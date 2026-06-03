@@ -122,7 +122,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B1. Add `app/models/ingestion.py`
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: none
 - Plan refs: [New Data Model](ingestion_v2_plan.md#new-data-model), [ingestion_runs](ingestion_v2_plan.md#ingestion_runs), [ingestion_files](ingestion_v2_plan.md#ingestion_files), [ingestion_file_members](ingestion_v2_plan.md#ingestion_file_members), [ingestion_rows](ingestion_v2_plan.md#ingestion_rows), [ingestion_row_events](ingestion_v2_plan.md#ingestion_row_events), [ingestion_attempts](ingestion_v2_plan.md#ingestion_attempts)
 - Build:
@@ -141,7 +141,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B2. Add staging Alembic migration
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B1
 - Plan refs: [Phase 2](ingestion_v2_plan.md#phase-2-staging-tables), [Task Group B](ingestion_v2_plan.md#task-group-b-migrations-and-models)
 - Build:
@@ -160,7 +160,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B3. Register models in metadata import path
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B1
 - Plan refs: [Implementation Modules](ingestion_v2_plan.md#implementation-modules)
 - Build:
@@ -171,7 +171,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B4. Create staging service package
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B1
 - Plan refs: [Implementation Modules](ingestion_v2_plan.md#implementation-modules), [Target Pipeline](ingestion_v2_plan.md#target-pipeline)
 - Files:
@@ -192,7 +192,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B5. Add staged CSV reader
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4
 - Plan refs: [Target Pipeline](ingestion_v2_plan.md#target-pipeline), [Normalization Strategy](ingestion_v2_plan.md#normalization-strategy)
 - Build:
@@ -207,7 +207,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B6. Add ZIP staging helper
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4, B5
 - Plan refs: [ingestion_file_members](ingestion_v2_plan.md#ingestion_file_members), [Target Pipeline](ingestion_v2_plan.md#target-pipeline)
 - Build:
@@ -221,7 +221,7 @@ Goal: preserve raw rows, member metadata, normalized payloads, validation state,
 
 ### B7. Add run phase/status updates
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4
 - Plan refs: [ingestion_runs](ingestion_v2_plan.md#ingestion_runs), [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy)
 - Build:

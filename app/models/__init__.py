@@ -8,6 +8,14 @@ from app.models.fre import (
     FrePosicaoAcionaria,
     FreRemuneracaoTotalOrgao,
 )
+from app.models.ingestion import (
+    IngestionAttempt,
+    IngestionFile,
+    IngestionFileMember,
+    IngestionRow,
+    IngestionRowEvent,
+    IngestionRun,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
 
@@ -24,6 +32,12 @@ __all__ = [
     "FrePosicaoAcionaria",
     "FreRemuneracaoTotalOrgao",
     "HistoricoAlteracaoCampo",
+    "IngestionAttempt",
+    "IngestionFile",
+    "IngestionFileMember",
+    "IngestionRow",
+    "IngestionRowEvent",
+    "IngestionRun",
     "ParecerFinanceiro",
     "RegistroQuarentena",
     "Usuario",

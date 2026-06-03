@@ -13,7 +13,7 @@ os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import companhia, financeiro, fre, sincronizacao, usuario  # noqa: F401
+from app.models import companhia, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
 
 
 @pytest.fixture()
