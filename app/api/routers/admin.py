@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -18,9 +19,12 @@ from app.schemas.admin import (
     RegistroQuarentenaResposta,
     RespostaAgendamentoEmLote,
     RespostaAgendamentoSincronizacao,
+    RespostaCancelamentoSincronizacao,
+    SolicitacaoCancelamentoSincronizacao,
     TarefaAgendadaResumo,
 )
 from app.schemas.comum import Paginacao
+from app.worker.celery_app import celery_app
 from app.worker.tasks import (
     sincronizar_cadastro_companhias_task,
     sincronizar_dfp_task,
@@ -36,6 +40,12 @@ _RESPOSTA_TOKEN_INVALIDO = {
         "content": {"application/json": {"example": {"detail": "Token de acesso invalido."}}},
     }
 }
+
+_STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "falha", "cancelada"}
+
+
+def _agora() -> datetime:
+    return datetime.now(UTC)
 
 
 def _extrair_ano_arquivo(arquivo: str) -> int | None:
@@ -204,6 +214,129 @@ def reprocessar_arquivo(
     return RespostaAgendamentoEmLote(status="agendada", tarefas=[tarefa])
 
 
+@router.post(
+    "/sincronizacoes/cancelar",
+    response_model=RespostaCancelamentoSincronizacao,
+    summary="Cancelar Sincronizacao em Andamento ou na Fila",
+    description=(
+        "Interrompe uma sincronização administrativa já disparada. "
+        "A operação aceita **um e apenas um** seletor: `id_execucao` ou `id_tarefa`.\n\n"
+        "**Quando usar `id_execucao`:**\n"
+        "- a execução já aparece em `GET /admin/sincronizacoes`;\n"
+        "- você deseja cancelar uma execução identificada no banco, preservando contadores já consolidados;\n"
+        "- a API atualizará o status da execução para `cancelada`, preencherá `finalizada_em` e registrará mensagem administrativa;\n"
+        "- se essa execução antiga não possuir `id_tarefa`, o cancelamento ainda assim será aceito como baixa administrativa local.\n\n"
+        "**Quando usar `id_tarefa`:**\n"
+        "- você acabou de receber `id_tarefa` no disparo e a execução ainda não foi materializada em banco;\n"
+        "- você precisa revogar diretamente a task no Celery;\n"
+        "- se a task já tiver criado execução com mesmo `id_tarefa`, a API também marcará essa execução como `cancelada`.\n\n"
+        "**Semântica operacional:**\n"
+        "- por padrão, `terminar_imediatamente=true`, o que envia `revoke(..., terminate=True, signal='SIGTERM')` ao Celery;\n"
+        "- este modo é recomendado para sincronizações em andamento, pois tenta parar o worker imediatamente;\n"
+        "- tarefas já finalizadas não podem ser canceladas e retornam `409`;\n"
+        "- se o seletor apontar apenas para task em fila, a resposta informará `execucao_encontrada=false`.\n\n"
+        "**Observações importantes:**\n"
+        "- a revogação é comando assíncrono ao Celery; portanto, em cenários distribuídos extremos pode haver pequeno atraso entre solicitação e parada efetiva;\n"
+        "- execuções antigas sem `id_tarefa` não podem ser revogadas remotamente, mas podem ser encerradas administrativamente com status `cancelada`;\n"
+        "- contadores (`total_linhas_lidas`, `total_inseridos`, etc.) permanecem com último valor persistido no momento do cancelamento;\n"
+        "- use `GET /admin/sincronizacoes/{id_execucao}` após cancelamento para auditoria detalhada."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {
+            "description": "Execução ou task não localizada.",
+            "content": {"application/json": {"example": {"detail": "Execucao ou task nao encontrada."}}},
+        },
+        409: {
+            "description": "Sincronização já finalizada.",
+            "content": {
+                "application/json": {"example": {"detail": "Execucao nao esta em andamento e nao pode ser cancelada."}}
+            },
+        },
+        422: {
+            "description": "Payload inválido, com seletor ausente ou múltiplo.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Informe exatamente um seletor: id_execucao ou id_tarefa."}
+                }
+            },
+        },
+    },
+    operation_id="cancelarSincronizacaoAdmin",
+)
+def cancelar_sincronizacao(
+    payload: Annotated[
+        SolicitacaoCancelamentoSincronizacao,
+        Body(
+            description=(
+                "Payload de cancelamento. "
+                "Envie `id_execucao` **ou** `id_tarefa`. "
+                "Se ambos forem enviados, a API rejeita a solicitação com `422`."
+            )
+        ),
+    ],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> RespostaCancelamentoSincronizacao:
+    if bool(payload.id_execucao) == bool(payload.id_tarefa):
+        raise HTTPException(status_code=422, detail="Informe exatamente um seletor: id_execucao ou id_tarefa.")
+
+    execucao: ExecucaoSincronizacao | None
+    if payload.id_execucao is not None:
+        execucao = db.get(ExecucaoSincronizacao, payload.id_execucao)
+        if execucao is None:
+            raise HTTPException(status_code=404, detail="Execucao ou task nao encontrada.")
+        id_tarefa = execucao.id_tarefa
+    else:
+        id_tarefa = payload.id_tarefa
+        execucao = db.scalar(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id_tarefa == id_tarefa))
+
+    if execucao is not None and execucao.status in _STATUS_FINAL_EXECUCAO:
+        raise HTTPException(status_code=409, detail="Execucao nao esta em andamento e nao pode ser cancelada.")
+
+    revogacao_solicitada = False
+    if id_tarefa is not None:
+        celery_app.control.revoke(id_tarefa, terminate=payload.terminar_imediatamente, signal="SIGTERM")
+        revogacao_solicitada = True
+
+    if execucao is not None:
+        mensagem = "Execucao cancelada via endpoint administrativo."
+        if payload.motivo:
+            mensagem = f"{mensagem} Motivo: {payload.motivo}"
+        if id_tarefa is None:
+            mensagem = (
+                f"{mensagem} Execucao encerrada apenas no banco, sem revogacao remota, "
+                "pois o registro nao possui id_tarefa associado."
+            )
+        execucao.status = "cancelada"
+        execucao.finalizada_em = _agora()
+        execucao.mensagem_erro = mensagem
+        db.commit()
+        return RespostaCancelamentoSincronizacao(
+            id_execucao=str(execucao.id),
+            id_tarefa=id_tarefa,
+            execucao_encontrada=True,
+            status_execucao=execucao.status,
+            revogacao_solicitada=revogacao_solicitada,
+            terminar_imediatamente=payload.terminar_imediatamente,
+            mensagem=(
+                "Sincronizacao cancelada com sucesso."
+                if revogacao_solicitada
+                else "Execucao marcada como cancelada no banco sem revogacao remota."
+            ),
+        )
+
+    return RespostaCancelamentoSincronizacao(
+        id_execucao=None,
+        id_tarefa=id_tarefa,
+        execucao_encontrada=False,
+        status_execucao=None,
+        revogacao_solicitada=revogacao_solicitada,
+        terminar_imediatamente=payload.terminar_imediatamente,
+        mensagem="Revogacao enviada para task sem execucao materializada no banco.",
+    )
+
+
 @router.get(
     "/sincronizacoes",
     response_model=ListaExecucoesSincronizacao,
@@ -235,6 +368,7 @@ def listar_execucoes(
     dados = [
         ExecucaoSincronizacaoResumo(
             id=str(item.id),
+            id_tarefa=item.id_tarefa,
             tipo_fonte=item.tipo_fonte,
             arquivo=item.arquivo,
             status=item.status,
@@ -278,6 +412,7 @@ def detalhar_execucao(
         raise HTTPException(status_code=404, detail="Execucao nao encontrada.")
     return ExecucaoSincronizacaoDetalhe(
         id=str(execucao.id),
+        id_tarefa=execucao.id_tarefa,
         tipo_fonte=execucao.tipo_fonte,
         ano=execucao.ano,
         arquivo=execucao.arquivo,

@@ -32,7 +32,7 @@ services:
   cvm_scheduler:
     build: .
     container_name: cvm_scheduler
-    command: celery -A app.worker.celery_app beat --loglevel=info
+    command: sh -lc "python -m app.worker.bootstrap && celery -A app.worker.celery_app beat --loglevel=info"
     env_file:
       - .env
     volumes:

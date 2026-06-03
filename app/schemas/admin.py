@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -17,6 +18,7 @@ class RespostaAgendamentoSincronizacao(BaseModel):
 
 class ExecucaoSincronizacaoResumo(BaseModel):
     id: str = Field(description="ID da execução de sincronização.")
+    id_tarefa: str | None = Field(default=None, description="ID da task no Celery associada à execução, quando disponível.")
     tipo_fonte: str = Field(description='Tipo da fonte processada (ex.: "cadastro", "dfp", "itr").')
     arquivo: str = Field(description="Nome do arquivo (CSV ou ZIP) associado à execução.")
     status: str = Field(description="Status final/atual da execução.")
@@ -40,6 +42,7 @@ class ListaExecucoesSincronizacao(BaseModel):
 
 class ExecucaoSincronizacaoDetalhe(BaseModel):
     id: str = Field(description="ID da execução de sincronização.")
+    id_tarefa: str | None = Field(default=None, description="ID da task no Celery que iniciou a execução, quando conhecido.")
     tipo_fonte: str = Field(description='Tipo da fonte processada (ex.: "cadastro", "dfp", "itr").')
     ano: int | None = Field(description="Ano de referência do processamento, quando aplicável.")
     arquivo: str = Field(description="Arquivo principal associado à execução.")
@@ -65,6 +68,96 @@ class TarefaAgendadaResumo(BaseModel):
 class RespostaAgendamentoEmLote(BaseModel):
     status: str = Field(description='Status do disparo em lote. Valor esperado: "agendada".')
     tarefas: list[TarefaAgendadaResumo] = Field(description="Lista das tarefas enfileiradas.")
+
+
+class SolicitacaoCancelamentoSincronizacao(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "id_execucao": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+                    "terminar_imediatamente": True,
+                    "motivo": "Execução duplicada do mesmo ano.",
+                },
+                {
+                    "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
+                    "terminar_imediatamente": True,
+                    "motivo": "Parada operacional solicitada por administrador.",
+                },
+            ]
+        }
+    )
+
+    id_execucao: UUID | None = Field(
+        default=None,
+        description=(
+            "ID da execução registrada em `execucoes_sincronizacao`. "
+            "Use este seletor quando a sincronização já aparece em `/admin/sincronizacoes`."
+        ),
+    )
+    id_tarefa: str | None = Field(
+        default=None,
+        description=(
+            "ID da task Celery retornado no disparo (`id_tarefa`). "
+            "Use este seletor quando a execução ainda não apareceu na listagem, ou quando desejar revogar a task diretamente."
+        ),
+    )
+    terminar_imediatamente: bool = Field(
+        default=True,
+        description=(
+            "Quando `true`, envia revogação com `terminate=True` e sinal `SIGTERM` ao worker Celery. "
+            "Este é modo recomendado para interromper sincronizações já em execução. "
+            "Quando `false`, a API apenas revoga a task no broker; tarefas já iniciadas podem continuar até conclusão."
+        ),
+    )
+    motivo: str | None = Field(
+        default=None,
+        description=(
+            "Motivo livre para auditoria operacional. "
+            "Quando informado, é incorporado à mensagem persistida na execução cancelada."
+        ),
+        max_length=1000,
+    )
+
+
+class RespostaCancelamentoSincronizacao(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "id_execucao": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+                "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
+                "execucao_encontrada": True,
+                "status_execucao": "cancelada",
+                "revogacao_solicitada": True,
+                "terminar_imediatamente": True,
+                "mensagem": "Sincronização cancelada com sucesso.",
+            }
+        }
+    )
+
+    id_execucao: str | None = Field(
+        description="ID da execução cancelada, quando a task já havia materializado registro no banco."
+    )
+    id_tarefa: str | None = Field(
+        default=None,
+        description=(
+            "ID da task revogada no Celery. "
+            "Pode ser `null` quando o cancelamento ocorreu apenas sobre um registro legado em banco sem vínculo de task."
+        ),
+    )
+    execucao_encontrada: bool = Field(
+        description="Indica se existia registro em `execucoes_sincronizacao` associado ao seletor informado."
+    )
+    status_execucao: str | None = Field(
+        default=None,
+        description=(
+            "Status final persistido na execução quando ela foi encontrada. "
+            "Valor esperado após cancelamento bem-sucedido: `cancelada`."
+        ),
+    )
+    revogacao_solicitada: bool = Field(description="Indica se a API enviou comando de revogação ao Celery.")
+    terminar_imediatamente: bool = Field(description="Espelha opção recebida na solicitação.")
+    mensagem: str = Field(description="Resumo textual do efeito aplicado pela API.")
 
 
 class RegistroQuarentenaResposta(BaseModel):

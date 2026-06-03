@@ -25,6 +25,8 @@ from app.services.normalizacao import (
     normalizar_texto,
 )
 
+_BATCH_COMMIT_LINHAS = 5000
+
 _CAMPOS_NEGOCIO_DOCUMENTOS = {
     "companhia_id",
     "tipo_formulario",
@@ -287,6 +289,33 @@ def _resolver_companhia(db: Session, cnpj_companhia: str, codigo_cvm: int | None
     return db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
 
 
+def _indexar_companhias(db: Session) -> tuple[dict[str, Companhia], dict[int, Companhia]]:
+    companhias = db.execute(select(Companhia)).scalars().all()
+    por_cnpj = {companhia.cnpj_companhia: companhia for companhia in companhias if companhia.cnpj_companhia}
+    por_codigo = {companhia.codigo_cvm: companhia for companhia in companhias if companhia.codigo_cvm is not None}
+    return por_cnpj, por_codigo
+
+
+def _resolver_companhia_indexada(
+    cnpj_companhia: str, codigo_cvm: int | None, *, por_cnpj: dict[str, Companhia], por_codigo: dict[int, Companhia]
+) -> Companhia | None:
+    if normalizar_texto(cnpj_companhia):
+        return por_cnpj.get(cnpj_companhia)
+    if codigo_cvm is None:
+        return None
+    return por_codigo.get(codigo_cvm)
+
+
+def _atualizar_execucao(execucao: ExecucaoSincronizacao, contadores: dict[str, int], *, status: str | None = None) -> None:
+    execucao.total_linhas_lidas = contadores["lidas"]
+    execucao.total_inseridos = contadores["inseridos"]
+    execucao.total_atualizados = contadores["atualizados"]
+    execucao.total_inalterados = contadores["inalterados"]
+    execucao.total_rejeitados = contadores["rejeitados"]
+    if status is not None:
+        execucao.status = status
+
+
 def _upsert_registro(
     db: Session,
     *,
@@ -360,7 +389,9 @@ def _arquivos_esperados(prefixo: str, ano: int) -> set[str]:
     return esperados
 
 
-def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, ano: int) -> dict[str, Any]:
+def _sincronizar_formulario(
+    db: Session, *, prefixo: str, tipo_formulario: str, ano: int, task_id: str | None = None
+) -> dict[str, Any]:
     total_companhias = db.query(Companhia).count()
     if total_companhias == 0:
         raise ValueError("cadastro_companhias_nao_ingestado")
@@ -371,6 +402,7 @@ def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, 
     execucao = ExecucaoSincronizacao(
         tipo_fonte=prefixo,
         ano=ano,
+        id_tarefa=task_id,
         arquivo=arquivo_zip,
         url=url,
         status="em_execucao",
@@ -421,6 +453,7 @@ def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, 
                 "inalterados": 0,
                 "rejeitados": 0,
             }
+            companhias_por_cnpj, companhias_por_codigo = _indexar_companhias(db)
 
             arquivos_processar = sorted(esperados)
             for arquivo_csv in arquivos_processar:
@@ -531,10 +564,11 @@ def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, 
                         continue
                     chaves_vistas.add(chave_natural)
 
-                    companhia = _resolver_companhia(
-                        db,
+                    companhia = _resolver_companhia_indexada(
                         cnpj_companhia=dados["cnpj_companhia"],
                         codigo_cvm=dados.get("codigo_cvm"),
+                        por_cnpj=companhias_por_cnpj,
+                        por_codigo=companhias_por_codigo,
                     )
                     if companhia is None:
                         _registrar_quarentena(
@@ -617,12 +651,32 @@ def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, 
                             contadores=contadores,
                         )
 
-        execucao.total_linhas_lidas = contadores["lidas"]
-        execucao.total_inseridos = contadores["inseridos"]
-        execucao.total_atualizados = contadores["atualizados"]
-        execucao.total_inalterados = contadores["inalterados"]
-        execucao.total_rejeitados = contadores["rejeitados"]
-        execucao.status = "sucesso"
+                    if contadores["lidas"] % _BATCH_COMMIT_LINHAS == 0:
+                        _atualizar_execucao(execucao, contadores)
+                        db.commit()
+                        if execucao.status == "cancelada":
+                            return {
+                                "execucao_id": str(execucao.id),
+                                "status": "cancelada",
+                                "total_linhas_lidas": contadores["lidas"],
+                                "total_inseridos": contadores["inseridos"],
+                                "total_atualizados": contadores["atualizados"],
+                                "total_inalterados": contadores["inalterados"],
+                                "total_rejeitados": contadores["rejeitados"],
+                            }
+
+        if execucao.status == "cancelada":
+            db.commit()
+            return {
+                "execucao_id": str(execucao.id),
+                "status": "cancelada",
+                "total_linhas_lidas": contadores["lidas"],
+                "total_inseridos": contadores["inseridos"],
+                "total_atualizados": contadores["atualizados"],
+                "total_inalterados": contadores["inalterados"],
+                "total_rejeitados": contadores["rejeitados"],
+            }
+        _atualizar_execucao(execucao, contadores, status="sucesso")
         execucao.finalizada_em = _agora()
         db.commit()
         return {
@@ -645,9 +699,9 @@ def _sincronizar_formulario(db: Session, *, prefixo: str, tipo_formulario: str, 
         raise
 
 
-def sincronizar_dfp(db: Session, ano: int) -> dict[str, Any]:
-    return _sincronizar_formulario(db, prefixo="dfp", tipo_formulario="DFP", ano=ano)
+def sincronizar_dfp(db: Session, ano: int, task_id: str | None = None) -> dict[str, Any]:
+    return _sincronizar_formulario(db, prefixo="dfp", tipo_formulario="DFP", ano=ano, task_id=task_id)
 
 
-def sincronizar_itr(db: Session, ano: int) -> dict[str, Any]:
-    return _sincronizar_formulario(db, prefixo="itr", tipo_formulario="ITR", ano=ano)
+def sincronizar_itr(db: Session, ano: int, task_id: str | None = None) -> dict[str, Any]:
+    return _sincronizar_formulario(db, prefixo="itr", tipo_formulario="ITR", ano=ano, task_id=task_id)

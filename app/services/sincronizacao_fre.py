@@ -178,7 +178,11 @@ def _arquivos_fre_mvp(ano: int) -> dict[str, str]:
     }
 
 
-def sincronizar_fre(db: Session, ano: int) -> dict[str, Any]:
+def _arquivos_fre_opcionais(ano: int) -> set[str]:
+    return {f"fre_cia_aberta_empregado_posicao_declaracao_genero_{ano}.csv"}
+
+
+def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[str, Any]:
     if db.query(Companhia).count() == 0:
         raise ValueError("cadastro_companhias_nao_ingestado")
 
@@ -188,6 +192,7 @@ def sincronizar_fre(db: Session, ano: int) -> dict[str, Any]:
     execucao = ExecucaoSincronizacao(
         tipo_fonte="fre",
         ano=ano,
+        id_tarefa=task_id,
         arquivo=arquivo_zip,
         url=url,
         status="em_execucao",
@@ -219,14 +224,17 @@ def sincronizar_fre(db: Session, ano: int) -> dict[str, Any]:
             return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
 
         arquivos = _arquivos_fre_mvp(ano)
+        arquivos_opcionais = _arquivos_fre_opcionais(ano)
         contadores = {"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
         with zipfile.ZipFile(io.BytesIO(payload)) as zip_ref:
             nomes = set(zip_ref.namelist())
-            faltando = sorted(set(arquivos.keys()) - nomes)
+            faltando = sorted(set(arquivos.keys()) - nomes - arquivos_opcionais)
             if faltando:
                 raise ValueError(f"arquivo_nao_esperado_ausente: {','.join(faltando)}")
 
             for arquivo_csv, tipo in arquivos.items():
+                if arquivo_csv not in nomes:
+                    continue
                 with zip_ref.open(arquivo_csv) as arquivo_handle:
                     texto = _decode_csv(arquivo_handle.read())
                 leitor = csv.DictReader(io.StringIO(texto), delimiter=";")

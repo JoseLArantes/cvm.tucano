@@ -67,9 +67,9 @@ env:
   LOG_LEVEL: "INFO"
   AMBIENTE: "producao"
   ENABLE_PROMETHEUS_METRICS: "false"
-  ANOS_INICIAIS_DFP: ""
-  ANOS_INICIAIS_ITR: ""
-  ANOS_INICIAIS_FRE: ""
+  ANOS_INICIAIS_DFP: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_ITR: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_FRE: "2021,2022,2023,2024,2025"
   BACKEND_CORS_ORIGINS: "http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com"
 
 appSecret:

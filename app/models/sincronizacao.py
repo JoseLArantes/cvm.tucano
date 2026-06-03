@@ -14,6 +14,7 @@ class StatusExecucao(enum.StrEnum):
     sucesso = "sucesso"
     sem_alteracao = "sem_alteracao"
     falha = "falha"
+    cancelada = "cancelada"
 
 
 class ExecucaoSincronizacao(Base):
@@ -22,6 +23,7 @@ class ExecucaoSincronizacao(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     tipo_fonte: Mapped[str] = mapped_column(String(50), index=True)
     ano: Mapped[int | None] = mapped_column(Integer, index=True)
+    id_tarefa: Mapped[str | None] = mapped_column(String(64), index=True)
     arquivo: Mapped[str] = mapped_column(String(255))
     url: Mapped[str] = mapped_column(String(500))
     hash_arquivo: Mapped[str | None] = mapped_column(String(64), index=True)

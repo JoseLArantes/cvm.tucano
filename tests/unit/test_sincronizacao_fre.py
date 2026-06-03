@@ -62,7 +62,13 @@ def _companhia() -> Companhia:
     )
 
 
-def _zip_fre(ano: int, *, cnpj: str = "08.773.135/0001-00", remuneracao_auditor: str = "1000,00") -> bytes:
+def _zip_fre(
+    ano: int,
+    *,
+    cnpj: str = "08.773.135/0001-00",
+    remuneracao_auditor: str = "1000,00",
+    incluir_empregados_genero: bool = True,
+) -> bytes:
     b = io.BytesIO()
     with zipfile.ZipFile(b, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
         z.writestr(
@@ -121,14 +127,16 @@ def _zip_fre(ano: int, *, cnpj: str = "08.773.135/0001-00", remuneracao_auditor:
                 "100,00;10,00;5,00;DESC F;50,00;20,00;10,00;5,00;1,00;DESC V;0,00;0,00;0,00;OBS\n"
             ).encode("latin1"),
         )
-        z.writestr(
-            f"fre_cia_aberta_empregado_posicao_declaracao_genero_{ano}.csv",
-            (
-                "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Posicao;Quantidade_Feminino;"
-                "Quantidade_Masculino;Quantidade_Nao_Binario;Quantidade_Outros;Quantidade_Sem_Resposta\n"
-                f"{cnpj};2025-12-31;1;123;EMPRESA A;Diretoria;10;20;1;0;0\n"
-            ).encode("latin1"),
-        )
+        if incluir_empregados_genero:
+            z.writestr(
+                f"fre_cia_aberta_empregado_posicao_declaracao_genero_{ano}.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Posicao;"
+                    "Quantidade_Feminino;Quantidade_Masculino;Quantidade_Nao_Binario;Quantidade_Outros;"
+                    "Quantidade_Sem_Resposta\n"
+                    f"{cnpj};2025-12-31;1;123;EMPRESA A;Diretoria;10;20;1;0;0\n"
+                ).encode("latin1"),
+            )
     return b.getvalue()
 
 
@@ -177,6 +185,26 @@ def test_fre_quarentena_quando_sem_companhia(db_session: Session, monkeypatch: A
     assert r["status"] == "sucesso"
     assert r["total_rejeitados"] == 6
     assert db_session.query(RegistroQuarentena).count() == 6
+
+
+def test_fre_aceita_arquivo_empregados_genero_ausente(db_session: Session, monkeypatch: Any) -> None:
+    db_session.add(_companhia())
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.services.sincronizacao_fre.httpx.get",
+        lambda *a, **k: FakeResponse(_zip_fre(2021, incluir_empregados_genero=False)),
+    )
+
+    resultado = sincronizar_fre(db_session, 2021)
+
+    assert resultado["status"] == "sucesso"
+    assert resultado["total_inseridos"] == 5
+    assert db_session.query(FreDocumento).count() == 1
+    assert db_session.query(FreAuditor).count() == 1
+    assert db_session.query(FreCapitalSocial).count() == 1
+    assert db_session.query(FrePosicaoAcionaria).count() == 1
+    assert db_session.query(FreRemuneracaoTotalOrgao).count() == 1
+    assert db_session.query(FreEmpregadoPosicaoGenero).count() == 0
 
 
 def test_fre_exige_cadastro(db_session: Session, monkeypatch: Any) -> None:

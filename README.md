@@ -69,6 +69,7 @@ Comandos úteis depois disso:
 ```bash
 docker compose run --rm cvm_api alembic upgrade head
 docker compose run --rm cvm_api pytest
+scripts/purge-local-db.sh --yes
 ```
 
 ## API e autenticação

@@ -82,12 +82,13 @@ def _registrar_quarentena(
     )
 
 
-def sincronizar_cadastro_companhias(db: Session) -> dict[str, Any]:
+def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> dict[str, Any]:
     settings = get_settings()
     url = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO}"
     execucao = ExecucaoSincronizacao(
         tipo_fonte="cadastro",
         ano=None,
+        id_tarefa=task_id,
         arquivo=ARQUIVO_CADASTRO,
         url=url,
         status="em_execucao",

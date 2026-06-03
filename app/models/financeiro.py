@@ -94,7 +94,7 @@ class DemonstracaoFinanceira(Base):
     data_referencia: Mapped[date] = mapped_column(Date, index=True)
     versao: Mapped[int] = mapped_column(Integer, index=True)
     denominacao_companhia: Mapped[str | None] = mapped_column(String(255))
-    grupo_demonstracao: Mapped[str | None] = mapped_column(String(50))
+    grupo_demonstracao: Mapped[str | None] = mapped_column(String(255))
     moeda: Mapped[str | None] = mapped_column(String(20))
     escala_moeda: Mapped[str | None] = mapped_column(String(50))
     ordem_exercicio: Mapped[str | None] = mapped_column(String(20))
