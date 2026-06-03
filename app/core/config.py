@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     anos_iniciais_dfp: str = Field(default="", alias="ANOS_INICIAIS_DFP")
     anos_iniciais_itr: str = Field(default="", alias="ANOS_INICIAIS_ITR")
     anos_iniciais_fre: str = Field(default="", alias="ANOS_INICIAIS_FRE")
+    ingestion_v2_provisional_company_enabled: bool = Field(
+        default=False,
+        alias="INGESTION_V2_PROVISIONAL_COMPANY_ENABLED",
+    )
 
     @field_validator("database_url", mode="before")
     @classmethod

@@ -401,7 +401,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D1. Define resolver dataclasses/results
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C1
 - Plan refs: [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm), [Task Group D](ingestion_v2_plan.md#task-group-d-resolver-v2)
 - Files:
@@ -419,7 +419,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D2. Resolve by exact CNPJ identifier
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D1, C9
 - Plan refs: [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -431,7 +431,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D3. Resolve by exact CVM code identifier
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D1, C9
 - Plan refs: [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -444,7 +444,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D4. Add document header map resolver
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D1
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -456,7 +456,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D5. Add repair-rule resolver hook
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D1
 - Plan refs: [repair_rules](ingestion_v2_plan.md#repair_rules), [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -468,7 +468,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D6. Add provisional issuer creation
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D1, C9
 - Plan refs: [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm), [Dependency and Configuration Plan](ingestion_v2_plan.md#dependency-and-configuration-plan)
 - Build:
@@ -484,7 +484,7 @@ Goal: one auditable company resolver for DFP, ITR, FRE.
 
 ### D7. Persist resolution details into staging rows
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: D2, D3, D4, D5, D6, B4
 - Plan refs: [ingestion_rows](ingestion_v2_plan.md#ingestion_rows), [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
