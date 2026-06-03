@@ -8,6 +8,7 @@ from app.models.fre import (
     FrePosicaoAcionaria,
     FreRemuneracaoTotalOrgao,
 )
+from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm, RepairRule
 from app.models.ingestion import (
     IngestionAttempt,
     IngestionFile,
@@ -21,6 +22,9 @@ from app.models.usuario import Usuario
 
 __all__ = [
     "Companhia",
+    "CompanhiaIdentificador",
+    "CompanhiaMercado",
+    "CompanhiaRegistroCvm",
     "ComposicaoCapital",
     "DemonstracaoFinanceira",
     "DocumentoFinanceiro",
@@ -40,5 +44,6 @@ __all__ = [
     "IngestionRun",
     "ParecerFinanceiro",
     "RegistroQuarentena",
+    "RepairRule",
     "Usuario",
 ]

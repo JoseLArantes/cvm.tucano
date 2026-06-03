@@ -33,6 +33,9 @@ class Companhia(Base):
     responsavel: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     auditor: Mapped[str | None] = mapped_column(String(255))
     cnpj_auditor: Mapped[str | None] = mapped_column(String(14))
+    tipo_emissor: Mapped[str | None] = mapped_column(String(32))
+    fonte_identidade_principal: Mapped[str | None] = mapped_column(String(64))
+    qualidade_identidade: Mapped[str | None] = mapped_column(String(32))
 
     arquivo_origem: Mapped[str] = mapped_column(String(255))
     ano_origem: Mapped[int | None] = mapped_column(Integer)

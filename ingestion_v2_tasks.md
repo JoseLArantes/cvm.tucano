@@ -236,7 +236,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C1. Add `app/models/identidade.py`
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: none
 - Plan refs: [companhia_registros_cvm](ingestion_v2_plan.md#companhia_registros_cvm), [companhia_mercados](ingestion_v2_plan.md#companhia_mercados), [companhia_identificadores](ingestion_v2_plan.md#companhia_identificadores)
 - Build:
@@ -250,7 +250,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C2. Add identity Alembic migration
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C1
 - Plan refs: [Phase 3](ingestion_v2_plan.md#phase-3-identity-graph), [Task Group C](ingestion_v2_plan.md#task-group-c-cadastro-v2)
 - Build:
@@ -267,7 +267,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C3. Extend `companhias` for v2 metadata
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C2
 - Plan refs: [companhias](ingestion_v2_plan.md#companhias), [Existing Table Changes](ingestion_v2_plan.md#existing-table-changes)
 - Build:
@@ -282,7 +282,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C4. Add shared v2 normalizers
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: none
 - Plan refs: [Shared Normalization Rules](ingestion_v2_plan.md#shared-normalization-rules), [Normalization Strategy](ingestion_v2_plan.md#normalization-strategy)
 - Files:
@@ -301,7 +301,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C5. Implement open cadastro v2 parser
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C4, B4
 - Plan refs: [Open Company Cadastro](ingestion_v2_plan.md#open-company-cadastro), [Cadastro Duplicate Policy](ingestion_v2_plan.md#cadastro-duplicate-policy)
 - Files:
@@ -318,7 +318,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C6. Implement foreign cadastro v2 parser
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C4, B4
 - Plan refs: [Foreign Company Cadastro](ingestion_v2_plan.md#foreign-company-cadastro)
 - Files:
@@ -334,7 +334,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C7. Implement canonical company selector
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C5, C6
 - Plan refs: [Cadastro Duplicate Policy](ingestion_v2_plan.md#cadastro-duplicate-policy)
 - Build:
@@ -351,7 +351,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C8. Implement cadastro merge service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C1, C5, C6, C7
 - Plan refs: [Cadastro Duplicate Policy](ingestion_v2_plan.md#cadastro-duplicate-policy), [companhia_registros_cvm](ingestion_v2_plan.md#companhia_registros_cvm), [companhia_mercados](ingestion_v2_plan.md#companhia_mercados)
 - Build:
@@ -366,7 +366,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C9. Implement identifier generation
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C8
 - Plan refs: [companhia_identificadores](ingestion_v2_plan.md#companhia_identificadores), [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -382,7 +382,7 @@ Goal: model official CVM identity reality and stop rejecting cadastro duplicates
 
 ### C10. Add `sincronizar_cadastro_companhias_v2`
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4, B5, C8, C9
 - Plan refs: [Phase 3](ingestion_v2_plan.md#phase-3-identity-graph), [Normal Daily Flow](ingestion_v2_plan.md#normal-daily-flow)
 - Build:
