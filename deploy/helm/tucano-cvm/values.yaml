@@ -1,0 +1,99 @@
+# Default values for tucano-cvm.
+
+image:
+  repository: registry.beakcloud.com/tucano-cvm
+  pullPolicy: Always
+  tag: "latest"
+
+imagePullSecrets:
+  - name: registry-cred
+
+nameOverride: ""
+fullnameOverride: ""
+
+rollout:
+  type: deployment
+  rollingUpdate:
+    maxSurge: 25%
+    maxUnavailable: 25%
+  argo:
+    steps:
+      - setWeight: 20
+      - pause:
+          duration: 10s
+      - setWeight: 50
+      - pause:
+          duration: 10s
+
+api:
+  replicaCount: 1
+  command:
+    - uvicorn
+    - app.main:app
+    - --host
+    - 0.0.0.0
+    - --port
+    - "8007"
+  resources: {}
+  podAnnotations: {}
+
+worker:
+  enabled: true
+  replicaCount: 1
+  command:
+    - celery
+    - -A
+    - app.worker.celery_app
+    - worker
+    - --loglevel=info
+  resources: {}
+  podAnnotations: {}
+
+beat:
+  enabled: true
+  replicaCount: 1
+  command:
+    - celery
+    - -A
+    - app.worker.celery_app
+    - beat
+    - --loglevel=info
+  resources: {}
+  podAnnotations: {}
+
+env:
+  REDIS_URL: "redis://redis.beakcloud.com:6379/0"
+  CVM_BASE_URL: "https://dados.cvm.gov.br/dados"
+  LOG_LEVEL: "INFO"
+  AMBIENTE: "producao"
+  ENABLE_PROMETHEUS_METRICS: "false"
+  ANOS_INICIAIS_DFP: ""
+  ANOS_INICIAIS_ITR: ""
+  ANOS_INICIAIS_FRE: ""
+  BACKEND_CORS_ORIGINS: "http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com"
+
+appSecret:
+  name: "cvm-secret"
+
+secretEnv: {}
+
+service:
+  type: NodePort
+  port: 8110
+  targetPort: 8007
+  nodePort: 30110
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: cvm.tucano.beakcloud.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
