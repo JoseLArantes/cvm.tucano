@@ -9,6 +9,7 @@ from app.models.fre import (
     FreRemuneracaoTotalOrgao,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
+from app.models.usuario import Usuario
 
 __all__ = [
     "Companhia",
@@ -25,4 +26,5 @@ __all__ = [
     "HistoricoAlteracaoCampo",
     "ParecerFinanceiro",
     "RegistroQuarentena",
+    "Usuario",
 ]

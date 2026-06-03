@@ -1,8 +1,29 @@
-import os
-
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
+from app.api.auth import gerar_hash_senha
 from app.main import app
+from app.models.usuario import Usuario
+
+
+def _criar_usuario(
+    db_session: Session,
+    username: str = "frontend-teste",
+    password: str = "senha-teste",
+    is_admin: bool = False,
+    ativo: bool = True,
+) -> Usuario:
+    usuario = Usuario(
+        username=username,
+        nome="Usuario Teste",
+        senha_hash=gerar_hash_senha(password),
+        is_admin=is_admin,
+        ativo=ativo,
+    )
+    db_session.add(usuario)
+    db_session.commit()
+    db_session.refresh(usuario)
+    return usuario
 
 
 def test_endpoints_exigem_token() -> None:
@@ -19,34 +40,54 @@ def test_healthcheck_nao_exige_token() -> None:
     assert resposta.json()["status"] == "ok"
 
 
-def test_login_retorna_token_com_credenciais_validas() -> None:
-    username = os.environ.get("TUCANO_CVM_USERNAME", "frontend-teste")
-    password = os.environ.get("TUCANO_CVM_PASSWORD", "senha-teste")
-    token = os.environ.get("TUCANO_CVM_TOKEN", "token-teste")
+def test_login_retorna_token_com_credenciais_validas(client: TestClient, db_session: Session) -> None:
+    _criar_usuario(db_session)
 
-    with TestClient(app) as client:
-        resposta = client.post("/auth/login", json={"username": username, "password": password})
+    resposta = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
 
     assert resposta.status_code == 200
-    assert resposta.json() == {"access_token": token, "token_type": "bearer"}
+    payload = resposta.json()
+    assert payload["access_token"].startswith("tucano.v1.")
+    assert payload["token_type"] == "bearer"
+    assert payload["expires_in"] == 28800
 
 
-def test_login_rejeita_credenciais_invalidas() -> None:
-    with TestClient(app) as client:
-        resposta = client.post("/auth/login", json={"username": "invalido", "password": "errada"})
+def test_login_rejeita_credenciais_invalidas(client: TestClient, db_session: Session) -> None:
+    _criar_usuario(db_session)
+
+    resposta = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-errada"})
 
     assert resposta.status_code == 401
     assert resposta.json()["detail"] == "Usuario ou senha invalidos."
 
 
-def test_endpoint_com_token_obtido_no_login(client: TestClient) -> None:
-    username = os.environ.get("TUCANO_CVM_USERNAME", "frontend-teste")
-    password = os.environ.get("TUCANO_CVM_PASSWORD", "senha-teste")
+def test_login_rejeita_usuario_inativo(client: TestClient, db_session: Session) -> None:
+    _criar_usuario(db_session, ativo=False)
 
-    login = client.post("/auth/login", json={"username": username, "password": password})
+    resposta = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
+
+    assert resposta.status_code == 401
+    assert resposta.json()["detail"] == "Usuario ou senha invalidos."
+
+
+def test_endpoint_com_token_obtido_no_login(client: TestClient, db_session: Session) -> None:
+    _criar_usuario(db_session)
+
+    login = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
     assert login.status_code == 200
 
     token = login.json()["access_token"]
     client.headers["Authorization"] = f"Bearer {token}"
-    resposta = client.get("/admin/sincronizacoes")
-    assert resposta.status_code != 401
+    resposta = client.get("/companhias")
+    assert resposta.status_code == 200
+
+
+def test_me_retorna_usuario_logado(client: TestClient, db_session: Session) -> None:
+    usuario = _criar_usuario(db_session)
+    login = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
+    client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+
+    resposta = client.get("/auth/me")
+
+    assert resposta.status_code == 200
+    assert resposta.json()["id"] == str(usuario.id)

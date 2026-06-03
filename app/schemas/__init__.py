@@ -39,6 +39,7 @@ from app.schemas.fre import (
     ListaFreRemuneracaoTotalOrgaoResposta,
 )
 from app.schemas.mestre import ConsultaCompanhiaMestreResposta
+from app.schemas.usuario import ListaUsuariosResposta, UsuarioAtualizacao, UsuarioCriacao, UsuarioResposta
 
 __all__ = [
     "ConsultaCompanhiaMestreResposta",
@@ -78,4 +79,8 @@ __all__ = [
     "RespostaAgendamentoEmLote",
     "RespostaAgendamentoSincronizacao",
     "TarefaAgendadaResumo",
+    "ListaUsuariosResposta",
+    "UsuarioAtualizacao",
+    "UsuarioCriacao",
+    "UsuarioResposta",
 ]

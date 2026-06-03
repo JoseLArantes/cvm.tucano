@@ -55,6 +55,10 @@ OPENAPI_TAGS = [
         "name": "admin",
         "description": "Operações administrativas de sincronização e monitoramento de execução.",
     },
+    {
+        "name": "usuarios",
+        "description": "Gestao de usuarios com login e controle administrativo.",
+    },
 ]
 
 app = FastAPI(

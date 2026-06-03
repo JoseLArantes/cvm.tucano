@@ -9,13 +9,11 @@ from sqlalchemy.pool import StaticPool
 
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
-os.environ["TUCANO_CVM_USERNAME"] = "frontend-teste"
-os.environ["TUCANO_CVM_PASSWORD"] = "senha-teste"
 
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import companhia, financeiro, fre, sincronizacao  # noqa: F401
+from app.models import companhia, financeiro, fre, sincronizacao, usuario  # noqa: F401
 
 
 @pytest.fixture()

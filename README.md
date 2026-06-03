@@ -74,9 +74,11 @@ docker compose run --rm cvm_api pytest
 ## API e autenticação
 
 - `/health` é intencionalmente público para liveness/readiness probe.
-- `POST /auth/login` aceita JSON com `username` e `password` e retorna `access_token` + `token_type`.
-- Configure `TUCANO_CVM_USERNAME`, `TUCANO_CVM_PASSWORD` e `TUCANO_CVM_TOKEN` para o login do frontend.
-- Todas as rotas protegidas de negócio/admin exigem `Authorization: Bearer <TUCANO_CVM_TOKEN>`.
+- `POST /auth/login` aceita JSON com `username` e `password` de um usuario cadastrado e retorna `access_token`, `token_type` e `expires_in`.
+- Use `Authorization: Bearer <access_token>` para acessar APIs protegidas depois do login.
+- `GET /auth/me` retorna o usuario autenticado pelo token bearer.
+- `/usuarios` fornece CRUD de usuarios; exige token de sistema (`TUCANO_CVM_TOKEN`) ou usuario com `is_admin=true`.
+- `TUCANO_CVM_TOKEN` permanece como token de sistema para bootstrap do primeiro usuario e operacoes administrativas.
 
 ## Testes e qualidade
 

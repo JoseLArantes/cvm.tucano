@@ -16,14 +16,7 @@ class Settings(BaseSettings):
         default="trocar-token",
         validation_alias=AliasChoices("TUCANO_CVM_TOKEN", "ADMIN_TOKEN"),
     )
-    api_username: str = Field(
-        default="frontend",
-        validation_alias=AliasChoices("TUCANO_CVM_USERNAME", "API_USERNAME"),
-    )
-    api_password: str = Field(
-        default="trocar-senha",
-        validation_alias=AliasChoices("TUCANO_CVM_PASSWORD", "API_PASSWORD"),
-    )
+    access_token_ttl_minutes: int = Field(default=480, gt=0, alias="ACCESS_TOKEN_TTL_MINUTES")
     admin_token: str = Field(default="trocar-token", alias="ADMIN_TOKEN")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     ambiente: str = Field(default="desenvolvimento", alias="AMBIENTE")
