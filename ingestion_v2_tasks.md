@@ -655,7 +655,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G1. Extract FRE MVP member map service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B6
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Phase 5](ingestion_v2_plan.md#phase-5-document-v2-promotion), [Task Group F](ingestion_v2_plan.md#task-group-f-fre-v2)
 - Files:
@@ -674,7 +674,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G2. Implement FRE v2 normalizers
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: G1, C4
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [FRE V2](ingestion_v2_plan.md#task-group-f-fre-v2)
 - Build:
@@ -690,7 +690,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G3. Promote FRE document headers first
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: G2, D7, E5
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy)
 - Build:
@@ -703,7 +703,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G4. Promote FRE child rows through header map
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: G3, D4, E4
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Identity Resolution Algorithm](ingestion_v2_plan.md#identity-resolution-algorithm)
 - Build:
@@ -720,7 +720,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G5. Add FRE v2 service entrypoint
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: G4
 - Plan refs: [Phase 5](ingestion_v2_plan.md#phase-5-document-v2-promotion), [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:
@@ -731,7 +731,7 @@ Goal: FRE stage-normalize-validate-resolve-promote with header map for child fil
 
 ### G6. Add FRE foreign/header-map tests
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: G5, C10
 - Plan refs: [Target Outcomes](ingestion_v2_plan.md#target-outcomes), [Testing Strategy](ingestion_v2_plan.md#testing-strategy)
 - Build:
