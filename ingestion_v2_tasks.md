@@ -747,7 +747,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H1. Add `quarantine_items_v2` model and migration
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B1
 - Plan refs: [quarantine_items_v2](ingestion_v2_plan.md#quarantine_items_v2), [Phase 6](ingestion_v2_plan.md#phase-6-repairable-quarantine-and-replay), [Task Group G](ingestion_v2_plan.md#task-group-g-quarantine-v2)
 - Build:
@@ -759,7 +759,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H2. Implement quarantine service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H1, B4
 - Plan refs: [Repair Queue](ingestion_v2_plan.md#repair-queue), [quarantine_items_v2](ingestion_v2_plan.md#quarantine_items_v2)
 - Files:
@@ -774,7 +774,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H3. Add repair rules model/service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H1
 - Plan refs: [repair_rules](ingestion_v2_plan.md#repair_rules), [Repair and Replay](ingestion_v2_plan.md#repair-and-replay)
 - Build:
@@ -786,7 +786,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H4. Implement row replay service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H2, D7, E5
 - Plan refs: [Replay Modes](ingestion_v2_plan.md#replay-modes), [Repair and Replay](ingestion_v2_plan.md#repair-and-replay)
 - Files:
@@ -802,7 +802,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H5. Implement member/run/quarantine replay
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H4
 - Plan refs: [Replay Modes](ingestion_v2_plan.md#replay-modes)
 - Build:
@@ -815,7 +815,7 @@ Goal: transform rejected rows into repairable, replayable queue.
 
 ### H6. Add quarantine/replay tests
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H5
 - Plan refs: [Testing Strategy](ingestion_v2_plan.md#testing-strategy)
 - Build:
@@ -832,7 +832,7 @@ Goal: add retries only for transient failures and defer document imports until i
 
 ### I1. Add retry exception taxonomy
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: none
 - Plan refs: [Retry Strategy](ingestion_v2_plan.md#retry-strategy), [Retryable Errors](ingestion_v2_plan.md#retryable-errors), [Non-retryable Errors](ingestion_v2_plan.md#non-retryable-errors), [Task Group H](ingestion_v2_plan.md#task-group-h-retry-v2)
 - Files:
@@ -847,7 +847,7 @@ Goal: add retries only for transient failures and defer document imports until i
 
 ### I2. Implement acquisition helper
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: I1, B4
 - Plan refs: [HTTP Client](ingestion_v2_plan.md#http-client), [ingestion_attempts](ingestion_v2_plan.md#ingestion_attempts)
 - Files:
@@ -864,7 +864,7 @@ Goal: add retries only for transient failures and defer document imports until i
 
 ### I3. Configure Celery retries for v2 tasks
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: I1, I2
 - Plan refs: [Celery Task Configuration](ingestion_v2_plan.md#celery-task-configuration)
 - Files:
@@ -881,7 +881,7 @@ Goal: add retries only for transient failures and defer document imports until i
 
 ### I4. Add document dependency check
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C10, I1
 - Plan refs: [Retry Strategy](ingestion_v2_plan.md#retry-strategy), [Normal Daily Flow](ingestion_v2_plan.md#normal-daily-flow)
 - Build:
@@ -895,7 +895,7 @@ Goal: add retries only for transient failures and defer document imports until i
 
 ### I5. Add attempt visibility to run summary
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4, I2
 - Plan refs: [ingestion_attempts](ingestion_v2_plan.md#ingestion_attempts), [When Retry Exhausts](ingestion_v2_plan.md#when-retry-exhausts)
 - Build:
@@ -910,7 +910,7 @@ Goal: expose v2 quality and make rollout controllable.
 
 ### J1. Add v2 settings
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: none
 - Plan refs: [Dependency and Configuration Plan](ingestion_v2_plan.md#dependency-and-configuration-plan)
 - Files:
@@ -930,7 +930,7 @@ Goal: expose v2 quality and make rollout controllable.
 
 ### J2. Add ingestion v2 metrics helpers
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4
 - Plan refs: [Phase 8](ingestion_v2_plan.md#phase-8-admin-and-observability), [Observability and SLO Gates](ingestion_v2_plan.md#task-group-i-observability-and-slo-gates)
 - Files:
@@ -947,7 +947,7 @@ Goal: expose v2 quality and make rollout controllable.
 
 ### J3. Add quality summary builder
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4, E5, H2
 - Plan refs: [Validation Model](ingestion_v2_plan.md#validation-model), [Phase 8](ingestion_v2_plan.md#phase-8-admin-and-observability)
 - Build:
@@ -963,7 +963,7 @@ Goal: expose v2 quality and make rollout controllable.
 
 ### J4. Add internal/admin list endpoints for v2 runs/quarantine
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H2, J3
 - Plan refs: [Repair and Replay](ingestion_v2_plan.md#repair-and-replay), [Phase 8](ingestion_v2_plan.md#phase-8-admin-and-observability)
 - Files:
@@ -978,7 +978,7 @@ Goal: expose v2 quality and make rollout controllable.
 
 ### J5. Add admin replay endpoints
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H5, J4
 - Plan refs: [Replay Modes](ingestion_v2_plan.md#replay-modes)
 - Build:
@@ -994,7 +994,7 @@ Goal: safely move from v1 to v2.
 
 ### K1. Add v2 task routes behind feature flags
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: C10, F5, G5, I3, J1
 - Plan refs: [Phase 9](ingestion_v2_plan.md#phase-9-rollout-and-backfill), [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:
@@ -1007,7 +1007,7 @@ Goal: safely move from v1 to v2.
 
 ### K2. Add dark-launch staging mode
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B6, J1
 - Plan refs: [Phase 9](ingestion_v2_plan.md#phase-9-rollout-and-backfill), [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy)
 - Build:
@@ -1018,7 +1018,7 @@ Goal: safely move from v1 to v2.
 
 ### K3. Add parity report between v1 and v2
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: K2, A4
 - Plan refs: [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill), [Target Outcomes](ingestion_v2_plan.md#target-outcomes)
 - Build:
@@ -1033,7 +1033,7 @@ Goal: safely move from v1 to v2.
 
 ### K4. Add backfill runner
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: K1, K2
 - Plan refs: [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:
@@ -1046,7 +1046,7 @@ Goal: safely move from v1 to v2.
 
 ### K5. Add rollout documentation
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: K1, K2, K3
 - Plan refs: [Operational Runbooks](ingestion_v2_plan.md#operational-runbooks), [Risks and Mitigations](ingestion_v2_plan.md#risks-and-mitigations)
 - Build:
@@ -1066,7 +1066,7 @@ Goal: verify v2 meets target outcomes and retire dead paths only after stable pr
 
 ### L1. Add quality gate enforcement
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: J3
 - Plan refs: [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy), [Target Outcomes](ingestion_v2_plan.md#target-outcomes)
 - Build:
@@ -1078,7 +1078,7 @@ Goal: verify v2 meets target outcomes and retire dead paths only after stable pr
 
 ### L2. Run live audit and v2 dark launch for 2021
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: K2, A6
 - Plan refs: [Target Outcomes](ingestion_v2_plan.md#target-outcomes), [Suggested First Sprint](ingestion_v2_plan.md#suggested-first-sprint)
 - Build:
@@ -1092,7 +1092,7 @@ Goal: verify v2 meets target outcomes and retire dead paths only after stable pr
 
 ### L3. Enable v2 promotion for one year
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: L2, K1
 - Plan refs: [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:
@@ -1105,7 +1105,7 @@ Goal: verify v2 meets target outcomes and retire dead paths only after stable pr
 
 ### L4. Replay repairable quarantine after identity fixes
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: H5, L3
 - Plan refs: [Repair and Replay](ingestion_v2_plan.md#repair-and-replay), [When `companhia_nao_encontrada` Spikes](ingestion_v2_plan.md#when-companhia_nao_encontrada-spikes)
 - Build:
@@ -1117,7 +1117,7 @@ Goal: verify v2 meets target outcomes and retire dead paths only after stable pr
 
 ### L5. Retire or isolate v1 paths
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: L3, L4
 - Plan refs: [Definition of Done](ingestion_v2_plan.md#definition-of-done-for-ingestion-v2), [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:

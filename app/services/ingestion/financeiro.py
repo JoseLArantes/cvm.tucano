@@ -10,9 +10,12 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
-from app.models.ingestion import IngestionRow
+from app.models.ingestion import IngestionFileMember, IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.financeiro_mapas import arquivos_demonstracao
+from app.services.ingestion.dependencies import ensure_identity_graph_ready
+from app.services.ingestion.quality import enforce_quality_gate
+from app.services.ingestion.quarantine import create_quarantine_item
 from app.services.ingestion.resolver import (
     STATUS_PROVISIONAL_CREATED,
     STATUS_RESOLVED,
@@ -24,10 +27,13 @@ from app.services.ingestion.resolver import (
 from app.services.ingestion.normalizers import gerar_hash_canonico
 from app.services.ingestion.staging import (
     create_run,
+    iter_zip_csv_members,
     register_file,
     stage_zip_payload,
+    stage_csv_payload,
     update_run_state,
 )
+from app.services.ingestion.summary import build_quality_summary
 from app.services.ingestion.validation import (
     build_natural_key,
     classify_duplicate,
@@ -268,10 +274,17 @@ def _process_financeiro_rows(
     tipo_formulario: str,
     ano: int,
     staged_members: list[tuple[Any, list[IngestionRow]]],
+    promote_enabled: bool,
+    contadores: dict[str, int] | None = None,
+    seen_by_row_kind: dict[str, dict[str, dict[str, Any]]] | None = None,
+    header_map: dict[tuple[str | None, int | None, int | None, Any], Any] | None = None,
 ) -> dict[str, int]:
-    contadores = {"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
-    seen_by_row_kind: dict[str, dict[str, dict[str, Any]]] = {}
-    header_map: dict[tuple[str | None, int | None, int | None, Any], Any] = {}
+    if contadores is None:
+        contadores = {"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
+    if seen_by_row_kind is None:
+        seen_by_row_kind = {}
+    if header_map is None:
+        header_map = {}
 
     ordered_members = sorted(
         staged_members,
@@ -285,6 +298,12 @@ def _process_financeiro_rows(
             for row in rows:
                 contadores["lidas"] += 1
                 write_validation_result(db, ingestion_row=row, result=schema_result)
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=schema_result,
+                    execucao_sincronizacao_id=execucao.id,
+                )
                 _registrar_quarentena(
                     db,
                     execucao_id=execucao.id,
@@ -315,6 +334,13 @@ def _process_financeiro_rows(
                     repairable=False,
                 )
                 write_validation_result(db, ingestion_row=row, result=result)
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    execucao_sincronizacao_id=execucao.id,
+                    legacy_reason=f"normalizacao_invalida: {exc}",
+                )
                 _registrar_quarentena(
                     db,
                     execucao_id=execucao.id,
@@ -352,6 +378,12 @@ def _process_financeiro_rows(
                     normalized_data=dados,
                     natural_key=natural_key,
                 )
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=duplicate_result,
+                    execucao_sincronizacao_id=execucao.id,
+                )
                 _registrar_quarentena(
                     db,
                     execucao_id=execucao.id,
@@ -382,6 +414,12 @@ def _process_financeiro_rows(
                     normalized_data=dados,
                     natural_key=natural_key,
                 )
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    execucao_sincronizacao_id=execucao.id,
+                )
                 _registrar_quarentena(
                     db,
                     execucao_id=execucao.id,
@@ -408,14 +446,17 @@ def _process_financeiro_rows(
                 normalized_data=dados,
                 natural_key=natural_key,
             )
-            _promote_financeiro_row(
-                db,
-                row_kind=row_kind,
-                row=row,
-                dados=dados,
-                execucao_id=execucao.id,
-                contadores=contadores,
-            )
+            if promote_enabled:
+                _promote_financeiro_row(
+                    db,
+                    row_kind=row_kind,
+                    row=row,
+                    dados=dados,
+                    execucao_id=execucao.id,
+                    contadores=contadores,
+                )
+            else:
+                contadores["inalterados"] += 1
             if row_kind.endswith("_documento"):
                 register_document_header(
                     header_map,
@@ -429,12 +470,280 @@ def _process_financeiro_rows(
                 )
 
             if contadores["lidas"] % _BATCH_COMMIT_LINHAS == 0:
-                update_run_state(run, phase="promote", quality_summary=contadores.copy())
+                update_run_state(run, phase="promote", quality_summary=build_quality_summary(db, ingestion_run_id=run.id))
                 _atualizar_execucao(execucao, contadores)
                 db.commit()
 
-    update_run_state(run, phase="promote", quality_summary=contadores.copy())
+    update_run_state(run, phase="promote", quality_summary=build_quality_summary(db, ingestion_run_id=run.id))
     return contadores
+
+
+def _iter_member_row_chunks(
+    db: Session,
+    *,
+    member_id: Any,
+    chunk_size: int,
+) -> Any:
+    offset = 0
+    while True:
+        rows = list(
+            db.execute(
+                select(IngestionRow)
+                .where(IngestionRow.ingestion_file_member_id == member_id)
+                .order_by(IngestionRow.linha_origem.asc())
+                .offset(offset)
+                .limit(chunk_size)
+            )
+            .scalars()
+            .all()
+        )
+        if not rows:
+            break
+        yield rows
+        offset += len(rows)
+
+
+def _process_financeiro_member(
+    db: Session,
+    *,
+    execucao: ExecucaoSincronizacao,
+    run: IngestionRun,
+    member: IngestionFileMember,
+    prefixo: str,
+    tipo_formulario: str,
+    ano: int,
+    promote_enabled: bool,
+    contadores: dict[str, int],
+    seen_by_row_kind: dict[str, dict[str, dict[str, Any]]],
+    header_map: dict[tuple[str | None, int | None, int | None, Any], Any],
+    chunk_size: int,
+) -> tuple[ExecucaoSincronizacao, IngestionRun, IngestionFileMember]:
+    member_row_kind = db.scalar(
+        select(IngestionRow.row_kind)
+        .where(IngestionRow.ingestion_file_member_id == member.id)
+        .order_by(IngestionRow.linha_origem.asc())
+        .limit(1)
+    )
+    schema_result = validate_member_header(member_row_kind or "desconhecido", member.header)
+    update_member_schema_validation(member, result=schema_result)
+    db.commit()
+
+    execucao_id = execucao.id
+    run_id = run.id
+    member_id = member.id
+
+    if schema_result.status == "invalid":
+        for rows in _iter_member_row_chunks(db, member_id=member_id, chunk_size=chunk_size):
+            for row in rows:
+                contadores["lidas"] += 1
+                write_validation_result(db, ingestion_row=row, result=schema_result)
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=schema_result,
+                    execucao_sincronizacao_id=execucao_id,
+                )
+                _registrar_quarentena(
+                    db,
+                    execucao_id=execucao_id,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=row.ano_origem or ano,
+                    linha_origem=row.linha_origem,
+                    motivo=schema_result.reason_code or "schema_inesperado",
+                    dados_originais=row.raw_data,
+                )
+                contadores["rejeitados"] += 1
+            execucao = db.get(ExecucaoSincronizacao, execucao_id)
+            run = db.get(IngestionRun, run_id)
+            if execucao is not None and run is not None:
+                update_run_state(run, phase="promote", quality_summary=build_quality_summary(db, ingestion_run_id=run.id))
+                _atualizar_execucao(execucao, contadores)
+            db.commit()
+            db.expunge_all()
+        execucao = db.get(ExecucaoSincronizacao, execucao_id)
+        run = db.get(IngestionRun, run_id)
+        member = db.get(IngestionFileMember, member_id)
+        assert execucao is not None and run is not None and member is not None
+        return execucao, run, member
+
+    for rows in _iter_member_row_chunks(db, member_id=member_id, chunk_size=chunk_size):
+        for row in rows:
+            contadores["lidas"] += 1
+            try:
+                row_kind, dados = normalizar_financeiro_row(
+                    prefixo=prefixo,
+                    tipo_formulario=tipo_formulario,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=ano,
+                    linha_origem=row.linha_origem,
+                    linha=row.raw_data,
+                )
+            except Exception as exc:
+                result = invalid_result(
+                    "normalizacao_invalida",
+                    details={"erro": str(exc)},
+                    repairable=False,
+                )
+                write_validation_result(db, ingestion_row=row, result=result)
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    execucao_sincronizacao_id=execucao_id,
+                    legacy_reason=f"normalizacao_invalida: {exc}",
+                )
+                _registrar_quarentena(
+                    db,
+                    execucao_id=execucao_id,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=ano,
+                    linha_origem=row.linha_origem,
+                    motivo=f"normalizacao_invalida: {exc}",
+                    dados_originais=row.raw_data,
+                )
+                contadores["rejeitados"] += 1
+                continue
+
+            natural_key = build_natural_key(row_kind, dados)
+            duplicate_result = classify_duplicate(
+                natural_key=natural_key,
+                normalized_hash=gerar_hash_canonico(dados),
+                normalized_data=dados,
+                seen_by_key=seen_by_row_kind.setdefault(row_kind, {}),
+            )
+            if duplicate_result.status == "ignored_duplicate":
+                write_validation_result(
+                    db,
+                    ingestion_row=row,
+                    result=duplicate_result,
+                    normalized_data=dados,
+                    natural_key=natural_key,
+                )
+                contadores["inalterados"] += 1
+                continue
+            if duplicate_result.status == "invalid":
+                write_validation_result(
+                    db,
+                    ingestion_row=row,
+                    result=duplicate_result,
+                    normalized_data=dados,
+                    natural_key=natural_key,
+                )
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=duplicate_result,
+                    execucao_sincronizacao_id=execucao_id,
+                )
+                _registrar_quarentena(
+                    db,
+                    execucao_id=execucao_id,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=ano,
+                    linha_origem=row.linha_origem,
+                    motivo=duplicate_result.reason_code or "chave_natural_duplicada_conflitante",
+                    dados_originais=row.raw_data,
+                )
+                contadores["rejeitados"] += 1
+                continue
+
+            resolver_result = resolve_companhia_v2(
+                db,
+                _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
+                header_map=header_map,
+            )
+            if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
+                result = invalid_result(
+                    resolver_result.resolution_method or "companhia_nao_encontrada",
+                    details=resolver_result.details,
+                    repairable=True,
+                )
+                write_validation_result(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    normalized_data=dados,
+                    natural_key=natural_key,
+                )
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    execucao_sincronizacao_id=execucao_id,
+                )
+                _registrar_quarentena(
+                    db,
+                    execucao_id=execucao_id,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=ano,
+                    linha_origem=row.linha_origem,
+                    motivo=resolver_result.resolution_method or "companhia_nao_encontrada",
+                    dados_originais=row.raw_data,
+                )
+                contadores["rejeitados"] += 1
+                continue
+
+            persist_resolution_result(db, ingestion_row=row, result=resolver_result)
+            dados["companhia_id"] = resolver_result.companhia_id
+            if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
+                companhia = db.get(Companhia, resolver_result.companhia_id)
+                if companhia is not None:
+                    dados["codigo_cvm"] = companhia.codigo_cvm
+
+            write_validation_result(
+                db,
+                ingestion_row=row,
+                result=duplicate_result,
+                normalized_data=dados,
+                natural_key=natural_key,
+            )
+            if promote_enabled:
+                _promote_financeiro_row(
+                    db,
+                    row_kind=row_kind,
+                    row=row,
+                    dados=dados,
+                    execucao_id=execucao_id,
+                    contadores=contadores,
+                )
+            else:
+                contadores["inalterados"] += 1
+            if row_kind.endswith("_documento"):
+                register_document_header(
+                    header_map,
+                    tipo_formulario=tipo_formulario,
+                    id_documento=dados.get("id_documento"),
+                    versao=dados.get("versao"),
+                    data_referencia=dados.get("data_referencia"),
+                    companhia_id=resolver_result.companhia_id,
+                    cnpj_companhia=dados.get("cnpj_companhia"),
+                    codigo_cvm=dados.get("codigo_cvm"),
+                )
+
+        execucao = db.get(ExecucaoSincronizacao, execucao_id)
+        run = db.get(IngestionRun, run_id)
+        if execucao is not None and run is not None:
+            update_run_state(run, phase="promote", quality_summary=build_quality_summary(db, ingestion_run_id=run.id))
+            _atualizar_execucao(execucao, contadores)
+        db.commit()
+        db.expunge_all()
+        execucao = db.get(ExecucaoSincronizacao, execucao_id)
+        run = db.get(IngestionRun, run_id)
+        member = db.get(IngestionFileMember, member_id)
+        assert execucao is not None and run is not None and member is not None
+
+    return execucao, run, member
+
+
+def _ordered_financeiro_members(
+    payload: bytes,
+    *,
+    prefixo: str,
+    ano: int,
+) -> list[tuple[str, bytes]]:
+    members = iter_zip_csv_members(payload)
+    principal = f"{prefixo}_cia_aberta_{ano}.csv"
+    return sorted(members, key=lambda item: (0 if item[0] == principal else 1, item[0]))
 
 
 def _sincronizar_financeiro_v2(
@@ -446,10 +755,10 @@ def _sincronizar_financeiro_v2(
     task_id: str | None = None,
     downloader: Any | None = None,
 ) -> dict[str, Any]:
+    settings = get_settings()
+    ensure_identity_graph_ready(db)
     if db.query(Companhia).count() == 0:
         raise ValueError("cadastro_companhias_nao_ingestado")
-
-    settings = get_settings()
     downloader = downloader or (lambda url: _download(url, timeout=300))
     arquivo_zip = f"{prefixo}_cia_aberta_{ano}.zip"
     url = f"{settings.cvm_base_url}/CIA_ABERTA/DOC/{tipo_formulario}/DADOS/{arquivo_zip}"
@@ -473,6 +782,8 @@ def _sincronizar_financeiro_v2(
         requested_by_task_id=task_id,
         phase="acquire",
     )
+    db.commit()
+    db.refresh(run)
 
     try:
         payload = downloader(url)
@@ -505,31 +816,63 @@ def _sincronizar_financeiro_v2(
             is_zip=True,
         )
         update_run_state(run, phase="stage")
-        staged_members = stage_zip_payload(
-            db,
-            ingestion_run=run,
-            ingestion_file=ingestion_file,
-            payload=payload,
-            ano_origem=ano,
-            row_kind_by_member=member_map,
-        )
-        staged_names = {member.member_name for member, _ in staged_members}
+        db.commit()
+        db.refresh(run)
+        db.refresh(execucao)
+
+        contadores = {"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
+        seen_by_row_kind: dict[str, dict[str, dict[str, Any]]] = {}
+        header_map: dict[tuple[str | None, int | None, int | None, Any], Any] = {}
+
+        staged_names: set[str] = set()
+        for member_name, member_payload in _ordered_financeiro_members(payload, prefixo=prefixo, ano=ano):
+            staged_names.add(member_name)
+            member, rows = stage_csv_payload(
+                db,
+                ingestion_run=run,
+                ingestion_file=ingestion_file,
+                payload=member_payload,
+                member_name=member_name,
+                arquivo_origem=member_name,
+                ano_origem=ano,
+                row_kind=member_map.get(member_name, "desconhecido"),
+            )
+            del rows
+            update_run_state(run, phase="stage")
+            db.commit()
+            db.refresh(run)
+            db.refresh(execucao)
+
+            execucao, run, member = _process_financeiro_member(
+                db,
+                execucao=execucao,
+                run=run,
+                member=member,
+                prefixo=prefixo,
+                tipo_formulario=tipo_formulario,
+                ano=ano,
+                promote_enabled=settings.ingestion_v2_promote_enabled,
+                contadores=contadores,
+                seen_by_row_kind=seen_by_row_kind,
+                header_map=header_map,
+                chunk_size=settings.ingestion_v2_promote_batch_size,
+            )
+
         faltando = sorted(required_members - staged_names)
         if faltando:
             raise ValueError(f"arquivo_nao_esperado_ausente: {','.join(faltando)}")
-
-        contadores = _process_financeiro_rows(
-            db,
-            execucao=execucao,
-            run=run,
-            prefixo=prefixo,
-            tipo_formulario=tipo_formulario,
-            ano=ano,
-            staged_members=staged_members,
-        )
-        _atualizar_execucao(execucao, contadores, status="sucesso")
+        quality_summary = build_quality_summary(db, ingestion_run_id=run.id)
+        status_execucao, mensagem_status = enforce_quality_gate(quality_summary=quality_summary)
+        _atualizar_execucao(execucao, contadores, status=status_execucao)
         execucao.finalizada_em = _agora()
-        update_run_state(run, status="sucesso", phase="complete", quality_summary=contadores.copy(), finished_at=_agora())
+        update_run_state(
+            run,
+            status=status_execucao,
+            phase="complete",
+            quality_summary=quality_summary,
+            message=mensagem_status,
+            finished_at=_agora(),
+        )
         db.commit()
         return {
             "execucao_id": str(execucao.id),

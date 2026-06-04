@@ -53,7 +53,10 @@ OPENAPI_TAGS = [
     },
     {
         "name": "admin",
-        "description": "Operações administrativas de sincronização e monitoramento de execução.",
+        "description": (
+            "Operacoes administrativas de sincronizacao, monitoramento de execucao, "
+            "quarentena v2, replay e rebuild de identidade."
+        ),
     },
     {
         "name": "usuarios",

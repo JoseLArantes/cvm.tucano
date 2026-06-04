@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import func, select
@@ -8,15 +9,22 @@ from app.api.auth import validar_token_api
 from app.api.deps import DbSession
 from app.core.config import get_settings
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
+from app.models.ingestion import IngestionRun, QuarantineItemV2
 from app.schemas.admin import (
     DashboardExecucoesResposta,
     ExecucaoSincronizacaoDetalhe,
     ExecucaoSincronizacaoResumo,
     HistoricoAlteracaoCampoResposta,
+    IngestionRunResumo,
+    ListaIngestionRuns,
     ListaExecucoesSincronizacao,
     ListaHistoricoAlteracoes,
+    ListaQuarantineItemsV2,
     ListaRegistrosQuarentena,
+    QuarantineItemV2Resposta,
+    ReplayQuarantineRequisicao,
     RegistroQuarentenaResposta,
+    ReplayResposta,
     RespostaAgendamentoEmLote,
     RespostaAgendamentoSincronizacao,
     RespostaCancelamentoSincronizacao,
@@ -24,6 +32,8 @@ from app.schemas.admin import (
     TarefaAgendadaResumo,
 )
 from app.schemas.comum import Paginacao
+from app.services.ingestion.cadastro import sincronizar_cadastro_companhias_v2
+from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service, replay_quarantine
 from app.worker.celery_app import celery_app
 from app.worker.tasks import (
     sincronizar_cadastro_companhias_task,
@@ -589,3 +599,207 @@ def dashboard_execucoes(
             for item in ultimas
         ],
     )
+
+
+@router.get(
+    "/ingestion-v2/runs",
+    response_model=ListaIngestionRuns,
+    summary="Listar Runs de Ingestion V2",
+    description=(
+        "Lista paginada das runs do pipeline de ingestao v2. "
+        "O frontend pode usar este endpoint como visao principal de monitoramento, "
+        "consumindo `status`, `phase` e `quality_summary` para cards, grids e alertas."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="listarIngestionV2RunsAdmin",
+)
+def listar_ingestion_v2_runs(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    pagina: Annotated[int, Query(ge=1)] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> ListaIngestionRuns:
+    offset = (pagina - 1) * tamanho_pagina
+    runs = (
+        db.execute(select(IngestionRun).order_by(IngestionRun.started_at.desc()).offset(offset).limit(tamanho_pagina))
+        .scalars()
+        .all()
+    )
+    total = db.query(IngestionRun).count()
+    return ListaIngestionRuns(
+        dados=[
+            IngestionRunResumo(
+                id=str(run.id),
+                execucao_sincronizacao_id=None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
+                tipo_fonte=run.tipo_fonte,
+                ano=run.ano,
+                status=run.status,
+                phase=run.phase,
+                quality_summary=run.quality_summary,
+            )
+            for run in runs
+        ],
+        paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
+    )
+
+
+@router.get(
+    "/ingestion-v2/runs/{run_id}",
+    response_model=IngestionRunResumo,
+    summary="Detalhar Run de Ingestion V2",
+    description=(
+        "Retorna uma run especifica do pipeline v2. "
+        "Use este endpoint para telas de detalhe e drill-down operacional, especialmente quando o frontend precisar ler "
+        "`quality_summary` consolidado antes de buscar quarentena ou acionar replay."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    operation_id="detalharIngestionV2RunAdmin",
+)
+def detalhar_ingestion_v2_run(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionRunResumo:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    return IngestionRunResumo(
+        id=str(run.id),
+        execucao_sincronizacao_id=None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
+        tipo_fonte=run.tipo_fonte,
+        ano=run.ano,
+        status=run.status,
+        phase=run.phase,
+        quality_summary=run.quality_summary,
+    )
+
+
+@router.get(
+    "/ingestion-v2/quarantine",
+    response_model=ListaQuarantineItemsV2,
+    summary="Listar Quarentena de Ingestion V2",
+    description=(
+        "Lista paginada da fila de reparo v2. "
+        "Os filtros atuais suportam `motivo_codigo`; o frontend deve tratar `motivo_codigo`, `status`, "
+        "`reparavel` e `tentativas_reprocessamento` como colunas de primeira classe."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="listarIngestionV2QuarantineAdmin",
+)
+def listar_ingestion_v2_quarantine(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    pagina: Annotated[int, Query(ge=1)] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
+    motivo_codigo: Annotated[str | None, Query()] = None,
+) -> ListaQuarantineItemsV2:
+    offset = (pagina - 1) * tamanho_pagina
+    query = select(QuarantineItemV2)
+    query_total = select(func.count()).select_from(QuarantineItemV2)
+    if motivo_codigo:
+        query = query.where(QuarantineItemV2.motivo_codigo == motivo_codigo)
+        query_total = query_total.where(QuarantineItemV2.motivo_codigo == motivo_codigo)
+    itens = (
+        db.execute(query.order_by(QuarantineItemV2.created_at.desc()).offset(offset).limit(tamanho_pagina))
+        .scalars()
+        .all()
+    )
+    total = db.scalar(query_total) or 0
+    return ListaQuarantineItemsV2(
+        dados=[
+            QuarantineItemV2Resposta(
+                id=str(item.id),
+                ingestion_run_id=None if item.ingestion_run_id is None else str(item.ingestion_run_id),
+                ingestion_row_id=str(item.ingestion_row_id),
+                arquivo_origem=item.arquivo_origem,
+                ano_origem=item.ano_origem,
+                linha_origem=item.linha_origem,
+                row_kind=item.row_kind,
+                status=item.status,
+                motivo_codigo=item.motivo_codigo,
+                severidade=item.severidade,
+                reparavel=item.reparavel,
+                tentativas_reprocessamento=item.tentativas_reprocessamento,
+                diagnostico=item.diagnostico,
+            )
+            for item in itens
+        ],
+        paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
+    )
+
+
+@router.post(
+    "/ingestion-v2/replay/quarantine",
+    response_model=ReplayResposta,
+    summary="Reprocessar Quarentena de Ingestion V2",
+    description=(
+        "Executa replay sobre itens pendentes da quarentena v2. "
+        "A requisicao aceita filtros opcionais por `reason_code`, `arquivo_origem` e `ano`. "
+        "Quando nenhum filtro e enviado, todos os itens `pendente` sao considerados."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="replayIngestionV2QuarantineAdmin",
+)
+def replay_ingestion_v2_quarantine(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    payload: Annotated[
+        ReplayQuarantineRequisicao,
+        Body(
+            examples=[
+                {"reason_code": "companhia_nao_encontrada"},
+                {"arquivo_origem": "itr_cia_aberta_2021.csv", "ano": 2021},
+            ]
+        ),
+    ] = ReplayQuarantineRequisicao(),
+) -> ReplayResposta:
+    resultado = replay_quarantine(
+        db,
+        reason_code=payload.reason_code,
+        arquivo_origem=payload.arquivo_origem,
+        ano=payload.ano,
+    )
+    return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/ingestion-v2/runs/{run_id}/replay",
+    response_model=ReplayResposta,
+    summary="Reprocessar Run de Ingestion V2",
+    description=(
+        "Executa replay de todas as linhas staged pertencentes a uma run v2. "
+        "A operacao e util quando uma correcao de identidade, parser ou regra de reparo precisa ser aplicada em lote "
+        "sem redownload do arquivo original."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    operation_id="replayIngestionV2RunAdmin",
+)
+def replay_ingestion_v2_run(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> ReplayResposta:
+    if db.get(IngestionRun, run_id) is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    resultado = replay_ingestion_run_service(db, run_id=run_id)
+    return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/ingestion-v2/identity/rebuild",
+    response_model=ReplayResposta,
+    summary="Reconstruir Identidade de Ingestion V2",
+    description=(
+        "Reprocessa o cadastro v2 para reconstruir a malha de identidade usada por DFP, ITR e FRE. "
+        "O frontend deve expor esta acao como operacao administrativa forte, normalmente seguida de replay da quarentena "
+        "por `companhia_nao_encontrada`."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="rebuildIngestionV2IdentityAdmin",
+)
+def rebuild_ingestion_v2_identity(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> ReplayResposta:
+    resultado = sincronizar_cadastro_companhias_v2(db)
+    return ReplayResposta(status="sucesso", detalhe=resultado)

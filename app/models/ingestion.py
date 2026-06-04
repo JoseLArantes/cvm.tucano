@@ -157,3 +157,38 @@ class IngestionAttempt(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class QuarantineItemV2(Base):
+    __tablename__ = "quarantine_items_v2"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id"), index=True
+    )
+    ingestion_row_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ingestion_rows.id"), index=True, nullable=False, unique=True
+    )
+    execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id"), index=True
+    )
+    arquivo_origem: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
+    linha_origem: Mapped[int | None] = mapped_column(Integer)
+    row_kind: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    motivo_codigo: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    severidade: Mapped[str] = mapped_column(String(16), nullable=False)
+    reparavel: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    diagnostico: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    ultima_tentativa_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tentativas_reprocessamento: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    resolvido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolvido_por: Mapped[str | None] = mapped_column(String(120))
+    ultimo_erro: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

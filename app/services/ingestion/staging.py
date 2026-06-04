@@ -328,6 +328,16 @@ def stage_zip_payload(
     return staged_members
 
 
+def iter_zip_csv_members(payload: bytes) -> list[tuple[str, bytes]]:
+    members: list[tuple[str, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        for member_name in archive.namelist():
+            if not member_name.endswith(".csv"):
+                continue
+            members.append((member_name, archive.read(member_name)))
+    return members
+
+
 def _serialize_json_bytes(payload: dict[str, Any]) -> bytes:
     import json
 

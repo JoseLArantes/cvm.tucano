@@ -24,10 +24,25 @@ class Settings(BaseSettings):
     anos_iniciais_dfp: str = Field(default="", alias="ANOS_INICIAIS_DFP")
     anos_iniciais_itr: str = Field(default="", alias="ANOS_INICIAIS_ITR")
     anos_iniciais_fre: str = Field(default="", alias="ANOS_INICIAIS_FRE")
+    ingestion_v2_enabled: bool = Field(default=False, alias="INGESTION_V2_ENABLED")
+    ingestion_v2_promote_enabled: bool = Field(default=True, alias="INGESTION_V2_PROMOTE_ENABLED")
     ingestion_v2_provisional_company_enabled: bool = Field(
         default=False,
         alias="INGESTION_V2_PROVISIONAL_COMPANY_ENABLED",
     )
+    ingestion_v2_max_retries: int = Field(default=5, ge=0, alias="INGESTION_V2_MAX_RETRIES")
+    ingestion_v2_retry_backoff_max_seconds: int = Field(
+        default=600,
+        ge=1,
+        alias="INGESTION_V2_RETRY_BACKOFF_MAX_SECONDS",
+    )
+    ingestion_v2_company_missing_max_ratio: float = Field(
+        default=0.01,
+        ge=0.0,
+        alias="INGESTION_V2_COMPANY_MISSING_MAX_RATIO",
+    )
+    ingestion_v2_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_V2_STAGE_BATCH_SIZE")
+    ingestion_v2_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_V2_PROMOTE_BATCH_SIZE")
 
     @field_validator("database_url", mode="before")
     @classmethod

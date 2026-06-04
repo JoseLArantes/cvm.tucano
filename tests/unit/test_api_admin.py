@@ -249,3 +249,34 @@ def test_openapi_documenta_cancelamento_sincronizacao(client: TestClient) -> Non
     assert esquema["properties"]["id_execucao"]["anyOf"][0]["format"] == "uuid"
     assert esquema["properties"]["id_tarefa"]["anyOf"][1]["type"] == "null"
     assert len(esquema["examples"]) == 2
+
+
+def test_openapi_documenta_admin_ingestion_v2(client: TestClient) -> None:
+    resposta = client.get("/openapi.json")
+
+    assert resposta.status_code == 200
+    payload = resposta.json()
+
+    rota_runs = payload["paths"]["/admin/ingestion-v2/runs"]["get"]
+    rota_quarantine = payload["paths"]["/admin/ingestion-v2/quarantine"]["get"]
+    rota_replay_quarantine = payload["paths"]["/admin/ingestion-v2/replay/quarantine"]["post"]
+    rota_replay_run = payload["paths"]["/admin/ingestion-v2/runs/{run_id}/replay"]["post"]
+    rota_identity = payload["paths"]["/admin/ingestion-v2/identity/rebuild"]["post"]
+
+    assert rota_runs["summary"] == "Listar Runs de Ingestion V2"
+    assert "quality_summary" in rota_runs["description"]
+    assert rota_quarantine["summary"] == "Listar Quarentena de Ingestion V2"
+    assert "motivo_codigo" in rota_quarantine["description"]
+    assert rota_replay_quarantine["summary"] == "Reprocessar Quarentena de Ingestion V2"
+    assert "reason_code" in rota_replay_quarantine["description"]
+    assert rota_replay_run["summary"] == "Reprocessar Run de Ingestion V2"
+    assert rota_identity["summary"] == "Reconstruir Identidade de Ingestion V2"
+
+    esquema_run = payload["components"]["schemas"]["IngestionRunResumo"]
+    esquema_quarentena = payload["components"]["schemas"]["QuarantineItemV2Resposta"]
+    esquema_replay_req = payload["components"]["schemas"]["ReplayQuarantineRequisicao"]
+
+    assert "quality_summary" in esquema_run["properties"]
+    assert "tentativas_reprocessamento" in esquema_quarentena["properties"]
+    assert esquema_replay_req["properties"]["reason_code"]["anyOf"][1]["type"] == "null"
+    assert len(esquema_replay_req["examples"]) == 3

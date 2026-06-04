@@ -16,6 +16,7 @@ from app.models.ingestion import (
     IngestionRow,
     IngestionRowEvent,
     IngestionRun,
+    QuarantineItemV2,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
@@ -43,6 +44,7 @@ __all__ = [
     "IngestionRowEvent",
     "IngestionRun",
     "ParecerFinanceiro",
+    "QuarantineItemV2",
     "RegistroQuarentena",
     "RepairRule",
     "Usuario",
