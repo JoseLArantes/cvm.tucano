@@ -285,16 +285,21 @@ def write_validation_result(
     created_by: str = "validation_v2",
 ) -> IngestionRow:
     normalized_hash = None
+    normalized_data_payload = None
+    natural_key_payload = None
     if normalized_data is not None:
         normalized_hash = gerar_hash_canonico(normalized_data)
+        normalized_data_payload = normalizar_chave_natural(normalized_data)
+    if natural_key is not None:
+        natural_key_payload = normalizar_chave_natural(natural_key)
     update_row_validation(
         ingestion_row,
         validation_status=result.status,
         validation_reason_code=result.reason_code,
         validation_details=result.to_json_payload(),
-        normalized_data=normalized_data,
+        normalized_data=normalized_data_payload,
         normalized_hash=normalized_hash,
-        natural_key=natural_key,
+        natural_key=natural_key_payload,
     )
     register_row_event(
         db,

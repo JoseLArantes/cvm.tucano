@@ -566,7 +566,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F1. Extract DFP/ITR member map service
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B6
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Phase 5](ingestion_v2_plan.md#phase-5-document-v2-promotion), [Task Group E](ingestion_v2_plan.md#task-group-e-financeiro-v2)
 - Files:
@@ -581,7 +581,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F2. Implement financeiro v2 normalizers
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: F1, C4
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Shared Normalization Rules](ingestion_v2_plan.md#shared-normalization-rules)
 - Build:
@@ -597,7 +597,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F3. Promote financeiro document headers first
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: F2, D7, E5
 - Plan refs: [Financial and FRE Documents](ingestion_v2_plan.md#financial-and-fre-documents), [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy)
 - Build:
@@ -611,7 +611,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F4. Promote financeiro child rows
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: F3, D4, E4
 - Plan refs: [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy), [Phase 5](ingestion_v2_plan.md#phase-5-document-v2-promotion)
 - Build:
@@ -627,7 +627,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F5. Add financeiro v2 service entrypoints
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: F4
 - Plan refs: [Phase 5](ingestion_v2_plan.md#phase-5-document-v2-promotion), [Rollout and Backfill](ingestion_v2_plan.md#phase-9-rollout-and-backfill)
 - Build:
@@ -639,7 +639,7 @@ Goal: DFP/ITR stage-normalize-validate-resolve-promote through v2 path.
 
 ### F6. Add foreign issuer financeiro tests
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: F5, C10
 - Plan refs: [Target Outcomes](ingestion_v2_plan.md#target-outcomes), [Testing Strategy](ingestion_v2_plan.md#testing-strategy)
 - Build:
