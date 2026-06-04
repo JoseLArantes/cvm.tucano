@@ -501,7 +501,7 @@ Goal: convert parser exceptions into structured validation and split exact dupli
 
 ### E1. Define validation result structure
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: B4
 - Plan refs: [Validation Model](ingestion_v2_plan.md#validation-model)
 - Files:
@@ -514,7 +514,7 @@ Goal: convert parser exceptions into structured validation and split exact dupli
 
 ### E2. Implement schema validation helpers
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: E1
 - Plan refs: [Validation Model](ingestion_v2_plan.md#validation-model), [When Schema Error Appears](ingestion_v2_plan.md#when-schema-error-appears)
 - Build:
@@ -526,7 +526,7 @@ Goal: convert parser exceptions into structured validation and split exact dupli
 
 ### E3. Implement natural-key builder registry
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: E1
 - Plan refs: [Document Duplicate Policy](ingestion_v2_plan.md#document-duplicate-policy), [Promotion Strategy](ingestion_v2_plan.md#promotion-strategy)
 - Build:
@@ -538,7 +538,7 @@ Goal: convert parser exceptions into structured validation and split exact dupli
 
 ### E4. Implement duplicate classifier
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: E3
 - Plan refs: [Document Duplicate Policy](ingestion_v2_plan.md#document-duplicate-policy), [When Duplicate Natural Key Spikes](ingestion_v2_plan.md#when-duplicate-natural-key-spikes)
 - Build:
@@ -551,7 +551,7 @@ Goal: convert parser exceptions into structured validation and split exact dupli
 
 ### E5. Add validation status writer
 
-- Status: `[ ]`
+- Status: `[x]`
 - Depends on: E1, B4
 - Plan refs: [ingestion_rows](ingestion_v2_plan.md#ingestion_rows), [ingestion_row_events](ingestion_v2_plan.md#ingestion_row_events)
 - Build:
