@@ -1,5 +1,3 @@
-from datetime import datetime
-
 import httpx
 import pytest
 from sqlalchemy import create_engine
@@ -7,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.ingestion import IngestionAttempt
 from app.services.ingestion.acquisition import download_with_attempts
 from app.services.ingestion.retry import (
@@ -40,7 +38,9 @@ class _Response:
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:
-            raise httpx.HTTPStatusError("erro", request=httpx.Request("GET", "https://example.test"), response=httpx.Response(self.status_code))
+            raise httpx.HTTPStatusError(
+                "erro", request=httpx.Request("GET", "https://example.test"), response=httpx.Response(self.status_code)
+            )
 
 
 def test_retry_classification() -> None:

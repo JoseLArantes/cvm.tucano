@@ -1,9 +1,11 @@
+from typing import Any
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.ingestion import IngestionRowEvent
 from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 from app.services.ingestion.validation import (
@@ -27,7 +29,7 @@ def _session() -> Session:
     return local_session()
 
 
-def _staged_row(session: Session):
+def _staged_row(session: Session) -> tuple[Any, Any]:
     run = create_run(session, tipo_fonte="dfp", ano=2025)
     ingestion_file = register_file(
         session,
@@ -116,7 +118,7 @@ def test_build_natural_key_for_dfp_demonstracao_fre_auditor_and_cadastro() -> No
 
 
 def test_classify_duplicate_ignores_exact_duplicate() -> None:
-    seen_by_key = {}
+    seen_by_key: dict[str, dict[str, Any]] = {}
     natural_key = {"id_documento": 10, "versao": 1}
     normalized_data = {"id_documento": 10, "versao": 1, "valor": "A"}
 
@@ -139,7 +141,7 @@ def test_classify_duplicate_ignores_exact_duplicate() -> None:
 
 
 def test_classify_duplicate_quarantines_conflict_with_field_diff() -> None:
-    seen_by_key = {}
+    seen_by_key: dict[str, dict[str, Any]] = {}
     natural_key = {"id_documento": 10, "versao": 1}
 
     classify_duplicate(

@@ -1,22 +1,19 @@
-from datetime import date
-from typing import Any
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.services.ingestion.cadastro import (
     ARQUIVO_CADASTRO_ABERTA,
     ARQUIVO_CADASTRO_ESTRANGEIRA,
-    normalizar_linha_cadastro_aberta_v2,
-    normalizar_linha_cadastro_estrangeira_v2,
-    promover_registros_cadastro_v2,
+    normalizar_linha_cadastro_aberta,
+    normalizar_linha_cadastro_estrangeira,
+    promover_registros_cadastro,
     selecionar_registro_canonico,
-    sincronizar_cadastro_companhias_v2,
+    sincronizar_cadastro_companhias,
 )
 from app.services.ingestion.normalizers import normalizar_cnpj_opcional, normalizar_codigo_cvm
 
@@ -129,8 +126,8 @@ def _csv_foreign(rows: list[dict[str, str]]) -> bytes:
     return ("\n".join(lines) + "\n").encode("latin1")
 
 
-def test_normalizar_linha_cadastro_aberta_v2_valid() -> None:
-    result = normalizar_linha_cadastro_aberta_v2(_row_aberta(), linha_origem=2)
+def test_normalizar_linha_cadastro_aberta_valid() -> None:
+    result = normalizar_linha_cadastro_aberta(_row_aberta(), linha_origem=2)
 
     assert result.status == "valid"
     assert result.data is not None
@@ -152,8 +149,8 @@ def test_normalizers_handle_blank_invalid_cnpj_and_zero_padded_codigo() -> None:
         raise AssertionError("Esperava ValueError para CNPJ invalido")
 
 
-def test_normalizar_linha_cadastro_estrangeira_v2_valid() -> None:
-    result = normalizar_linha_cadastro_estrangeira_v2(_row_estrangeira(), linha_origem=2)
+def test_normalizar_linha_cadastro_estrangeira_valid() -> None:
+    result = normalizar_linha_cadastro_estrangeira(_row_estrangeira(), linha_origem=2)
 
     assert result.status == "valid"
     assert result.data is not None
@@ -164,10 +161,10 @@ def test_normalizar_linha_cadastro_estrangeira_v2_valid() -> None:
 
 
 def test_selecionar_registro_canonico_prefere_ativo() -> None:
-    cancelado = normalizar_linha_cadastro_aberta_v2(
+    cancelado = normalizar_linha_cadastro_aberta(
         _row_aberta(codigo_cvm="1716", tipo_mercado="", situacao="CANCELADA"), linha_origem=2
     ).data
-    ativo = normalizar_linha_cadastro_aberta_v2(
+    ativo = normalizar_linha_cadastro_aberta(
         _row_aberta(codigo_cvm="24600", tipo_mercado="BOLSA", situacao="ATIVO"), linha_origem=3
     ).data
 
@@ -177,16 +174,14 @@ def test_selecionar_registro_canonico_prefere_ativo() -> None:
     assert escolhido["codigo_cvm"] == 24600
 
 
-def test_promover_registros_cadastro_v2_merge_tipo_mercado_and_multi_code() -> None:
+def test_promover_registros_cadastro_merge_tipo_mercado_and_multi_code() -> None:
     session = _session()
     try:
-        mercado_bolsa = normalizar_linha_cadastro_aberta_v2(
-            _row_aberta(tipo_mercado="BOLSA"), linha_origem=2
-        ).data
-        mercado_balcao = normalizar_linha_cadastro_aberta_v2(
+        mercado_bolsa = normalizar_linha_cadastro_aberta(_row_aberta(tipo_mercado="BOLSA"), linha_origem=2).data
+        mercado_balcao = normalizar_linha_cadastro_aberta(
             _row_aberta(tipo_mercado="BALCAO ORGANIZADO"), linha_origem=3
         ).data
-        outro_codigo = normalizar_linha_cadastro_aberta_v2(
+        outro_codigo = normalizar_linha_cadastro_aberta(
             _row_aberta(codigo_cvm="24600", tipo_mercado="BOLSA"), linha_origem=4
         ).data
 
@@ -194,7 +189,7 @@ def test_promover_registros_cadastro_v2_merge_tipo_mercado_and_multi_code() -> N
         assert mercado_balcao is not None
         assert outro_codigo is not None
 
-        contadores = promover_registros_cadastro_v2(session, [mercado_bolsa, mercado_balcao, outro_codigo])
+        contadores = promover_registros_cadastro(session, [mercado_bolsa, mercado_balcao, outro_codigo])
         session.commit()
 
         assert contadores["companhias"] == 1
@@ -206,7 +201,7 @@ def test_promover_registros_cadastro_v2_merge_tipo_mercado_and_multi_code() -> N
         session.close()
 
 
-def test_sincronizar_cadastro_companhias_v2_downloads_open_and_foreign_sources() -> None:
+def test_sincronizar_cadastro_companhias_downloads_open_and_foreign_sources() -> None:
     session = _session()
     try:
         aberta_payload = _csv_open([_row_aberta(cnpj="08.773.135/0001-00", codigo_cvm="25224")])
@@ -219,7 +214,7 @@ def test_sincronizar_cadastro_companhias_v2_downloads_open_and_foreign_sources()
         def downloader(url: str) -> bytes:
             return payloads[url]
 
-        resultado = sincronizar_cadastro_companhias_v2(session, downloader=downloader)
+        resultado = sincronizar_cadastro_companhias(session, downloader=downloader)
 
         assert resultado["status"] == "sucesso"
         assert resultado["total_linhas_lidas"] == 2

@@ -23,6 +23,13 @@ from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
 
+_RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
+    422: {
+        "description": "Parâmetros inválidos (filtro, formato ou ordenação).",
+        "content": {"application/json": {"example": {"detail": "Campo invalido para ordenacao: campo"}}},
+    }
+}
+
 ParametroCnpj = Annotated[
     str | None,
     Query(
@@ -40,6 +47,8 @@ ParametroDataFim = Annotated[
     Query(description="Data final de referência no formato ISO (YYYY-MM-DD).", examples=["2025-12-31"]),
 ]
 ParametroAnoOrigem = Annotated[int | None, Query(description="Ano do ZIP de origem.", examples=[2025])]
+ParametroAnoInicio = Annotated[int | None, Query(description="Ano inicial do ZIP/dados de origem.", examples=[2010])]
+ParametroAnoFim = Annotated[int | None, Query(description="Ano final do ZIP/dados de origem.", examples=[2020])]
 ParametroVersao = Annotated[int | None, Query(description="Versão do formulário.", examples=[1, 2])]
 ParametroCodigoConta = Annotated[str | None, Query(description="Código da conta contábil.", examples=["3.01"])]
 ParametroIdDocumento = Annotated[int | None, Query(description="ID do documento CVM.", examples=[123456])]
@@ -131,6 +140,8 @@ def _filtrar_basico(
     codigo_cvm: int | None,
     ano_origem: int | None,
     versao: int | None,
+    ano_inicio: int | None = None,
+    ano_fim: int | None = None,
 ) -> tuple[Select[Any], Select[Any]]:
     if cnpj_companhia:
         cnpj = normalizar_cnpj(cnpj_companhia)
@@ -142,6 +153,12 @@ def _filtrar_basico(
     if ano_origem is not None:
         query = query.where(_col(modelo, "ano_origem") == ano_origem)
         query_total = query_total.where(_col(modelo, "ano_origem") == ano_origem)
+    if ano_inicio is not None:
+        query = query.where(_col(modelo, "ano_origem") >= ano_inicio)
+        query_total = query_total.where(_col(modelo, "ano_origem") >= ano_inicio)
+    if ano_fim is not None:
+        query = query.where(_col(modelo, "ano_origem") <= ano_fim)
+        query_total = query_total.where(_col(modelo, "ano_origem") <= ano_fim)
     if versao is not None:
         query = query.where(_col(modelo, "versao") == versao)
         query_total = query_total.where(_col(modelo, "versao") == versao)
@@ -167,6 +184,8 @@ def listar_documentos_dfp(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     id_documento: ParametroIdDocumento = None,
     ordenar_por: ParametroOrdenacaoDocumentos = "-data_referencia",
@@ -180,6 +199,8 @@ def listar_documentos_dfp(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         id_documento=id_documento,
         ordenar_por=ordenar_por,
@@ -205,6 +226,8 @@ def listar_documentos_itr(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     id_documento: ParametroIdDocumento = None,
     ordenar_por: ParametroOrdenacaoDocumentos = "-data_referencia",
@@ -218,6 +241,8 @@ def listar_documentos_itr(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         id_documento=id_documento,
         ordenar_por=ordenar_por,
@@ -234,13 +259,17 @@ def _listar_documentos(
     data_referencia_inicio: date | None,
     data_referencia_fim: date | None,
     ano_origem: int | None,
+    ano_inicio: int | None = None,
+    ano_fim: int | None = None,
     versao: int | None,
     id_documento: int | None,
     ordenar_por: str | None,
 ) -> ListaDocumentosFinanceirosResposta:
     query: Select[Any] = select(DocumentoFinanceiro).where(DocumentoFinanceiro.tipo_formulario == tipo_formulario)
-    query_total = select(func.count()).select_from(DocumentoFinanceiro).where(
-        DocumentoFinanceiro.tipo_formulario == tipo_formulario
+    query_total = (
+        select(func.count())
+        .select_from(DocumentoFinanceiro)
+        .where(DocumentoFinanceiro.tipo_formulario == tipo_formulario)
     )
     query, query_total = _filtrar_basico(
         query,
@@ -250,6 +279,8 @@ def _listar_documentos(
         codigo_cvm=codigo_cvm,
         ano_origem=ano_origem,
         versao=versao,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
     )
     query, query_total = _filtrar_periodo(
         query,
@@ -294,6 +325,8 @@ def _listar_demonstracoes(
     data_referencia_inicio: date | None,
     data_referencia_fim: date | None,
     ano_origem: int | None,
+    ano_inicio: int | None = None,
+    ano_fim: int | None = None,
     versao: int | None,
     codigo_conta: str | None,
     ordenar_por: str | None,
@@ -303,10 +336,14 @@ def _listar_demonstracoes(
         DemonstracaoFinanceira.tipo_demonstracao == tipo_demonstracao,
         DemonstracaoFinanceira.escopo_demonstracao == escopo_demonstracao,
     )
-    query_total = select(func.count()).select_from(DemonstracaoFinanceira).where(
-        DemonstracaoFinanceira.tipo_formulario == tipo_formulario,
-        DemonstracaoFinanceira.tipo_demonstracao == tipo_demonstracao,
-        DemonstracaoFinanceira.escopo_demonstracao == escopo_demonstracao,
+    query_total = (
+        select(func.count())
+        .select_from(DemonstracaoFinanceira)
+        .where(
+            DemonstracaoFinanceira.tipo_formulario == tipo_formulario,
+            DemonstracaoFinanceira.tipo_demonstracao == tipo_demonstracao,
+            DemonstracaoFinanceira.escopo_demonstracao == escopo_demonstracao,
+        )
     )
     query, query_total = _filtrar_basico(
         query,
@@ -316,6 +353,8 @@ def _listar_demonstracoes(
         codigo_cvm=codigo_cvm,
         ano_origem=ano_origem,
         versao=versao,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
     )
     query, query_total = _filtrar_periodo(
         query,
@@ -345,10 +384,7 @@ def _listar_demonstracoes(
     "/dfp/composicao-capital",
     response_model=ListaComposicoesCapitalResposta,
     summary="Listar Composição de Capital DFP",
-    description=(
-        "Retorna dados de composição de capital do DFP "
-        "(`dfp_cia_aberta_composicao_capital_{ano}.csv`)."
-    ),
+    description=("Retorna dados de composição de capital do DFP (`dfp_cia_aberta_composicao_capital_{ano}.csv`)."),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarComposicaoCapitalDfp",
 )
@@ -360,6 +396,8 @@ def listar_composicao_capital_dfp(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     ordenar_por: ParametroOrdenacaoComum = "-data_referencia",
 ) -> ListaComposicoesCapitalResposta:
@@ -372,6 +410,8 @@ def listar_composicao_capital_dfp(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         ordenar_por=ordenar_por,
     )
@@ -381,10 +421,7 @@ def listar_composicao_capital_dfp(
     "/itr/composicao-capital",
     response_model=ListaComposicoesCapitalResposta,
     summary="Listar Composição de Capital ITR",
-    description=(
-        "Retorna dados de composição de capital do ITR "
-        "(`itr_cia_aberta_composicao_capital_{ano}.csv`)."
-    ),
+    description=("Retorna dados de composição de capital do ITR (`itr_cia_aberta_composicao_capital_{ano}.csv`)."),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarComposicaoCapitalItr",
 )
@@ -396,6 +433,8 @@ def listar_composicao_capital_itr(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     ordenar_por: ParametroOrdenacaoComum = "-data_referencia",
 ) -> ListaComposicoesCapitalResposta:
@@ -408,6 +447,8 @@ def listar_composicao_capital_itr(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         ordenar_por=ordenar_por,
     )
@@ -423,12 +464,14 @@ def _listar_composicao_capital(
     data_referencia_inicio: date | None,
     data_referencia_fim: date | None,
     ano_origem: int | None,
+    ano_inicio: int | None = None,
+    ano_fim: int | None = None,
     versao: int | None,
     ordenar_por: str | None,
 ) -> ListaComposicoesCapitalResposta:
     query: Select[Any] = select(ComposicaoCapital).where(ComposicaoCapital.tipo_formulario == tipo_formulario)
-    query_total = select(func.count()).select_from(ComposicaoCapital).where(
-        ComposicaoCapital.tipo_formulario == tipo_formulario
+    query_total = (
+        select(func.count()).select_from(ComposicaoCapital).where(ComposicaoCapital.tipo_formulario == tipo_formulario)
     )
     query, query_total = _filtrar_basico(
         query,
@@ -438,6 +481,8 @@ def _listar_composicao_capital(
         codigo_cvm=codigo_cvm,
         ano_origem=ano_origem,
         versao=versao,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
     )
     query, query_total = _filtrar_periodo(
         query,
@@ -464,10 +509,7 @@ def _listar_composicao_capital(
     "/dfp/pareceres",
     response_model=ListaPareceresFinanceirosResposta,
     summary="Listar Pareceres DFP",
-    description=(
-        "Retorna pareceres e declarações do DFP "
-        "(`dfp_cia_aberta_parecer_{ano}.csv`)."
-    ),
+    description=("Retorna pareceres e declarações do DFP (`dfp_cia_aberta_parecer_{ano}.csv`)."),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarPareceresDfp",
 )
@@ -479,6 +521,8 @@ def listar_pareceres_dfp(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     ordenar_por: ParametroOrdenacaoComum = "-data_referencia",
 ) -> ListaPareceresFinanceirosResposta:
@@ -491,6 +535,8 @@ def listar_pareceres_dfp(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         ordenar_por=ordenar_por,
     )
@@ -500,10 +546,7 @@ def listar_pareceres_dfp(
     "/itr/pareceres",
     response_model=ListaPareceresFinanceirosResposta,
     summary="Listar Pareceres ITR",
-    description=(
-        "Retorna pareceres e declarações do ITR "
-        "(`itr_cia_aberta_parecer_{ano}.csv`)."
-    ),
+    description=("Retorna pareceres e declarações do ITR (`itr_cia_aberta_parecer_{ano}.csv`)."),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarPareceresItr",
 )
@@ -515,6 +558,8 @@ def listar_pareceres_itr(
     data_referencia_inicio: ParametroDataInicio = None,
     data_referencia_fim: ParametroDataFim = None,
     ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     ordenar_por: ParametroOrdenacaoComum = "-data_referencia",
 ) -> ListaPareceresFinanceirosResposta:
@@ -527,6 +572,8 @@ def listar_pareceres_itr(
         data_referencia_inicio=data_referencia_inicio,
         data_referencia_fim=data_referencia_fim,
         ano_origem=ano_origem,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
         versao=versao,
         ordenar_por=ordenar_por,
     )
@@ -542,12 +589,14 @@ def _listar_pareceres(
     data_referencia_inicio: date | None,
     data_referencia_fim: date | None,
     ano_origem: int | None,
+    ano_inicio: int | None = None,
+    ano_fim: int | None = None,
     versao: int | None,
     ordenar_por: str | None,
 ) -> ListaPareceresFinanceirosResposta:
     query: Select[Any] = select(ParecerFinanceiro).where(ParecerFinanceiro.tipo_formulario == tipo_formulario)
-    query_total = select(func.count()).select_from(ParecerFinanceiro).where(
-        ParecerFinanceiro.tipo_formulario == tipo_formulario
+    query_total = (
+        select(func.count()).select_from(ParecerFinanceiro).where(ParecerFinanceiro.tipo_formulario == tipo_formulario)
     )
     query, query_total = _filtrar_basico(
         query,
@@ -557,6 +606,8 @@ def _listar_pareceres(
         codigo_cvm=codigo_cvm,
         ano_origem=ano_origem,
         versao=versao,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
     )
     query, query_total = _filtrar_periodo(
         query,
@@ -597,6 +648,8 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
         data_referencia_inicio: ParametroDataInicio = None,
         data_referencia_fim: ParametroDataFim = None,
         ano_origem: ParametroAnoOrigem = None,
+        ano_inicio: ParametroAnoInicio = None,
+        ano_fim: ParametroAnoFim = None,
         versao: ParametroVersao = None,
         codigo_conta: ParametroCodigoConta = None,
         ordenar_por: ParametroOrdenacaoDemonstracoes = "-data_referencia",
@@ -612,6 +665,8 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
             data_referencia_inicio=data_referencia_inicio,
             data_referencia_fim=data_referencia_fim,
             ano_origem=ano_origem,
+            ano_inicio=ano_inicio,
+            ano_fim=ano_fim,
             versao=versao,
             codigo_conta=codigo_conta,
             ordenar_por=ordenar_por,
@@ -628,10 +683,7 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
             "Suporta filtros por companhia, período, versão, ano de origem e código da conta."
         ),
         responses=_RESPOSTAS_PADRAO,
-        operation_id=(
-            f"listar{tipo_formulario.title()}{tipo_demonstracao.title().replace('_', '')}"
-            f"{escopo.title()}"
-        ),
+        operation_id=(f"listar{tipo_formulario.title()}{tipo_demonstracao.title().replace('_', '')}{escopo.title()}"),
     )(endpoint)
 
 

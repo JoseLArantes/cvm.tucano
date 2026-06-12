@@ -12,6 +12,12 @@ from app.schemas.admin import (
     TarefaAgendadaResumo,
 )
 from app.schemas.auth import LoginRequisicao, LoginResposta
+from app.schemas.cgvn import (
+    CgvnDocumentoResposta,
+    CgvnPraticaResposta,
+    ListaCgvnDocumentosResposta,
+    ListaCgvnPraticasResposta,
+)
 from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
 from app.schemas.erros import ErroPadrao
 from app.schemas.financeiro import (
@@ -38,8 +44,15 @@ from app.schemas.fre import (
     ListaFrePosicaoAcionariaResposta,
     ListaFreRemuneracaoTotalOrgaoResposta,
 )
+from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta
 from app.schemas.mestre import ConsultaCompanhiaMestreResposta
 from app.schemas.usuario import ListaUsuariosResposta, UsuarioAtualizacao, UsuarioCriacao, UsuarioResposta
+from app.schemas.vlmo import (
+    ListaVlmoConsolidadoResposta,
+    ListaVlmoDocumentosResposta,
+    VlmoConsolidadoResposta,
+    VlmoDocumentoResposta,
+)
 
 __all__ = [
     "ConsultaCompanhiaMestreResposta",
@@ -67,6 +80,8 @@ __all__ = [
     "ListaFreEmpregadoPosicaoGeneroResposta",
     "ListaFrePosicaoAcionariaResposta",
     "ListaFreRemuneracaoTotalOrgaoResposta",
+    "IpeDocumentoResposta",
+    "ListaIpeDocumentosResposta",
     "ListaCompanhiasResposta",
     "ListaComposicoesCapitalResposta",
     "ListaDemonstracoesFinanceirasResposta",
@@ -83,4 +98,12 @@ __all__ = [
     "UsuarioAtualizacao",
     "UsuarioCriacao",
     "UsuarioResposta",
+    "ListaVlmoConsolidadoResposta",
+    "ListaVlmoDocumentosResposta",
+    "VlmoConsolidadoResposta",
+    "VlmoDocumentoResposta",
+    "CgvnDocumentoResposta",
+    "ListaCgvnDocumentosResposta",
+    "CgvnPraticaResposta",
+    "ListaCgvnPraticasResposta",
 ]

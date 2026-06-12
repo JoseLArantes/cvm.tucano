@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import Select, func, select
@@ -11,7 +11,7 @@ from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter(prefix="/companhias")
 
-_RESPOSTAS_PADRAO = {
+_RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     404: {
         "description": "Recurso não encontrado para os critérios informados.",
         "content": {"application/json": {"example": {"detail": "Companhia nao encontrada."}}},
@@ -27,10 +27,7 @@ _RESPOSTAS_PADRAO = {
     "",
     response_model=ListaCompanhiasResposta,
     summary="Listar Companhias",
-    description=(
-        "Retorna lista paginada de companhias abertas normalizadas. "
-        "Permite filtragem por CNPJ e código CVM."
-    ),
+    description=("Retorna lista paginada de companhias abertas normalizadas. Permite filtragem por CNPJ e código CVM."),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarCompanhias",
 )
@@ -66,7 +63,9 @@ def listar_companhias(
 
     total = db.scalar(query_total) or 0
     itens = (
-        db.execute(query.order_by(Companhia.denominacao_social).offset(paginacao.offset).limit(paginacao.tamanho_pagina))
+        db.execute(
+            query.order_by(Companhia.denominacao_social).offset(paginacao.offset).limit(paginacao.tamanho_pagina)
+        )
         .scalars()
         .all()
     )

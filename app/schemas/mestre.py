@@ -15,6 +15,7 @@ from app.schemas.fre import (
     ListaFrePosicaoAcionariaResposta,
     ListaFreRemuneracaoTotalOrgaoResposta,
 )
+from app.schemas.ipe import ListaIpeDocumentosResposta
 
 
 class ConsultaCompanhiaMestreResposta(BaseModel):
@@ -47,3 +48,4 @@ class ConsultaCompanhiaMestreResposta(BaseModel):
     fre_empregados_posicao_genero: ListaFreEmpregadoPosicaoGeneroResposta = Field(
         description="Resultado de `GET /fre/empregados/posicao-genero`."
     )
+    ipe_documentos: ListaIpeDocumentosResposta = Field(description="Resultado de `GET /ipe/documentos`.")

@@ -1,19 +1,29 @@
 import json
 import logging
 import sys
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import perf_counter
+from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 
+counter_factory: Any = None
+histogram_factory: Any = None
+make_asgi_app: Any = None
+
 try:
-    from prometheus_client import Counter, Histogram, make_asgi_app
+    from prometheus_client import Counter as _counter_factory
+    from prometheus_client import Histogram as _histogram_factory
+    from prometheus_client import make_asgi_app as _make_asgi_app
 except Exception:  # pragma: no cover - ambiente sem dependencia opcional
-    Counter = None  # type: ignore[assignment]
-    Histogram = None  # type: ignore[assignment]
-    make_asgi_app = None  # type: ignore[assignment]
+    pass
+else:
+    counter_factory = _counter_factory
+    histogram_factory = _histogram_factory
+    make_asgi_app = _make_asgi_app
 
 
 class JsonFormatter(logging.Formatter):
@@ -44,27 +54,27 @@ def configurar_logging(log_level: str) -> None:
 
 
 _CONTADOR_REQUISICOES = (
-    Counter(
+    counter_factory(
         "cvm_api_requisicoes_total",
         "Total de requisicoes HTTP por metodo, rota e status.",
         ["metodo", "rota", "status_code"],
     )
-    if Counter is not None
+    if counter_factory is not None
     else None
 )
 _LATENCIA_REQUISICOES = (
-    Histogram(
+    histogram_factory(
         "cvm_api_requisicao_duracao_segundos",
         "Duracao das requisicoes HTTP em segundos.",
         ["metodo", "rota"],
     )
-    if Histogram is not None
+    if histogram_factory is not None
     else None
 )
 
 
 class ObservabilidadeMiddleware(BaseHTTPMiddleware):
-    def __init__(self, app: object, *, habilitar_metricas: bool) -> None:
+    def __init__(self, app: Callable[..., Any], *, habilitar_metricas: bool) -> None:
         super().__init__(app)
         self.logger = logging.getLogger("app.api")
         self.habilitar_metricas = habilitar_metricas
@@ -103,4 +113,4 @@ class ObservabilidadeMiddleware(BaseHTTPMiddleware):
 def criar_app_metricas() -> object | None:
     if make_asgi_app is None:
         return None
-    return make_asgi_app()
+    return cast(object, make_asgi_app())

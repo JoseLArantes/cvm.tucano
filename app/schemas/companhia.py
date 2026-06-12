@@ -87,9 +87,7 @@ class CompanhiaResposta(BaseModel):
     categoria_registro: str | None = Field(description="Categoria de registro do emissor.")
     data_inicio_categoria: date | None = Field(description="Data de inicio da categoria de registro atual.")
     situacao_emissor: str | None = Field(description="Situacao do emissor informada pela CVM.")
-    data_inicio_situacao_emissor: date | None = Field(
-        description="Data de inicio da situacao do emissor atual."
-    )
+    data_inicio_situacao_emissor: date | None = Field(description="Data de inicio da situacao do emissor atual.")
     controle_acionario: str | None = Field(description="Tipo de controle acionario informado pela CVM.")
     endereco: dict[str, Any] = Field(description="Bloco estruturado com endereco da companhia.")
     responsavel: dict[str, Any] = Field(description="Bloco estruturado com dados do responsavel cadastral.")

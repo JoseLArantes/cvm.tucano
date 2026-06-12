@@ -16,12 +16,36 @@ class RespostaAgendamentoSincronizacao(BaseModel):
     status: str = Field(description='Estado inicial do disparo da tarefa. Valor esperado: "agendada".')
 
 
+class AnaliseArquivo(BaseModel):
+    file_name: str = Field(description="Nome do arquivo ou membro do zip.")
+    file_size: str = Field(description="Tamanho formatado (ex.: KB, MB).")
+    rows_count: int = Field(description="Número de linhas de dados no arquivo.")
+    columns_count: int = Field(description="Número de colunas no arquivo.")
+    header_columns: list[str] = Field(description="Lista com os nomes das colunas.")
+    encoding: str | None = Field(default=None, description="Encoding detectado/usado.")
+    delimiter: str = Field(description="Delimitador de campos detectado/usado.")
+
+
 class ExecucaoSincronizacaoResumo(BaseModel):
     id: str = Field(description="ID da execução de sincronização.")
-    id_tarefa: str | None = Field(default=None, description="ID da task no Celery associada à execução, quando disponível.")
+    id_tarefa: str | None = Field(
+        default=None, description="ID da task no Celery associada à execução, quando disponível."
+    )
     tipo_fonte: str = Field(description='Tipo da fonte processada (ex.: "cadastro", "dfp", "itr").')
     arquivo: str = Field(description="Nome do arquivo (CSV ou ZIP) associado à execução.")
-    status: str = Field(description="Status final/atual da execução.")
+    status: str = Field(
+        description=(
+            "Status atual ou final da execução. Estados possíveis incluem: "
+            '"agendada" (tarefa enfileirada no Celery), '
+            '"em_execucao" (processamento ativo), '
+            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
+            '"sucesso" (ingestão finalizada com sucesso), '
+            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
+            '"skipped" (ignorado por hash de arquivo já existente), '
+            '"falha" (erro durante qualquer fase de processamento), '
+            '"cancelada" (execução abortada manualmente).'
+        )
+    )
     iniciada_em: datetime = Field(description="Timestamp de início da execução.")
     finalizada_em: datetime | None = Field(description="Timestamp de finalização da execução.")
     total_linhas_lidas: int = Field(description="Total de linhas lidas.")
@@ -29,6 +53,30 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     total_atualizados: int = Field(description="Total de registros atualizados.")
     total_inalterados: int = Field(description="Total de registros sem alteração de negócio.")
     total_rejeitados: int = Field(description="Total de registros enviados para quarentena.")
+    analise_arquivos: list[AnaliseArquivo] | None = Field(
+        default=None, description="Análise dos arquivos processados nesta execução."
+    )
+    id_execucao_pai: str | None = Field(
+        default=None, description="ID da execução pai, se esta for uma execução filha."
+    )
+    tipo_execucao: str | None = Field(
+        default=None, description="Tipo da execução: arquivo_zip, arquivo_membro, ou arquivo_simples."
+    )
+    arquivo_principal: str | None = Field(
+        default=None, description="Nome do arquivo ZIP principal para execuções membro."
+    )
+    filhos_total: int | None = Field(
+        default=None, description="Quantidade total de arquivos membros/filhos agendados."
+    )
+    filhos_concluidos: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos concluídos com sucesso."
+    )
+    filhos_falha: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos que falharam."
+    )
+    filhos_em_andamento: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos em andamento."
+    )
 
 
 class ListaExecucoesSincronizacao(BaseModel):
@@ -42,13 +90,27 @@ class ListaExecucoesSincronizacao(BaseModel):
 
 class ExecucaoSincronizacaoDetalhe(BaseModel):
     id: str = Field(description="ID da execução de sincronização.")
-    id_tarefa: str | None = Field(default=None, description="ID da task no Celery que iniciou a execução, quando conhecido.")
+    id_tarefa: str | None = Field(
+        default=None, description="ID da task no Celery que iniciou a execução, quando conhecido."
+    )
     tipo_fonte: str = Field(description='Tipo da fonte processada (ex.: "cadastro", "dfp", "itr").')
     ano: int | None = Field(description="Ano de referência do processamento, quando aplicável.")
     arquivo: str = Field(description="Arquivo principal associado à execução.")
     url: str = Field(description="URL remota da fonte utilizada no processamento.")
     hash_arquivo: str | None = Field(description="Hash SHA-256 do arquivo processado.")
-    status: str = Field(description="Status da execução.")
+    status: str = Field(
+        description=(
+            "Status atual ou final da execução. Estados possíveis incluem: "
+            '"agendada" (tarefa enfileirada no Celery), '
+            '"em_execucao" (processamento ativo), '
+            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
+            '"sucesso" (ingestão finalizada com sucesso), '
+            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
+            '"skipped" (ignorado por hash de arquivo já existente), '
+            '"falha" (erro durante qualquer fase de processamento), '
+            '"cancelada" (execução abortada manualmente).'
+        )
+    )
     iniciada_em: datetime = Field(description="Timestamp de início.")
     finalizada_em: datetime | None = Field(description="Timestamp de fim.")
     total_linhas_lidas: int = Field(description="Total de linhas lidas.")
@@ -56,7 +118,34 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     total_atualizados: int = Field(description="Total de atualizações.")
     total_inalterados: int = Field(description="Total de inalterados.")
     total_rejeitados: int = Field(description="Total rejeitado para quarentena.")
-    mensagem_erro: str | None = Field(description="Mensagem de erro em caso de falha.")
+    mensagem_erro: str | None = Field(description="Mensagem de erro in caso de falha.")
+    analise_arquivos: list[AnaliseArquivo] | None = Field(
+        default=None, description="Análise detalhada dos arquivos processados nesta execução."
+    )
+    id_execucao_pai: str | None = Field(
+        default=None, description="ID da execução pai, se esta for uma execução filha."
+    )
+    tipo_execucao: str | None = Field(
+        default=None, description="Tipo da execução: arquivo_zip, arquivo_membro, ou arquivo_simples."
+    )
+    arquivo_principal: str | None = Field(
+        default=None, description="Nome do arquivo ZIP principal para execuções membro."
+    )
+    filhos_total: int | None = Field(
+        default=None, description="Quantidade total de arquivos membros/filhos agendados."
+    )
+    filhos_concluidos: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos concluídos com sucesso."
+    )
+    filhos_falha: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos que falharam."
+    )
+    filhos_em_andamento: int | None = Field(
+        default=None, description="Quantidade de arquivos membros/filhos em andamento."
+    )
+    execucoes_filhas: list[ExecucaoSincronizacaoResumo] | None = Field(
+        default=None, description="Resumo das execuções filhas, caso aplicável."
+    )
 
 
 class TarefaAgendadaResumo(BaseModel):
@@ -99,7 +188,8 @@ class SolicitacaoCancelamentoSincronizacao(BaseModel):
         default=None,
         description=(
             "ID da task Celery retornado no disparo (`id_tarefa`). "
-            "Use este seletor quando a execução ainda não apareceu na listagem, ou quando desejar revogar a task diretamente."
+            "Use este seletor quando a execução ainda não apareceu na listagem, "
+            "ou quando desejar revogar a task diretamente."
         ),
     )
     terminar_imediatamente: bool = Field(
@@ -142,7 +232,8 @@ class RespostaCancelamentoSincronizacao(BaseModel):
         default=None,
         description=(
             "ID da task revogada no Celery. "
-            "Pode ser `null` quando o cancelamento ocorreu apenas sobre um registro legado em banco sem vínculo de task."
+            "Pode ser `null` quando o cancelamento ocorreu apenas sobre um "
+            "registro legado em banco sem vínculo de task."
         ),
     )
     execucao_encontrada: bool = Field(
@@ -226,22 +317,30 @@ class IngestionRunResumo(BaseModel):
         }
     )
 
-    id: str = Field(description="ID da execucao v2 em `ingestion_runs`.")
+    id: str = Field(description="ID da execucao em `ingestion_runs`.")
     execucao_sincronizacao_id: str | None = Field(
         default=None,
-        description="ID da execucao legado-correlata em `execucoes_sincronizacao`, quando houver ponte entre v1 e v2.",
+        description=(
+            "ID da execucao correlata em `execucoes_sincronizacao`, quando houver."
+        ),
     )
-    tipo_fonte: str = Field(description='Tipo da fonte processada na run v2 (ex.: "cadastro_v2", "dfp", "itr", "fre").')
+    tipo_fonte: str = Field(description='Tipo da fonte processada na run (ex.: "cadastro", "dfp", "itr", "fre").')
     ano: int | None = Field(description="Ano de referencia da run, quando aplicavel.")
     status: str = Field(
-        description="Status consolidado da run v2, incluindo estados de qualidade como `sucesso_com_alerta` e `falha_qualidade`."
+        description=(
+            "Status consolidado da run, incluindo estados de qualidade como "
+            "`sucesso_com_alerta` e `falha_qualidade`."
+        )
     )
-    phase: str = Field(description="Fase atual ou final da run v2, por exemplo `stage`, `validate`, `promote` ou `complete`.")
+    phase: str = Field(
+        description="Fase atual ou final da run, por exemplo `stage`, `validate`, `promote` ou `complete`."
+    )
     quality_summary: dict[str, Any] | None = Field(
         default=None,
         description=(
             "Resumo agregado para dashboards e automacao de frontend. "
-            "Pode incluir contagem por status de linha, motivos de rejeicao, metodos de resolucao, retries e itens em quarentena."
+            "Pode incluir contagem por status de linha, motivos de rejeicao, "
+            "metodos de resolucao, retries e itens em quarentena."
         ),
     )
 
@@ -251,11 +350,11 @@ class ListaIngestionRuns(BaseModel):
         json_schema_extra={"example": {"dados": [], "paginacao": {"pagina": 1, "tamanho_pagina": 100, "total": 0}}}
     )
 
-    dados: list[IngestionRunResumo] = Field(description="Lista paginada de runs v2.")
+    dados: list[IngestionRunResumo] = Field(description="Lista paginada de runs.")
     paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
 
 
-class QuarantineItemV2Resposta(BaseModel):
+class QuarantineItemResposta(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
@@ -280,30 +379,34 @@ class QuarantineItemV2Resposta(BaseModel):
         }
     )
 
-    id: str = Field(description="ID do item da fila de reparo v2.")
-    ingestion_run_id: str | None = Field(default=None, description="ID da run v2 que gerou o item.")
+    id: str = Field(description="ID do item da fila de reparo.")
+    ingestion_run_id: str | None = Field(default=None, description="ID da run que gerou o item.")
     ingestion_row_id: str = Field(description="ID da linha staged relacionada.")
     arquivo_origem: str = Field(description="Arquivo de origem da linha rejeitada.")
     ano_origem: int | None = Field(description="Ano do arquivo de origem, quando aplicavel.")
     linha_origem: int | None = Field(description="Numero da linha no arquivo de origem, quando disponivel.")
     row_kind: str = Field(description="Tipo interno da linha staged, por exemplo `dfp_documento` ou `fre_documento`.")
-    status: str = Field(description="Estado atual da fila de reparo: `pendente`, `resolvido_auto`, `resolvido_manual` ou `ignorado`.")
+    status: str = Field(
+        description="Estado atual da fila de reparo: `pendente`, `resolvido_auto`, `resolvido_manual` ou `ignorado`."
+    )
     motivo_codigo: str = Field(description="Codigo estavel do motivo da quarentena, adequado para filtros de frontend.")
     severidade: str = Field(description="Severidade operacional do item, por exemplo `error` ou `warning`.")
     reparavel: bool = Field(description="Indica se o item e elegivel para replay automatico ou assistido.")
     tentativas_reprocessamento: int = Field(description="Numero acumulado de tentativas de replay.")
     diagnostico: dict[str, Any] | None = Field(
         default=None,
-        description="Diagnostico estruturado para UI e suporte operacional, preservando contexto de resolucao e validacao.",
+        description=(
+            "Diagnostico estruturado para UI e suporte operacional, preservando contexto de resolucao e validacao."
+        ),
     )
 
 
-class ListaQuarantineItemsV2(BaseModel):
+class ListaQuarantineItems(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={"example": {"dados": [], "paginacao": {"pagina": 1, "tamanho_pagina": 100, "total": 0}}}
     )
 
-    dados: list[QuarantineItemV2Resposta] = Field(description="Lista paginada de itens da quarentena v2.")
+    dados: list[QuarantineItemResposta] = Field(description="Lista paginada de itens da quarentena.")
     paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
 
 
@@ -320,7 +423,9 @@ class ReplayQuarantineRequisicao(BaseModel):
 
     reason_code: str | None = Field(
         default=None,
-        description="Filtra replay por motivo estavel de quarentena. Quando omitido, considera todos os itens pendentes.",
+        description=(
+            "Filtra replay por motivo estavel de quarentena. Quando omitido, considera todos os itens pendentes."
+        ),
     )
     arquivo_origem: str | None = Field(
         default=None,
@@ -328,7 +433,10 @@ class ReplayQuarantineRequisicao(BaseModel):
     )
     ano: int | None = Field(
         default=None,
-        description="Restringe o replay a um ano de origem especifico. Normalmente usado junto com `arquivo_origem` ou `reason_code`.",
+        description=(
+            "Restringe o replay a um ano de origem especifico. Normalmente "
+            "usado junto com `arquivo_origem` ou `reason_code`."
+        ),
     )
 
 
@@ -349,7 +457,9 @@ class ReplayResposta(BaseModel):
         }
     )
 
-    status: str = Field(description='Status da chamada administrativa. Valor esperado quando a requisicao e aceita: `"sucesso"`.')
+    status: str = Field(
+        description='Status da chamada administrativa. Valor esperado quando a requisicao e aceita: `"sucesso"`.'
+    )
     detalhe: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -357,3 +467,91 @@ class ReplayResposta(BaseModel):
             "O formato interno varia por operacao, mas sempre inclui contexto suficiente para feedback administrativo."
         ),
     )
+
+
+class FonteDatasetResumoResposta(BaseModel):
+    dataset: str = Field(description="Chave canônica do dataset dentro da fonte.")
+    descricao: str = Field(description="Descrição resumida do dataset.")
+    member_name_template: str = Field(description="Template do nome do member CSV.")
+    row_kind: str | None = Field(description="Tipo interno de linha staged, quando houver.")
+    destino_promovido: str | None = Field(description="Tabela ou entidade promovida, quando houver.")
+    obrigatorio: bool = Field(description="Indica se o dataset é obrigatório no pacote da fonte.")
+    status_suporte: str = Field(description="Status de suporte do dataset na aplicação.")
+    normalizador: str | None = Field(description="Função normalizadora responsável pelo dataset.")
+    chaves_relacao: list[str] = Field(description="Campos-base usados para relacionamento e resolução.")
+    observacoes: str | None = Field(default=None, description="Observações operacionais relevantes.")
+
+
+class FonteResumoResposta(BaseModel):
+    fonte: str = Field(description="Chave canônica da família de fonte.")
+    familia: str = Field(description="Família lógica da fonte CVM.")
+    descricao: str = Field(description="Descrição funcional da fonte.")
+    tipo_distribuicao: str = Field(description="Forma de distribuição: `csv_unico` ou `zip_anual`.")
+    status_suporte: str = Field(description="Status de suporte da fonte.")
+    dependencias: list[str] = Field(description="Fontes que precisam existir antes desta.")
+    primeiro_ano: int | None = Field(description="Primeiro ano suportado, quando aplicável.")
+    ultimo_ano: int | None = Field(description="Último ano suportado, quando aplicável.")
+    total_datasets: int = Field(description="Quantidade total de datasets registrados para a fonte.")
+    datasets_obrigatorios: int = Field(description="Quantidade de datasets obrigatórios.")
+    datasets_opcionais: int = Field(description="Quantidade de datasets opcionais.")
+
+
+class ListaFontesResposta(BaseModel):
+    dados: list[FonteResumoResposta] = Field(description="Lista ordenada das fontes registradas.")
+
+
+class FonteDetalheResposta(FonteResumoResposta):
+    obrigatorio: bool = Field(description="Indica se a fonte é obrigatória para o fluxo do domínio.")
+    dataset_path_template: str = Field(description="Template do path do dataset remoto na CVM.")
+    arquivo_principal_template: str = Field(description="Template do arquivo principal esperado para a fonte.")
+    datasets: list[FonteDatasetResumoResposta] = Field(description="Datasets registrados para a fonte.")
+
+
+class AuditoriaFonteDatasetResposta(BaseModel):
+    dataset: str = Field(description="Nome interno do dataset auditado.")
+    membro_esperado: str = Field(description="Nome de arquivo esperado no CVM.")
+    encontrado: bool = Field(description="Indica se o membro esperado foi encontrado.")
+    row_kind: str | None = Field(description="Row kind registrado para o dataset.")
+    destino_promovido: str | None = Field(description="Destino promovido no pipeline interno.")
+    obrigatorio: bool = Field(description="Indica se o dataset é obrigatório.")
+    status_suporte: str = Field(description="Status de suporte do dataset no registry.")
+    normalizador: str | None = Field(description="Normalizador associado ao dataset.")
+    chaves_relacao: list[str] = Field(description="Chaves relacionais do dataset.")
+    observacoes: str | None = Field(description="Observacoes operacionais do dataset.")
+
+
+class AuditoriaFonteResposta(BaseModel):
+    fonte: str = Field(description="Chave canônica da fonte auditada.")
+    familia: str = Field(description="Familia CVM da fonte.")
+    descricao: str = Field(description="Descricao resumida da fonte.")
+    status_suporte: str = Field(description="Status de suporte da fonte no registry.")
+    ano: int | None = Field(description="Ano de referência da auditoria, quando aplicável.")
+    url: str = Field(description="URL auditada no CVM.")
+    arquivo_principal: str = Field(description="Arquivo principal esperado na fonte.")
+    acessivel: bool = Field(description="Indica se o arquivo principal respondeu com sucesso.")
+    sha256: str | None = Field(description="Hash SHA-256 do payload baixado, quando disponível.")
+    tamanho_bytes: int | None = Field(description="Tamanho do payload em bytes, quando disponível.")
+    datasets_esperados: int = Field(description="Quantidade de datasets esperados no registry.")
+    datasets_encontrados: int = Field(description="Quantidade de datasets encontrados no payload.")
+    datasets_faltantes: int = Field(description="Quantidade de datasets ausentes no payload.")
+    datasets: list[AuditoriaFonteDatasetResposta] = Field(description="Detalhe dos datasets comparados.")
+    observacoes: str | None = Field(description="Observacoes operacionais da auditoria.")
+
+
+class AuditoriaFontesRequisicao(BaseModel):
+    ano: int | None = Field(default=None, description="Ano de referência para fontes anuais.")
+    fontes: list[str] | None = Field(
+        default=None, description="Lista de fontes a auditar; quando omitida, usa fontes implementadas."
+    )
+
+
+class AuditoriaFontesResposta(BaseModel):
+    ano: int | None = Field(description="Ano de referência da auditoria.")
+    fontes: list[AuditoriaFonteResposta] = Field(description="Lista de resultados por fonte.")
+    total_fontes: int = Field(description="Total de fontes auditadas.")
+    total_fontes_acessiveis: int = Field(description="Total de fontes com download bem-sucedido.")
+    total_datasets_faltantes: int = Field(description="Total de datasets faltantes no conjunto auditado.")
+
+
+class ListaAuditoriasFontesResposta(BaseModel):
+    dados: list[AuditoriaFontesResposta] = Field(description="Lista de auditorias executadas em memória.")

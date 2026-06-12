@@ -15,7 +15,7 @@ def enforce_quality_gate(*, quality_summary: dict[str, Any]) -> tuple[str, str |
     reason_counts = quality_summary.get("reason_counts", {})
     missing_company = reason_counts.get("companhia_nao_encontrada", 0)
     ratio = missing_company / total_rows
-    if ratio > settings.ingestion_v2_company_missing_max_ratio:
+    if ratio > settings.ingestion_company_missing_max_ratio:
         return "falha_qualidade", f"companhia_nao_encontrada_ratio={ratio:.4f}"
 
     schema_errors = reason_counts.get("schema_inesperado", 0)

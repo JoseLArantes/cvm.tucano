@@ -60,11 +60,24 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_ingestion_row_id"], ["ingestion_rows.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_companhia_registros_cvm_cnpj_companhia"), "companhia_registros_cvm", ["cnpj_companhia"], unique=False)
-    op.create_index(op.f("ix_companhia_registros_cvm_codigo_cvm"), "companhia_registros_cvm", ["codigo_cvm"], unique=False)
-    op.create_index(op.f("ix_companhia_registros_cvm_companhia_id"), "companhia_registros_cvm", ["companhia_id"], unique=False)
-    op.create_index(op.f("ix_companhia_registros_cvm_fonte_cadastro"), "companhia_registros_cvm", ["fonte_cadastro"], unique=False)
-    op.create_index(op.f("ix_companhia_registros_cvm_source_ingestion_row_id"), "companhia_registros_cvm", ["source_ingestion_row_id"], unique=False)
+    op.create_index(
+        op.f("ix_companhia_registros_cvm_cnpj_companhia"), "companhia_registros_cvm", ["cnpj_companhia"], unique=False
+    )
+    op.create_index(
+        op.f("ix_companhia_registros_cvm_codigo_cvm"), "companhia_registros_cvm", ["codigo_cvm"], unique=False
+    )
+    op.create_index(
+        op.f("ix_companhia_registros_cvm_companhia_id"), "companhia_registros_cvm", ["companhia_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_companhia_registros_cvm_fonte_cadastro"), "companhia_registros_cvm", ["fonte_cadastro"], unique=False
+    )
+    op.create_index(
+        op.f("ix_companhia_registros_cvm_source_ingestion_row_id"),
+        "companhia_registros_cvm",
+        ["source_ingestion_row_id"],
+        unique=False,
+    )
 
     op.create_table(
         "companhia_mercados",
@@ -80,8 +93,18 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_ingestion_row_id"], ["ingestion_rows.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_companhia_mercados_companhia_registro_cvm_id"), "companhia_mercados", ["companhia_registro_cvm_id"], unique=False)
-    op.create_index(op.f("ix_companhia_mercados_source_ingestion_row_id"), "companhia_mercados", ["source_ingestion_row_id"], unique=False)
+    op.create_index(
+        op.f("ix_companhia_mercados_companhia_registro_cvm_id"),
+        "companhia_mercados",
+        ["companhia_registro_cvm_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_companhia_mercados_source_ingestion_row_id"),
+        "companhia_mercados",
+        ["source_ingestion_row_id"],
+        unique=False,
+    )
 
     op.create_table(
         "companhia_identificadores",
@@ -102,10 +125,22 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_ingestion_row_id"], ["ingestion_rows.id"]),
         sa.PrimaryKeyConstraint("id"),
     )
-    op.create_index(op.f("ix_companhia_identificadores_companhia_id"), "companhia_identificadores", ["companhia_id"], unique=False)
-    op.create_index(op.f("ix_companhia_identificadores_source_ingestion_row_id"), "companhia_identificadores", ["source_ingestion_row_id"], unique=False)
+    op.create_index(
+        op.f("ix_companhia_identificadores_companhia_id"), "companhia_identificadores", ["companhia_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_companhia_identificadores_source_ingestion_row_id"),
+        "companhia_identificadores",
+        ["source_ingestion_row_id"],
+        unique=False,
+    )
     op.create_index(op.f("ix_companhia_identificadores_tipo"), "companhia_identificadores", ["tipo"], unique=False)
-    op.create_index(op.f("ix_companhia_identificadores_valor_normalizado"), "companhia_identificadores", ["valor_normalizado"], unique=False)
+    op.create_index(
+        op.f("ix_companhia_identificadores_valor_normalizado"),
+        "companhia_identificadores",
+        ["valor_normalizado"],
+        unique=False,
+    )
     op.create_index(
         "ix_companhia_identificadores_tipo_valor_normalizado",
         "companhia_identificadores",

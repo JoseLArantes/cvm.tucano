@@ -146,9 +146,7 @@ def _popular_financeiro(db: Session, companhia_id: uuid.UUID) -> None:
     db.commit()
 
 
-def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(
-    client: TestClient, db_session: Session
-) -> None:
+def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(client: TestClient, db_session: Session) -> None:
     companhia = _base_companhia()
     db_session.add(companhia)
     db_session.commit()

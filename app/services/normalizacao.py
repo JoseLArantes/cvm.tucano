@@ -148,9 +148,7 @@ def normalizar_linha_cadastro(
         "responsavel": responsavel,
         "auditor": normalizar_texto(linha.get("AUDITOR")),
         "cnpj_auditor": (
-            normalizar_cnpj(str(linha["CNPJ_AUDITOR"]))
-            if normalizar_texto(linha.get("CNPJ_AUDITOR"))
-            else None
+            normalizar_cnpj(str(linha["CNPJ_AUDITOR"])) if normalizar_texto(linha.get("CNPJ_AUDITOR")) else None
         ),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,

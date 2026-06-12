@@ -1,28 +1,27 @@
 import io
 import zipfile
 from datetime import UTC, date, datetime
-from typing import Any
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.identidade import CompanhiaIdentificador
 from app.models.sincronizacao import RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
 from app.services.ingestion.cadastro import (
-    normalizar_linha_cadastro_estrangeira_v2,
-    promover_registros_cadastro_v2,
+    normalizar_linha_cadastro_estrangeira,
+    promover_registros_cadastro,
 )
 from app.services.ingestion.financeiro import (
     map_financeiro_members,
     normalizar_financeiro_row,
-    sincronizar_dfp_v2,
-    sincronizar_itr_v2,
+    sincronizar_dfp,
+    sincronizar_itr,
 )
 
 
@@ -98,7 +97,16 @@ def _add_identifiers(session: Session, companhia: Companhia) -> None:
     session.flush()
 
 
-def _zip_financeiro(prefixo: str, ano: int, *, valor_conta: str, cnpj: str, codigo_cvm: str) -> bytes:
+def _zip_financeiro(
+    prefixo: str,
+    ano: int,
+    *,
+    valor_conta: str,
+    cnpj: str,
+    codigo_cvm: str,
+    empty_members: set[str] | None = None,
+) -> bytes:
+    empty_members = empty_members or set()
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
         zip_file.writestr(
@@ -126,24 +134,25 @@ def _zip_financeiro(prefixo: str, ano: int, *, valor_conta: str, cnpj: str, codi
             ).encode("latin1"),
         )
         for nome_arquivo, _, _ in arquivos_demonstracao(prefixo, ano):
-            zip_file.writestr(
-                nome_arquivo,
-                (
-                    "CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;"
-                    "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA\n"
+            payload = (
+                "CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;"
+                "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA\n"
+            )
+            if nome_arquivo not in empty_members:
+                payload += (
                     f"{cnpj};2025-12-31;1;EMPRESA A;{codigo_cvm};GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;"
                     f"1.01;Caixa;{valor_conta};S\n"
-                ).encode("latin1"),
-            )
+                )
+            zip_file.writestr(nome_arquivo, payload.encode("latin1"))
     return buffer.getvalue()
 
 
 def test_map_financeiro_members_maps_all_expected_files() -> None:
     member_map, required = map_financeiro_members("dfp", 2025)
 
-    assert f"dfp_cia_aberta_2025.csv" in member_map
-    assert f"dfp_cia_aberta_composicao_capital_2025.csv" in member_map
-    assert f"dfp_cia_aberta_parecer_2025.csv" in member_map
+    assert "dfp_cia_aberta_2025.csv" in member_map
+    assert "dfp_cia_aberta_composicao_capital_2025.csv" in member_map
+    assert "dfp_cia_aberta_parecer_2025.csv" in member_map
     assert len(required) == 19
 
 
@@ -173,8 +182,8 @@ def test_normalizar_financeiro_row_reuses_v1_mapping() -> None:
     assert dados["id_documento"] == 123
 
 
-def test_sincronizar_financeiro_v2_inserts_same_counts_as_v1_for_dfp_and_itr() -> None:
-    for prefixo, fn in (("dfp", sincronizar_dfp_v2), ("itr", sincronizar_itr_v2)):
+def test_sincronizar_financeiro_inserts_same_counts_as_v1_for_dfp_and_itr() -> None:
+    for prefixo, fn in (("dfp", sincronizar_dfp), ("itr", sincronizar_itr)):
         session = _session()
         try:
             companhia = _companhia()
@@ -183,11 +192,13 @@ def test_sincronizar_financeiro_v2_inserts_same_counts_as_v1_for_dfp_and_itr() -
             _add_identifiers(session, companhia)
             session.commit()
 
-            payload = _zip_financeiro(prefixo, 2025, valor_conta="1.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+            payload = _zip_financeiro(
+                prefixo, 2025, valor_conta="1.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224"
+            )
             resultado = fn(
                 session,
                 2025,
-                downloader=lambda _: payload,
+                downloader=lambda _, payload=payload: payload,
             )
 
             assert resultado["status"] == "sucesso"
@@ -201,11 +212,11 @@ def test_sincronizar_financeiro_v2_inserts_same_counts_as_v1_for_dfp_and_itr() -
             session.close()
 
 
-def test_sincronizar_financeiro_v2_resolves_foreign_issuer_without_quarantine() -> None:
-    for prefixo, fn in (("dfp", sincronizar_dfp_v2), ("itr", sincronizar_itr_v2)):
+def test_sincronizar_financeiro_resolves_foreign_issuer_without_quarantine() -> None:
+    for prefixo, fn in (("dfp", sincronizar_dfp), ("itr", sincronizar_itr)):
         session = _session()
         try:
-            registro = normalizar_linha_cadastro_estrangeira_v2(
+            registro = normalizar_linha_cadastro_estrangeira(
                 {
                     "CNPJ": "07.857.093/0001-14",
                     "DENOM_SOCIAL": "AURA MINERALS INC.",
@@ -223,7 +234,7 @@ def test_sincronizar_financeiro_v2_resolves_foreign_issuer_without_quarantine() 
                 linha_origem=2,
             )
             assert registro.data is not None
-            promover_registros_cadastro_v2(session, [registro.data])
+            promover_registros_cadastro(session, [registro.data])
             session.commit()
 
             payload = _zip_financeiro(
@@ -233,7 +244,7 @@ def test_sincronizar_financeiro_v2_resolves_foreign_issuer_without_quarantine() 
                 cnpj="07.857.093/0001-14",
                 codigo_cvm="80187",
             )
-            resultado = fn(session, 2025, downloader=lambda _: payload)
+            resultado = fn(session, 2025, downloader=lambda _, payload=payload: payload)
 
             assert resultado["status"] == "sucesso"
             assert resultado["total_rejeitados"] == 0
@@ -242,3 +253,80 @@ def test_sincronizar_financeiro_v2_resolves_foreign_issuer_without_quarantine() 
             assert session.query(DemonstracaoFinanceira).count() == 16
         finally:
             session.close()
+
+
+def test_sincronizar_financeiro_idempotencia_e_alteracao() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload_1 = _zip_financeiro("dfp", 2025, valor_conta="1.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        resultado_1 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_1)
+        assert resultado_1["status"] == "sucesso"
+
+        documento = session.query(DocumentoFinanceiro).one()
+        demonstracao = session.query(DemonstracaoFinanceira).first()
+        assert demonstracao is not None
+        documento.alterado_em = documento.alterado_em.replace(year=documento.alterado_em.year - 1)
+        demonstracao.alterado_em = demonstracao.alterado_em.replace(year=demonstracao.alterado_em.year - 1)
+        documento_alterado_em = documento.alterado_em
+        demonstracao_alterado_em = demonstracao.alterado_em
+        session.commit()
+
+        payload_2 = _zip_financeiro("dfp", 2025, valor_conta="1000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        resultado_2 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_2)
+        assert resultado_2["status"] == "sucesso"
+        assert resultado_2["total_inalterados"] >= 19
+
+        documento_igual = session.query(DocumentoFinanceiro).one()
+        demonstracao_igual = session.query(DemonstracaoFinanceira).first()
+        assert demonstracao_igual is not None
+        assert documento_igual.alterado_em == documento_alterado_em
+        assert demonstracao_igual.alterado_em == demonstracao_alterado_em
+
+        payload_3 = _zip_financeiro("dfp", 2025, valor_conta="2.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        resultado_3 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_3)
+        assert resultado_3["status"] == "sucesso"
+        assert resultado_3["total_atualizados"] >= 1
+
+        demonstracao_alterada = session.query(DemonstracaoFinanceira).first()
+        assert demonstracao_alterada is not None
+        assert demonstracao_alterada.alterado_em > demonstracao_alterado_em
+    finally:
+        session.close()
+
+
+def test_sincronizar_dfp_succeeds_when_dfc_md_members_have_only_header() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "dfp",
+            2026,
+            valor_conta="1.000,00",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            empty_members={
+                "dfp_cia_aberta_DFC_MD_con_2026.csv",
+                "dfp_cia_aberta_DFC_MD_ind_2026.csv",
+            },
+        )
+        resultado = sincronizar_dfp(session, 2026, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert session.query(DocumentoFinanceiro).count() == 1
+        assert session.query(DemonstracaoFinanceira).count() == 14
+        assert session.query(ComposicaoCapital).count() == 1
+        assert session.query(ParecerFinanceiro).count() == 1
+        assert session.query(RegistroQuarentena).count() == 0
+    finally:
+        session.close()

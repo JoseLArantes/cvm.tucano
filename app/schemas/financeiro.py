@@ -111,9 +111,7 @@ class ComposicaoCapitalResposta(BaseModel):
     quantidade_acoes_preferenciais_tesouraria: Decimal | None = Field(
         description="Quantidade de acoes preferenciais em tesouraria."
     )
-    quantidade_total_acoes_tesouraria: Decimal | None = Field(
-        description="Quantidade total de acoes em tesouraria."
-    )
+    quantidade_total_acoes_tesouraria: Decimal | None = Field(description="Quantidade total de acoes em tesouraria.")
     arquivo_origem: str = Field(description="Arquivo CSV de origem no ZIP anual.")
     ano_origem: int | None = Field(description="Ano do ZIP de origem processado.")
     linha_origem: int | None = Field(description="Linha do CSV de origem.")

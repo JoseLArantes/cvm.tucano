@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.fre import FreDocumento
+from app.models.ipe import IpeDocumento
 
 
 def _companhia_base() -> Companhia:
@@ -165,6 +166,31 @@ def _seed_dados(db: Session, companhia_id: uuid.UUID) -> None:
             alterado_em=agora,
         )
     )
+    db.add(
+        IpeDocumento(
+            companhia_id=companhia_id,
+            cnpj_companhia="08773135000100",
+            codigo_cvm=25224,
+            nome_companhia="Empresa A",
+            data_referencia=date(2025, 1, 1),
+            categoria="Categoria X",
+            tipo="Tipo X",
+            especie="Espécie X",
+            assunto="Assunto X",
+            data_entrega=date(2025, 1, 15),
+            tipo_apresentacao="Apresentacao",
+            protocolo_entrega="123456",
+            versao=1,
+            link_download="http://ipe",
+            arquivo_origem="ipe_cia_aberta_2025.csv",
+            ano_origem=2025,
+            linha_origem=2,
+            hash_origem="hash-ipe",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
     db.commit()
 
 
@@ -183,3 +209,4 @@ def test_endpoint_mestre_unifica_respostas(client: TestClient, db_session: Sessi
     assert payload["pareceres_dfp"]["paginacao"]["total"] == 1
     assert payload["demonstracoes"]["dfp_demonstracao_resultado_consolidado"]["paginacao"]["total"] == 1
     assert payload["fre_documentos"]["paginacao"]["total"] == 1
+    assert payload["ipe_documentos"]["paginacao"]["total"] == 1

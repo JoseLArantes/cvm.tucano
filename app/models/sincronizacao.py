@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -13,25 +13,39 @@ class StatusExecucao(enum.StrEnum):
     em_execucao = "em_execucao"
     sucesso = "sucesso"
     sem_alteracao = "sem_alteracao"
+    skipped = "skipped"
     falha = "falha"
     cancelada = "cancelada"
+    aguardando_ingestao = "aguardando_ingestao"
+
+
+class TipoExecucao(enum.StrEnum):
+    arquivo_zip = "arquivo_zip"
+    arquivo_membro = "arquivo_membro"
+    arquivo_simples = "arquivo_simples"
 
 
 class ExecucaoSincronizacao(Base):
     __tablename__ = "execucoes_sincronizacao"
+    __table_args__ = (
+        Index("idx_execucoes_sinc_parent_exec_id", "parent_execucao_id"),
+        Index("idx_execucoes_sinc_composite", "tipo_fonte", "ano", "parent_execucao_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    parent_execucao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), nullable=True
+    )
+    tipo_execucao: Mapped[str] = mapped_column(String(20), default=TipoExecucao.arquivo_simples.value, index=True)
     tipo_fonte: Mapped[str] = mapped_column(String(50), index=True)
     ano: Mapped[int | None] = mapped_column(Integer, index=True)
     id_tarefa: Mapped[str | None] = mapped_column(String(64), index=True)
     arquivo: Mapped[str] = mapped_column(String(255))
     url: Mapped[str] = mapped_column(String(500))
     hash_arquivo: Mapped[str | None] = mapped_column(String(64), index=True)
-    iniciada_em: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    iniciada_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finalizada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    status: Mapped[str] = mapped_column(String(20), default=StatusExecucao.em_execucao.value)
+    status: Mapped[str] = mapped_column(String(20), default=StatusExecucao.em_execucao.value, index=True)
     total_linhas_lidas: Mapped[int] = mapped_column(Integer, default=0)
     total_inseridos: Mapped[int] = mapped_column(Integer, default=0)
     total_atualizados: Mapped[int] = mapped_column(Integer, default=0)
@@ -50,9 +64,7 @@ class HistoricoAlteracaoCampo(Base):
     campo: Mapped[str] = mapped_column(String(100))
     valor_anterior: Mapped[str | None] = mapped_column(Text)
     valor_novo: Mapped[str | None] = mapped_column(Text)
-    alterado_em: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    alterado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     execucao_sincronizacao_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("execucoes_sincronizacao.id"), index=True
     )
@@ -72,6 +84,4 @@ class RegistroQuarentena(Base):
     linha_origem: Mapped[int | None] = mapped_column(Integer)
     motivo: Mapped[str] = mapped_column(String(255))
     dados_originais: Mapped[dict[str, Any]] = mapped_column(JSON)
-    criado_em: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

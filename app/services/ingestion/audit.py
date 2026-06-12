@@ -5,12 +5,14 @@ import hashlib
 import io
 import zipfile
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 
+from app.services.ingestion.source_registry import FonteRegistry, fontes_implementadas
 from app.services.normalizacao import normalizar_inteiro, normalizar_linha_cadastro
 
 CVM_BASE_URL = "https://dados.cvm.gov.br/dados"
@@ -80,6 +82,10 @@ def build_source_url(path: str, *, year: int | None = None) -> str:
     return f"{CVM_BASE_URL}/{path.format(ano=year)}"
 
 
+def build_registry_source_url(fonte: FonteRegistry, *, year: int | None) -> str:
+    return build_source_url(fonte.dataset_path_template, year=year)
+
+
 def fetch_sources(
     *,
     year: int,
@@ -112,6 +118,102 @@ def fetch_sources(
     return sources
 
 
+def _download_registry_source(
+    fonte: FonteRegistry,
+    *,
+    year: int | None,
+    downloader: Callable[[str], bytes],
+) -> dict[str, Any]:
+    url = build_registry_source_url(fonte, year=year)
+    arquivo_principal = fonte.render_arquivo_principal(ano=year)
+    payload = downloader(url)
+    sha256 = sha256_hex(payload)
+
+    datasets = []
+    encontrados = 0
+    faltantes = 0
+    member_names: set[str] = set()
+
+    if fonte.tipo_distribuicao == "zip_anual":
+        member_names = set(read_zip_csv_members(payload).keys())
+
+    for dataset in fonte.datasets:
+        try:
+            membro_esperado = dataset.render_member_name(ano=year)
+        except ValueError:
+            membro_esperado = dataset.member_name_template
+        encontrado = membro_esperado in member_names if member_names else True
+        if fonte.tipo_distribuicao == "zip_anual":
+            if encontrado:
+                encontrados += 1
+            else:
+                faltantes += 1
+        else:
+            encontrados = len(fonte.datasets)
+            faltantes = 0
+            encontrado = True
+        datasets.append(
+            {
+                "dataset": dataset.dataset,
+                "membro_esperado": membro_esperado,
+                "encontrado": encontrado,
+                "row_kind": dataset.row_kind,
+                "destino_promovido": dataset.destino_promovido,
+                "obrigatorio": dataset.obrigatorio,
+                "status_suporte": dataset.status_suporte,
+                "normalizador": dataset.normalizador,
+                "chaves_relacao": list(dataset.chaves_relacao),
+                "observacoes": dataset.observacoes,
+            }
+        )
+
+    if fonte.tipo_distribuicao == "csv_unico":
+        encontrados = len(fonte.datasets)
+        faltantes = 0
+
+    return {
+        "fonte": fonte.fonte,
+        "familia": fonte.familia,
+        "descricao": fonte.descricao,
+        "status_suporte": fonte.status_suporte,
+        "ano": year,
+        "url": url,
+        "arquivo_principal": arquivo_principal,
+        "acessivel": True,
+        "sha256": sha256,
+        "tamanho_bytes": len(payload),
+        "datasets_esperados": fonte.total_datasets,
+        "datasets_encontrados": encontrados,
+        "datasets_faltantes": faltantes,
+        "datasets": datasets,
+        "observacoes": None,
+    }
+
+
+def build_dataset_discovery_audit(
+    *,
+    year: int | None = None,
+    fontes: tuple[str, ...] | None = None,
+    downloader: Callable[[str], bytes] = download_source,
+) -> dict[str, Any]:
+    fonte_items = [fonte for fonte in fontes_implementadas() if fontes is None or fonte.fonte in fontes]
+    resultados: list[dict[str, Any]] = []
+    for fonte in fonte_items:
+        auditoria = _download_registry_source(
+            fonte,
+            year=year if fonte.tipo_distribuicao == "zip_anual" else None,
+            downloader=downloader,
+        )
+        resultados.append(auditoria)
+    return {
+        "ano": year,
+        "fontes": resultados,
+        "total_fontes": len(resultados),
+        "total_fontes_acessiveis": len(resultados),
+        "total_datasets_faltantes": sum(item["datasets_faltantes"] for item in resultados),
+    }
+
+
 def analyze_cadastro_duplicates(rows: list[dict[str, str]]) -> dict[str, Any]:
     grouped: dict[str, list[tuple[int, dict[str, str]]]] = defaultdict(list)
     for line_number, row in enumerate(rows, start=2):
@@ -120,7 +222,7 @@ def analyze_cadastro_duplicates(rows: list[dict[str, str]]) -> dict[str, Any]:
             continue
         grouped[cnpj].append((line_number, row))
 
-    categories = Counter()
+    categories: Counter[str] = Counter()
     samples: dict[str, list[dict[str, Any]]] = defaultdict(list)
     duplicate_bucket_count = 0
     duplicate_extra_rows = 0
@@ -329,10 +431,13 @@ def build_audit_report(
         },
         "cadastro_duplicates": analyze_cadastro_duplicates(open_company_rows),
         "missing_parent": {},
+        "discovery": build_dataset_discovery_audit(year=year, fontes=document_sources),
     }
 
     for document_source in document_sources:
-        report["missing_parent"][document_source] = analyze_missing_companies(
+        missing_parent = report["missing_parent"]
+        assert isinstance(missing_parent, dict)
+        missing_parent[document_source] = analyze_missing_companies(
             document_source,
             sources[document_source].payload,
             open_company_rows=open_company_rows,
@@ -377,4 +482,13 @@ def render_console_summary(report: dict[str, Any]) -> str:
                 ),
             ]
         )
+    discovery = report.get("discovery")
+    if isinstance(discovery, dict):
+        lines.append("discovery:")
+        for fonte in discovery.get("fontes", []):
+            lines.append(
+                f"  - {fonte['fonte']}: acessivel={fonte['acessivel']} "
+                f"datasets={fonte['datasets_encontrados']}/{fonte['datasets_esperados']} "
+                f"faltantes={fonte['datasets_faltantes']}"
+            )
     return "\n".join(lines)

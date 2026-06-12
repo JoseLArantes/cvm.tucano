@@ -13,6 +13,7 @@ celery_app = Celery(
     backend=settings.redis_url,
 )
 celery_app.conf.timezone = "America/Sao_Paulo"
+celery_app.conf.worker_prefetch_multiplier = 1
 
 
 def construir_beat_schedule() -> dict[str, dict[str, Any]]:
@@ -25,6 +26,11 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
     tarefas_anuais = (
         ("dfp", settings.anos_iniciais_dfp, "app.worker.tasks.sincronizar_dfp_task"),
         ("itr", settings.anos_iniciais_itr, "app.worker.tasks.sincronizar_itr_task"),
+        ("fre", settings.anos_iniciais_fre, "app.worker.tasks.sincronizar_fre_task"),
+        ("fca", settings.anos_iniciais_fca, "app.worker.tasks.sincronizar_fca_task"),
+        ("ipe", settings.anos_iniciais_ipe, "app.worker.tasks.sincronizar_ipe_task"),
+        ("vlmo", settings.anos_iniciais_vlmo, "app.worker.tasks.sincronizar_vlmo_task"),
+        ("cgvn", settings.anos_iniciais_cgvn, "app.worker.tasks.sincronizar_cgvn_task"),
     )
     deslocamento_minutos = 0
     for tipo_fonte, anos_configurados, tarefa in tarefas_anuais:

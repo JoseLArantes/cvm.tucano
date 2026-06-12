@@ -7,18 +7,30 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+from psycopg.errors import UniqueViolation
 from sqlalchemy import Select, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.fre import (
+    FreAcaoEntregue,
     FreAuditor,
     FreCapitalSocial,
+    FreCapitalSocialClasseAcao,
+    FreCapitalSocialTituloConversivel,
+    FreDistribuicaoCapital,
+    FreDistribuicaoCapitalClasseAcao,
     FreDocumento,
     FreEmpregadoPosicaoGenero,
     FrePosicaoAcionaria,
+    FrePosicaoAcionariaClasseAcao,
+    FreRemuneracaoAcao,
+    FreRemuneracaoMaximaMinimaMedia,
     FreRemuneracaoTotalOrgao,
+    FreRemuneracaoVariavel,
+    FreResponsavel,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.services.normalizacao import (
@@ -117,7 +129,7 @@ def _upsert(
     dados: dict[str, Any],
     execucao_id: Any,
     contadores: dict[str, int],
-) -> None:
+) -> Any:
     filtros = [getattr(model, campo) == dados[campo] for campo in campos_chave]
     query: Select[tuple[Any]] = select(model).where(*filtros)
     existente = db.scalar(query)
@@ -125,9 +137,28 @@ def _upsert(
 
     dados["hash_origem"] = gerar_hash_canonico({k: v for k, v in dados.items() if k != "linha_origem"})
     if existente is None:
-        db.add(model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora))
-        contadores["inseridos"] += 1
-        return
+        try:
+            novo_obj = model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora)
+            db.add(novo_obj)
+            db.flush()
+            contadores["inseridos"] += 1
+            return novo_obj
+        except IntegrityError as exc:
+            db.rollback()
+            if isinstance(exc.orig, UniqueViolation):
+                # Row was inserted concurrently (race condition or re-run).
+                # Re-fetch and count as inalterado.
+                existente = db.scalar(select(model).where(*filtros))
+                if existente is not None:
+                    existente.sincronizado_em = agora
+                    existente.arquivo_origem = dados["arquivo_origem"]
+                    existente.ano_origem = dados["ano_origem"]
+                    existente.linha_origem = dados["linha_origem"]
+                    existente.hash_origem = dados["hash_origem"]
+                contadores["inalterados"] += 1
+                return existente
+            else:
+                raise
 
     alteracoes: dict[str, tuple[Any, Any]] = {}
     for campo in campos_negocio:
@@ -144,7 +175,7 @@ def _upsert(
 
     if not alteracoes:
         contadores["inalterados"] += 1
-        return
+        return existente
 
     for campo, (_, novo) in alteracoes.items():
         setattr(existente, campo, novo)
@@ -165,21 +196,31 @@ def _upsert(
                 ano_origem=dados["ano_origem"],
             )
         )
+    return existente
 
 
 def _arquivos_fre_mvp(ano: int) -> dict[str, str]:
+    from app.services.ingestion.source_registry import obter_fonte
+    fonte = obter_fonte("fre")
+    if not fonte:
+        return {}
     return {
-        f"fre_cia_aberta_{ano}.csv": "documentos",
-        f"fre_cia_aberta_auditor_{ano}.csv": "auditores",
-        f"fre_cia_aberta_capital_social_{ano}.csv": "capital_social",
-        f"fre_cia_aberta_posicao_acionaria_{ano}.csv": "posicao_acionaria",
-        f"fre_cia_aberta_remuneracao_total_orgao_{ano}.csv": "remuneracao_total_orgao",
-        f"fre_cia_aberta_empregado_posicao_declaracao_genero_{ano}.csv": "empregado_posicao_genero",
+        ds.render_member_name(ano=ano): ds.dataset
+        for ds in fonte.datasets
+        if ds.status_suporte == "suportado"
     }
 
 
 def _arquivos_fre_opcionais(ano: int) -> set[str]:
-    return {f"fre_cia_aberta_empregado_posicao_declaracao_genero_{ano}.csv"}
+    from app.services.ingestion.source_registry import obter_fonte
+    fonte = obter_fonte("fre")
+    if not fonte:
+        return set()
+    return {
+        ds.render_member_name(ano=ano)
+        for ds in fonte.datasets
+        if ds.status_suporte == "suportado" and not ds.obrigatorio
+    }
 
 
 def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[str, Any]:
@@ -218,10 +259,10 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
             )
         )
         if anterior is not None:
-            execucao.status = "sem_alteracao"
+            execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+            return {"execucao_id": str(execucao.id), "status": "skipped"}
 
         arquivos = _arquivos_fre_mvp(ano)
         arquivos_opcionais = _arquivos_fre_opcionais(ano)
@@ -391,9 +432,7 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                     "tipo_pessoa_representante_legal": normalizar_texto(
                                         linha.get("Tipo_Pessoa_Representante_Legal")
                                     ),
-                                    "cpf_cnpj_representante_legal": _digitos(
-                                        linha.get("CPF_CNPJ_Representante_legal")
-                                    ),
+                                    "cpf_cnpj_representante_legal": _digitos(linha.get("CPF_CNPJ_Representante_legal")),
                                     "data_composicao_capital_social": normalizar_data(
                                         linha.get("Data_Composicao_Capital_Social")
                                     ),
@@ -468,6 +507,371 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                     dados["data_inicio_exercicio_social"],
                                     dados["data_fim_exercicio_social"],
                                 )
+                            elif tipo == "responsavel":
+                                nome_responsavel = normalizar_texto(linha.get("Nome_Responsavel"))
+                                cargo_responsavel = normalizar_texto(linha.get("Cargo_Responsavel"))
+                                if nome_responsavel is None or cargo_responsavel is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "nome_responsavel": nome_responsavel,
+                                    "cargo_responsavel": cargo_responsavel,
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    nome_responsavel,
+                                    cargo_responsavel,
+                                )
+                            elif tipo == "capital_social_classe_acao":
+                                id_capital_social = normalizar_inteiro(linha.get("ID_Capital_Social"))
+                                if id_capital_social is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "id_capital_social": id_capital_social,
+                                    "tipo_classe_acao_preferencial": normalizar_texto(
+                                        linha.get("Tipo_Classe_Acao_Preferencial")
+                                    ),
+                                    "quantidade_acoes": normalizar_decimal_cvm(linha.get("Quantidade_Acoes")),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    id_capital_social,
+                                    dados["tipo_classe_acao_preferencial"],
+                                )
+                            elif tipo == "capital_social_titulo_conversivel":
+                                id_capital_social = normalizar_inteiro(linha.get("ID_Capital_Social"))
+                                if id_capital_social is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "id_capital_social": id_capital_social,
+                                    "titulo_conversivel_acao": normalizar_texto(linha.get("Titulo_Conversivel_Acao")),
+                                    "condicoes_conversao": normalizar_texto(linha.get("Condicoes_Conversao")),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    id_capital_social,
+                                    dados["titulo_conversivel_acao"],
+                                )
+                            elif tipo == "distribuicao_capital":
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "data_ultima_assembleia": normalizar_data(linha.get("Data_Ultima_Assembleia")),
+                                    "quantidade_acoes_ordinarias_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acoes_Ordinarias_Circulacao")
+                                    ),
+                                    "percentual_acoes_ordinarias_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Percentual_Acoes_Ordinarias_Circulacao")
+                                    ),
+                                    "quantidade_acoes_preferenciais_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acoes_Preferenciais_Circulacao")
+                                    ),
+                                    "percentual_acoes_preferenciais_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Percentual_Acoes_Preferenciais_Circulacao")
+                                    ),
+                                    "quantidade_total_acoes_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Total_Acoes_Circulacao")
+                                    ),
+                                    "percentual_total_acoes_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Percentual_Total_Acoes_Circulacao")
+                                    ),
+                                    "quantidade_acionistas_pf": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acionistas_PF")
+                                    ),
+                                    "quantidade_acionistas_pj": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acionistas_PJ")
+                                    ),
+                                    "quantidade_acionistas_investidores_institucionais": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acionistas_Investidores_Institucionais")
+                                    ),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (id_documento, versao, data_referencia, cnpj_companhia)
+                            elif tipo == "distribuicao_capital_classe_acao":
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "classe_acoes_preferenciais": normalizar_texto(
+                                        linha.get("Classe_Acoes_Preferenciais")
+                                    ),
+                                    "sigla_classe_acoes_preferenciais": normalizar_texto(
+                                        linha.get("Sigla_Classe_Acoes_Preferenciais")
+                                    ),
+                                    "quantidade_acoes_preferenciais_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Acoes_Preferenciais_Circulacao")
+                                    ),
+                                    "percentual_acoes_preferenciais_circulacao": normalizar_decimal_cvm(
+                                        linha.get("Percentual_Acoes_Preferenciais_Circulacao")
+                                    ),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    dados["sigla_classe_acoes_preferenciais"],
+                                )
+                            elif tipo == "posicao_acionaria_classe_acao":
+                                id_acionista = normalizar_inteiro(linha.get("ID_Acionista"))
+                                if id_acionista is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "id_acionista": id_acionista,
+                                    "tipo_classe_acao_preferencial": normalizar_texto(
+                                        linha.get("Tipo_Classe_Acao_Preferencial")
+                                    ),
+                                    "quantidade_acoes": normalizar_decimal_cvm(linha.get("Quantidade_Acoes")),
+                                    "percentual_acoes": normalizar_decimal_cvm(linha.get("Percentual_Acoes")),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    id_acionista,
+                                    dados["tipo_classe_acao_preferencial"],
+                                )
+                            elif tipo == "remuneracao_maxima_minima_media":
+                                orgao = normalizar_texto(linha.get("Orgao_Administracao"))
+                                if orgao is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "data_inicio_exercicio_social": normalizar_data(
+                                        linha.get("Data_Inicio_Exercicio_Social")
+                                    ),
+                                    "data_fim_exercicio_social": normalizar_data(
+                                        linha.get("Data_Fim_Exercicio_Social")
+                                    ),
+                                    "orgao_administracao": orgao,
+                                    "numero_membros": normalizar_decimal_cvm(linha.get("Numero_Membros")),
+                                    "numero_membros_remunerados": normalizar_decimal_cvm(
+                                        linha.get("Numero_Membros_Remunerados")
+                                    ),
+                                    "valor_maior_remuneracao": normalizar_decimal_cvm(
+                                        linha.get("Valor_Maior_Remuneracao")
+                                    ),
+                                    "valor_medio_remuneracao": normalizar_decimal_cvm(
+                                        linha.get("Valor_Medio_Remuneracao")
+                                    ),
+                                    "valor_menor_remuneracao": normalizar_decimal_cvm(
+                                        linha.get("Valor_Menor_Remuneracao")
+                                    ),
+                                    "observacao": normalizar_texto(linha.get("Observacao")),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    orgao,
+                                    dados["data_inicio_exercicio_social"],
+                                    dados["data_fim_exercicio_social"],
+                                )
+                            elif tipo == "remuneracao_variavel":
+                                orgao = normalizar_texto(linha.get("Orgao_Administracao"))
+                                if orgao is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "data_inicio_exercicio_social": normalizar_data(
+                                        linha.get("Data_Inicio_Exercicio_Social")
+                                    ),
+                                    "data_fim_exercicio_social": normalizar_data(
+                                        linha.get("Data_Fim_Exercicio_Social")
+                                    ),
+                                    "orgao_administracao": orgao,
+                                    "quantidade_total_membros": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Total_Membros")
+                                    ),
+                                    "quantidade_membros_remunerados": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Membros_Remunerados")
+                                    ),
+                                    "bonus_valor_minimo": normalizar_decimal_cvm(linha.get("Bonus_Valor_Minimo")),
+                                    "bonus_valor_maximo": normalizar_decimal_cvm(linha.get("Bonus_Valor_Maximo")),
+                                    "bonus_valor_metas_atingidas": normalizar_decimal_cvm(
+                                        linha.get("Bonus_Valor_Metas_Atingidas")
+                                    ),
+                                    "bonus_valor_efetivo": normalizar_decimal_cvm(linha.get("Bonus_Valor_Efetivo")),
+                                    "participacao_valor_minimo": normalizar_decimal_cvm(
+                                        linha.get("Participacao_Valor_Minimo")
+                                    ),
+                                    "participacao_valor_maximo": normalizar_decimal_cvm(
+                                        linha.get("Participacao_Valor_Maximo")
+                                    ),
+                                    "participacao_valor_metas_atingidas": normalizar_decimal_cvm(
+                                        linha.get("Participacao_Valor_Metas_Atingidas")
+                                    ),
+                                    "participacao_valor_efetivo": normalizar_decimal_cvm(
+                                        linha.get("Participacao_Valor_Efetivo")
+                                    ),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    orgao,
+                                    dados["data_inicio_exercicio_social"],
+                                    dados["data_fim_exercicio_social"],
+                                )
+                            elif tipo == "remuneracao_acao":
+                                orgao = normalizar_texto(linha.get("Orgao_Administracao"))
+                                if orgao is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "data_inicio_exercicio_social": normalizar_data(
+                                        linha.get("Data_Inicio_Exercicio_Social")
+                                    ),
+                                    "data_fim_exercicio_social": normalizar_data(
+                                        linha.get("Data_Fim_Exercicio_Social")
+                                    ),
+                                    "orgao_administracao": orgao,
+                                    "quantidade_total_membros": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Total_Membros")
+                                    ),
+                                    "quantidade_membros_remunerados": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Membros_Remunerados")
+                                    ),
+                                    "preco_medio_ponderado_opcoes_em_aberto": normalizar_decimal_cvm(
+                                        linha.get("Preco_Medio_Ponderado_Opcoes_Em_Aberto")
+                                    ),
+                                    "preco_medio_ponderado_opcoes_exercidas": normalizar_decimal_cvm(
+                                        linha.get("Preco_Medio_Ponderado_Opcoes_Exercidas")
+                                    ),
+                                    "preco_medio_ponderado_opcoes_perdidas": normalizar_decimal_cvm(
+                                        linha.get("Preco_Medio_Ponderado_Opcoes_Perdidas")
+                                    ),
+                                    "diluicao_potencial": normalizar_decimal_cvm(linha.get("Diluicao_Potencial")),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    orgao,
+                                    dados["data_inicio_exercicio_social"],
+                                    dados["data_fim_exercicio_social"],
+                                )
+                            elif tipo == "acao_entregue":
+                                orgao = normalizar_texto(linha.get("Orgao_Administracao"))
+                                if orgao is None:
+                                    raise ValueError("campo_obrigatorio_ausente")
+                                dados = {
+                                    "cnpj_companhia": cnpj_companhia,
+                                    "data_referencia": data_referencia,
+                                    "versao": versao,
+                                    "id_documento": id_documento,
+                                    "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                                    "data_inicio_exercicio_social": normalizar_data(
+                                        linha.get("Data_Inicio_Exercicio_Social")
+                                    ),
+                                    "data_fim_exercicio_social": normalizar_data(
+                                        linha.get("Data_Fim_Exercicio_Social")
+                                    ),
+                                    "orgao_administracao": orgao,
+                                    "quantidade_total_membros": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Total_Membros")
+                                    ),
+                                    "quantidade_membros_remunerados": normalizar_decimal_cvm(
+                                        linha.get("Quantidade_Membros_Remunerados")
+                                    ),
+                                    "quantidade_acoes": normalizar_inteiro(linha.get("Quantidade_Acoes")),
+                                    "preco_medio_ponderado_aquisicao": normalizar_decimal_cvm(
+                                        linha.get("Preco_Medio_Ponderado_Aquisicao")
+                                    ),
+                                    "preco_medio_ponderado_mercado": normalizar_decimal_cvm(
+                                        linha.get("Preco_Medio_Ponderado_Mercado")
+                                    ),
+                                    "valor_diferenca_aquisicao_mercado": normalizar_decimal_cvm(
+                                        linha.get("Valor_Diferenca_Aquisicao_Mercado")
+                                    ),
+                                    "arquivo_origem": arquivo_csv,
+                                    "ano_origem": ano,
+                                    "linha_origem": linha_origem,
+                                }
+                                chave = (
+                                    id_documento,
+                                    versao,
+                                    data_referencia,
+                                    cnpj_companhia,
+                                    orgao,
+                                    dados["data_inicio_exercicio_social"],
+                                    dados["data_fim_exercicio_social"],
+                                )
                             else:
                                 posicao = normalizar_texto(linha.get("Posicao"))
                                 if posicao is None:
@@ -483,9 +887,7 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                     "quantidade_masculino": normalizar_inteiro(linha.get("Quantidade_Masculino")),
                                     "quantidade_nao_binario": normalizar_inteiro(linha.get("Quantidade_Nao_Binario")),
                                     "quantidade_outros": normalizar_inteiro(linha.get("Quantidade_Outros")),
-                                    "quantidade_sem_resposta": normalizar_inteiro(
-                                        linha.get("Quantidade_Sem_Resposta")
-                                    ),
+                                    "quantidade_sem_resposta": normalizar_inteiro(linha.get("Quantidade_Sem_Resposta")),
                                     "arquivo_origem": arquivo_csv,
                                     "ano_origem": ano,
                                     "linha_origem": linha_origem,
@@ -615,6 +1017,197 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                             db,
                             model=FreRemuneracaoTotalOrgao,
                             entidade="fre_remuneracoes_totais_orgaos",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "orgao_administracao",
+                                "data_inicio_exercicio_social",
+                                "data_fim_exercicio_social",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "responsavel":
+                        _upsert(
+                            db,
+                            model=FreResponsavel,
+                            entidade="fre_responsaveis",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "nome_responsavel",
+                                "cargo_responsavel",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "capital_social_classe_acao":
+                        _upsert(
+                            db,
+                            model=FreCapitalSocialClasseAcao,
+                            entidade="fre_capital_social_classes_acoes",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "id_capital_social",
+                                "tipo_classe_acao_preferencial",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "capital_social_titulo_conversivel":
+                        _upsert(
+                            db,
+                            model=FreCapitalSocialTituloConversivel,
+                            entidade="fre_capital_social_titulos_conversiveis",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "id_capital_social",
+                                "titulo_conversivel_acao",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "distribuicao_capital":
+                        _upsert(
+                            db,
+                            model=FreDistribuicaoCapital,
+                            entidade="fre_distribuicao_capital",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "distribuicao_capital_classe_acao":
+                        _upsert(
+                            db,
+                            model=FreDistribuicaoCapitalClasseAcao,
+                            entidade="fre_distribuicao_capital_classes_acoes",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "sigla_classe_acoes_preferenciais",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "posicao_acionaria_classe_acao":
+                        _upsert(
+                            db,
+                            model=FrePosicaoAcionariaClasseAcao,
+                            entidade="fre_posicoes_acionarias_classes_acoes",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "id_acionista",
+                                "tipo_classe_acao_preferencial",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "remuneracao_maxima_minima_media":
+                        _upsert(
+                            db,
+                            model=FreRemuneracaoMaximaMinimaMedia,
+                            entidade="fre_remuneracoes_maximas_minimas_medias",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "orgao_administracao",
+                                "data_inicio_exercicio_social",
+                                "data_fim_exercicio_social",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "remuneracao_variavel":
+                        _upsert(
+                            db,
+                            model=FreRemuneracaoVariavel,
+                            entidade="fre_remuneracoes_variaveis",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "orgao_administracao",
+                                "data_inicio_exercicio_social",
+                                "data_fim_exercicio_social",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "remuneracao_acao":
+                        _upsert(
+                            db,
+                            model=FreRemuneracaoAcao,
+                            entidade="fre_remuneracoes_acoes",
+                            campos_chave=(
+                                "id_documento",
+                                "versao",
+                                "data_referencia",
+                                "cnpj_companhia",
+                                "orgao_administracao",
+                                "data_inicio_exercicio_social",
+                                "data_fim_exercicio_social",
+                            ),
+                            campos_negocio=set(dados.keys())
+                            - {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"},
+                            dados=dados,
+                            execucao_id=execucao.id,
+                            contadores=contadores,
+                        )
+                    elif tipo == "acao_entregue":
+                        _upsert(
+                            db,
+                            model=FreAcaoEntregue,
+                            entidade="fre_acoes_entregues",
                             campos_chave=(
                                 "id_documento",
                                 "versao",

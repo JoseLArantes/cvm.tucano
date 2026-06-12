@@ -9,11 +9,13 @@ from app.db.base import Base
 from app.models.ingestion import IngestionAttempt, IngestionFile, IngestionFileMember, IngestionRow, IngestionRowEvent
 from app.services.ingestion.staging import (
     create_run,
+    iter_staged_member_chunks,
     read_staged_csv_rows,
     register_attempt,
     register_file,
     register_row_event,
     stage_csv_payload,
+    stage_csv_payload_streaming,
     stage_zip_payload,
     update_row_validation,
     update_run_state,
@@ -127,5 +129,40 @@ def test_stage_zip_payload_stages_all_csv_members() -> None:
         assert session.query(IngestionFileMember).count() == 2
         assert session.query(IngestionRow).count() == 3
         assert {member.member_name for member, _ in staged} == {"a.csv", "b.csv"}
+    finally:
+        session.close()
+
+
+def test_stage_csv_payload_streaming_persists_rows_and_chunk_iteration() -> None:
+    session = _session()
+    try:
+        run = create_run(session, tipo_fonte="itr", ano=2022)
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/itr.zip",
+            source_filename="itr.zip",
+            payload=b"fake",
+        )
+
+        member = stage_csv_payload_streaming(
+            session,
+            ingestion_run=run,
+            ingestion_file=ingestion_file,
+            payload=b"col_a;col_b\n1;2\n3;4\n5;6\n",
+            member_name="itr_cia_aberta_2022.csv",
+            arquivo_origem="itr_cia_aberta_2022.csv",
+            ano_origem=2022,
+            row_kind="itr_documento",
+            chunk_size=2,
+        )
+        session.commit()
+
+        chunks = list(iter_staged_member_chunks(session, member_id=member.id, chunk_size=2))
+
+        assert member.row_count == 3
+        assert session.query(IngestionRow).count() == 3
+        assert [len(chunk) for chunk in chunks] == [2, 1]
+        assert [row.linha_origem for chunk in chunks for row in chunk] == [2, 3, 4]
     finally:
         session.close()

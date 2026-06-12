@@ -234,9 +234,7 @@ def _normalizar_composicao_capital(
         "quantidade_acoes_preferenciais_capital_integralizado": normalizar_decimal_cvm(
             linha.get("QT_ACAO_PREF_CAP_INTEGR")
         ),
-        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_cvm(
-            linha.get("QT_ACAO_TOTAL_CAP_INTEGR")
-        ),
+        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_cvm(linha.get("QT_ACAO_TOTAL_CAP_INTEGR")),
         "quantidade_acoes_ordinarias_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_ORDIN_TESOURO")),
         "quantidade_acoes_preferenciais_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_PREF_TESOURO")),
         "quantidade_total_acoes_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_TOTAL_TESOURO")),
@@ -306,7 +304,9 @@ def _resolver_companhia_indexada(
     return por_codigo.get(codigo_cvm)
 
 
-def _atualizar_execucao(execucao: ExecucaoSincronizacao, contadores: dict[str, int], *, status: str | None = None) -> None:
+def _atualizar_execucao(
+    execucao: ExecucaoSincronizacao, contadores: dict[str, int], *, status: str | None = None
+) -> None:
     execucao.total_linhas_lidas = contadores["lidas"]
     execucao.total_inseridos = contadores["inseridos"]
     execucao.total_atualizados = contadores["atualizados"]
@@ -326,7 +326,7 @@ def _upsert_registro(
     dados: dict[str, Any],
     execucao_id: Any,
     contadores: dict[str, int],
-) -> None:
+) -> Any:
     filtro = [getattr(model, campo) == dados[campo] for campo in campos_chave]
     query: Select[tuple[Any]] = select(model).where(*filtro)
     existente = db.scalar(query)
@@ -336,9 +336,10 @@ def _upsert_registro(
     dados["hash_origem"] = gerar_hash_canonico(dados_para_hash, campos_ignorados={"hash_origem"})
 
     if existente is None:
-        db.add(model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora))
+        novo_obj = model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora)
+        db.add(novo_obj)
         contadores["inseridos"] += 1
-        return
+        return novo_obj
 
     alteracoes: dict[str, tuple[Any, Any]] = {}
     for campo in campos_negocio:
@@ -355,7 +356,7 @@ def _upsert_registro(
 
     if not alteracoes:
         contadores["inalterados"] += 1
-        return
+        return existente
 
     for campo, (_, valor_novo) in alteracoes.items():
         setattr(existente, campo, valor_novo)
@@ -376,6 +377,7 @@ def _upsert_registro(
                 ano_origem=dados["ano_origem"],
             )
         )
+    return existente
 
 
 def _arquivos_esperados(prefixo: str, ano: int) -> set[str]:
@@ -428,10 +430,10 @@ def _sincronizar_formulario(
             )
         )
         if anterior is not None:
-            execucao.status = "sem_alteracao"
+            execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+            return {"execucao_id": str(execucao.id), "status": "skipped"}
 
         zip_buffer = io.BytesIO(payload)
         with zipfile.ZipFile(zip_buffer) as zip_ref:

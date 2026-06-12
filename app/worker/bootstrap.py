@@ -8,8 +8,13 @@ from app.db.session import SessionLocal
 from app.models.sincronizacao import ExecucaoSincronizacao, StatusExecucao
 from app.worker.tasks import (
     sincronizar_cadastro_companhias_task,
+    sincronizar_cgvn_task,
     sincronizar_dfp_task,
+    sincronizar_fca_task,
+    sincronizar_fre_task,
+    sincronizar_ipe_task,
     sincronizar_itr_task,
+    sincronizar_vlmo_task,
 )
 
 logger = logging.getLogger(__name__)
@@ -18,6 +23,7 @@ _STATUS_EXISTENTE_VALIDO = (
     StatusExecucao.em_execucao.value,
     StatusExecucao.sucesso.value,
     StatusExecucao.sem_alteracao.value,
+    StatusExecucao.skipped.value,
 )
 
 
@@ -45,6 +51,11 @@ def agendar_sincronizacoes_iniciais() -> list[tuple[str, int | None]]:
         tarefas_anuais = (
             ("dfp", settings.anos_iniciais_dfp, sincronizar_dfp_task.delay),
             ("itr", settings.anos_iniciais_itr, sincronizar_itr_task.delay),
+            ("fre", settings.anos_iniciais_fre, sincronizar_fre_task.delay),
+            ("fca", settings.anos_iniciais_fca, sincronizar_fca_task.delay),
+            ("ipe", settings.anos_iniciais_ipe, sincronizar_ipe_task.delay),
+            ("vlmo", settings.anos_iniciais_vlmo, sincronizar_vlmo_task.delay),
+            ("cgvn", settings.anos_iniciais_cgvn, sincronizar_cgvn_task.delay),
         )
         for tipo_fonte, anos_configurados, delay in tarefas_anuais:
             for ano in settings.parse_anos(anos_configurados):

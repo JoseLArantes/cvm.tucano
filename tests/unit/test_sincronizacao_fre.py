@@ -155,7 +155,7 @@ def test_sincronizacao_fre_mvp(db_session: Session, monkeypatch: Any) -> None:
     assert r1["total_inseridos"] == 6
 
     r2 = sincronizar_fre(db_session, 2025)
-    assert r2["status"] == "sem_alteracao"
+    assert r2["status"] == "skipped"
 
     r3 = sincronizar_fre(db_session, 2025)
     assert r3["status"] == "sucesso"
@@ -168,9 +168,11 @@ def test_sincronizacao_fre_mvp(db_session: Session, monkeypatch: Any) -> None:
     assert db_session.query(FreRemuneracaoTotalOrgao).count() == 1
     assert db_session.query(FreEmpregadoPosicaoGenero).count() == 1
 
-    historicos = db_session.execute(
-        select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "fre_auditores")
-    ).scalars().all()
+    historicos = (
+        db_session.execute(select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "fre_auditores"))
+        .scalars()
+        .all()
+    )
     assert any(h.campo == "remuneracao_auditor" for h in historicos)
 
 
@@ -212,7 +214,9 @@ def test_fre_exige_cadastro(db_session: Session, monkeypatch: Any) -> None:
     with pytest.raises(ValueError, match="cadastro_companhias_nao_ingestado"):
         sincronizar_fre(db_session, 2025)
 
-    execucoes = db_session.execute(
-        select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.tipo_fonte == "fre")
-    ).scalars().all()
+    execucoes = (
+        db_session.execute(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.tipo_fonte == "fre"))
+        .scalars()
+        .all()
+    )
     assert len(execucoes) == 0

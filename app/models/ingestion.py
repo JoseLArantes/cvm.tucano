@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, Uuid, func
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, LargeBinary, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -44,14 +44,10 @@ class IngestionFile(Base):
     http_status_code: Mapped[int | None] = mapped_column(Integer)
     etag: Mapped[str | None] = mapped_column(String(255))
     last_modified: Mapped[str | None] = mapped_column(String(255))
-    downloaded_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     is_zip: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     already_seen_success: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -73,9 +69,7 @@ class IngestionFileMember(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     schema_status: Mapped[str] = mapped_column(String(32), nullable=False)
     schema_message: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -103,16 +97,12 @@ class IngestionRow(Base):
     validation_status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     validation_reason_code: Mapped[str | None] = mapped_column(String(64), index=True)
     validation_details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
-    resolved_companhia_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("companhias.id"), index=True
-    )
+    resolved_companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
     resolution_method: Mapped[str | None] = mapped_column(String(64))
     resolution_confidence: Mapped[str | None] = mapped_column(String(32))
     promoted_entity: Mapped[str | None] = mapped_column(String(120))
     promoted_entity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
@@ -128,44 +118,34 @@ class IngestionRowEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), nullable=False)
     event_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_by: Mapped[str | None] = mapped_column(String(120))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class IngestionAttempt(Base):
     __tablename__ = "ingestion_attempts"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("ingestion_runs.id"), index=True
-    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("ingestion_runs.id"), index=True)
     task_id: Mapped[str | None] = mapped_column(String(64), index=True)
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     error_type: Mapped[str | None] = mapped_column(String(120))
     error_message: Mapped[str | None] = mapped_column(Text)
     next_retry_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
 
-class QuarantineItemV2(Base):
-    __tablename__ = "quarantine_items_v2"
+class QuarantineItem(Base):
+    __tablename__ = "quarantine_items"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("ingestion_runs.id"), index=True
-    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("ingestion_runs.id"), index=True)
     ingestion_row_id: Mapped[uuid.UUID] = mapped_column(
         Uuid, ForeignKey("ingestion_rows.id"), index=True, nullable=False, unique=True
     )
@@ -186,9 +166,17 @@ class QuarantineItemV2(Base):
     resolvido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     resolvido_por: Mapped[str | None] = mapped_column(String(120))
     ultimo_erro: Mapped[str | None] = mapped_column(Text)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class IngestionFileMemberPayload(Base):
+    __tablename__ = "ingestion_file_member_payloads"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="CASCADE"), primary_key=True
+    )
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+

@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionRow, QuarantineItemV2
+from app.models.ingestion import IngestionRow, QuarantineItem
 from app.models.sincronizacao import RegistroQuarentena
 from app.services.ingestion.staging import register_row_event
 from app.services.ingestion.validation import ValidationResult
@@ -32,14 +32,12 @@ def create_quarantine_item(
     result: ValidationResult,
     execucao_sincronizacao_id: Any | None = None,
     legacy_reason: str | None = None,
-    created_by: str = "quarantine_v2",
-) -> QuarantineItemV2:
+    created_by: str = "quarantine",
+) -> QuarantineItem:
     motivo_codigo = _normalizar_reason_code(result.reason_code)
-    item = db.scalar(
-        select(QuarantineItemV2).where(QuarantineItemV2.ingestion_row_id == ingestion_row.id)
-    )
+    item = db.scalar(select(QuarantineItem).where(QuarantineItem.ingestion_row_id == ingestion_row.id))
     if item is None:
-        item = QuarantineItemV2(
+        item = QuarantineItem(
             ingestion_run_id=ingestion_row.ingestion_run_id,
             ingestion_row_id=ingestion_row.id,
             execucao_sincronizacao_id=execucao_sincronizacao_id,
@@ -55,7 +53,6 @@ def create_quarantine_item(
             tentativas_reprocessamento=0,
         )
         db.add(item)
-        db.flush()
     else:
         item.execucao_sincronizacao_id = execucao_sincronizacao_id or item.execucao_sincronizacao_id
         item.status = DEFAULT_QUARANTINE_STATUS
@@ -103,11 +100,11 @@ def create_quarantine_item(
 def mark_quarantine_resolved(
     db: Session,
     *,
-    item: QuarantineItemV2,
+    item: QuarantineItem,
     status: str,
     resolved_by: str,
     message: str | None = None,
-) -> QuarantineItemV2:
+) -> QuarantineItem:
     item.status = status
     item.resolvido_em = _agora()
     item.resolvido_por = resolved_by
@@ -116,11 +113,11 @@ def mark_quarantine_resolved(
 
 
 def register_quarantine_replay_attempt(
-    item: QuarantineItemV2,
+    item: QuarantineItem,
     *,
     success: bool,
     error_message: str | None = None,
-) -> QuarantineItemV2:
+) -> QuarantineItem:
     item.tentativas_reprocessamento += 1
     item.ultima_tentativa_em = _agora()
     if success:

@@ -146,12 +146,8 @@ class ComposicaoCapital(Base):
     data_referencia: Mapped[date] = mapped_column(Date, index=True)
     versao: Mapped[int] = mapped_column(Integer, index=True)
     denominacao_companhia: Mapped[str | None] = mapped_column(String(255))
-    quantidade_acoes_ordinarias_capital_integralizado: Mapped[Decimal | None] = mapped_column(
-        Numeric(30, 6)
-    )
-    quantidade_acoes_preferenciais_capital_integralizado: Mapped[Decimal | None] = mapped_column(
-        Numeric(30, 6)
-    )
+    quantidade_acoes_ordinarias_capital_integralizado: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_preferenciais_capital_integralizado: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_total_acoes_capital_integralizado: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_acoes_ordinarias_tesouraria: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_acoes_preferenciais_tesouraria: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))

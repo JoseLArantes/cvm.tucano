@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, RepairRule
 from app.models.ingestion import IngestionRow
@@ -14,11 +14,12 @@ from app.services.ingestion.resolver import (
     STATUS_NOT_FOUND,
     STATUS_PROVISIONAL_CREATED,
     STATUS_RESOLVED,
+    DocumentHeaderMap,
     ResolverInput,
     build_document_header_key,
     persist_resolution_result,
     register_document_header,
-    resolve_companhia_v2,
+    resolve_companhia,
 )
 from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 
@@ -41,7 +42,7 @@ def _companhia(
     codigo_cvm: int | None,
     denominacao: str,
 ) -> Companhia:
-    companhia = Companhia(
+    empresa = Companhia(
         cnpj_companhia=cnpj,
         codigo_cvm=codigo_cvm,
         denominacao_social=denominacao,
@@ -51,22 +52,22 @@ def _companhia(
         linha_origem=2,
         hash_origem=f"hash-{cnpj}-{codigo_cvm}",
     )
-    session.add(companhia)
+    session.add(empresa)
     session.flush()
-    return companhia
+    return empresa
 
 
 def _identificador(
     session: Session,
     *,
-    companhia: Companhia,
+    empresa: Companhia,
     tipo: str,
     valor_normalizado: str,
     fonte: str = "teste",
 ) -> None:
     session.add(
         CompanhiaIdentificador(
-            companhia_id=companhia.id,
+            companhia_id=empresa.id,
             tipo=tipo,
             valor=valor_normalizado,
             valor_normalizado=valor_normalizado,
@@ -101,13 +102,13 @@ def _staged_row(session: Session) -> IngestionRow:
     return rows[0]
 
 
-def test_resolve_companhia_v2_by_exact_cnpj_single_company() -> None:
+def test_resolve_companhia_by_exact_cnpj_single_company() -> None:
     session = _session()
     try:
         companhia = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="EMPRESA SA")
-        _identificador(session, companhia=companhia, tipo="cnpj", valor_normalizado="08773135000100")
+        _identificador(session, empresa=companhia, tipo="cnpj", valor_normalizado="08773135000100")
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=None, denominacao_companhia="EMPRESA SA"),
         )
@@ -119,26 +120,26 @@ def test_resolve_companhia_v2_by_exact_cnpj_single_company() -> None:
         session.close()
 
 
-def test_resolve_companhia_v2_by_exact_cnpj_duplicate_rows_same_company() -> None:
+def test_resolve_companhia_by_exact_cnpj_duplicate_rows_same_company() -> None:
     session = _session()
     try:
         companhia = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="EMPRESA SA")
         _identificador(
             session,
-            companhia=companhia,
+            empresa=companhia,
             tipo="cnpj",
             valor_normalizado="08773135000100",
             fonte="cad_cia_aberta",
         )
         _identificador(
             session,
-            companhia=companhia,
+            empresa=companhia,
             tipo="cnpj",
             valor_normalizado="08773135000100",
             fonte="cad_cia_estrang",
         )
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=None),
         )
@@ -149,15 +150,15 @@ def test_resolve_companhia_v2_by_exact_cnpj_duplicate_rows_same_company() -> Non
         session.close()
 
 
-def test_resolve_companhia_v2_returns_ambiguous_for_multiple_companies_same_cnpj() -> None:
+def test_resolve_companhia_returns_ambiguous_for_multiple_companies_same_cnpj() -> None:
     session = _session()
     try:
         companhia_a = _companhia(session, cnpj="11111111111111", codigo_cvm=10, denominacao="A SA")
         companhia_b = _companhia(session, cnpj="22222222222222", codigo_cvm=20, denominacao="B SA")
-        _identificador(session, companhia=companhia_a, tipo="cnpj", valor_normalizado="08773135000100", fonte="fonte_a")
-        _identificador(session, companhia=companhia_b, tipo="cnpj", valor_normalizado="08773135000100", fonte="fonte_b")
+        _identificador(session, empresa=companhia_a, tipo="cnpj", valor_normalizado="08773135000100", fonte="fonte_a")
+        _identificador(session, empresa=companhia_b, tipo="cnpj", valor_normalizado="08773135000100", fonte="fonte_b")
 
-        result = resolve_companhia_v2(session, ResolverInput(cnpj_companhia="08.773.135/0001-00"))
+        result = resolve_companhia(session, ResolverInput(cnpj_companhia="08.773.135/0001-00"))
 
         assert result.status == STATUS_AMBIGUOUS
         assert result.companhia_id is None
@@ -166,13 +167,13 @@ def test_resolve_companhia_v2_returns_ambiguous_for_multiple_companies_same_cnpj
         session.close()
 
 
-def test_resolve_companhia_v2_by_zero_padded_codigo_cvm() -> None:
+def test_resolve_companhia_by_zero_padded_codigo_cvm() -> None:
     session = _session()
     try:
         companhia = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="EMPRESA SA")
-        _identificador(session, companhia=companhia, tipo="codigo_cvm", valor_normalizado="25224")
+        _identificador(session, empresa=companhia, tipo="codigo_cvm", valor_normalizado="25224")
 
-        result = resolve_companhia_v2(session, ResolverInput(codigo_cvm="00025224"))
+        result = resolve_companhia(session, ResolverInput(codigo_cvm="00025224"))
 
         assert result.status == STATUS_RESOLVED
         assert result.companhia_id == companhia.id
@@ -181,15 +182,15 @@ def test_resolve_companhia_v2_by_zero_padded_codigo_cvm() -> None:
         session.close()
 
 
-def test_resolve_companhia_v2_detects_conflict_between_cnpj_and_codigo() -> None:
+def test_resolve_companhia_detects_conflict_between_cnpj_and_codigo() -> None:
     session = _session()
     try:
         companhia_a = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="A SA")
         companhia_b = _companhia(session, cnpj="07857093000114", codigo_cvm=80187, denominacao="B SA")
-        _identificador(session, companhia=companhia_a, tipo="cnpj", valor_normalizado="08773135000100")
-        _identificador(session, companhia=companhia_b, tipo="codigo_cvm", valor_normalizado="25224")
+        _identificador(session, empresa=companhia_a, tipo="cnpj", valor_normalizado="08773135000100")
+        _identificador(session, empresa=companhia_b, tipo="codigo_cvm", valor_normalizado="25224")
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
         )
@@ -200,11 +201,11 @@ def test_resolve_companhia_v2_detects_conflict_between_cnpj_and_codigo() -> None
         session.close()
 
 
-def test_resolve_companhia_v2_uses_document_header_map_for_child_row() -> None:
+def test_resolve_companhia_uses_document_header_map_for_child_row() -> None:
     session = _session()
     try:
         companhia = _companhia(session, cnpj="07857093000114", codigo_cvm=80187, denominacao="AURA")
-        header_map = {}
+        header_map: DocumentHeaderMap = {}
         register_document_header(
             header_map,
             tipo_formulario="FRE",
@@ -216,7 +217,7 @@ def test_resolve_companhia_v2_uses_document_header_map_for_child_row() -> None:
             codigo_cvm=80187,
         )
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(
                 cnpj_companhia=None,
@@ -231,17 +232,20 @@ def test_resolve_companhia_v2_uses_document_header_map_for_child_row() -> None:
 
         assert result.status == STATUS_RESOLVED
         assert result.companhia_id == companhia.id
-        assert build_document_header_key(
-            tipo_formulario="FRE",
-            id_documento=99,
-            versao=3,
-            data_referencia=date(2025, 12, 31),
-        ) in header_map
+        assert (
+            build_document_header_key(
+                tipo_formulario="FRE",
+                id_documento=99,
+                versao=3,
+                data_referencia=date(2025, 12, 31),
+            )
+            in header_map
+        )
     finally:
         session.close()
 
 
-def test_resolve_companhia_v2_uses_repair_rule() -> None:
+def test_resolve_companhia_uses_repair_rule() -> None:
     session = _session()
     try:
         companhia = _companhia(session, cnpj="07857093000114", codigo_cvm=80187, denominacao="AURA")
@@ -261,7 +265,7 @@ def test_resolve_companhia_v2_uses_repair_rule() -> None:
         )
         session.flush()
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(
                 tipo_formulario="FRE",
@@ -279,15 +283,17 @@ def test_resolve_companhia_v2_uses_repair_rule() -> None:
         session.close()
 
 
-def test_resolve_companhia_v2_provisional_disabled_and_enabled() -> None:
+def test_resolve_companhia_provisional_disabled_and_enabled() -> None:
     session = _session()
     try:
-        missing = ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224, denominacao_companhia="EMPRESA SA")
+        missing = ResolverInput(
+            cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224, denominacao_companhia="EMPRESA SA"
+        )
 
-        result_disabled = resolve_companhia_v2(session, missing, provisional_enabled=False)
+        result_disabled = resolve_companhia(session, missing, provisional_enabled=False)
         assert result_disabled.status == STATUS_NOT_FOUND
 
-        result_enabled = resolve_companhia_v2(session, missing, provisional_enabled=True)
+        result_enabled = resolve_companhia(session, missing, provisional_enabled=True)
         assert result_enabled.status == STATUS_PROVISIONAL_CREATED
         companhia = session.get(Companhia, result_enabled.companhia_id)
         assert companhia is not None
@@ -303,14 +309,14 @@ def test_persist_resolution_result_updates_staging_row_and_event() -> None:
         companhia = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="EMPRESA SA")
         row = _staged_row(session)
 
-        result = resolve_companhia_v2(
+        result = resolve_companhia(
             session,
             ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
             provisional_enabled=True,
         )
         if result.status == STATUS_NOT_FOUND:
-            _identificador(session, companhia=companhia, tipo="cnpj", valor_normalizado="08773135000100")
-            result = resolve_companhia_v2(
+            _identificador(session, empresa=companhia, tipo="cnpj", valor_normalizado="08773135000100")
+            result = resolve_companhia(
                 session,
                 ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
             )
