@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from app.services.ingestion.source_registry import FonteRegistry, fontes_implementadas
+from app.services.ingestion.lifecycle import fetch_cvm_novidades_summary
 from app.services.normalizacao import normalizar_inteiro, normalizar_linha_cadastro
 
 CVM_BASE_URL = "https://dados.cvm.gov.br/dados"
@@ -176,6 +177,11 @@ def _download_registry_source(
         "familia": fonte.familia,
         "descricao": fonte.descricao,
         "status_suporte": fonte.status_suporte,
+        "artifact_type": fonte.artifact_type,
+        "update_cadence": fonte.update_cadence,
+        "remote_probe_strategy": fonte.remote_probe_strategy,
+        "version_semantics": fonte.version_semantics,
+        "reconcile_policy": fonte.reconcile_policy,
         "ano": year,
         "url": url,
         "arquivo_principal": arquivo_principal,
@@ -185,6 +191,14 @@ def _download_registry_source(
         "datasets_esperados": fonte.total_datasets,
         "datasets_encontrados": encontrados,
         "datasets_faltantes": faltantes,
+        "drift_summary": {
+            "required_member_missing": [
+                item["membro_esperado"] for item in datasets if item["obrigatorio"] and not item["encontrado"]
+            ],
+            "optional_member_missing": [
+                item["membro_esperado"] for item in datasets if (not item["obrigatorio"]) and not item["encontrado"]
+            ],
+        },
         "datasets": datasets,
         "observacoes": None,
     }
@@ -205,12 +219,14 @@ def build_dataset_discovery_audit(
             downloader=downloader,
         )
         resultados.append(auditoria)
+    novidades = fetch_cvm_novidades_summary()
     return {
         "ano": year,
         "fontes": resultados,
         "total_fontes": len(resultados),
         "total_fontes_acessiveis": len(resultados),
         "total_datasets_faltantes": sum(item["datasets_faltantes"] for item in resultados),
+        "novidades": novidades,
     }
 
 

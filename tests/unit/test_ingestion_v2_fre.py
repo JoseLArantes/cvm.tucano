@@ -233,6 +233,56 @@ def test_normalizar_fre_row_allows_child_without_cnpj_for_header_map() -> None:
     assert dados["id_documento"] == 123
 
 
+def test_normalizar_fre_row_normalizes_sigla_uf_and_uf_sede() -> None:
+    row_kind, dados_posicao = normalizar_fre_row(
+        tipo="posicao_acionaria",
+        arquivo_origem="fre_cia_aberta_posicao_acionaria_2025.csv",
+        ano_origem=2025,
+        linha_origem=2,
+        linha={
+            "CNPJ_Companhia": "08.773.135/0001-00",
+            "Data_Referencia": "2025-12-31",
+            "Versao": "1",
+            "ID_Documento": "123",
+            "Nome_Companhia": "EMPRESA A",
+            "ID_Acionista": "1",
+            "Acionista": "ACIONISTA X",
+            "Tipo_Pessoa_Acionista": "PF",
+            "CPF_CNPJ_Acionista": "12345678900",
+            "Quantidade_Acao_Ordinaria_Circulacao": "10",
+            "Percentual_Acao_Ordinaria_Circulacao": "1,5",
+            "Quantidade_Acao_Preferencial_Circulacao": "20",
+            "Percentual_Acao_Preferencial_Circulacao": "2,5",
+            "Quantidade_Total_Acoes_Circulacao": "30",
+            "Percentual_Total_Acoes_Circulacao": "4,0",
+            "Nacionalidade": "BRASIL",
+            "Sigla_UF": "São Paulo",
+        },
+    )
+    row_kind_sociedade, dados_sociedade = normalizar_fre_row(
+        tipo="participacao_sociedade",
+        arquivo_origem="fre_cia_aberta_participacao_sociedade_2025.csv",
+        ano_origem=2025,
+        linha_origem=3,
+        linha={
+            "CNPJ_Companhia": "08.773.135/0001-00",
+            "Data_Referencia": "2025-12-31",
+            "Versao": "1",
+            "ID_Documento": "123",
+            "Nome_Companhia": "EMPRESA A",
+            "ID_Sociedade": "1",
+            "Razao_Social": "SOCIEDADE X",
+            "Pais_Sede": "Canada",
+            "UF_Sede": "EXTERIOR",
+        },
+    )
+
+    assert row_kind == "fre_posicao_acionaria"
+    assert dados_posicao["sigla_uf"] == "SP"
+    assert row_kind_sociedade == "fre_participacao_sociedade"
+    assert dados_sociedade["uf_sede"] is None
+
+
 def test_sincronizar_fre_matches_v1_counts_and_optional_behavior() -> None:
     for incluir_empregados, total_inseridos, empregado_count in ((True, 6, 1), (False, 5, 0)):
         session = _session()
@@ -300,6 +350,155 @@ def test_sincronizar_fre_resolves_foreign_child_rows_through_header_map() -> Non
         assert session.query(FrePosicaoAcionaria).count() == 1
         assert session.query(FreRemuneracaoTotalOrgao).count() == 1
         assert session.query(FreEmpregadoPosicaoGenero).count() == 1
+    finally:
+        session.close()
+
+
+def test_sincronizar_fre_accepts_distinct_rows_that_share_old_narrow_keys() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
+            z.writestr(
+                "fre_cia_aberta_2025.csv",
+                (
+                    "CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC\n"
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;FRE;123;2026-01-01;http://doc\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_administrador_membro_conselho_fiscal_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Orgao_Administracao;Nome;CPF;Profissao;"
+                    "Cargo_Eletivo_Ocupado;Complemento_Cargo_Eletivo_Ocupado;Data_Eleicao;Data_Posse;Data_Inicio_Primeiro_Mandato;"
+                    "Prazo_Mandato;Eleito_Controlador;Outro_Cargo_Funcao;Experiencia_Profissional;Data_Nascimento;"
+                    "Numero_Mandatos_Consecutivos;Percentual_Participacao_Reunioes\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;Diretoria;NOME A;44041497787;Administrador;;;"
+                    "2023-04-28;2023-04-30;2013-09-30;2 anos;N;;;1951-05-23;1;100\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;Diretoria;NOME A;44041497787;Administrador;"
+                    "Diretor Presidente;;2025-04-30;2025-04-30;2013-09-30;2 anos;N;;;1951-05-23;1;100\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;Diretoria;NOME A;44041497787;Administrador;"
+                    "Outros Diretores;;2025-04-30;2025-04-30;2013-09-30;2 anos;N;Diretor Financeiro;;1951-05-23;1;100\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_auditor_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Auditor;Auditor;CPF_Auditor;"
+                    "CNPJ_Auditor;Codigo_CVM_Auditor;Tipo_Origem_Auditor;Data_Inicio_Contratacao;Data_Fim_Contratacao;"
+                    "Data_Inicio_Prestacao_Servico;Servico_Contratado;Remuneracao_Auditor;Justificativa_Substituicao;"
+                    "Razao_Apresentada\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;1;AUDITOR X;12345678900;10.830.108/0001-65;100;"
+                    "ORIGEM;2020-01-01;;2020-01-01;SERVICO;1000,00;JUSTIFICATIVA;RAZAO\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_capital_social_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Capital_Social;Tipo_Capital;"
+                    "Data_Autorizacao_Aprovacao;Valor_Capital;Prazo_Integralizacao;Quantidade_Acoes_Ordinarias;"
+                    "Quantidade_Acoes_Preferenciais;Quantidade_Total_Acoes\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;1;SUBSCRITO;2025-01-01;1000,00;12M;100;200;300\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_posicao_acionaria_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Acionista;Acionista;"
+                    "Tipo_Pessoa_Acionista;CPF_CNPJ_Acionista;ID_Acionista_Relacionado;Acionista_Relacionado;"
+                    "Tipo_Pessoa_Acionista_Relacionado;CPF_CNPJ_Acionista_Relacionado;"
+                    "Quantidade_Acao_Ordinaria_Circulacao;Percentual_Acao_Ordinaria_Circulacao;"
+                    "Quantidade_Acao_Preferencial_Circulacao;Percentual_Acao_Preferencial_Circulacao;"
+                    "Quantidade_Total_Acoes_Circulacao;Percentual_Total_Acoes_Circulacao;Nacionalidade;Sigla_UF;"
+                    "Residente_Exterior;Representante_Legal;Tipo_Pessoa_Representante_Legal;"
+                    "CPF_CNPJ_Representante_legal;Data_Composicao_Capital_Social;Data_Ultima_Alteracao;"
+                    "Acionista_Controlador;Participante_Acordo_Acionistas\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;1;ACIONISTA X;PF;12345678900;;;;;"
+                    "10;1,5;20;2,5;30;4,0;BRASIL;SP;N;REP X;PF;12345678901;2025-01-01;2025-12-31;S;N\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_membro_comite_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Nome;CPF;Profissao;Tipo_Comite;"
+                    "Descricao_Outros_Comites;Cargo_Ocupado;Descricao_Outro_Cargo_Ocupado;Data_Eleicao;Data_Posse;"
+                    "Data_Inicio_Primeiro_Mandato;Prazo_Mandato;Outro_Cargo_Funcao;Experiencia_Profissional;Data_Nascimento;"
+                    "Numero_Mandatos_Consecutivos;Percentual_Participacao_Reunioes\n"
+                    "08.773.135/0001-00;2025-12-31;10;123;EMPRESA A;DAVID FEFFER;88273962849;Administrador;Outros Comitês;"
+                    "Pessoas;;;2026-04-29;2026-04-29;2019-05-01;2 anos;;;1956-11-13;1;100\n"
+                    "08.773.135/0001-00;2025-12-31;10;123;EMPRESA A;DAVID FEFFER;88273962849;Administrador;Outros Comitês;"
+                    "Sustentabilidade;;;2026-04-29;2026-04-29;2019-05-01;2 anos;;;1956-11-13;1;100\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_remuneracao_total_orgao_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Data_Inicio_Exercicio_Social;"
+                    "Data_Fim_Exercicio_Social;Total_Remuneracao;Orgao_Administracao;Numero_Membros;"
+                    "Total_Remuneracao_Orgao;Numero_Membros_Remunerados;Salario;Beneficios_Diretos_Indiretos;"
+                    "Participacoes_Comites;Outros_Valores_Fixos;Descricao_Outros_Remuneracoes_Fixas;Bonus;"
+                    "Participacao_Resultados;Participacao_Reunioes;Outros_Valores_Variaveis;Comissoes;"
+                    "Descricao_Outros_Remuneracoes_Variaveis;Pos_emprego;Cessacao_Cargo;Baseada_Acoes;Observacao\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;2025-01-01;2025-12-31;1000,00;Conselho;5;1000,00;5;"
+                    "500,00;100,00;10,00;5,00;DESC F;50,00;20,00;10,00;5,00;1,00;DESC V;0,00;0,00;0,00;OBS\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_relacao_familiar_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Nome_Administrador;CPF_Administrador;"
+                    "Nome_Emissor;CNPJ_Emissor;Cargo_Administrador;Nome_Pessoa_Relacionada;CPF_Pessoa_Relacionada;"
+                    "Nome_Emissor_Pessoa_Relacionada;CNPJ_Emissor_Pessoa_Relacionada;Cargo_Pessoa_Relacionada;Tipo_Parentesco;"
+                    "Observacao\n"
+                    "08.773.135/0001-00;2025-12-31;9;123;EMPRESA A;JOSE A;11111111111;EMPRESA A;08773135000100;Diretor;"
+                    "THEREZA A;22222222222;Companhia X;01938783000111;CONTROLADORA;Sogra ou Sogro (2º grau por afinidade);Obs 1\n"
+                    "08.773.135/0001-00;2025-12-31;9;123;EMPRESA A;JOSE A;11111111111;Sociedade Agrícola Santa Tereza Ltda;13591565000132;ADMINISTRADORA;"
+                    "THEREZA A;22222222222;Companhia X;01938783000111;CONTROLADORA;Sogra ou Sogro (2º grau por afinidade);Obs 2\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_relacao_subordinacao_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Data_Inicio_Exercicio_Social;"
+                    "Data_Fim_Exercicio_Social;Nome_Administrador;CPF_Administrador;Cargo_Administrador;Nome_Pessoa_Relacionada;"
+                    "Tipo_Pessoa_Relacionada;Documento_Pessoa_Relacionada;Cargo_Pessoa_Relacionada;Categoria_Pessoa_Relacionada;"
+                    "Tipo_Relacao;Observacao\n"
+                    "08.773.135/0001-00;2025-12-31;31;123;EMPRESA A;2022-01-01;2022-12-31;DARIO A;33333333333;Diretor;"
+                    "CARTAO BRB S.A.;PJ;00000208000100;;;Controle;Obs 1\n"
+                    "08.773.135/0001-00;2025-12-31;31;123;EMPRESA A;2023-01-01;2023-12-31;DARIO A;33333333333;Diretor;"
+                    "CARTAO BRB S.A.;PJ;00000208000100;;;Controle;Obs 2\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                "fre_cia_aberta_transacao_parte_relacionada_2025.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Parte_Relacionada;Tipo_Pessoa;"
+                    "Documento_Parte_Relacionada;Relacao_Emissor;Data_Transacao;Objeto_Contrato;Montante_Envolvido;"
+                    "Saldo_Existente;Montante_Interesse_Parte_Relacionada;Garantia_Seguro;Duracao_Transacao;Emprestimo_Divida;"
+                    "Rescisao;Natureza_Razao_Operacao;Taxa_Juros;Posicao_Contratual_Emissor;Especificacao_Posicao_Contratual_Emissor\n"
+                    "08.773.135/0001-00;2025-12-31;2;123;EMPRESA A;Volkswagen do Brasil;PJ;00389481000179;Coligada;2024-12-31;"
+                    "Saldo existente na conta de Clientes;1639900000;R$ 587.997 mil;100% do montante envolvido no negócio.;;;;;Saldo conta clientes;TJLP + 1,72% a.a.;Credor;\n"
+                    "08.773.135/0001-00;2025-12-31;2;123;EMPRESA A;Volkswagen do Brasil;PJ;00389481000179;Coligada;2024-12-31;"
+                    "Saldo existente na conta de Fornecedores;69170400000;691704000.00;691704000.00;;;;;Saldo conta fornecedores;;Devedor;\n"
+                ).encode("latin1"),
+            )
+
+        resultado = sincronizar_fre(session, 2025, downloader=lambda _: payload.getvalue())
+
+        assert resultado["status"] == "sucesso"
+        assert resultado["total_rejeitados"] == 0
+        assert session.query(FreAdministradorMembroConselhoFiscal).count() == 3
+        assert session.query(FreMembroComite).count() == 2
+        assert session.query(FreRelacaoFamiliar).count() == 2
+        assert session.query(FreRelacaoSubordinacao).count() == 2
+        assert session.query(FreTransacaoParteRelacionada).count() == 2
+        assert session.query(RegistroQuarentena).count() == 0
     finally:
         session.close()
 
@@ -722,7 +921,7 @@ def test_sincronizar_fre_idempotency() -> None:
         # Ingestion 2 (unchanged data)
         p2 = build_zip()
         res2 = sincronizar_fre(session, 2025, downloader=lambda _: p2)
-        assert res2["status"] in ("sucesso", "skipped")
+        assert res2["status"] in ("sucesso", "skipped", "sem_alteracao")
 
         # Verify timestamps unchanged (still backdated)
         for m in models_to_test:
@@ -822,7 +1021,7 @@ def test_sincronizar_fre_phase_1_datasets() -> None:
                     "Emprestimo_Divida;Rescisao;Natureza_Razao_Operacao;Taxa_Juros;Posicao_Contratual_Emissor;"
                     "Especificacao_Posicao_Contratual_Emissor\n"
                     "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;Parte A;PJ;12345678000100;Controlador;2025-06-01;"
-                    "Contrato X;100000.00;50000.00;100000.00;Nenhuma;12 meses;N;N;Operacao normal;5.5;Devedor;Ativo\n"
+                    "Contrato X;100000.00;R$ 587.997 mil;100% do montante envolvido no negócio.;Nenhuma;12 meses;N;N;Operacao normal;TJLP + 1,72% a.a.;Devedor;Ativo\n"
                 ).encode("latin1"),
             )
 

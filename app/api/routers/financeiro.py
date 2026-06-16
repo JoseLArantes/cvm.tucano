@@ -19,6 +19,7 @@ from app.schemas.financeiro import (
     ParecerFinanceiroResposta,
 )
 from app.services.financeiro_mapas import DEMONSTRACOES
+from app.services.financeiro_valores import expressao_sql_valor_conta_ajustado, serializar_demonstracao_financeira
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
@@ -69,7 +70,8 @@ ParametroOrdenacaoDemonstracoes = Annotated[
         description=(
             "Campo de ordenação. Prefixe com '-' para ordem decrescente. "
             "Permitidos em demonstrações: data_referencia, versao, cnpj_companhia, "
-            "codigo_conta, valor_conta."
+            "codigo_conta, valor_conta. Quando a ordenação usa `valor_conta`, "
+            "o backend considera o valor monetário ajustado por `ESCALA_MOEDA`."
         ),
         examples=["-data_referencia", "codigo_conta"],
     ),
@@ -366,16 +368,23 @@ def _listar_demonstracoes(
     if codigo_conta:
         query = query.where(DemonstracaoFinanceira.codigo_conta == codigo_conta)
         query_total = query_total.where(DemonstracaoFinanceira.codigo_conta == codigo_conta)
-    query = _aplicar_ordenacao(
-        query,
-        modelo=DemonstracaoFinanceira,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "codigo_conta", "valor_conta"},
-    )
+    if ordenar_por:
+        direcao_desc = ordenar_por.startswith("-")
+        campo = ordenar_por[1:] if direcao_desc else ordenar_por
+        if campo == "valor_conta":
+            expressao = expressao_sql_valor_conta_ajustado()
+            query = query.order_by(expressao.desc() if direcao_desc else expressao.asc())
+        else:
+            query = _aplicar_ordenacao(
+                query,
+                modelo=DemonstracaoFinanceira,
+                ordenar_por=ordenar_por,
+                campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "codigo_conta", "valor_conta"},
+            )
     total = db.scalar(query_total) or 0
     itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaDemonstracoesFinanceirasResposta(
-        dados=[DemonstracaoFinanceiraResposta.model_validate(item) for item in itens],
+        dados=[DemonstracaoFinanceiraResposta.model_validate(serializar_demonstracao_financeira(item)) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
     )
 
@@ -680,7 +689,9 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
         description=(
             f"Retorna linhas da demonstração `{tipo_demonstracao}` no escopo `{escopo}` "
             f"para o formulário {tipo_formulario}. "
-            "Suporta filtros por companhia, período, versão, ano de origem e código da conta."
+            "Suporta filtros por companhia, período, versão, ano de origem e código da conta. "
+            "Nos retornos financeiros, `valor_conta` já representa o montante monetário absoluto após aplicação "
+            "de `escala_moeda`; `valor_conta_reportado` preserva o número bruto informado pela CVM."
         ),
         responses=_RESPOSTAS_PADRAO,
         operation_id=(f"listar{tipo_formulario.title()}{tipo_demonstracao.title().replace('_', '')}{escopo.title()}"),

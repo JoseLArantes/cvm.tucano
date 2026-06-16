@@ -3,10 +3,10 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class CgvnDocumentoResposta(BaseModel):
+class CgvnDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -36,7 +36,7 @@ class ListaCgvnDocumentosResposta(BaseModel):
     paginacao: Paginacao
 
 
-class CgvnPraticaResposta(BaseModel):
+class CgvnPraticaResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID

@@ -14,6 +14,11 @@ celery_app = Celery(
 )
 celery_app.conf.timezone = "America/Sao_Paulo"
 celery_app.conf.worker_prefetch_multiplier = 1
+celery_app.conf.task_acks_late = True
+celery_app.conf.task_reject_on_worker_lost = True
+celery_app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
+celery_app.conf.worker_max_tasks_per_child = settings.celery_worker_max_tasks_per_child
+celery_app.conf.worker_max_memory_per_child = settings.celery_worker_max_memory_per_child_kb
 
 
 def construir_beat_schedule() -> dict[str, dict[str, Any]]:

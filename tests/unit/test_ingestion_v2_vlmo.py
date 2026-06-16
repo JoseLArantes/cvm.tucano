@@ -141,6 +141,33 @@ def _build_zip(
     return buffer.getvalue()
 
 
+def _build_zip_duplicate_alt_key() -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        zip_file.writestr(
+            "vlmo_cia_aberta_2025.csv",
+            (
+                "CNPJ_Companhia;Nome_Companhia;Codigo_CVM;Data_Referencia;Categoria;Tipo;Data_Entrega;"
+                "Tipo_Apresentacao;Motivo_Reapresentacao;Protocolo_Entrega;Versao;Link_Download\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-01-01;Negociacao Administradores;Consolidado;"
+                "2025-01-15;Original;;PROTOCOLO-1;1;http://vlmo/documento/1\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-01-01;Negociacao Administradores;Consolidado;"
+                "2025-01-15;Reapresentacao;;PROTOCOLO-2;1;http://vlmo/documento/2\n"
+            ).encode("latin1"),
+        )
+        zip_file.writestr(
+            "vlmo_cia_aberta_con_2025.csv",
+            (
+                "CNPJ_Companhia;Nome_Companhia;Data_Referencia;Versao;Tipo_Empresa;Empresa;Tipo_Cargo;"
+                "Tipo_Movimentacao;Descricao_Movimentacao;Tipo_Operacao;Tipo_Ativo;Caracteristica_Valor_Mobiliario;"
+                "Intermediario;Data_Movimentacao;Quantidade;Preco_Unitario;Volume\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;2025-01-01;1;Pessoa Vinculada;Controlador;Diretor;"
+                "Negociacao;Compra em mercado;Compra;Acao Ordinaria;ON;Corretora X;2025-01-10;100;10,50;1050,00\n"
+            ).encode("latin1"),
+        )
+    return buffer.getvalue()
+
+
 def test_sincronizar_vlmo_idempotency_and_quarantine(db_session: Session) -> None:
     companhia = _companhia()
     db_session.add(companhia)
@@ -157,7 +184,7 @@ def test_sincronizar_vlmo_idempotency_and_quarantine(db_session: Session) -> Non
     alterado_consolidado = consolidado.alterado_em
 
     resultado2 = sincronizar_vlmo(db_session, 2025, downloader=lambda _: _build_zip())
-    assert resultado2["status"] == "skipped"
+    assert resultado2["status"] == "sem_alteracao"
     documento_igual = db_session.scalar(select(VlmoDocumento))
     consolidado_igual = db_session.scalar(select(VlmoConsolidado))
     assert documento_igual is not None and documento_igual.alterado_em == alterado_documento
@@ -174,8 +201,7 @@ def test_sincronizar_vlmo_idempotency_and_quarantine(db_session: Session) -> Non
     assert consolidado_alterado.alterado_em != alterado_consolidado
 
     staged = list(db_session.execute(select(IngestionRow).where(IngestionRow.row_kind.like("vlmo_%"))).scalars())
-    assert staged
-    assert {item.promoted_entity for item in staged} == {"vlmo_documentos", "vlmo_consolidado"}
+    assert staged == []
 
     resultado_quarentena = sincronizar_vlmo(
         db_session,
@@ -183,4 +209,16 @@ def test_sincronizar_vlmo_idempotency_and_quarantine(db_session: Session) -> Non
         downloader=lambda _: _build_zip(missing_categoria_header=True),
     )
     assert resultado_quarentena["status"] == "sucesso"
-    assert db_session.scalar(select(QuarantineItem).where(QuarantineItem.row_kind == "vlmo_documento")) is not None
+    assert db_session.scalar(select(QuarantineItem).where(QuarantineItem.row_kind == "vlmo_documento")) is None
+
+
+def test_sincronizar_vlmo_tolerates_duplicate_alternate_document_key(db_session: Session) -> None:
+    companhia = _companhia()
+    db_session.add(companhia)
+    db_session.commit()
+
+    resultado = sincronizar_vlmo(db_session, 2025, downloader=lambda _: _build_zip_duplicate_alt_key())
+
+    assert resultado["status"] == "sucesso"
+    documentos = list(db_session.execute(select(VlmoDocumento)).scalars())
+    assert len(documentos) == 1

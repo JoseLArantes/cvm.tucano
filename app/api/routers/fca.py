@@ -382,7 +382,7 @@ def listar_auditores_fca(
     ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     nome_auditor: Annotated[str | None, Query(description="Filtrar por nome do auditor.")] = None,
-    codigo_cvm_auditor: Annotated[int | None, Query(description="Filtrar por codigo CVM do auditor.")] = None,
+    codigo_cvm_auditor: Annotated[str | None, Query(description="Filtrar por codigo CVM do auditor.")] = None,
     ordenar_por: Annotated[
         str | None,
         Query(description="Campos: data_referencia, versao, cnpj_companhia, nome_auditor, codigo_cvm_auditor."),

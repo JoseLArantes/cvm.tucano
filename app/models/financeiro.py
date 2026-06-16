@@ -7,6 +7,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -78,9 +79,17 @@ class DemonstracaoFinanceira(Base):
             "versao",
             "grupo_demonstracao",
             "ordem_exercicio",
+            "data_inicio_exercicio",
             "data_fim_exercicio",
             "codigo_conta",
+            "coluna_df",
             name="uq_demonstracoes_financeiras_chave_natural",
+        ),
+        Index(
+            "ix_demonstracoes_financeiras_lineage_scope_hash",
+            "arquivo_origem",
+            "ano_origem",
+            "hash_origem",
         ),
     )
 
@@ -101,8 +110,9 @@ class DemonstracaoFinanceira(Base):
     data_inicio_exercicio: Mapped[date | None] = mapped_column(Date)
     data_fim_exercicio: Mapped[date | None] = mapped_column(Date)
     codigo_conta: Mapped[str | None] = mapped_column(String(40), index=True)
+    coluna_df: Mapped[str] = mapped_column(Text, nullable=False, default="")
     descricao_conta: Mapped[str | None] = mapped_column(Text)
-    valor_conta: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_conta: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     conta_fixa: Mapped[bool | None] = mapped_column(Boolean)
 
     arquivo_origem: Mapped[str] = mapped_column(String(255))

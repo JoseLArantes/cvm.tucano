@@ -148,7 +148,7 @@ def test_sincronizar_cgvn_idempotency_and_quarantine(db_session: Session) -> Non
     alterado_pratica = pratica.alterado_em
 
     resultado2 = sincronizar_cgvn(db_session, 2025, downloader=lambda _: payload_igual)
-    assert resultado2["status"] == "skipped"
+    assert resultado2["status"] == "sem_alteracao"
     documento_igual = db_session.scalar(select(CgvnDocumento))
     pratica_igual = db_session.scalar(select(CgvnPratica))
     assert documento_igual is not None and documento_igual.alterado_em == alterado_documento
@@ -165,8 +165,7 @@ def test_sincronizar_cgvn_idempotency_and_quarantine(db_session: Session) -> Non
     assert pratica_alterada.alterado_em != alterado_pratica
 
     staged = list(db_session.execute(select(IngestionRow).where(IngestionRow.row_kind.like("cgvn_%"))).scalars())
-    assert staged
-    assert {item.promoted_entity for item in staged} == {"cgvn_documentos", "cgvn_praticas"}
+    assert staged == []
 
     resultado_quarentena = sincronizar_cgvn(
         db_session,

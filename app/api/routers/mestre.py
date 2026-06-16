@@ -45,6 +45,7 @@ from app.schemas.fre import (
 from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta
 from app.schemas.mestre import ConsultaCompanhiaMestreResposta
 from app.services.financeiro_mapas import DEMONSTRACOES
+from app.services.financeiro_valores import serializar_demonstracao_financeira
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
@@ -79,7 +80,9 @@ def _listar(
     summary="Consulta Mestre da Companhia",
     description=(
         "Dado um `cnpj_companhia` ou `codigo_cvm`, agrega a resposta de todos os grupos de endpoints "
-        "de companhia, financeiro (DFP/ITR), FRE e IPE em um unico payload."
+        "de companhia, financeiro (DFP/ITR), FRE e IPE em um unico payload. "
+        "Nas demonstrações financeiras DFP/ITR agregadas, `valor_conta` já é entregue ajustado por "
+        "`escala_moeda`, enquanto `valor_conta_reportado` preserva o número bruto do CSV da CVM."
     ),
     responses={
         404: {
@@ -207,16 +210,25 @@ def consultar_companhia_mestre(
                 )
                 if codigo is not None:
                     filtros_demonstracao = filtros_demonstracao + (DemonstracaoFinanceira.codigo_cvm == codigo,)
-                dados_demonstracao, total_demonstracao = _listar(
-                    db,
-                    modelo=DemonstracaoFinanceira,
-                    schema=DemonstracaoFinanceiraResposta,
-                    limite=limite_por_endpoint,
-                    filtros=filtros_demonstracao,
+                total_demonstracao = (
+                    db.scalar(select(func.count()).select_from(DemonstracaoFinanceira).where(*filtros_demonstracao)) or 0
+                )
+                itens_demonstracao = (
+                    db.execute(
+                        select(DemonstracaoFinanceira)
+                        .where(*filtros_demonstracao)
+                        .order_by(DemonstracaoFinanceira.data_referencia.desc())
+                        .limit(limite_por_endpoint)
+                    )
+                    .scalars()
+                    .all()
                 )
                 chave = f"{formulario.lower()}_{item['rota'].replace('-', '_')}_{escopo}"
                 demonstracoes[chave] = ListaDemonstracoesFinanceirasResposta(
-                    dados=dados_demonstracao,
+                    dados=[
+                        DemonstracaoFinanceiraResposta.model_validate(serializar_demonstracao_financeira(item))
+                        for item in itens_demonstracao
+                    ],
                     paginacao=_paginacao(total_demonstracao, limite_por_endpoint),
                 )
 

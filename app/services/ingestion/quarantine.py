@@ -77,7 +77,7 @@ def create_quarantine_item(
                 arquivo_origem=ingestion_row.arquivo_origem,
                 ano_origem=ingestion_row.ano_origem,
                 linha_origem=ingestion_row.linha_origem,
-                motivo=legacy_reason or motivo_codigo,
+                motivo=(legacy_reason or motivo_codigo)[:255],
                 dados_originais=ingestion_row.raw_data,
             )
         )

@@ -3,10 +3,10 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class FcaDocumentoResposta(BaseModel):
+class FcaDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
@@ -27,7 +27,7 @@ class FcaDocumentoResposta(BaseModel):
     alterado_em: datetime
 
 
-class FcaGeralResposta(BaseModel):
+class FcaGeralResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
@@ -147,7 +147,7 @@ class FcaAuditorResposta(BaseModel):
     nome_empresarial: str | None
     nome_auditor: str | None
     cpf_cnpj_auditor: str | None
-    codigo_cvm_auditor: int | None
+    codigo_cvm_auditor: str | None
     origem_auditor: str | None
     data_inicio_atuacao_auditor: date | None
     data_fim_atuacao_auditor: date | None

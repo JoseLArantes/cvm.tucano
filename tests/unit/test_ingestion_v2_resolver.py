@@ -182,7 +182,7 @@ def test_resolve_companhia_by_zero_padded_codigo_cvm() -> None:
         session.close()
 
 
-def test_resolve_companhia_detects_conflict_between_cnpj_and_codigo() -> None:
+def test_resolve_companhia_prefers_codigo_when_cnpj_and_codigo_conflict() -> None:
     session = _session()
     try:
         companhia_a = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="A SA")
@@ -195,8 +195,30 @@ def test_resolve_companhia_detects_conflict_between_cnpj_and_codigo() -> None:
             ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
         )
 
+        assert result.status == STATUS_RESOLVED
+        assert result.companhia_id == companhia_b.id
+        assert result.resolution_method == "codigo_cvm_identificador_alta"
+    finally:
+        session.close()
+
+
+def test_resolve_companhia_ambiguous_when_both_cnpj_and_codigo_have_multiple_matches() -> None:
+    session = _session()
+    try:
+        companhia_a = _companhia(session, cnpj="11111111111111", codigo_cvm=10, denominacao="A SA")
+        companhia_b = _companhia(session, cnpj="22222222222222", codigo_cvm=20, denominacao="B SA")
+        for empresa in [companhia_a, companhia_b]:
+            _identificador(session, empresa=empresa, tipo="cnpj", valor_normalizado="08773135000100")
+            _identificador(session, empresa=empresa, tipo="codigo_cvm", valor_normalizado="25224")
+
+        result = resolve_companhia(
+            session,
+            ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
+        )
+
         assert result.status == STATUS_AMBIGUOUS
         assert result.companhia_id is None
+        assert result.resolution_method == "companhia_ambigua"
     finally:
         session.close()
 
@@ -321,7 +343,7 @@ def test_persist_resolution_result_updates_staging_row_and_event() -> None:
                 ResolverInput(cnpj_companhia="08.773.135/0001-00", codigo_cvm=25224),
             )
 
-        persist_resolution_result(session, ingestion_row=row, result=result)
+        persist_resolution_result(session, ingestion_row=row, result=result, persist=True)
         session.commit()
         session.refresh(row)
 

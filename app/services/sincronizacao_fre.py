@@ -39,6 +39,7 @@ from app.services.normalizacao import (
     normalizar_data,
     normalizar_decimal_cvm,
     normalizar_inteiro,
+    normalizar_sigla_uf,
     normalizar_texto,
 )
 
@@ -105,7 +106,7 @@ def _registrar_quarentena(
             arquivo_origem=arquivo_origem,
             ano_origem=ano_origem,
             linha_origem=linha_origem,
-            motivo=motivo,
+            motivo=motivo[:255] if motivo else "",
             dados_originais=dados_originais,
         )
     )
@@ -334,7 +335,7 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                         if normalizar_texto(linha.get("CNPJ_Auditor"))
                                         else None
                                     ),
-                                    "codigo_cvm_auditor": normalizar_inteiro(linha.get("Codigo_CVM_Auditor")),
+                                    "codigo_cvm_auditor": normalizar_texto(linha.get("Codigo_CVM_Auditor")),
                                     "tipo_origem_auditor": normalizar_texto(linha.get("Tipo_Origem_Auditor")),
                                     "data_inicio_contratacao": normalizar_data(linha.get("Data_Inicio_Contratacao")),
                                     "data_fim_contratacao": normalizar_data(linha.get("Data_Fim_Contratacao")),
@@ -342,7 +343,7 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                         linha.get("Data_Inicio_Prestacao_Servico")
                                     ),
                                     "servico_contratado": normalizar_texto(linha.get("Servico_Contratado")),
-                                    "remuneracao_auditor": normalizar_decimal_cvm(linha.get("Remuneracao_Auditor")),
+                                    "remuneracao_auditor": normalizar_texto(linha.get("Remuneracao_Auditor")),
                                     "justificativa_substituicao": normalizar_texto(
                                         linha.get("Justificativa_Substituicao")
                                     ),
@@ -426,7 +427,7 @@ def sincronizar_fre(db: Session, ano: int, task_id: str | None = None) -> dict[s
                                         linha.get("Percentual_Total_Acoes_Circulacao")
                                     ),
                                     "nacionalidade": normalizar_texto(linha.get("Nacionalidade")),
-                                    "sigla_uf": normalizar_texto(linha.get("Sigla_UF")),
+                                    "sigla_uf": normalizar_sigla_uf(linha.get("Sigla_UF")),
                                     "residente_exterior": _normalizar_booleano(linha.get("Residente_Exterior")),
                                     "representante_legal": normalizar_texto(linha.get("Representante_Legal")),
                                     "tipo_pessoa_representante_legal": normalizar_texto(

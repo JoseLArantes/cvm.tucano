@@ -14,3 +14,14 @@ def test_preserva_database_url_ja_normalizada() -> None:
 def test_configura_ttl_token_por_alias() -> None:
     settings = Settings.model_validate({"ACCESS_TOKEN_TTL_MINUTES": 30})
     assert settings.access_token_ttl_minutes == 30
+
+
+def test_configura_reciclagem_de_worker_celery() -> None:
+    settings = Settings.model_validate(
+        {
+            "CELERY_WORKER_MAX_TASKS_PER_CHILD": 2,
+            "CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB": 900000,
+        }
+    )
+    assert settings.celery_worker_max_tasks_per_child == 2
+    assert settings.celery_worker_max_memory_per_child_kb == 900000

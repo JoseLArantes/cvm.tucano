@@ -209,6 +209,22 @@ def _resolve_exact_identifier_result(
                 resolution_confidence="alta",
                 details={"cnpj_match_count": len(cnpj_ids), "codigo_match_count": len(codigo_ids)},
             )
+        if len(codigo_ids) == 1:
+            return ResolverResult(
+                status=STATUS_RESOLVED,
+                companhia_id=next(iter(codigo_ids)),
+                resolution_method="codigo_cvm_identificador_alta",
+                resolution_confidence="alta",
+                details={"codigo_match_count": 1},
+            )
+        if len(cnpj_ids) == 1:
+            return ResolverResult(
+                status=STATUS_RESOLVED,
+                companhia_id=next(iter(cnpj_ids)),
+                resolution_method="cnpj_identificador_alta",
+                resolution_confidence="alta",
+                details={"cnpj_match_count": 1},
+            )
         return ResolverResult(
             status=STATUS_AMBIGUOUS,
             companhia_id=None,
@@ -483,7 +499,10 @@ def persist_resolution_result(
     ingestion_row: IngestionRow,
     result: ResolverResult,
     created_by: str = "resolver",
+    persist: bool = False,
 ) -> IngestionRow:
+    if not persist:
+        return ingestion_row
     ingestion_row.resolved_companhia_id = result.companhia_id
     ingestion_row.resolution_method = result.resolution_method
     ingestion_row.resolution_confidence = result.resolution_confidence

@@ -28,7 +28,7 @@ def _criar_usuario(
 
 def test_endpoints_exigem_token() -> None:
     with TestClient(app) as client:
-        resposta = client.get("/admin/sincronizacoes")
+        resposta = client.get("/ingestion/sincronizacoes")
     assert resposta.status_code == 401
     assert resposta.json()["detail"] == "Token de acesso invalido."
 

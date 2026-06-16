@@ -49,6 +49,7 @@ from app.models.fre import (
 from app.models.ipe import IpeDocumento
 from app.models.vlmo import VlmoConsolidado, VlmoDocumento
 from app.schemas.exportacao import DatasetResposta, FonteResposta
+from app.services.financeiro_valores import colunas_exportacao, serializar_exportacao_linha
 from app.services.ingestion.source_registry import (
     listar_datasets,
     listar_fontes,
@@ -164,22 +165,24 @@ def generate_json(
     db: DbSession, query: Select[Any], Model: type[Any], columns: list[str]
 ) -> Generator[str, None, None]:
     result = db.execute(query.execution_options(yield_per=1000)).scalars()
+    export_columns = colunas_exportacao(Model, columns)
     yield "[\n"
     first = True
     for row in result:
-        row_dict: dict[str, Any] = {}
-        for c in columns:
-            val = getattr(row, c)
+        row_dict = serializar_exportacao_linha(row, export_columns)
+        serializable: dict[str, Any] = {}
+        for c in export_columns:
+            val = row_dict.get(c)
             if isinstance(val, uuid.UUID):
-                row_dict[c] = str(val)
+                serializable[c] = str(val)
             elif isinstance(val, (datetime, date)):
-                row_dict[c] = val.isoformat()
+                serializable[c] = val.isoformat()
             elif isinstance(val, Decimal):
-                row_dict[c] = float(val)
+                serializable[c] = float(val)
             else:
-                row_dict[c] = val
+                serializable[c] = val
 
-        line = json.dumps(row_dict, cls=CustomEncoder)
+        line = json.dumps(serializable, cls=CustomEncoder)
         if not first:
             yield ",\n" + line
         else:
@@ -192,16 +195,18 @@ def generate_csv(db: DbSession, query: Select[Any], Model: type[Any], columns: l
     result = db.execute(query.execution_options(yield_per=1000)).scalars()
     output = io.StringIO()
     writer = csv.writer(output, delimiter=",", lineterminator="\n")
+    export_columns = colunas_exportacao(Model, columns)
     # Yield header
-    writer.writerow(columns)
+    writer.writerow(export_columns)
     yield output.getvalue()
     output.seek(0)
     output.truncate(0)
 
     for row in result:
+        row_dict = serializar_exportacao_linha(row, export_columns)
         vals = []
-        for col in columns:
-            val = getattr(row, col)
+        for col in export_columns:
+            val = row_dict.get(col)
             if val is None:
                 vals.append("")
             elif isinstance(val, uuid.UUID):
@@ -296,6 +301,9 @@ def listar_datasets_api(
         "Suporta resolução automática de aliases curtos de demonstrações financeiras (ex: 'bpa_ind' -> "
         "'demonstracao_balanco_patrimonial_ativo_individual'). "
         "Permite aplicar filtros flexíveis de período (ano_inicio/ano_fim) e companhia (cnpj_companhia/codigo_cvm). "
+        "Nos datasets de demonstrações DFP/ITR, `valor_conta` é exportado já ajustado por `ESCALA_MOEDA`, "
+        "enquanto `valor_conta_reportado` preserva o número bruto informado pela CVM e `fator_escala_moeda` "
+        "explica a multiplicação aplicada. "
         "Para proteção do serviço, a consulta é limitada a um teto máximo de 100.000 registros por chamada."
     ),
 )

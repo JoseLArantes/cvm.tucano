@@ -62,9 +62,12 @@ from app.models.fre import (
 )
 from app.models.ingestion import IngestionRow
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
+from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
+from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.dependencies import ensure_identity_graph_ready
 from app.services.ingestion.engine import ZipIngestionSpec, process_zip_members
+from app.services.ingestion.lifecycle import build_custom_remote_probe, upsert_artifact_snapshot
 from app.services.ingestion.normalizers import (
     gerar_hash_canonico,
     normalizar_cnpj,
@@ -72,6 +75,7 @@ from app.services.ingestion.normalizers import (
     normalizar_data,
     normalizar_decimal_cvm,
     normalizar_inteiro,
+    normalizar_sigla_uf,
     normalizar_texto,
 )
 from app.services.ingestion.quality import enforce_quality_gate
@@ -85,6 +89,7 @@ from app.services.ingestion.resolver import (
     register_document_header,
     resolve_companhia,
 )
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
 from app.services.ingestion.staging import (
     create_run,
@@ -92,6 +97,7 @@ from app.services.ingestion.staging import (
     iter_zip_csv_members,
     register_file,
     update_run_state,
+    safe_promote_chunk,
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary
 from app.services.ingestion.validation import (
@@ -195,13 +201,13 @@ def normalizar_fre_row(
                     if normalizar_texto(linha.get("CNPJ_Auditor"))
                     else None
                 ),
-                "codigo_cvm_auditor": normalizar_inteiro(linha.get("Codigo_CVM_Auditor")),
+                "codigo_cvm_auditor": normalizar_texto(linha.get("Codigo_CVM_Auditor")),
                 "tipo_origem_auditor": normalizar_texto(linha.get("Tipo_Origem_Auditor")),
                 "data_inicio_contratacao": normalizar_data(linha.get("Data_Inicio_Contratacao")),
                 "data_fim_contratacao": normalizar_data(linha.get("Data_Fim_Contratacao")),
                 "data_inicio_prestacao_servico": normalizar_data(linha.get("Data_Inicio_Prestacao_Servico")),
                 "servico_contratado": normalizar_texto(linha.get("Servico_Contratado")),
-                "remuneracao_auditor": normalizar_decimal_cvm(linha.get("Remuneracao_Auditor")),
+                "remuneracao_auditor": normalizar_texto(linha.get("Remuneracao_Auditor")),
                 "justificativa_substituicao": normalizar_texto(linha.get("Justificativa_Substituicao")),
                 "razao_apresentada": normalizar_texto(linha.get("Razao_Apresentada")),
             },
@@ -259,7 +265,7 @@ def normalizar_fre_row(
                     linha.get("Percentual_Total_Acoes_Circulacao")
                 ),
                 "nacionalidade": normalizar_texto(linha.get("Nacionalidade")),
-                "sigla_uf": normalizar_texto(linha.get("Sigla_UF")),
+                "sigla_uf": normalizar_sigla_uf(linha.get("Sigla_UF")),
                 "residente_exterior": _normalizar_booleano(linha.get("Residente_Exterior")),
                 "representante_legal": normalizar_texto(linha.get("Representante_Legal")),
                 "tipo_pessoa_representante_legal": normalizar_texto(linha.get("Tipo_Pessoa_Representante_Legal")),
@@ -582,7 +588,7 @@ def normalizar_fre_row(
                 "tipo_sociedade": normalizar_texto(linha.get("Tipo_Sociedade")),
                 "descricao_atividades": normalizar_texto(linha.get("Descricao_Atividades")),
                 "pais_sede": normalizar_texto(linha.get("Pais_Sede")),
-                "uf_sede": normalizar_texto(linha.get("UF_Sede")),
+                "uf_sede": normalizar_sigla_uf(linha.get("UF_Sede")),
                 "municipio_sede": normalizar_texto(linha.get("Municipio_Sede")),
                 "participacao_emissor": normalizar_decimal_cvm(linha.get("Participacao_Emissor")),
                 "possui_registro_cvm": _normalizar_booleano(linha.get("Possui_Registro_CVM")),
@@ -632,14 +638,14 @@ def normalizar_fre_row(
                 "data_transacao": normalizar_data(linha.get("Data_Transacao")),
                 "objeto_contrato": normalizar_texto(linha.get("Objeto_Contrato")),
                 "montante_envolvido": normalizar_decimal_cvm(linha.get("Montante_Envolvido")),
-                "saldo_existente": normalizar_decimal_cvm(linha.get("Saldo_Existente")),
-                "montante_interesse_parte_relacionada": normalizar_decimal_cvm(linha.get("Montante_Interesse_Parte_Relacionada")),
+                "saldo_existente": normalizar_texto(linha.get("Saldo_Existente")),
+                "montante_interesse_parte_relacionada": normalizar_texto(linha.get("Montante_Interesse_Parte_Relacionada")),
                 "garantia_seguro": normalizar_texto(linha.get("Garantia_Seguro")),
                 "duracao_transacao": normalizar_texto(linha.get("Duracao_Transacao")),
                 "emprestimo_divida": normalizar_texto(linha.get("Emprestimo_Divida")),
                 "rescisao": normalizar_texto(linha.get("Rescisao")),
                 "natureza_razao_operacao": normalizar_texto(linha.get("Natureza_Razao_Operacao")),
-                "taxa_juros": normalizar_decimal_cvm(linha.get("Taxa_Juros")),
+                "taxa_juros": normalizar_texto(linha.get("Taxa_Juros")),
                 "posicao_contratual_emissor": normalizar_texto(linha.get("Posicao_Contratual_Emissor")),
                 "especificacao_posicao_contratual_emissor": normalizar_texto(linha.get("Especificacao_Posicao_Contratual_Emissor")),
             },
@@ -1212,6 +1218,8 @@ def _fre_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str, ...]]
                 "cnpj_companhia",
                 "id_acionista",
                 "tipo_classe_acao_preferencial",
+                "quantidade_acoes",
+                "percentual_acoes",
             ),
         )
     if row_kind == "fre_remuneracao_maxima_minima_media":
@@ -1274,31 +1282,91 @@ def _fre_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str, ...]]
         return (
             FreAdministradorMembroConselhoFiscal,
             "fre_administradores_membros_conselho_fiscal",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "nome", "cpf", "orgao_administracao"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "nome",
+                "cpf",
+                "orgao_administracao",
+                "data_eleicao",
+                "data_posse",
+                "cargo_eletivo_ocupado",
+                "outro_cargo_funcao",
+            ),
         )
     if row_kind == "fre_membro_comite":
         return (
             FreMembroComite,
             "fre_membros_comites",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "nome", "cpf", "tipo_comite"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "nome",
+                "cpf",
+                "tipo_comite",
+                "descricao_outros_comites",
+            ),
         )
     if row_kind == "fre_relacao_familiar":
         return (
             FreRelacaoFamiliar,
             "fre_relacoes_familiares",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "nome_administrador", "nome_pessoa_relacionada", "tipo_parentesco"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "nome_administrador",
+                "nome_pessoa_relacionada",
+                "tipo_parentesco",
+                "cnpj_emissor_pessoa_relacionada",
+                "nome_emissor_pessoa_relacionada",
+                "cargo_Pessoa_relacionada",
+                "cnpj_emissor",
+                "nome_emissor",
+                "cargo_administrador",
+            ),
         )
     if row_kind == "fre_relacao_subordinacao":
         return (
             FreRelacaoSubordinacao,
             "fre_relacoes_subordinacao",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "nome_administrador", "nome_pessoa_relacionada", "tipo_relacao"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "data_inicio_exercicio_social",
+                "data_fim_exercicio_social",
+                "nome_administrador",
+                "nome_pessoa_relacionada",
+                "tipo_relacao",
+                "cargo_administrador",
+                "cargo_pessoa_relacionada",
+            ),
         )
     if row_kind == "fre_transacao_parte_relacionada":
         return (
             FreTransacaoParteRelacionada,
             "fre_transacoes_partes_relacionadas",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "parte_relacionada", "relacao_emissor", "data_transacao"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "parte_relacionada",
+                "documento_parte_relacionada",
+                "relacao_emissor",
+                "data_transacao",
+                "montante_envolvido",
+                "saldo_existente",
+                "montante_interesse_parte_relacionada",
+                "posicao_contratual_emissor",
+            ),
         )
     if row_kind == "fre_capital_social_aumento":
         return (
@@ -1450,6 +1518,25 @@ def _promote_fre_chunk(
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> None:
+    safe_promote_chunk(
+        db,
+        promote_func=_promote_fre_chunk_internal,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        registrar_quarentena_fn=_registrar_quarentena,
+        row_kind=row_kind,
+    )
+
+
+def _promote_fre_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
     if not linhas_promovidas:
         return
 
@@ -1465,16 +1552,30 @@ def _promote_fre_chunk(
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
     existentes: list[Any] = []
     if chaves:
-        existentes = list(db.execute(select(model).where(_build_key_clause(model, campos_chave, chaves))).scalars())
+        for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+            existentes.extend(db.execute(select(model).where(_build_key_clause(model, campos_chave, batch))).scalars())
     existentes_por_chave = {tuple(getattr(item, campo) for campo in campos_chave): item for item in existentes}
 
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[dict[str, Any]] = []
+    chaves_no_lote: dict[tuple, dict[str, Any]] = {}
 
     for row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
+        existente_lote = chaves_no_lote.get(chave)
+        if existente_lote is not None:
+            for campo in campos_negocio:
+                if campo in dados and dados[campo] is not None and dados[campo] != existente_lote.get(campo):
+                    existente_lote[campo] = dados[campo]
+            existente_lote["arquivo_origem"] = dados["arquivo_origem"]
+            existente_lote["ano_origem"] = dados["ano_origem"]
+            existente_lote["linha_origem"] = dados["linha_origem"]
+            existente_lote["hash_origem"] = dados["hash_origem"]
+            contadores["atualizados"] += 1
+            continue
         existente = existentes_por_chave.get(chave)
         if existente is None:
+            chaves_no_lote[chave] = dados
             novo_id = uuid.uuid4()
             payload_insercao.append(
                 {
@@ -1486,8 +1587,6 @@ def _promote_fre_chunk(
                 }
             )
             contadores["inseridos"] += 1
-            row.promoted_entity = entidade
-            row.promoted_entity_id = novo_id
             continue
 
         alteracoes: dict[str, tuple[Any, Any]] = {}
@@ -1525,13 +1624,12 @@ def _promote_fre_chunk(
                         "ano_origem": dados["ano_origem"],
                     }
                 )
-        row.promoted_entity = entidade
-        row.promoted_entity_id = existente.id
-
     if payload_insercao:
-        db.execute(insert(model), payload_insercao)
+        for batch in iter_parameter_batches(payload_insercao, parameter_width=mapping_parameter_width(payload_insercao)):
+            db.execute(insert(model), batch)
     if historicos:
-        db.execute(insert(HistoricoAlteracaoCampo), historicos)
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
 
 
 def _promote_fre_row(
@@ -1583,25 +1681,9 @@ def _process_fre_rows(
         schema_result = validate_member_header(rows[0].row_kind if rows else "desconhecido", member.header)
         update_member_schema_validation(member, result=schema_result)
         if schema_result.status == "invalid":
-            for row in rows:
-                contadores["lidas"] += 1
-                write_validation_result(db, ingestion_row=row, result=schema_result)
-                create_quarantine_item(
-                    db,
-                    ingestion_row=row,
-                    result=schema_result,
-                    execucao_sincronizacao_id=execucao.id,
-                )
-                _registrar_quarentena(
-                    db,
-                    execucao_id=execucao.id,
-                    arquivo_origem=row.arquivo_origem,
-                    ano_origem=row.ano_origem or ano,
-                    linha_origem=row.linha_origem,
-                    motivo=schema_result.reason_code or "schema_inesperado",
-                    dados_originais=row.raw_data,
-                )
-                contadores["rejeitados"] += 1
+            contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
+            contadores["lidas"] += member.row_count
+            contadores["rejeitados"] += member.row_count
             continue
 
         tipo = member_type_map.get(member.member_name)
@@ -1619,7 +1701,11 @@ def _process_fre_rows(
                     linha=row.raw_data,
                 )
             except Exception as exc:
-                result = invalid_result("normalizacao_invalida", details={"erro": str(exc)})
+                result = invalid_result(
+                    f"normalizacao_invalida: {exc}",
+                    details={"erro": str(exc)},
+                    repairable=True,
+                )
                 write_validation_result(db, ingestion_row=row, result=result)
                 create_quarantine_item(
                     db,
@@ -1642,6 +1728,7 @@ def _process_fre_rows(
 
             natural_key = build_natural_key(row_kind, dados)
             duplicate_result = classify_duplicate(
+                row_kind=row_kind,
                 natural_key=natural_key,
                 normalized_hash=gerar_hash_canonico(dados),
                 normalized_data=dados,
@@ -1782,6 +1869,7 @@ def _process_fre_member(
     run: Any,
     ano: int,
     member: Any,
+    reconcile_required: bool,
     promote_enabled: bool,
     contadores: dict[str, int],
     seen_by_row_kind: dict[str, dict[str, dict[str, Any]]],
@@ -1798,33 +1886,16 @@ def _process_fre_member(
     update_member_schema_validation(member, result=schema_result)
     if schema_result.status == "invalid":
         contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
-        for rows in [first_rows, *list(chunks)]:
-            for row in rows:
-                contadores["lidas"] += 1
-                write_validation_result(db, ingestion_row=row, result=schema_result)
-                create_quarantine_item(
-                    db,
-                    ingestion_row=row,
-                    result=schema_result,
-                    execucao_sincronizacao_id=execucao.id,
-                )
-                _registrar_quarentena(
-                    db,
-                    execucao_id=execucao.id,
-                    arquivo_origem=row.arquivo_origem,
-                    ano_origem=row.ano_origem or ano,
-                    linha_origem=row.linha_origem,
-                    motivo=schema_result.reason_code or "schema_inesperado",
-                    dados_originais=row.raw_data,
-                )
-                contadores["rejeitados"] += 1
+        contadores["lidas"] += member.row_count
+        contadores["rejeitados"] += member.row_count
         return
 
     tipo = member_type_map.get(member.member_name)
     if tipo is None:
         return
 
-    for rows in [first_rows, *list(chunks)]:
+    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    for rows in [first_rows, *chunks]:
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
             contadores["lidas"] += 1
@@ -1837,7 +1908,11 @@ def _process_fre_member(
                     linha=row.raw_data,
                 )
             except Exception as exc:
-                result = invalid_result("normalizacao_invalida", details={"erro": str(exc)})
+                result = invalid_result(
+                    f"normalizacao_invalida: {exc}",
+                    details={"erro": str(exc)},
+                    repairable=True,
+                )
                 write_validation_result(db, ingestion_row=row, result=result)
                 create_quarantine_item(
                     db,
@@ -1860,6 +1935,7 @@ def _process_fre_member(
 
             natural_key = build_natural_key(row_kind, dados)
             duplicate_result = classify_duplicate(
+                row_kind=row_kind,
                 natural_key=natural_key,
                 normalized_hash=gerar_hash_canonico(dados),
                 normalized_data=dados,
@@ -1949,6 +2025,8 @@ def _process_fre_member(
                 natural_key=natural_key,
             )
             if promote_enabled:
+                model, _, _ = _fre_promotion_spec(row_kind)
+                current_hashes_by_model.setdefault(model, set()).add(_preparar_dados_promocao(dados)["hash_origem"])
                 linhas_promovidas.append((row, dados))
             else:
                 contadores["inalterados"] += 1
@@ -1964,15 +2042,6 @@ def _process_fre_member(
                     codigo_cvm=dados.get("codigo_cvm"),
                 )
 
-            if contadores["lidas"] % _BATCH_COMMIT_LINHAS == 0:
-                update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
-                execucao.total_linhas_lidas = contadores["lidas"]
-                execucao.total_inseridos = contadores["inseridos"]
-                execucao.total_atualizados = contadores["atualizados"]
-                execucao.total_inalterados = contadores["inalterados"]
-                execucao.total_rejeitados = contadores["rejeitados"]
-                db.commit()
-
         if promote_enabled and linhas_promovidas:
             _promote_fre_chunk(
                 db,
@@ -1980,6 +2049,25 @@ def _process_fre_member(
                 linhas_promovidas=linhas_promovidas,
                 execucao_id=execucao.id,
                 contadores=contadores,
+            )
+        update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
+        execucao.total_linhas_lidas = contadores["lidas"]
+        execucao.total_inseridos = contadores["inseridos"]
+        execucao.total_atualizados = contadores["atualizados"]
+        execucao.total_inalterados = contadores["inalterados"]
+        execucao.total_rejeitados = contadores["rejeitados"]
+        db.commit()
+
+    if promote_enabled and reconcile_required:
+        for model, current_hashes in current_hashes_by_model.items():
+            contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconcile_promoted_rows(
+                db,
+                model=model,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem=member.member_name,
+                ano_origem=ano,
+                current_hashes=current_hashes,
             )
 
 
@@ -1995,6 +2083,7 @@ def sincronizar_fre(
     ensure_identity_graph_ready(db)
     if db.query(Companhia).count() == 0:
         raise ValueError("cadastro_companhias_nao_ingestado")
+    custom_downloader = downloader is not None
     downloader = downloader or (lambda url: _download(url, timeout=300))
     arquivo_zip = f"fre_cia_aberta_{ano}.zip"
     url = f"{settings.cvm_base_url}/CIA_ABERTA/DOC/FRE/DADOS/{arquivo_zip}"
@@ -2022,8 +2111,50 @@ def sincronizar_fre(
     db.refresh(run)
 
     try:
+        remote_probe = (
+            build_custom_remote_probe(source_url=url)
+            if custom_downloader
+            else probe_remote_source(db, run=run, tipo_fonte="fre", ano=ano, source_url=url)
+        )
+        update_run_state(run, phase="acquire", remote_probe=remote_probe)
+        if remote_probe.get("decision") == "unchanged" and not force_reimport:
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
+            execucao.finalizada_em = _agora()
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message=remote_probe.get("decision_reason"),
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
+            db.commit()
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+
         payload = downloader(url)
         hash_arquivo = hashlib.sha256(payload).hexdigest()
+        remote_probe = annotate_probe_with_sha_confirmation(
+            remote_probe,
+            current_sha256=hash_arquivo,
+            previous_sha256=hash_arquivo if buscar_execucao_hash_existente(
+                db,
+                tipo_fonte="fre",
+                ano=ano,
+                hash_arquivo=hash_arquivo,
+                execucao_atual_id=execucao.id,
+            )
+            is not None
+            else None,
+        )
         execucao.hash_arquivo = hash_arquivo
 
         anterior = buscar_execucao_hash_existente(
@@ -2034,11 +2165,27 @@ def sincronizar_fre(
             execucao_atual_id=execucao.id,
         )
         if anterior is not None and not force_reimport:
-            execucao.status = "skipped"
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
             execucao.finalizada_em = _agora()
-            update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message="download_sha_igual_referencia",
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "skipped"}
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
 
         row_kind_map, required_members, optional_members = map_fre_members(ano)
         ingestion_file = register_file(
@@ -2048,6 +2195,15 @@ def sincronizar_fre(
             source_filename=arquivo_zip,
             payload=payload,
             is_zip=True,
+        )
+        artifact_snapshot = upsert_artifact_snapshot(
+            db,
+            run=run,
+            source_url=url,
+            source_filename=arquivo_zip,
+            remote_probe=remote_probe,
+            ingestion_file=ingestion_file,
+            status="downloaded",
         )
         update_run_state(run, phase="stage")
         db.commit()
@@ -2068,6 +2224,7 @@ def sincronizar_fre(
             db,
             run=run,
             ingestion_file=ingestion_file,
+            artifact_snapshot=artifact_snapshot,
             spec=ZipIngestionSpec(
                 tipo_fonte="fre",
                 ano=ano,
@@ -2081,6 +2238,7 @@ def sincronizar_fre(
                     run=run,
                     ano=ano,
                     member=context.member,
+                    reconcile_required=context.reconcile_required,
                     promote_enabled=settings.ingestion_promote_enabled,
                     contadores=contadores,
                     seen_by_row_kind=seen_by_row_kind,
@@ -2094,6 +2252,7 @@ def sincronizar_fre(
         quality_summary = build_quality_summary(db, ingestion_run_id=run.id)
         quality_summary.update(member_summary)
         quality_summary["members_invalid_schema"] = contadores.get("members_invalid_schema", 0)
+        quality_summary["reconciled_deleted"] = contadores.get("reconciled_deleted", 0)
         status_execucao, mensagem_status = enforce_quality_gate(quality_summary=quality_summary)
         execucao.total_linhas_lidas = contadores["lidas"]
         execucao.total_inseridos = contadores["inseridos"]
@@ -2107,9 +2266,12 @@ def sincronizar_fre(
             status=status_execucao,
             phase="complete",
             quality_summary=quality_summary,
+            change_summary=member_summary.get("change_summary"),
+            remote_probe=remote_probe,
             message=mensagem_status,
             finished_at=_agora(),
         )
+        artifact_snapshot.status = status_execucao
         db.commit()
         return {
             "execucao_id": str(execucao.id),

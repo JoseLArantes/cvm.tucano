@@ -13,7 +13,19 @@ from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
 from app.models.ingestion import IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
+from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
+from app.services.ingestion.change_tracking import (
+    compare_member_with_previous,
+    finalize_member_change_summary,
+    previous_successful_members,
+    reconcile_promoted_rows,
+)
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
+from app.services.ingestion.lifecycle import (
+    build_custom_remote_probe,
+    capture_member_lifecycle_snapshot,
+    upsert_artifact_snapshot,
+)
 from app.services.ingestion.normalizers import (
     gerar_hash_canonico,
     normalizar_cnpj_opcional,
@@ -31,12 +43,15 @@ from app.services.ingestion.resolver import (
     persist_resolution_result,
     resolve_companhia,
 )
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
 from app.services.ingestion.staging import (
     create_run,
     iter_zip_csv_members,
     member_has_successful_match,
+    purge_member_success_rows,
     register_file,
+    safe_promote_chunk,
     stage_csv_payload,
     update_run_state,
 )
@@ -230,6 +245,25 @@ def _promote_cgvn_chunk(
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> None:
+    safe_promote_chunk(
+        db,
+        promote_func=_promote_cgvn_chunk_internal,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        registrar_quarentena_fn=_registrar_quarentena,
+        row_kind=row_kind,
+    )
+
+
+def _promote_cgvn_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
     if not linhas_promovidas:
         return
     model: type[Any]
@@ -252,21 +286,33 @@ def _promote_cgvn_chunk(
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
     existentes: list[Any] = []
     if chaves:
-        existentes = list(db.execute(select(model).where(_build_key_clause(model, campos_chave, chaves))).scalars())
+        for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+            existentes.extend(db.execute(select(model).where(_build_key_clause(model, campos_chave, batch))).scalars())
     existentes_por_chave = {tuple(getattr(item, campo) for campo in campos_chave): item for item in existentes}
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[dict[str, Any]] = []
+    chaves_no_lote: dict[tuple, dict[str, Any]] = {}
     for row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
+        existente_lote = chaves_no_lote.get(chave)
+        if existente_lote is not None:
+            for campo in campos_negocio:
+                if campo in dados and dados[campo] is not None and dados[campo] != existente_lote.get(campo):
+                    existente_lote[campo] = dados[campo]
+            existente_lote["arquivo_origem"] = dados["arquivo_origem"]
+            existente_lote["ano_origem"] = dados["ano_origem"]
+            existente_lote["linha_origem"] = dados["linha_origem"]
+            existente_lote["hash_origem"] = dados["hash_origem"]
+            contadores["atualizados"] += 1
+            continue
         existente = existentes_por_chave.get(chave)
         if existente is None:
+            chaves_no_lote[chave] = dados
             novo_id = uuid.uuid4()
             payload_insercao.append(
                 {"id": novo_id, **dados, "criado_em": agora, "sincronizado_em": agora, "alterado_em": agora}
             )
             contadores["inseridos"] += 1
-            row.promoted_entity = entidade
-            row.promoted_entity_id = novo_id
             continue
         alteracoes: dict[str, tuple[Any, Any]] = {}
         for campo in campos_negocio:
@@ -301,12 +347,12 @@ def _promote_cgvn_chunk(
                         "ano_origem": dados["ano_origem"],
                     }
                 )
-        row.promoted_entity = entidade
-        row.promoted_entity_id = existente.id
     if payload_insercao:
-        db.execute(insert(model), payload_insercao)
+        for batch in iter_parameter_batches(payload_insercao, parameter_width=mapping_parameter_width(payload_insercao)):
+            db.execute(insert(model), batch)
     if historicos:
-        db.execute(insert(HistoricoAlteracaoCampo), historicos)
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
 
 
 def _process_cgvn_rows(
@@ -326,25 +372,13 @@ def _process_cgvn_rows(
         seen_by_row_kind = {}
 
     for member, rows in staged_members:
+        current_hashes_by_model: dict[type[Any], set[str]] = {}
         schema_result = validate_member_header(rows[0].row_kind if rows else "desconhecido", member.header)
         update_member_schema_validation(member, result=schema_result)
         if schema_result.status == "invalid":
-            for row in rows:
-                contadores["lidas"] += 1
-                write_validation_result(db, ingestion_row=row, result=schema_result)
-                create_quarantine_item(
-                    db, ingestion_row=row, result=schema_result, execucao_sincronizacao_id=execucao.id
-                )
-                _registrar_quarentena(
-                    db,
-                    execucao_id=execucao.id,
-                    arquivo_origem=row.arquivo_origem,
-                    ano_origem=row.ano_origem or ano,
-                    linha_origem=row.linha_origem,
-                    motivo=schema_result.reason_code or "schema_inesperado",
-                    dados_originais=row.raw_data,
-                )
-                contadores["rejeitados"] += 1
+            contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
+            contadores["lidas"] += member.row_count
+            contadores["rejeitados"] += member.row_count
             continue
 
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
@@ -358,7 +392,11 @@ def _process_cgvn_rows(
                     linha=row.raw_data,
                 )
             except Exception as exc:
-                result = invalid_result("normalizacao_invalida", details={"erro": str(exc)})
+                result = invalid_result(
+                    f"normalizacao_invalida: {exc}",
+                    details={"erro": str(exc)},
+                    repairable=True,
+                )
                 write_validation_result(db, ingestion_row=row, result=result)
                 create_quarantine_item(
                     db,
@@ -381,6 +419,7 @@ def _process_cgvn_rows(
 
             natural_key = build_natural_key(row_kind, dados)
             duplicate_result = classify_duplicate(
+                row_kind=row_kind,
                 natural_key=natural_key,
                 normalized_hash=gerar_hash_canonico(dados),
                 normalized_data=dados,
@@ -446,6 +485,8 @@ def _process_cgvn_rows(
                 db, ingestion_row=row, result=duplicate_result, normalized_data=dados, natural_key=natural_key
             )
             if promote_enabled and row_kind in _PROMOTED_ROW_KINDS:
+                model = CgvnDocumento if row_kind == "cgvn_documento" else CgvnPratica
+                current_hashes_by_model.setdefault(model, set()).add(_prepare_promocao(dados)["hash_origem"])
                 linhas_promovidas.append((row, dados))
                 if len(linhas_promovidas) >= _PROMOTE_CHUNK_SIZE:
                     _promote_cgvn_chunk(
@@ -477,6 +518,16 @@ def _process_cgvn_rows(
                 execucao_id=execucao.id,
                 contadores=contadores,
             )
+        for model, current_hashes in current_hashes_by_model.items():
+            contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconcile_promoted_rows(
+                db,
+                model=model,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem=member.member_name,
+                ano_origem=ano,
+                current_hashes=current_hashes,
+            )
 
     update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
     return contadores
@@ -491,6 +542,7 @@ def sincronizar_cgvn(
 ) -> dict[str, Any]:
     settings = get_settings()
     limpar_caches_resolver()
+    custom_downloader = downloader is not None
     downloader = downloader or (lambda url: _download(url, timeout=300))
     arquivo_zip = f"cgvn_cia_aberta_{ano}.zip"
     url = f"{settings.cvm_base_url}/CIA_ABERTA/DOC/CGVN/DADOS/{arquivo_zip}"
@@ -513,8 +565,50 @@ def sincronizar_cgvn(
     db.refresh(run)
 
     try:
+        remote_probe = (
+            build_custom_remote_probe(source_url=url)
+            if custom_downloader
+            else probe_remote_source(db, run=run, tipo_fonte="cgvn", ano=ano, source_url=url)
+        )
+        update_run_state(run, phase="acquire", remote_probe=remote_probe)
+        if remote_probe.get("decision") == "unchanged" and not force_reimport:
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
+            execucao.finalizada_em = _agora()
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message=remote_probe.get("decision_reason"),
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
+            db.commit()
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+
         payload = downloader(url)
         hash_arquivo = hashlib.sha256(payload).hexdigest()
+        remote_probe = annotate_probe_with_sha_confirmation(
+            remote_probe,
+            current_sha256=hash_arquivo,
+            previous_sha256=hash_arquivo if buscar_execucao_hash_existente(
+                db,
+                tipo_fonte="cgvn",
+                ano=ano,
+                hash_arquivo=hash_arquivo,
+                execucao_atual_id=execucao.id,
+            )
+            is not None
+            else None,
+        )
         execucao.hash_arquivo = hash_arquivo
 
         anterior = buscar_execucao_hash_existente(
@@ -525,13 +619,29 @@ def sincronizar_cgvn(
             execucao_atual_id=execucao.id,
         )
         if anterior is not None and not force_reimport:
-            execucao.status = "skipped"
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
             execucao.finalizada_em = _agora()
-            update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message="download_sha_igual_referencia",
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "skipped"}
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
 
-        row_kind_map, _, required_members, _ = map_cgvn_members(ano)
+        row_kind_map, _, required_members, optional_members = map_cgvn_members(ano)
         staged_names = {member_name for member_name, _ in iter_zip_csv_members(payload)}
         faltando = sorted(required_members - staged_names)
         if faltando:
@@ -543,6 +653,15 @@ def sincronizar_cgvn(
         ingestion_file = register_file(
             db, ingestion_run=run, source_url=url, source_filename=arquivo_zip, payload=payload, is_zip=True
         )
+        artifact_snapshot = upsert_artifact_snapshot(
+            db,
+            run=run,
+            source_url=url,
+            source_filename=arquivo_zip,
+            remote_probe=remote_probe,
+            ingestion_file=ingestion_file,
+            status="downloaded",
+        )
         update_run_state(run, phase="stage")
         db.commit()
         db.refresh(run)
@@ -551,6 +670,19 @@ def sincronizar_cgvn(
         contadores = {"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
         membros_inalterados = 0
         seen_by_row_kind: dict[str, dict[str, dict[str, Any]]] = {}
+        staged_rows_purged = 0
+        previous_members = previous_successful_members(
+            db,
+            tipo_fonte="cgvn",
+            ano=ano,
+            current_run_id=run.id,
+        )
+        change_summary = finalize_member_change_summary(
+            current_member_names=[],
+            previous_members=previous_members,
+            required_members=required_members,
+            optional_members=optional_members,
+        )
         member_order = {
             dataset.render_member_name(ano=ano): indice
             for indice, dataset in enumerate(listar_datasets("cgvn"), start=1)
@@ -568,12 +700,31 @@ def sincronizar_cgvn(
                 current_run_id=run.id,
             ):
                 membros_inalterados += 1
+                lifecycle = capture_member_lifecycle_snapshot(
+                    db,
+                    artifact_snapshot=artifact_snapshot,
+                    tipo_fonte="cgvn",
+                    ano=ano,
+                    current_run_id=run.id,
+                    member_name=member_name,
+                    payload=member_payload,
+                    row_kind=row_kind_map.get(member_name, "desconhecido"),
+                    required_member=member_name in required_members,
+                    schema_status="reused",
+                    schema_message="member_sha256_reused",
+                    lifecycle_status="member_skipped",
+                )
+                if lifecycle["delivery_delta"] is not None:
+                    delivery_changed = list(change_summary.get("delivery_index_changed", []))
+                    delivery_changed.append({"member_name": member_name, **lifecycle["delivery_delta"]})
+                    change_summary["delivery_index_changed"] = delivery_changed
                 update_run_state(
                     run,
                     phase="stage",
+                    change_summary=change_summary,
                     quality_summary=build_contadores_quality_summary(
                         contadores,
-                        extras={"members_skipped": membros_inalterados},
+                        extras={"members_skipped": membros_inalterados, "staged_rows_purged": staged_rows_purged},
                     ),
                 )
                 db.commit()
@@ -590,7 +741,7 @@ def sincronizar_cgvn(
                 ano_origem=ano,
                 row_kind=row_kind_map.get(member_name, "desconhecido"),
             )
-            update_run_state(run, phase="stage")
+            update_run_state(run, phase="stage", change_summary=change_summary)
             db.commit()
             db.refresh(run)
             db.refresh(execucao)
@@ -604,12 +755,47 @@ def sincronizar_cgvn(
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
             )
+            member = db.get(type(member), member.id) or member
+            lifecycle = capture_member_lifecycle_snapshot(
+                db,
+                artifact_snapshot=artifact_snapshot,
+                tipo_fonte="cgvn",
+                ano=ano,
+                current_run_id=run.id,
+                member_name=member_name,
+                payload=member_payload,
+                row_kind=row_kind_map.get(member_name, "desconhecido"),
+                required_member=member_name in required_members,
+                schema_status=member.schema_status,
+                schema_message=member.schema_message,
+                lifecycle_status="processed",
+                ingestion_file_member_id=member.id,
+            )
+            change_summary = compare_member_with_previous(
+                member=member,
+                previous_members=previous_members,
+                change_summary=change_summary,
+            )
+            if lifecycle["delivery_delta"] is not None:
+                delivery_changed = list(change_summary.get("delivery_index_changed", []))
+                delivery_changed.append({"member_name": member_name, **lifecycle["delivery_delta"]})
+                change_summary["delivery_index_changed"] = delivery_changed
+            staged_rows_purged += purge_member_success_rows(db, ingestion_file_member_id=member.id)
             db.commit()
             db.refresh(run)
             db.refresh(execucao)
 
+        change_summary = finalize_member_change_summary(
+            current_member_names=staged_names,
+            previous_members=previous_members,
+            required_members=required_members,
+            optional_members=optional_members,
+            change_summary=change_summary,
+        )
         quality_summary = build_quality_summary(db, ingestion_run_id=run.id)
         quality_summary["members_skipped"] = membros_inalterados
+        quality_summary["staged_rows_purged"] = staged_rows_purged
+        quality_summary["reconciled_deleted"] = contadores.get("reconciled_deleted", 0)
         status_execucao, mensagem_status = enforce_quality_gate(quality_summary=quality_summary)
         execucao.total_linhas_lidas = contadores["lidas"]
         execucao.total_inseridos = contadores["inseridos"]
@@ -623,9 +809,12 @@ def sincronizar_cgvn(
             status=status_execucao,
             phase="complete",
             quality_summary=quality_summary,
+            change_summary=change_summary,
+            remote_probe=remote_probe,
             message=mensagem_status,
             finished_at=_agora(),
         )
+        artifact_snapshot.status = status_execucao
         db.commit()
         return {
             "execucao_id": str(execucao.id),

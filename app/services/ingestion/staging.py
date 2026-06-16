@@ -108,6 +108,8 @@ def update_run_state(
     phase: str | None = None,
     message: str | None = None,
     quality_summary: dict[str, Any] | None = None,
+    remote_probe: dict[str, Any] | None = None,
+    change_summary: dict[str, Any] | None = None,
     finished_at: datetime | None = None,
 ) -> IngestionRun:
     if status is not None:
@@ -118,6 +120,10 @@ def update_run_state(
         run.message = message
     if quality_summary is not None:
         run.quality_summary = quality_summary
+    if remote_probe is not None:
+        run.remote_probe = remote_probe
+    if change_summary is not None:
+        run.change_summary = change_summary
     if finished_at is not None:
         run.finished_at = finished_at
     return run
@@ -150,13 +156,12 @@ def register_file(
         existing_run = db.get(IngestionRun, existing.ingestion_run_id)
         if existing_run is not None and existing_run.status not in set(STATUSS_REAPROVEITAVEIS_EXECUCAO):
             member_ids_stmt = select(IngestionFileMember.id).where(IngestionFileMember.ingestion_file_id == existing.id)
-            db.execute(delete(QuarantineItem).where(QuarantineItem.ingestion_run_id == existing_run.id))
-            
             row_ids_stmt = select(IngestionRow.id).where(
                 (IngestionRow.ingestion_run_id == existing_run.id) |
                 (IngestionRow.ingestion_file_member_id.in_(member_ids_stmt))
             )
-            
+            db.execute(delete(QuarantineItem).where(QuarantineItem.ingestion_row_id.in_(row_ids_stmt)))
+            db.execute(delete(QuarantineItem).where(QuarantineItem.ingestion_run_id == existing_run.id))
             db.execute(
                 delete(IngestionRowEvent).where(
                     IngestionRowEvent.ingestion_row_id.in_(row_ids_stmt)
@@ -251,11 +256,19 @@ def register_member(
 
 
 def save_member_payload(db: Session, execution_id: Any, payload: bytes) -> None:
-    member_payload = IngestionFileMemberPayload(
-        id=execution_id,
-        payload=payload
+    member_payload = db.scalar(
+        select(IngestionFileMemberPayload).where(
+            IngestionFileMemberPayload.id == execution_id
+        )
     )
-    db.add(member_payload)
+    if member_payload is None:
+        member_payload = IngestionFileMemberPayload(
+            id=execution_id,
+            payload=payload
+        )
+        db.add(member_payload)
+    else:
+        member_payload.payload = payload
     db.flush()
 
 
@@ -465,6 +478,30 @@ def register_row_event(
     )
     db.add(event)
     return event
+
+
+def purge_member_success_rows(
+    db: Session,
+    *,
+    ingestion_file_member_id: Any,
+) -> int:
+    db.flush()
+    row_ids_stmt = (
+        select(IngestionRow.id)
+        .where(
+            IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
+            ~IngestionRow.id.in_(select(QuarantineItem.ingestion_row_id)),
+        )
+    )
+    db.execute(delete(IngestionRowEvent).where(IngestionRowEvent.ingestion_row_id.in_(row_ids_stmt)))
+    deleted_rows = db.execute(
+        delete(IngestionRow).where(
+            IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
+            ~IngestionRow.id.in_(select(QuarantineItem.ingestion_row_id)),
+        )
+    )
+    db.flush()
+    return int(deleted_rows.rowcount or 0)
 
 
 def register_attempt(
@@ -808,3 +845,79 @@ def stage_csv_payload_streaming_from_disk(
     member.row_count = total_rows
     _log_file_analysis(member)
     return member
+
+
+def safe_promote_chunk(
+    db: Session,
+    *,
+    promote_func: Any,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+    registrar_quarentena_fn: Any,
+    **kwargs: Any,
+) -> None:
+    nested = None
+    try:
+        nested = db.begin_nested()
+        chunk_contadores = {"inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
+        promote_func(
+            db,
+            linhas_promovidas=linhas_promovidas,
+            execucao_id=execucao_id,
+            contadores=chunk_contadores,
+            **kwargs,
+        )
+        nested.commit()
+        for k, v in chunk_contadores.items():
+            contadores[k] = contadores.get(k, 0) + v
+    except Exception as exc:
+        if nested is not None:
+            nested.rollback()
+        
+        from app.services.ingestion.quarantine import create_quarantine_item
+        from app.services.ingestion.validation import invalid_result, write_validation_result
+        
+        for row, dados in linhas_promovidas:
+            row_nested = None
+            try:
+                row_nested = db.begin_nested()
+                row_contadores = {"inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0}
+                promote_func(
+                    db,
+                    linhas_promovidas=[(row, dados)],
+                    execucao_id=execucao_id,
+                    contadores=row_contadores,
+                    **kwargs,
+                )
+                row_nested.commit()
+                for k, v in row_contadores.items():
+                    contadores[k] = contadores.get(k, 0) + v
+            except Exception as row_exc:
+                if row_nested is not None:
+                    row_nested.rollback()
+                
+                result = invalid_result(
+                    "normalizacao_invalida",
+                    details={"erro": f"Erro de banco durante promocao: {row_exc}"},
+                    repairable=False,
+                )
+                write_validation_result(db, ingestion_row=row, result=result)
+                create_quarantine_item(
+                    db,
+                    ingestion_row=row,
+                    result=result,
+                    execucao_sincronizacao_id=execucao_id,
+                    legacy_reason=f"erro_banco: {row_exc}",
+                )
+                registrar_quarentena_fn(
+                    db,
+                    execucao_id=execucao_id,
+                    arquivo_origem=row.arquivo_origem,
+                    ano_origem=row.ano_origem,
+                    linha_origem=row.linha_origem,
+                    motivo=f"normalizacao_invalida: erro_banco: {row_exc}",
+                    dados_originais=row.raw_data,
+                )
+                contadores["rejeitados"] = contadores.get("rejeitados", 0) + 1
+

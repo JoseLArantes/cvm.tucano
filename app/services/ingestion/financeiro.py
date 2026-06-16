@@ -15,9 +15,12 @@ from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, Doc
 from app.models.ingestion import IngestionFileMember, IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.financeiro_mapas import arquivos_demonstracao
+from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
+from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.dependencies import ensure_identity_graph_ready
 from app.services.ingestion.engine import ZipIngestionSpec, process_zip_members
+from app.services.ingestion.lifecycle import build_custom_remote_probe, upsert_artifact_snapshot
 from app.services.ingestion.normalizers import gerar_hash_canonico
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.quarantine import create_quarantine_item
@@ -30,6 +33,7 @@ from app.services.ingestion.resolver import (
     register_document_header,
     resolve_companhia,
 )
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
 from app.services.ingestion.staging import (
     create_run,
@@ -37,6 +41,7 @@ from app.services.ingestion.staging import (
     iter_zip_csv_members,
     register_file,
     update_run_state,
+    safe_promote_chunk,
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary_snapshot
 from app.services.ingestion.validation import (
@@ -189,7 +194,7 @@ def _build_incremental_quality_summary(
         ],
         provisional_company_count=provisional_count,
         quarantine_total=rejeitados,
-        extras=extras,
+        extras={"reconciled_deleted": contadores.get("reconciled_deleted", 0), **(extras or {})},
     )
 
 
@@ -205,7 +210,7 @@ def _promote_with_tracking(
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> None:
-    entidade_db = _upsert_registro(
+    _upsert_registro(
         db,
         model=model,
         entidade=entidade,
@@ -215,8 +220,6 @@ def _promote_with_tracking(
         execucao_id=execucao_id,
         contadores=contadores,
     )
-    row.promoted_entity = entidade
-    row.promoted_entity_id = None if entidade_db is None else entidade_db.id
 
 
 def _financeiro_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str, ...], set[str]]:
@@ -240,8 +243,10 @@ def _financeiro_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str
                 "versao",
                 "grupo_demonstracao",
                 "ordem_exercicio",
+                "data_inicio_exercicio",
                 "data_fim_exercicio",
                 "codigo_conta",
+                "coluna_df",
             ),
             _CAMPOS_NEGOCIO_DEMONSTRACOES,
         )
@@ -296,6 +301,25 @@ def _promote_financeiro_chunk(
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> None:
+    safe_promote_chunk(
+        db,
+        promote_func=_promote_financeiro_chunk_internal,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        registrar_quarentena_fn=_registrar_quarentena,
+        row_kind=row_kind,
+    )
+
+
+def _promote_financeiro_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
     if not linhas_promovidas:
         return
 
@@ -305,19 +329,29 @@ def _promote_financeiro_chunk(
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
     existentes = []
     if chaves:
-        existentes = list(
-            db.execute(select(model).where(_build_key_clause(model, campos_chave, chaves))).scalars()
-        )
+        for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+            existentes.extend(db.execute(select(model).where(_build_key_clause(model, campos_chave, batch))).scalars())
     existentes_por_chave = {tuple(getattr(item, campo) for campo in campos_chave): item for item in existentes}
 
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[Any] = []
-    entidades_por_linha: dict[tuple[Any, ...], Any] = {}
-
+    chaves_no_lote: dict[tuple, dict[str, Any]] = {}
     for row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
+        existente_lote = chaves_no_lote.get(chave)
+        if existente_lote is not None:
+            for campo in campos_negocio:
+                if campo in dados and dados[campo] is not None and dados[campo] != existente_lote.get(campo):
+                    existente_lote[campo] = dados[campo]
+            existente_lote["arquivo_origem"] = dados["arquivo_origem"]
+            existente_lote["ano_origem"] = dados["ano_origem"]
+            existente_lote["linha_origem"] = dados["linha_origem"]
+            existente_lote["hash_origem"] = dados["hash_origem"]
+            contadores["atualizados"] += 1
+            continue
         existente = existentes_por_chave.get(chave)
         if existente is None:
+            chaves_no_lote[chave] = dados
             novo_id = uuid.uuid4()
             payload_insercao.append(
                 {
@@ -329,8 +363,6 @@ def _promote_financeiro_chunk(
                 }
             )
             contadores["inseridos"] += 1
-            row.promoted_entity = entidade
-            row.promoted_entity_id = novo_id
             continue
 
         alteracoes: dict[str, tuple[Any, Any]] = {}
@@ -368,16 +400,15 @@ def _promote_financeiro_chunk(
                         "ano_origem": dados["ano_origem"],
                     }
                 )
-        row.promoted_entity = entidade
-        row.promoted_entity_id = existente.id
-        entidades_por_linha[chave] = existente
 
     if payload_insercao:
-        db.execute(insert(model), payload_insercao)
+        for batch in iter_parameter_batches(payload_insercao, parameter_width=mapping_parameter_width(payload_insercao)):
+            db.execute(insert(model), batch)
     if historicos:
         from app.models.sincronizacao import HistoricoAlteracaoCampo
 
-        db.execute(insert(HistoricoAlteracaoCampo), historicos)
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
 
 
 def _promote_financeiro_row(
@@ -497,25 +528,9 @@ def _process_financeiro_rows(
         schema_result = validate_member_header(rows[0].row_kind if rows else "desconhecido", member.header)
         update_member_schema_validation(member, result=schema_result)
         if schema_result.status == "invalid":
-            for row in rows:
-                contadores["lidas"] += 1
-                write_validation_result(db, ingestion_row=row, result=schema_result)
-                create_quarantine_item(
-                    db,
-                    ingestion_row=row,
-                    result=schema_result,
-                    execucao_sincronizacao_id=execucao.id,
-                )
-                _registrar_quarentena(
-                    db,
-                    execucao_id=execucao.id,
-                    arquivo_origem=row.arquivo_origem,
-                    ano_origem=row.ano_origem or ano,
-                    linha_origem=row.linha_origem,
-                    motivo=schema_result.reason_code or "schema_inesperado",
-                    dados_originais=row.raw_data,
-                )
-                contadores["rejeitados"] += 1
+            contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
+            contadores["lidas"] += member.row_count
+            contadores["rejeitados"] += member.row_count
             continue
 
         for row in rows:
@@ -531,9 +546,9 @@ def _process_financeiro_rows(
                 )
             except Exception as exc:
                 result = invalid_result(
-                    "normalizacao_invalida",
+                    f"normalizacao_invalida: {exc}",
                     details={"erro": str(exc)},
-                    repairable=False,
+                    repairable=True,
                 )
                 write_validation_result(db, ingestion_row=row, result=result)
                 create_quarantine_item(
@@ -557,6 +572,7 @@ def _process_financeiro_rows(
 
             natural_key = build_natural_key(row_kind, dados)
             duplicate_result = classify_duplicate(
+                row_kind=row_kind,
                 natural_key=natural_key,
                 normalized_hash=gerar_hash_canonico(dados),
                 normalized_data=dados,
@@ -689,6 +705,7 @@ def _process_financeiro_member(
     execucao: ExecucaoSincronizacao,
     run: IngestionRun,
     member: IngestionFileMember,
+    reconcile_required: bool,
     prefixo: str,
     tipo_formulario: str,
     ano: int,
@@ -719,41 +736,21 @@ def _process_financeiro_member(
 
     if schema_result.status == "invalid":
         contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
-        for rows in iter_staged_member_chunks(db, member_id=member_id, chunk_size=chunk_size):
-            for row in rows:
-                contadores["lidas"] += 1
-                write_validation_result(db, ingestion_row=row, result=schema_result)
-                create_quarantine_item(
-                    db,
-                    ingestion_row=row,
-                    result=schema_result,
-                    execucao_sincronizacao_id=execucao_id,
-                )
-                _registrar_quarentena(
-                    db,
-                    execucao_id=execucao_id,
-                    arquivo_origem=row.arquivo_origem,
-                    ano_origem=row.ano_origem or ano,
-                    linha_origem=row.linha_origem,
-                    motivo=schema_result.reason_code or "schema_inesperado",
-                    dados_originais=row.raw_data,
-                )
-                contadores["rejeitados"] += 1
-                assert isinstance(reason_counts, Counter)
-                assert isinstance(top_quarantine_files, Counter)
-                reason_counts[schema_result.reason_code or "schema_inesperado"] += 1
-                top_quarantine_files[row.arquivo_origem] += 1
-            execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
-            run_atual = db.get(IngestionRun, run_id)
-            if execucao_atual is not None and run_atual is not None:
-                update_run_state(
-                    run_atual,
-                    phase="promote",
-                    quality_summary=_build_incremental_quality_summary(contadores, quality_counters),
-                )
-                _atualizar_execucao(execucao_atual, contadores)
-            db.commit()
-            db.expunge_all()
+        contadores["lidas"] += member.row_count
+        contadores["rejeitados"] += member.row_count
+        assert isinstance(reason_counts, Counter)
+        reason_counts[schema_result.reason_code or "schema_inesperado"] += member.row_count
+        execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
+        run_atual = db.get(IngestionRun, run_id)
+        if execucao_atual is not None and run_atual is not None:
+            update_run_state(
+                run_atual,
+                phase="promote",
+                quality_summary=_build_incremental_quality_summary(contadores, quality_counters),
+            )
+            _atualizar_execucao(execucao_atual, contadores)
+        db.commit()
+        db.expunge_all()
         execucao_recuperada = db.get(ExecucaoSincronizacao, execucao_id)
         run_recuperada = db.get(IngestionRun, run_id)
         member_recuperado = db.get(IngestionFileMember, member_id)
@@ -763,6 +760,8 @@ def _process_financeiro_member(
     execucao_final: ExecucaoSincronizacao | None = None
     run_final: IngestionRun | None = None
     member_final: IngestionFileMember | None = None
+    reconciled_deleted = 0
+    current_hashes_by_model: dict[type[Any], set[str]] = {}
     for rows in iter_staged_member_chunks(db, member_id=member_id, chunk_size=chunk_size):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
@@ -778,9 +777,9 @@ def _process_financeiro_member(
                 )
             except Exception as exc:
                 result = invalid_result(
-                    "normalizacao_invalida",
+                    f"normalizacao_invalida: {exc}",
                     details={"erro": str(exc)},
-                    repairable=False,
+                    repairable=True,
                 )
                 write_validation_result(db, ingestion_row=row, result=result)
                 create_quarantine_item(
@@ -808,6 +807,7 @@ def _process_financeiro_member(
 
             natural_key = build_natural_key(row_kind, dados)
             duplicate_result = classify_duplicate(
+                row_kind=row_kind,
                 natural_key=natural_key,
                 normalized_hash=gerar_hash_canonico(dados),
                 normalized_data=dados,
@@ -915,6 +915,8 @@ def _process_financeiro_member(
                 natural_key=natural_key,
             )
             if promote_enabled:
+                model, _, _, _ = _financeiro_promotion_spec(row_kind)
+                current_hashes_by_model.setdefault(model, set()).add(_preparar_dados_promocao(dados)["hash_origem"])
                 linhas_promovidas.append((row, dados))
             else:
                 contadores["inalterados"] += 1
@@ -940,15 +942,28 @@ def _process_financeiro_member(
                 contadores=contadores,
             )
 
-        execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
-        run_atual = db.get(IngestionRun, run_id)
-        if execucao_atual is not None and run_atual is not None:
-            update_run_state(
-                run_atual,
-                phase="promote",
-                quality_summary=_build_incremental_quality_summary(contadores, quality_counters),
+    if promote_enabled and reconcile_required:
+        for model, current_hashes in current_hashes_by_model.items():
+            reconciled_deleted += reconcile_promoted_rows(
+                db,
+                model=model,
+                ingestion_run_id=run_id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem=member.arquivo_origem if hasattr(member, "arquivo_origem") else member.member_name,
+                ano_origem=ano,
+                current_hashes=current_hashes,
             )
-            _atualizar_execucao(execucao_atual, contadores)
+        contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
+
+    execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
+    run_atual = db.get(IngestionRun, run_id)
+    if execucao_atual is not None and run_atual is not None:
+        update_run_state(
+            run_atual,
+            phase="promote",
+            quality_summary=_build_incremental_quality_summary(contadores, quality_counters),
+        )
+        _atualizar_execucao(execucao_atual, contadores)
         db.commit()
         db.expunge_all()
         execucao_final = db.get(ExecucaoSincronizacao, execucao_id)
@@ -979,6 +994,7 @@ def _process_financeiro_member_callback(
     db: Session,
     *,
     context_member: IngestionFileMember,
+    reconcile_required: bool,
     execucao: ExecucaoSincronizacao,
     run: IngestionRun,
     prefixo: str,
@@ -996,6 +1012,7 @@ def _process_financeiro_member_callback(
         execucao=execucao,
         run=run,
         member=context_member,
+        reconcile_required=reconcile_required,
         prefixo=prefixo,
         tipo_formulario=tipo_formulario,
         ano=ano,
@@ -1023,6 +1040,7 @@ def _sincronizar_financeiro(
     ensure_identity_graph_ready(db)
     if db.query(Companhia).count() == 0:
         raise ValueError("cadastro_companhias_nao_ingestado")
+    custom_downloader = downloader is not None
     downloader = downloader or (lambda url: _download(url, timeout=300))
     arquivo_zip = f"{prefixo}_cia_aberta_{ano}.zip"
     url = f"{settings.cvm_base_url}/CIA_ABERTA/DOC/{tipo_formulario}/DADOS/{arquivo_zip}"
@@ -1050,8 +1068,56 @@ def _sincronizar_financeiro(
     db.refresh(run)
 
     try:
+        remote_probe = (
+            build_custom_remote_probe(source_url=url)
+            if custom_downloader
+            else probe_remote_source(
+                db,
+                run=run,
+                tipo_fonte=prefixo,
+                ano=ano,
+                source_url=url,
+            )
+        )
+        update_run_state(run, phase="acquire", remote_probe=remote_probe)
+        if remote_probe.get("decision") == "unchanged" and not force_reimport:
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
+            execucao.finalizada_em = _agora()
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message=remote_probe.get("decision_reason"),
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
+            db.commit()
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+
         payload = downloader(url)
         hash_arquivo = hashlib.sha256(payload).hexdigest()
+        remote_probe = annotate_probe_with_sha_confirmation(
+            remote_probe,
+            current_sha256=hash_arquivo,
+            previous_sha256=hash_arquivo if buscar_execucao_hash_existente(
+                db,
+                tipo_fonte=prefixo,
+                ano=ano,
+                hash_arquivo=hash_arquivo,
+                execucao_atual_id=execucao.id,
+            )
+            is not None
+            else None,
+        )
         execucao.hash_arquivo = hash_arquivo
 
         anterior = buscar_execucao_hash_existente(
@@ -1062,11 +1128,27 @@ def _sincronizar_financeiro(
             execucao_atual_id=execucao.id,
         )
         if anterior is not None and not force_reimport:
-            execucao.status = "skipped"
+            upsert_artifact_snapshot(
+                db,
+                run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                remote_probe=remote_probe,
+                ingestion_file=None,
+                status="sem_alteracao",
+            )
+            execucao.status = "sem_alteracao"
             execucao.finalizada_em = _agora()
-            update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
+            update_run_state(
+                run,
+                status="sem_alteracao",
+                phase="complete",
+                message="download_sha_igual_referencia",
+                remote_probe=remote_probe,
+                finished_at=_agora(),
+            )
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "skipped"}
+            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
 
         member_map, required_members = map_financeiro_members(prefixo, ano)
         ingestion_file = register_file(
@@ -1076,6 +1158,15 @@ def _sincronizar_financeiro(
             source_filename=arquivo_zip,
             payload=payload,
             is_zip=True,
+        )
+        artifact_snapshot = upsert_artifact_snapshot(
+            db,
+            run=run,
+            source_url=url,
+            source_filename=arquivo_zip,
+            remote_probe=remote_probe,
+            ingestion_file=ingestion_file,
+            status="downloaded",
         )
         update_run_state(run, phase="stage")
         db.commit()
@@ -1095,6 +1186,7 @@ def _sincronizar_financeiro(
             db,
             run=run,
             ingestion_file=ingestion_file,
+            artifact_snapshot=artifact_snapshot,
             spec=ZipIngestionSpec(
                 tipo_fonte=prefixo,
                 ano=ano,
@@ -1105,6 +1197,7 @@ def _sincronizar_financeiro(
                 process_member=lambda db_session, context: _process_financeiro_member_callback(
                     db_session,
                     context_member=context.member,
+                    reconcile_required=context.reconcile_required,
                     execucao=execucao,
                     run=run,
                     prefixo=prefixo,
@@ -1140,9 +1233,12 @@ def _sincronizar_financeiro(
             status=status_execucao,
             phase="complete",
             quality_summary=quality_summary,
+            change_summary=member_summary.get("change_summary"),
+            remote_probe=remote_probe,
             message=mensagem_status,
             finished_at=_agora(),
         )
+        artifact_snapshot.status = status_execucao
         db.commit()
         return {
             "execucao_id": str(execucao.id),

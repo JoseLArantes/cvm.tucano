@@ -10,12 +10,26 @@ from app.models.ingestion import IngestionAttempt, IngestionRow, IngestionRun, Q
 
 
 def build_quality_summary(db: Session, *, ingestion_run_id: Any) -> dict[str, Any]:
+    run = db.get(IngestionRun, ingestion_run_id)
+    attempts = list(
+        db.execute(select(IngestionAttempt).where(IngestionAttempt.ingestion_run_id == ingestion_run_id)).scalars()
+    )
+    if run is not None and run.quality_summary:
+        summary = dict(run.quality_summary)
+        attempts_payload = summary.get("attempts", {})
+        summary["attempts"] = {
+            "total": len(attempts),
+            "by_status": dict(Counter(attempt.status for attempt in attempts)),
+            "next_retry_at": max(
+                (attempt.next_retry_at.isoformat() for attempt in attempts if attempt.next_retry_at is not None),
+                default=attempts_payload.get("next_retry_at"),
+            ),
+        }
+        return summary
+
     rows = list(db.execute(select(IngestionRow).where(IngestionRow.ingestion_run_id == ingestion_run_id)).scalars())
     quarantines = list(
         db.execute(select(QuarantineItem).where(QuarantineItem.ingestion_run_id == ingestion_run_id)).scalars()
-    )
-    attempts = list(
-        db.execute(select(IngestionAttempt).where(IngestionAttempt.ingestion_run_id == ingestion_run_id)).scalars()
     )
 
     row_status_counts = Counter(row.validation_status for row in rows)
@@ -81,9 +95,10 @@ def build_contadores_quality_summary(
 ) -> dict[str, Any]:
     validos = contadores.get("inseridos", 0) + contadores.get("atualizados", 0) + contadores.get("inalterados", 0)
     rejeitados = contadores.get("rejeitados", 0)
+    quarantine_total = contadores.get("quarantine_total", rejeitados)
     return build_quality_summary_snapshot(
         row_status_counts={"valid": validos, "invalid": rejeitados},
-        quarantine_total=rejeitados,
+        quarantine_total=quarantine_total,
         extras=extras,
     )
 

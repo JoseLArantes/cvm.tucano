@@ -113,7 +113,7 @@ def _seed_fre(db: Session, companhia_id: UUID) -> None:
             data_fim_contratacao=None,
             data_inicio_prestacao_servico=date(2020, 1, 1),
             servico_contratado="SERVICO",
-            remuneracao_auditor=Decimal("1000"),
+            remuneracao_auditor="1000",
             justificativa_substituicao=None,
             razao_apresentada=None,
             arquivo_origem="fre_cia_aberta_auditor_2025.csv",

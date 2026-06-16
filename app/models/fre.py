@@ -88,13 +88,13 @@ class FreAuditor(Base):
     auditor: Mapped[str | None] = mapped_column(Text)
     cpf_auditor: Mapped[str | None] = mapped_column(String(20))
     cnpj_auditor: Mapped[str | None] = mapped_column(String(14))
-    codigo_cvm_auditor: Mapped[int | None] = mapped_column(Integer)
+    codigo_cvm_auditor: Mapped[str | None] = mapped_column(String(20))
     tipo_origem_auditor: Mapped[str | None] = mapped_column(Text)
     data_inicio_contratacao: Mapped[date | None] = mapped_column(Date)
     data_fim_contratacao: Mapped[date | None] = mapped_column(Date)
     data_inicio_prestacao_servico: Mapped[date | None] = mapped_column(Date)
     servico_contratado: Mapped[str | None] = mapped_column(Text)
-    remuneracao_auditor: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    remuneracao_auditor: Mapped[str | None] = mapped_column(Text)
     justificativa_substituicao: Mapped[str | None] = mapped_column(Text)
     razao_apresentada: Mapped[str | None] = mapped_column(Text)
 
@@ -134,7 +134,7 @@ class FreCapitalSocial(Base):
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     tipo_capital: Mapped[str | None] = mapped_column(Text)
     data_autorizacao_aprovacao: Mapped[date | None] = mapped_column(Date)
-    valor_capital: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_capital: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     prazo_integralizacao: Mapped[str | None] = mapped_column(Text)
     quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
@@ -235,25 +235,25 @@ class FreRemuneracaoTotalOrgao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     data_inicio_exercicio_social: Mapped[date | None] = mapped_column(Date)
     data_fim_exercicio_social: Mapped[date | None] = mapped_column(Date)
-    total_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    total_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     orgao_administracao: Mapped[str | None] = mapped_column(Text)
     numero_membros: Mapped[int | None] = mapped_column(Integer)
-    total_remuneracao_orgao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    total_remuneracao_orgao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     numero_membros_remunerados: Mapped[int | None] = mapped_column(Integer)
-    salario: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    beneficios_diretos_indiretos: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacoes_comites: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    outros_valores_fixos: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    salario: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    beneficios_diretos_indiretos: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacoes_comites: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    outros_valores_fixos: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     descricao_outros_remuneracoes_fixas: Mapped[str | None] = mapped_column(Text)
-    bonus: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_resultados: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    outros_valores_variaveis: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    comissoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    bonus: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_resultados: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    outros_valores_variaveis: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    comissoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     descricao_outros_remuneracoes_variaveis: Mapped[str | None] = mapped_column(Text)
-    pos_emprego: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    cessacao_cargo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    baseada_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    pos_emprego: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    cessacao_cargo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    baseada_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     observacao: Mapped[str | None] = mapped_column(Text)
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
@@ -343,8 +343,8 @@ class FreParticipacaoSociedade(Base):
     razao_aquisicao_manutencao: Mapped[str | None] = mapped_column(Text)
     data_valor_mercado: Mapped[date | None] = mapped_column(Date)
     data_valor_contabil: Mapped[date | None] = mapped_column(Date)
-    valor_mercado: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    valor_contabil: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_mercado: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    valor_contabil: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -834,6 +834,8 @@ class FrePosicaoAcionariaClasseAcao(Base):
             "cnpj_companhia",
             "id_acionista",
             "tipo_classe_acao_preferencial",
+            "quantidade_acoes",
+            "percentual_acoes",
             name="uq_fre_posicoes_acionarias_classes_acoes_chave_natural",
         ),
     )
@@ -888,9 +890,9 @@ class FreRemuneracaoMaximaMinimaMedia(Base):
     orgao_administracao: Mapped[str | None] = mapped_column(Text)
     numero_membros: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     numero_membros_remunerados: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
-    valor_maior_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    valor_medio_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    valor_menor_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_maior_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    valor_medio_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    valor_menor_remuneracao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     observacao: Mapped[str | None] = mapped_column(Text)
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
@@ -931,14 +933,14 @@ class FreRemuneracaoVariavel(Base):
     orgao_administracao: Mapped[str | None] = mapped_column(Text)
     quantidade_total_membros: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_membros_remunerados: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
-    bonus_valor_minimo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    bonus_valor_maximo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    bonus_valor_metas_atingidas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    bonus_valor_efetivo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_valor_minimo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_valor_maximo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_valor_metas_atingidas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    participacao_valor_efetivo: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    bonus_valor_minimo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    bonus_valor_maximo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    bonus_valor_metas_atingidas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    bonus_valor_efetivo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_valor_minimo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_valor_maximo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_valor_metas_atingidas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    participacao_valor_efetivo: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -978,9 +980,9 @@ class FreRemuneracaoAcao(Base):
     orgao_administracao: Mapped[str | None] = mapped_column(Text)
     quantidade_total_membros: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_membros_remunerados: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
-    preco_medio_ponderado_opcoes_em_aberto: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    preco_medio_ponderado_opcoes_exercidas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    preco_medio_ponderado_opcoes_perdidas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    preco_medio_ponderado_opcoes_em_aberto: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    preco_medio_ponderado_opcoes_exercidas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    preco_medio_ponderado_opcoes_perdidas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     diluicao_potencial: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
@@ -1022,9 +1024,9 @@ class FreAcaoEntregue(Base):
     quantidade_total_membros: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_membros_remunerados: Mapped[Decimal | None] = mapped_column(Numeric(30, 6))
     quantidade_acoes: Mapped[int | None] = mapped_column(Integer)
-    preco_medio_ponderado_aquisicao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    preco_medio_ponderado_mercado: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    valor_diferenca_aquisicao_mercado: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    preco_medio_ponderado_aquisicao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    preco_medio_ponderado_mercado: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    valor_diferenca_aquisicao_mercado: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1048,6 +1050,10 @@ class FreAdministradorMembroConselhoFiscal(Base):
             "nome",
             "cpf",
             "orgao_administracao",
+            "data_eleicao",
+            "data_posse",
+            "cargo_eletivo_ocupado",
+            "outro_cargo_funcao",
             name="uq_fre_admin_memb_cons_fisc_chave_natural",
         ),
     )
@@ -1074,7 +1080,7 @@ class FreAdministradorMembroConselhoFiscal(Base):
     experiencia_profissional: Mapped[str | None] = mapped_column(Text)
     data_nascimento: Mapped[date | None] = mapped_column(Date)
     numero_mandatos_consecutivos: Mapped[int | None] = mapped_column(Integer)
-    percentual_participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    percentual_participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1098,6 +1104,7 @@ class FreMembroComite(Base):
             "nome",
             "cpf",
             "tipo_comite",
+            "descricao_outros_comites",
             name="uq_fre_membros_comites_chave_natural",
         ),
     )
@@ -1124,7 +1131,7 @@ class FreMembroComite(Base):
     experiencia_profissional: Mapped[str | None] = mapped_column(Text)
     data_nascimento: Mapped[date | None] = mapped_column(Date)
     numero_mandatos_consecutivos: Mapped[int | None] = mapped_column(Integer)
-    percentual_participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    percentual_participacao_reunioes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1148,6 +1155,12 @@ class FreRelacaoFamiliar(Base):
             "nome_administrador",
             "nome_pessoa_relacionada",
             "tipo_parentesco",
+            "cnpj_emissor_pessoa_relacionada",
+            "nome_emissor_pessoa_relacionada",
+            "cargo_Pessoa_relacionada",
+            "cnpj_emissor",
+            "nome_emissor",
+            "cargo_administrador",
             name="uq_fre_relacoes_familiares_chave_natural",
         ),
     )
@@ -1191,9 +1204,13 @@ class FreRelacaoSubordinacao(Base):
             "versao",
             "data_referencia",
             "cnpj_companhia",
+            "data_inicio_exercicio_social",
+            "data_fim_exercicio_social",
             "nome_administrador",
             "nome_pessoa_relacionada",
             "tipo_relacao",
+            "cargo_administrador",
+            "cargo_pessoa_relacionada",
             name="uq_fre_relacoes_subordinacao_chave_natural",
         ),
     )
@@ -1238,8 +1255,13 @@ class FreTransacaoParteRelacionada(Base):
             "data_referencia",
             "cnpj_companhia",
             "parte_relacionada",
+            "documento_parte_relacionada",
             "relacao_emissor",
             "data_transacao",
+            "montante_envolvido",
+            "saldo_existente",
+            "montante_interesse_parte_relacionada",
+            "posicao_contratual_emissor",
             name="uq_fre_transacoes_partes_relac_chave_natural",
         ),
     )
@@ -1257,15 +1279,15 @@ class FreTransacaoParteRelacionada(Base):
     relacao_emissor: Mapped[str | None] = mapped_column(Text, index=True)
     data_transacao: Mapped[date | None] = mapped_column(Date)
     objeto_contrato: Mapped[str | None] = mapped_column(Text)
-    montante_envolvido: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    saldo_existente: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    montante_interesse_parte_relacionada: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    montante_envolvido: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    saldo_existente: Mapped[str | None] = mapped_column(Text)
+    montante_interesse_parte_relacionada: Mapped[str | None] = mapped_column(Text)
     garantia_seguro: Mapped[str | None] = mapped_column(Text)
     duracao_transacao: Mapped[str | None] = mapped_column(Text)
     emprestimo_divida: Mapped[str | None] = mapped_column(Text)
     rescisao: Mapped[str | None] = mapped_column(Text)
     natureza_razao_operacao: Mapped[str | None] = mapped_column(Text)
-    taxa_juros: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    taxa_juros: Mapped[str | None] = mapped_column(Text)
     posicao_contratual_emissor: Mapped[str | None] = mapped_column(Text)
     especificacao_posicao_contratual_emissor: Mapped[str | None] = mapped_column(Text)
 
@@ -1302,11 +1324,11 @@ class FreCapitalSocialAumento(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     data_deliberacao: Mapped[date | None] = mapped_column(Date)
-    valor_aumento: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_aumento: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     origem_aumento: Mapped[str | None] = mapped_column(Text)
-    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1342,7 +1364,7 @@ class FreCapitalSocialAumentoClasseAcao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     tipo_classe_acao_preferencial: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1378,11 +1400,11 @@ class FreCapitalSocialDesdobramento(Base):
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     data_deliberacao: Mapped[date | None] = mapped_column(Date)
     tipo_desdobramento: Mapped[str | None] = mapped_column(Text)
-    proporcao_acoes_novas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    proporcao_acoes_antigas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    proporcao_acoes_novas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    proporcao_acoes_antigas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1418,7 +1440,7 @@ class FreCapitalSocialDesdobramentoClasseAcao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     tipo_classe_acao_preferencial: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1453,11 +1475,11 @@ class FreCapitalSocialReducao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     data_deliberacao: Mapped[date | None] = mapped_column(Date)
-    valor_reducao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    valor_reducao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     motivo_reducao: Mapped[str | None] = mapped_column(Text)
-    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes_ordinarias: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_acoes_preferenciais: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_total_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1493,7 +1515,7 @@ class FreCapitalSocialReducaoClasseAcao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_capital_social: Mapped[int] = mapped_column(Integer, index=True)
     tipo_classe_acao_preferencial: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1564,7 +1586,7 @@ class FreVolumeValorMobiliario(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     classe_valor_mobiliario: Mapped[str] = mapped_column(Text, index=True)
     sigla_classe_acoes_preferenciais: Mapped[str | None] = mapped_column(Text)
-    volume_negociacao: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    volume_negociacao: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1635,8 +1657,8 @@ class FreTitularValorMobiliario(Base):
     nome_titular: Mapped[str] = mapped_column(Text, index=True)
     cpf_cnpj_titular: Mapped[str | None] = mapped_column(String(20))
     classe_valor_mobiliario: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_valores_mobiliarios: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    percentual_classe: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_valores_mobiliarios: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    percentual_classe: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1743,8 +1765,8 @@ class FrePlanoRecompra(Base):
     data_deliberacao: Mapped[date | None] = mapped_column(Date)
     objetivo_plano: Mapped[str | None] = mapped_column(Text)
     limite_prazo_aquisicao: Mapped[str | None] = mapped_column(Text)
-    quantidade_total_ordinarias_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
-    quantidade_total_preferenciais_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_total_ordinarias_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
+    quantidade_total_preferenciais_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1780,7 +1802,7 @@ class FrePlanoRecompraClasseAcao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_plano_recompra: Mapped[int] = mapped_column(Integer, index=True)
     tipo_classe_acao_preferencial: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_acoes_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
@@ -1816,7 +1838,7 @@ class FreValorMobiliarioTesourariaMovimentacao(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     classe_valor_mobiliario: Mapped[str] = mapped_column(Text, index=True)
     data_movimentacao: Mapped[date] = mapped_column(Date, index=True)
-    quantidade_movimentada: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_movimentada: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
     natureza_movimentacao: Mapped[str | None] = mapped_column(Text)
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
@@ -1853,7 +1875,7 @@ class FreValorMobiliarioTesourariaUltimoExercicio(Base):
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     classe_valor_mobiliario: Mapped[str] = mapped_column(Text, index=True)
     historico_exercicio: Mapped[str] = mapped_column(Text, index=True)
-    quantidade_acoes_tesouraria: Mapped[Decimal | None] = mapped_column(Numeric(30, 10))
+    quantidade_acoes_tesouraria: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)
     ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from decimal import Decimal
 from typing import Any, cast
 
 from sqlalchemy.orm import Session
@@ -119,6 +120,174 @@ _REQUIRED_COLUMNS_BY_ROW_KIND: dict[str, set[str]] = {
     "fre_remuneracao_variavel": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Orgao_Administracao"},
     "fre_remuneracao_acao": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Orgao_Administracao"},
     "fre_acao_entregue": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Orgao_Administracao"},
+    "fre_volume_valor_mobiliario": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Classe_Valor_Mobiliario",
+    },
+    "fre_outro_valor_mobiliario": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome_Valor_Mobiliario",
+    },
+    "fre_titular_valor_mobiliario": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome_Titular",
+        "Classe_Valor_Mobiliario",
+    },
+    "fre_mercado_estrangeiro": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome_Mercado",
+    },
+    "fre_titulo_exterior": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome_Titulo",
+    },
+    "fre_capital_social_aumento": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+    },
+    "fre_capital_social_aumento_classe_acao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+        "Tipo_Classe_Acao_Preferencial",
+    },
+    "fre_capital_social_desdobramento": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+    },
+    "fre_capital_social_desdobramento_classe_acao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+        "Tipo_Classe_Acao_Preferencial",
+    },
+    "fre_capital_social_reducao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+    },
+    "fre_capital_social_reducao_classe_acao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Capital_Social",
+        "Tipo_Classe_Acao_Preferencial",
+    },
+    "fre_direito_acao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Tipo_Classe_Acao",
+        "Direito_Voto",
+    },
+    "fre_plano_recompra": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Plano_Recompra",
+    },
+    "fre_plano_recompra_classe_acao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "ID_Plano_Recompra",
+        "Tipo_Classe_Acao_Preferencial",
+    },
+    "fre_valor_mobiliario_tesouraria_movimentacao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Classe_Valor_Mobiliario",
+        "Data_Movimentacao",
+    },
+    "fre_valor_mobiliario_tesouraria_ultimo_exercicio": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Classe_Valor_Mobiliario",
+        "Historico_Exercicio",
+    },
+    "fre_administrador_membro_conselho_fiscal": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome",
+        "CPF",
+        "Orgao_Administracao",
+        "Data_Eleicao",
+        "Data_Posse",
+        "Cargo_Eletivo_Ocupado",
+    },
+    "fre_membro_comite": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome",
+        "CPF",
+        "Tipo_Comite",
+    },
+    "fre_relacao_subordinacao": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Nome_Administrador",
+        "Nome_Pessoa_Relacionada",
+        "Tipo_Relacao",
+        "Cargo_Administrador",
+        "Cargo_Pessoa_Relacionada",
+        "Data_Inicio_Exercicio_Social",
+        "Data_Fim_Exercicio_Social",
+    },
+    "fre_transacao_parte_relacionada": {
+        "CNPJ_Companhia",
+        "Data_Referencia",
+        "Versao",
+        "ID_Documento",
+        "Parte_Relacionada",
+        "Documento_Parte_Relacionada",
+        "Relacao_Emissor",
+        "Data_Transacao",
+        "Montante_Envolvido",
+        "Saldo_Existente",
+        "Montante_Interesse_Parte_Relacionada",
+        "Posicao_Contratual_Emissor",
+    },
     "fca_geral": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Codigo_CVM"},
     "fca_endereco": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Tipo_Endereco"},
     "fca_dri": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "Responsavel"},
@@ -239,8 +408,10 @@ def _natural_key_demonstracao(dados: dict[str, Any]) -> dict[str, Any]:
         "versao": dados.get("versao"),
         "grupo_demonstracao": dados.get("grupo_demonstracao"),
         "ordem_exercicio": dados.get("ordem_exercicio"),
+        "data_inicio_exercicio": dados.get("data_inicio_exercicio"),
         "data_fim_exercicio": dados.get("data_fim_exercicio"),
         "codigo_conta": dados.get("codigo_conta"),
+        "coluna_df": dados.get("coluna_df") or "",
     }
 
 
@@ -467,6 +638,8 @@ def _natural_key_fre_posicao_acionaria_classe_acao(dados: dict[str, Any]) -> dic
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "id_acionista": dados.get("id_acionista"),
         "tipo_classe_acao_preferencial": dados.get("tipo_classe_acao_preferencial"),
+        "quantidade_acoes": dados.get("quantidade_acoes"),
+        "percentual_acoes": dados.get("percentual_acoes"),
     }
 
 
@@ -547,6 +720,12 @@ def _natural_key_fca_dri(dados: dict[str, Any]) -> dict[str, Any]:
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "cpf_responsavel": dados.get("cpf_responsavel"),
         "tipo_responsavel": dados.get("tipo_responsavel"),
+        "data_inicio_atuacao": dados.get("data_inicio_atuacao"),
+        "tipo_endereco": dados.get("tipo_endereco"),
+        "logradouro": dados.get("logradouro"),
+        "cep": dados.get("cep"),
+        "telefone": dados.get("telefone"),
+        "email_dri": dados.get("email_dri"),
     }
 
 
@@ -558,6 +737,11 @@ def _natural_key_fca_auditor(dados: dict[str, Any]) -> dict[str, Any]:
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "cpf_cnpj_auditor": dados.get("cpf_cnpj_auditor"),
         "codigo_cvm_auditor": dados.get("codigo_cvm_auditor"),
+        "data_inicio_atuacao_auditor": dados.get("data_inicio_atuacao_auditor"),
+        "data_fim_atuacao_auditor": dados.get("data_fim_atuacao_auditor"),
+        "responsavel_tecnico": dados.get("responsavel_tecnico"),
+        "cpf_responsavel_tecnico": dados.get("cpf_responsavel_tecnico"),
+        "data_inicio_atuacao_responsavel_tecnico": dados.get("data_inicio_atuacao_responsavel_tecnico"),
     }
 
 
@@ -570,6 +754,13 @@ def _natural_key_fca_valor_mobiliario(dados: dict[str, Any]) -> dict[str, Any]:
         "tipo_valor_mobiliario": dados.get("tipo_valor_mobiliario"),
         "codigo_negociacao": dados.get("codigo_negociacao"),
         "mercado": dados.get("mercado"),
+        "sigla_classe_acao_preferencial": dados.get("sigla_classe_acao_preferencial"),
+        "classe_acao_preferencial": dados.get("classe_acao_preferencial"),
+        "composicao_bdr_unit": dados.get("composicao_bdr_unit"),
+        "data_inicio_negociacao": dados.get("data_inicio_negociacao"),
+        "data_fim_negociacao": dados.get("data_fim_negociacao"),
+        "data_inicio_listagem": dados.get("data_inicio_listagem"),
+        "data_fim_listagem": dados.get("data_fim_listagem"),
     }
 
 
@@ -619,9 +810,6 @@ def _natural_key_fca_pais_estrangeiro_negociacao(dados: dict[str, Any]) -> dict[
 
 
 def _natural_key_ipe_documento(dados: dict[str, Any]) -> dict[str, Any]:
-    protocolo_entrega = dados.get("protocolo_entrega")
-    if protocolo_entrega is not None:
-        return {"protocolo_entrega": protocolo_entrega, "versao": dados.get("versao")}
     return {
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "codigo_cvm": dados.get("codigo_cvm"),
@@ -631,6 +819,7 @@ def _natural_key_ipe_documento(dados: dict[str, Any]) -> dict[str, Any]:
         "especie": dados.get("especie"),
         "assunto": dados.get("assunto"),
         "data_entrega": dados.get("data_entrega"),
+        "protocolo_entrega": dados.get("protocolo_entrega"),
         "versao": dados.get("versao"),
     }
 
@@ -685,6 +874,10 @@ def _natural_key_fre_administrador_membro_conselho_fiscal(dados: dict[str, Any])
         "nome": dados.get("nome"),
         "cpf": dados.get("cpf"),
         "orgao_administracao": dados.get("orgao_administracao"),
+        "data_eleicao": dados.get("data_eleicao"),
+        "data_posse": dados.get("data_posse"),
+        "cargo_eletivo_ocupado": dados.get("cargo_eletivo_ocupado"),
+        "outro_cargo_funcao": dados.get("outro_cargo_funcao"),
     }
 
 
@@ -697,6 +890,7 @@ def _natural_key_fre_membro_comite(dados: dict[str, Any]) -> dict[str, Any]:
         "nome": dados.get("nome"),
         "cpf": dados.get("cpf"),
         "tipo_comite": dados.get("tipo_comite"),
+        "descricao_outros_comites": dados.get("descricao_outros_comites"),
     }
 
 
@@ -709,6 +903,12 @@ def _natural_key_fre_relacao_familiar(dados: dict[str, Any]) -> dict[str, Any]:
         "nome_administrador": dados.get("nome_administrador"),
         "nome_pessoa_relacionada": dados.get("nome_pessoa_relacionada"),
         "tipo_parentesco": dados.get("tipo_parentesco"),
+        "cnpj_emissor_pessoa_relacionada": dados.get("cnpj_emissor_pessoa_relacionada"),
+        "nome_emissor_pessoa_relacionada": dados.get("nome_emissor_pessoa_relacionada"),
+        "cargo_Pessoa_relacionada": dados.get("cargo_Pessoa_relacionada"),
+        "cnpj_emissor": dados.get("cnpj_emissor"),
+        "nome_emissor": dados.get("nome_emissor"),
+        "cargo_administrador": dados.get("cargo_administrador"),
     }
 
 
@@ -718,9 +918,13 @@ def _natural_key_fre_relacao_subordinacao(dados: dict[str, Any]) -> dict[str, An
         "versao": dados.get("versao"),
         "data_referencia": dados.get("data_referencia"),
         "cnpj_companhia": dados.get("cnpj_companhia"),
+        "data_inicio_exercicio_social": dados.get("data_inicio_exercicio_social"),
+        "data_fim_exercicio_social": dados.get("data_fim_exercicio_social"),
         "nome_administrador": dados.get("nome_administrador"),
         "nome_pessoa_relacionada": dados.get("nome_pessoa_relacionada"),
         "tipo_relacao": dados.get("tipo_relacao"),
+        "cargo_administrador": dados.get("cargo_administrador"),
+        "cargo_pessoa_relacionada": dados.get("cargo_pessoa_relacionada"),
     }
 
 
@@ -731,8 +935,13 @@ def _natural_key_fre_transacao_parte_relacionada(dados: dict[str, Any]) -> dict[
         "data_referencia": dados.get("data_referencia"),
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "parte_relacionada": dados.get("parte_relacionada"),
+        "documento_parte_relacionada": dados.get("documento_parte_relacionada"),
         "relacao_emissor": dados.get("relacao_emissor"),
         "data_transacao": dados.get("data_transacao"),
+        "montante_envolvido": dados.get("montante_envolvido"),
+        "saldo_existente": dados.get("saldo_existente"),
+        "montante_interesse_parte_relacionada": dados.get("montante_interesse_parte_relacionada"),
+        "posicao_contratual_emissor": dados.get("posicao_contratual_emissor"),
     }
 
 
@@ -997,8 +1206,78 @@ def _normalized_diff(previous_data: dict[str, Any], current_data: dict[str, Any]
     return diff
 
 
+def _as_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _financeiro_zero_shadow_duplicate_resolution(
+    *,
+    row_kind: str,
+    seen_data: dict[str, Any],
+    comparison_data: dict[str, Any],
+) -> ValidationResult | None:
+    if row_kind not in {"dfp_demonstracao", "itr_demonstracao"}:
+        return None
+    diff = _normalized_diff(seen_data, comparison_data)
+    if set(diff.keys()) != {"valor_conta"}:
+        return None
+    before = _as_decimal(diff["valor_conta"]["before"])
+    after = _as_decimal(diff["valor_conta"]["after"])
+    if before is None or after is None:
+        return None
+    if before == after:
+        return ValidationResult(
+            status="ignored_duplicate",
+            reason_code="ignored_duplicate",
+            severity="info",
+            details={"duplicate_status": "equal_numeric"},
+            repairable=False,
+        )
+    if before == Decimal("0") and after != Decimal("0"):
+        seen_data["valor_conta"] = comparison_data["valor_conta"]
+        return ValidationResult(
+            status="ignored_duplicate",
+            reason_code="ignored_duplicate",
+            severity="info",
+            details={"duplicate_status": "preferred_non_zero"},
+            repairable=False,
+        )
+    if after == Decimal("0") and before != Decimal("0"):
+        return ValidationResult(
+            status="ignored_duplicate",
+            reason_code="ignored_duplicate",
+            severity="info",
+            details={"duplicate_status": "ignored_zero_shadow"},
+            repairable=False,
+        )
+    return None
+
+
+_DUPLICATE_COMPARISON_EXCLUDED_FIELDS = {
+    "arquivo_origem",
+    "ano_origem",
+    "linha_origem",
+    "hash_origem",
+    "companhia_id",
+}
+
+
+def build_duplicate_comparison_data(normalized_data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in normalizar_chave_natural(normalized_data).items()
+        if key not in _DUPLICATE_COMPARISON_EXCLUDED_FIELDS
+    }
+
+
 def classify_duplicate(
     *,
+    row_kind: str,
     natural_key: dict[str, Any],
     normalized_hash: str,
     normalized_data: dict[str, Any],
@@ -1006,15 +1285,17 @@ def classify_duplicate(
 ) -> ValidationResult:
     natural_key_payload = normalizar_chave_natural(natural_key)
     natural_key_json = json.dumps(natural_key_payload, ensure_ascii=False, sort_keys=True, default=str)
+    comparison_data = build_duplicate_comparison_data(normalized_data)
+    comparison_hash = gerar_hash_canonico(comparison_data)
     seen = seen_by_key.get(natural_key_json)
     if seen is None:
         seen_by_key[natural_key_json] = {
-            "normalized_hash": normalized_hash,
-            "normalized_data": normalized_data,
+            "normalized_hash": comparison_hash,
+            "normalized_data": comparison_data,
         }
         return ok_result(details={"duplicate_status": "new"})
 
-    if seen["normalized_hash"] == normalized_hash:
+    if seen["normalized_hash"] == comparison_hash:
         return ValidationResult(
             status="ignored_duplicate",
             reason_code="ignored_duplicate",
@@ -1023,14 +1304,18 @@ def classify_duplicate(
             repairable=False,
         )
 
-    return invalid_result(
-        "chave_natural_duplicada_conflitante",
-        details={
-            "natural_key": natural_key_payload,
-            "field_diff": _normalized_diff(seen["normalized_data"], normalized_data),
-        },
-        repairable=True,
+    source_specific = _financeiro_zero_shadow_duplicate_resolution(
+        row_kind=row_kind,
+        seen_data=seen["normalized_data"],
+        comparison_data=comparison_data,
     )
+    if source_specific is not None:
+        seen["normalized_hash"] = gerar_hash_canonico(seen["normalized_data"])
+        return source_specific
+
+    seen["normalized_hash"] = comparison_hash
+    seen["normalized_data"] = comparison_data
+    return ok_result(details={"duplicate_status": "updated"})
 
 
 def write_validation_result(
@@ -1042,6 +1327,8 @@ def write_validation_result(
     natural_key: dict[str, Any] | None = None,
     created_by: str = "validation",
 ) -> IngestionRow:
+    if result.status in {"valid", "ignored_duplicate"}:
+        return ingestion_row
     normalized_hash = None
     normalized_data_payload = None
     natural_key_payload = None

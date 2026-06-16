@@ -27,6 +27,12 @@ _RETRY_KWARGS = {
     "max_retries": _settings.ingestion_max_retries,
 }
 
+_STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cancelada"}
+
+
+def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
+    return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
+
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cadastro_companhias_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def sincronizar_cadastro_companhias_task(self: Any, force_reimport: bool = False) -> dict[str, str]:
@@ -137,11 +143,13 @@ def pre_processar_sincronizacao_zip(
     from datetime import UTC, datetime
     from sqlalchemy import select
 
-    from app.models.ingestion import IngestionRun
+    from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.dedup import buscar_execucao_hash_existente
     from app.services.ingestion.staging import (
         create_run,
+        get_member_payload,
+        save_member_payload,
         member_has_successful_match,
         register_file,
         register_member,
@@ -259,6 +267,7 @@ def pre_processar_sincronizacao_zip(
             extracted_path = extract_zip_member(str(zip_path), member_name, str(extracted_dir))
             member_hash = compute_file_sha256(extracted_path)
             member_size = Path(extracted_path).stat().st_size
+            member_payload = Path(extracted_path).read_bytes()
 
             # Check if supported
             if member_name not in supported_member_names:
@@ -296,6 +305,7 @@ def pre_processar_sincronizacao_zip(
                     encoding=None,
                     schema_status="ok",
                 )
+                save_member_payload(db, child_exec.id, member_payload)
                 db.flush()
                 continue
 
@@ -342,6 +352,7 @@ def pre_processar_sincronizacao_zip(
                     encoding=None,
                     schema_status="ok",
                 )
+                save_member_payload(db, child_exec.id, member_payload)
                 db.flush()
                 continue
 
@@ -384,6 +395,7 @@ def pre_processar_sincronizacao_zip(
                 encoding=encoding,
                 delimiter=delimiter,
             )
+            save_member_payload(db, child_exec.id, member_payload)
             db.flush()
 
         # Update parent execution to aguardando_ingestao
@@ -445,6 +457,10 @@ def ingerir_sincronizacao_zip(
     if execucao is None:
         db.close()
         raise ValueError(f"Execution not found: {execucao_id}")
+
+    if execucao.status == "cancelada":
+        db.close()
+        return _resultado_cancelado(execucao.id, "Execution was cancelled before ingestion started.")
 
     if execucao.status != "aguardando_ingestao":
         db.close()
@@ -575,6 +591,7 @@ def sincronizar_member_internal(
     force_reimport: bool = False,
     task_id: str | None = None,
 ) -> dict[str, str]:
+    import gc
     import uuid
     from collections import Counter
     from datetime import UTC, datetime
@@ -582,10 +599,12 @@ def sincronizar_member_internal(
 
     from sqlalchemy import select
 
-    from app.models.ingestion import IngestionFile, IngestionRow, IngestionRun
+    from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.staging import (
         create_run,
+        get_member_payload,
+        purge_member_success_rows,
         stage_csv_payload_streaming_from_disk,
         update_run_state,
     )
@@ -599,6 +618,20 @@ def sincronizar_member_internal(
     execucao = db.get(ExecucaoSincronizacao, uuid.UUID(child_execucao_id))
     if execucao is None:
         raise ValueError(f"Execution not found: {child_execucao_id}")
+
+    if execucao.status == "cancelada":
+        return _resultado_cancelado(execucao.id, "Execution was cancelled before member processing started.")
+
+    parent_execucao = db.get(ExecucaoSincronizacao, uuid.UUID(parent_execucao_id))
+    if parent_execucao is None:
+        raise ValueError(f"Parent execution not found: {parent_execucao_id}")
+    if parent_execucao.status == "cancelada":
+        if execucao.status not in _STATUS_FINAL_EXECUCAO:
+            execucao.status = "cancelada"
+            execucao.finalizada_em = datetime.now(UTC)
+            execucao.mensagem_erro = "Execucao cancelada porque a sincronizacao pai foi cancelada."
+            db.commit()
+        return _resultado_cancelado(execucao.id, "Parent execution was cancelled before member processing started.")
 
     if task_id:
         execucao.id_tarefa = task_id
@@ -620,10 +653,6 @@ def sincronizar_member_internal(
         db.commit()
         db.refresh(run)
 
-    parent_execucao = db.get(ExecucaoSincronizacao, uuid.UUID(parent_execucao_id))
-    if parent_execucao is None:
-        raise ValueError(f"Parent execution not found: {parent_execucao_id}")
-
     ingestion_file = db.scalar(
         select(IngestionFile)
         .join(IngestionRun)
@@ -638,10 +667,15 @@ def sincronizar_member_internal(
         member_path = zip_dir / "extracted" / member_name
 
         if not member_path.exists():
-            zip_path = zip_dir / parent_execucao.arquivo
-            if not zip_path.exists():
-                download_file_to_disk(parent_execucao.url, str(zip_path), timeout=300)
-            extract_zip_member(str(zip_path), member_name, str(zip_dir / "extracted"))
+            try:
+                payload = get_member_payload(db, execucao.id)
+                member_path.parent.mkdir(parents=True, exist_ok=True)
+                member_path.write_bytes(payload)
+            except ValueError:
+                zip_path = zip_dir / parent_execucao.arquivo
+                if not zip_path.exists():
+                    download_file_to_disk(parent_execucao.url, str(zip_path), timeout=300)
+                extract_zip_member(str(zip_path), member_name, str(zip_dir / "extracted"))
 
         encoding, delimiter = detect_encoding_and_delimiter(str(member_path))
         member_sha256 = compute_file_sha256(str(member_path))
@@ -666,12 +700,20 @@ def sincronizar_member_internal(
         )
         db.commit()
         db.refresh(member)
+        reconcile_required = False
+        if tipo_fonte in ("dfp", "itr", "fre"):
+            from app.services.ingestion.lifecycle import previous_member_snapshot
 
-        rows = list(
-            db.execute(
-                select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
-            ).scalars()
-        )
+            reconcile_required = (
+                previous_member_snapshot(
+                    db,
+                    tipo_fonte=tipo_fonte,
+                    ano=ano,
+                    current_run_id=run.id,
+                    member_name=member_name,
+                )
+                is not None
+            )
 
         header_map = {}
         if tipo_fonte in ("dfp", "itr", "fre", "fca"):
@@ -700,6 +742,7 @@ def sincronizar_member_internal(
                 execucao=execucao,
                 run=run,
                 member=member,
+                reconcile_required=reconcile_required,
                 prefixo=tipo_fonte,
                 tipo_formulario=tipo_fonte.upper(),
                 ano=ano,
@@ -718,6 +761,7 @@ def sincronizar_member_internal(
                 run=run,
                 ano=ano,
                 member=member,
+                reconcile_required=reconcile_required,
                 promote_enabled=_settings.ingestion_promote_enabled,
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
@@ -725,7 +769,13 @@ def sincronizar_member_internal(
                 chunk_size=_settings.ingestion_promote_batch_size,
             )
         elif tipo_fonte == "fca":
+            from app.models.ingestion import IngestionRow
             from app.services.ingestion.fca import _process_fca_rows
+            rows = list(
+                db.execute(
+                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
+                ).scalars()
+            )
             _process_fca_rows(
                 db,
                 execucao=execucao,
@@ -738,7 +788,13 @@ def sincronizar_member_internal(
                 header_map=header_map,
             )
         elif tipo_fonte == "ipe":
+            from app.models.ingestion import IngestionRow
             from app.services.ingestion.ipe import _process_ipe_rows
+            rows = list(
+                db.execute(
+                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
+                ).scalars()
+            )
             _process_ipe_rows(
                 db,
                 execucao=execucao,
@@ -750,7 +806,13 @@ def sincronizar_member_internal(
                 seen_by_row_kind=seen_by_row_kind,
             )
         elif tipo_fonte == "vlmo":
+            from app.models.ingestion import IngestionRow
             from app.services.ingestion.vlmo import _process_vlmo_rows
+            rows = list(
+                db.execute(
+                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
+                ).scalars()
+            )
             _process_vlmo_rows(
                 db,
                 execucao=execucao,
@@ -762,7 +824,13 @@ def sincronizar_member_internal(
                 seen_by_row_kind=seen_by_row_kind,
             )
         elif tipo_fonte == "cgvn":
+            from app.models.ingestion import IngestionRow
             from app.services.ingestion.cgvn import _process_cgvn_rows
+            rows = list(
+                db.execute(
+                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
+                ).scalars()
+            )
             _process_cgvn_rows(
                 db,
                 execucao=execucao,
@@ -799,7 +867,12 @@ def sincronizar_member_internal(
             message=mensagem_status,
             finished_at=datetime.now(UTC),
         )
+        document_file = f"{tipo_fonte}_cia_aberta_{ano}.csv"
+        if status_execucao in {"sucesso", "sucesso_com_alerta"} and member_name != document_file:
+            purge_member_success_rows(db, ingestion_file_member_id=member.id)
         db.commit()
+        db.expunge_all()
+        gc.collect()
         return {"status": status_execucao, "execucao_id": str(execucao.id)}
 
     except Exception as exc:
@@ -866,6 +939,8 @@ def disparar_dependentes_task(
         execucao = db.get(ExecucaoSincronizacao, parent_uuid)
         if execucao is None:
             raise ValueError(f"Parent execution not found: {parent_execucao_id}")
+        if execucao.status == "cancelada":
+            return _resultado_cancelado(execucao.id, "Parent execution was cancelled before dependent dispatch.")
 
         document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
         header_exec = db.scalar(
@@ -929,8 +1004,8 @@ def finalizar_sincronizacao_zip_task(
     from pathlib import Path
     from sqlalchemy import select
     from app.models.sincronizacao import ExecucaoSincronizacao
-    from app.models.ingestion import IngestionRun
-    from app.services.ingestion.staging import update_run_state
+    from app.models.ingestion import IngestionFile, IngestionRun
+    from app.services.ingestion.staging import purge_member_success_rows, update_run_state
     from app.db.session import SessionLocal
 
     db = SessionLocal()
@@ -952,7 +1027,10 @@ def finalizar_sincronizacao_zip_task(
         total_rejeitados = sum(c.total_rejeitados or 0 for c in children)
 
         child_statuses = {c.status for c in children}
-        if "falha" in child_statuses or "quality_fail" in child_statuses:
+        if execucao.status == "cancelada":
+            parent_status = "cancelada"
+            message = execucao.mensagem_erro or "Sincronizacao cancelada manualmente."
+        elif "falha" in child_statuses or "quality_fail" in child_statuses:
             parent_status = "falha"
             message = "Um ou mais arquivos membros falharam."
         elif "em_execucao" in child_statuses or "agendada" in child_statuses:
@@ -992,6 +1070,23 @@ def finalizar_sincronizacao_zip_task(
                 quality_summary=quality_summary,
                 finished_at=datetime.now(UTC),
             )
+
+        from app.models.ingestion import IngestionFileMember
+
+        parent_run = db.scalar(
+            select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+        )
+        if parent_run is not None:
+            ingestion_file = db.scalar(
+                select(IngestionFile)
+                .where(IngestionFile.ingestion_run_id == parent_run.id)
+            )
+            if ingestion_file is not None:
+                members = db.scalars(
+                    select(IngestionFileMember).where(IngestionFileMember.ingestion_file_id == ingestion_file.id)
+                ).all()
+                for member in members:
+                    purge_member_success_rows(db, ingestion_file_member_id=member.id)
 
         db.commit()
 
@@ -1140,7 +1235,9 @@ def ingerir_sincronizacao_task(
         execucao = db.get(ExecucaoSincronizacao, exec_uuid)
         if execucao is None:
             raise ValueError(f"Execution not found: {execucao_id}")
-        
+        if execucao.status == "cancelada":
+            return _resultado_cancelado(execucao.id, "Execution was cancelled before task start.")
+
         execucao.id_tarefa = str(self.request.id)
         db.commit()
 

@@ -18,6 +18,11 @@ from app.models.ingestion import IngestionAttempt, IngestionRow, IngestionRun, Q
 from app.services.ingestion.backfill import build_dark_launch_parity_report, run_backfill_years
 from app.services.ingestion.metrics import RunTimer, get_ingestion_metrics
 from app.services.ingestion.quality import enforce_quality_gate
+from app.services.ingestion.sql_batches import (
+    iter_lookup_batches,
+    iter_parameter_batches,
+    max_rows_for_parameter_budget,
+)
 from app.services.ingestion.summary import build_quality_summary, render_parity_report_markdown
 
 
@@ -145,6 +150,48 @@ def test_build_quality_summary_and_quality_gate(db_session: Session) -> None:
     assert message is not None
 
 
+def test_build_quality_summary_prefers_persisted_run_summary(db_session: Session) -> None:
+    run = IngestionRun(
+        tipo_fonte="dfp",
+        ano=2025,
+        status="sucesso",
+        phase="complete",
+        quality_summary={
+            "row_status_counts": {"valid": 10, "invalid": 1},
+            "reason_counts": {"companhia_nao_encontrada": 1},
+            "quarantine_total": 1,
+        },
+    )
+    db_session.add(run)
+    db_session.flush()
+    db_session.add(
+        IngestionAttempt(
+            ingestion_run_id=run.id,
+            operation="replay",
+            attempt_number=1,
+            status="success",
+        )
+    )
+    db_session.commit()
+
+    summary = build_quality_summary(db_session, ingestion_run_id=run.id)
+
+    assert summary["row_status_counts"] == {"valid": 10, "invalid": 1}
+    assert summary["attempts"]["total"] == 1
+
+
+def test_sql_parameter_batches_respect_budget() -> None:
+    rows = [{"a": idx, "b": idx, "c": idx, "d": idx, "e": idx, "f": idx, "g": idx} for idx in range(10000)]
+
+    batch_size = max_rows_for_parameter_budget(parameter_width=7, budget=60000)
+    batches = list(iter_parameter_batches(rows, parameter_width=7, budget=60000))
+
+    assert batch_size == 8571
+    assert len(batches) == 2
+    assert len(batches[0]) == 8571
+    assert len(batches[1]) == 1429
+
+
 def test_render_parity_report_markdown() -> None:
     texto = render_parity_report_markdown(legado={"a": 1, "b": 2}, atual={"a": 2, "b": 2})
     assert "| a | 1 | 2 | 1 |" in texto
@@ -184,15 +231,45 @@ def test_admin_v2_runs_and_quarantine_endpoints(client: TestClient, db_session: 
     )
     db_session.commit()
 
-    resposta_runs = client.get("/admin/ingestion/runs")
-    resposta_run = client.get(f"/admin/ingestion/runs/{run.id}")
-    resposta_quarentena = client.get("/admin/ingestion/quarantine")
+    resposta_runs = client.get("/ingestion/runs")
+    resposta_run = client.get(f"/ingestion/runs/{run.id}")
+    resposta_quarentena = client.get("/ingestion/quarentena")
+    resposta_resumo = client.get("/ingestion/quarentena/resumo")
 
     assert resposta_runs.status_code == 200
     assert resposta_runs.json()["paginacao"]["total"] == 1
     assert resposta_run.status_code == 200
     assert resposta_quarentena.status_code == 200
     assert resposta_quarentena.json()["paginacao"]["total"] == 1
+
+    # Test new filters on /ingestion/quarentena
+    res_filtros_ok = client.get("/ingestion/quarentena?arquivo_origem=dfp.csv&status=pendente&ano_origem=2025")
+    assert res_filtros_ok.status_code == 200
+    assert res_filtros_ok.json()["paginacao"]["total"] == 1
+
+    res_filtros_vazio = client.get("/ingestion/quarentena?arquivo_origem=dfp_outro.csv")
+    assert res_filtros_vazio.status_code == 200
+    assert res_filtros_vazio.json()["paginacao"]["total"] == 0
+
+    res_filtros_status_vazio = client.get("/ingestion/quarentena?status=resolvido_auto")
+    assert res_filtros_status_vazio.status_code == 200
+    assert res_filtros_status_vazio.json()["paginacao"]["total"] == 0
+
+    res_filtros_ano_vazio = client.get("/ingestion/quarentena?ano_origem=2026")
+    assert res_filtros_ano_vazio.status_code == 200
+    assert res_filtros_ano_vazio.json()["paginacao"]["total"] == 0
+
+    assert resposta_resumo.status_code == 200
+    resumo = resposta_resumo.json()
+    assert resumo["total"] == 1
+    assert resumo["por_status"]["pendente"] == 1
+    assert resumo["por_erro"][0]["motivo_codigo"] == "companhia_nao_encontrada"
+    assert resumo["por_erro"][0]["quantidade"] == 1
+    assert resumo["por_arquivo"][0]["arquivo_origem"] == "dfp.csv"
+    assert resumo["por_arquivo"][0]["quantidade"] == 1
+    assert resumo["por_arquivo_e_erro"][0]["arquivo_origem"] == "dfp.csv"
+    assert resumo["por_arquivo_e_erro"][0]["motivo_codigo"] == "companhia_nao_encontrada"
+    assert resumo["por_arquivo_e_erro"][0]["quantidade"] == 1
 
 
 def test_admin_v2_replay_and_identity_rebuild_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,9 +287,9 @@ def test_admin_v2_replay_and_identity_rebuild_endpoints(client: TestClient, monk
     )
 
     resposta_quarentena = client.post(
-        "/admin/ingestion/replay/quarantine", json={"reason_code": "companhia_nao_encontrada"}
+        "/ingestion/replay/quarentena", json={"reason_code": "companhia_nao_encontrada"}
     )
-    resposta_identity = client.post("/admin/ingestion/identity/rebuild")
+    resposta_identity = client.post("/ingestion/identity/rebuild")
 
     assert resposta_quarentena.status_code == 200
     assert resposta_identity.status_code == 200
@@ -294,3 +371,11 @@ def test_run_backfill_years_and_dark_launch_report(monkeypatch: pytest.MonkeyPat
     assert chamadas == []
     with pytest.raises(RuntimeError, match="relatorio_paridade_legado_removido"):
         build_dark_launch_parity_report(db_session, ano=2021)
+
+
+def test_iter_lookup_batches_uses_smaller_budget_for_large_key_lookups() -> None:
+    rows = list(range(1200))
+
+    batches = list(iter_lookup_batches(rows, parameter_width=12))
+
+    assert [len(batch) for batch in batches] == [500, 500, 200]

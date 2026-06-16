@@ -111,7 +111,7 @@ def test_sincronizar_ipe_idempotency_and_quarantine(db_session: Session) -> None
     alterado_inicial = documento.alterado_em
 
     resultado2 = sincronizar_ipe(db_session, 2025, downloader=lambda _: _build_zip())
-    assert resultado2["status"] == "skipped"
+    assert resultado2["status"] == "sem_alteracao"
     documento_igual = db_session.scalar(select(IpeDocumento))
     assert documento_igual is not None
     assert documento_igual.alterado_em == alterado_inicial
@@ -131,8 +131,7 @@ def test_sincronizar_ipe_idempotency_and_quarantine(db_session: Session) -> None
     assert documento_alterado.alterado_em != alterado_inicial
 
     staged = list(db_session.execute(select(IngestionRow).where(IngestionRow.row_kind == "ipe_documento")).scalars())
-    assert staged
-    assert all(item.promoted_entity == "ipe_documentos" for item in staged)
+    assert staged == []
 
     resultado_quarentena = sincronizar_ipe(
         db_session,
@@ -140,4 +139,61 @@ def test_sincronizar_ipe_idempotency_and_quarantine(db_session: Session) -> None
         downloader=lambda _: _build_zip(missing_categoria_header=True),
     )
     assert resultado_quarentena["status"] == "sucesso"
-    assert db_session.scalar(select(QuarantineItem).where(QuarantineItem.row_kind == "ipe_documento")) is not None
+    assert db_session.scalar(select(QuarantineItem).where(QuarantineItem.row_kind == "ipe_documento")) is None
+
+
+def test_sincronizar_ipe_accepts_same_protocolo_for_distinct_documents(db_session: Session) -> None:
+    companhia = _companhia()
+    db_session.add(companhia)
+    db_session.commit()
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        zip_file.writestr(
+            "ipe_cia_aberta_2025.csv",
+            (
+                "CNPJ_Companhia;Nome_Companhia;Codigo_CVM;Data_Referencia;Categoria;Tipo;Especie;Assunto;"
+                "Data_Entrega;Tipo_Apresentacao;Protocolo_Entrega;Versao;Link_Download\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-04-29;Assembleia;AGE;Boletim de voto a distância;;"
+                "2025-03-28;Apresentacao;015253IPE290420250104574411-37;1;http://ipe/age\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-04-29;Assembleia;AGO;Boletim de voto a distância;;"
+                "2025-03-28;Apresentacao;015253IPE290420250104574411-37;1;http://ipe/ago\n"
+            ).encode("latin1"),
+        )
+
+    resultado = sincronizar_ipe(db_session, 2025, downloader=lambda _: buffer.getvalue())
+
+    assert resultado["status"] == "sucesso"
+    docs = db_session.execute(select(IpeDocumento).order_by(IpeDocumento.tipo.asc())).scalars().all()
+    assert len(docs) == 2
+    assert [doc.tipo for doc in docs] == ["AGE", "AGO"]
+
+
+def test_sincronizar_ipe_accepts_same_document_shape_with_distinct_protocols(db_session: Session) -> None:
+    companhia = _companhia()
+    db_session.add(companhia)
+    db_session.commit()
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        zip_file.writestr(
+            "ipe_cia_aberta_2025.csv",
+            (
+                "CNPJ_Companhia;Nome_Companhia;Codigo_CVM;Data_Referencia;Categoria;Tipo;Especie;Assunto;"
+                "Data_Entrega;Tipo_Apresentacao;Protocolo_Entrega;Versao;Link_Download\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-04-29;Assembleia;AGE;Boletim de voto a distância;;"
+                "2025-03-28;Apresentacao;015253IPE290420250104574411-37;1;http://ipe/1\n"
+                "00.000.000/0001-91;Banco do Brasil S.A.;1023;2025-04-29;Assembleia;AGE;Boletim de voto a distância;;"
+                "2025-03-28;Apresentacao;015253IPE290420250104574412-38;1;http://ipe/2\n"
+            ).encode("latin1"),
+        )
+
+    resultado = sincronizar_ipe(db_session, 2025, downloader=lambda _: buffer.getvalue())
+
+    assert resultado["status"] == "sucesso"
+    docs = db_session.execute(select(IpeDocumento).order_by(IpeDocumento.protocolo_entrega.asc())).scalars().all()
+    assert len(docs) == 2
+    assert [doc.protocolo_entrega for doc in docs] == [
+        "015253IPE290420250104574411-37",
+        "015253IPE290420250104574412-38",
+    ]

@@ -1026,6 +1026,10 @@ Divulgar as demonstrações financeiras anuais auditadas, fornecendo a visão co
 > **Escala da Moeda:**
 > Valores nos arquivos contábeis anuais do DFP estão sujeitos à escala informada na coluna `ESCALA_MOEDA`. Na maioria das companhias abertas brasileiras, a escala é "MIL", significando que os valores contábeis expressos nas tabelas devem ser multiplicados por 1.000 para refletirem o valor monetário real.
 
+> [!NOTE]
+> **Semântica de API e correção operacional:**
+> Nos endpoints financeiros do projeto, `valor_conta` deve representar o montante monetário absoluto após aplicação da `ESCALA_MOEDA`, enquanto o valor bruto reportado pela CVM permanece disponível separadamente como referência de auditoria. Registros DFP/ITR ingeridos antes da correção do parser de decimais precisam ser reparados por replay/ressincronização a partir dos payloads brutos retidos.
+
 ---
 
 ## 8. Cadastro - Cadastro Geral de Companhias
@@ -1176,6 +1180,94 @@ Os principais campos para cruzamento entre diferentes conjuntos de dados são:
 - **Compliance e Due Diligence**: Uso de FCA, FRE, CAD
 
 ---
+## Como funciona a atualização dos arquivos CVM
+
+### 1. O mecanismo de reapresentação
+
+Quando uma companhia detecta um erro ou precisa corrigir um formulário já entregue, ela envia uma **reapresentação** via Sistema Empresas.NET. Cada envio recebe um número de versão sequencial: a entrega original é a versão `1`, a primeira correção é `2`, a segunda é `3`, e assim por diante.
+
+O campo **`VERSAO`** presente em todos os CSVs de companhias (DFP, ITR, FRE, FCA, CGVN etc.) é exatamente esse número. Ele é a chave para identificar reapresentações. A chave primária lógica de qualquer registro nesses arquivos é sempre a combinação:
+
+```
+CNPJ_CIA + DT_REFER + VERSAO
+```
+
+---
+
+### 2. Como a CVM atualiza os arquivos CSV
+
+Este é o ponto mais importante: **a CVM não usa append nem atualização parcial — ela regera o arquivo CSV inteiro do ano e o substitui completamente.** Quando qualquer empresa envia uma reapresentação, o ZIP/CSV do ano correspondente é reprocessado e sobrescrito no servidor.
+
+O comportamento concreto é:
+
+- **O arquivo anual (ex: `dfp_cia_aberta_2025.zip`) é substituído por completo** toda semana.
+- O novo arquivo contém **todas as versões de todos os formulários** entregues até aquele momento — incluindo tanto a versão original quanto as reapresentações de cada empresa. Não há remoção das versões antigas: o CSV acumula **todas as versões**, e cabe ao consumidor filtrar pela mais recente.
+- Por isso, para obter os dados mais atuais de uma empresa, você deve **filtrar pelo maior valor de `VERSAO`** para cada combinação `CNPJ_CIA + DT_REFER`.
+
+**Exemplo prático:** Se a Petrobras enviou o DFP 2024 três vezes (original + 2 correções), o arquivo `dfp_cia_aberta_2024.zip` terá três blocos de linhas para a Petrobras, com `VERSAO = 1`, `2` e `3`. A versão correta a usar é a `3`.
+
+---
+
+### 3. Cadência de atualização por conjunto
+
+A atualização dos arquivos mais recentes ocorre de terça a sábado, às 08h, com os dados recebidos até as 23h59 do dia anterior. Arquivos de períodos mais antigos são atualizados semanalmente, toda segunda-feira às 08h.
+
+Para os conjuntos de companhias abertas especificamente:
+
+| Conjunto | Cadência |
+|---|---|
+| CAD (Cadastro) | Diária |
+| DFP, ITR, FRE, FCA, CGVN, VLMO | Semanal (ano corrente e A-1) |
+| IPE | Semanal (ano corrente e A-1) |
+| Anos mais antigos (A-2 em diante) | Semanal, mas menos prioritário |
+
+---
+
+### 4. Como saber quando houve alterações
+
+Há três formas, do mais simples ao mais robusto:
+
+**a) Página de Novidades do portal**
+
+Todas as mudanças estruturais no Portal de Dados Abertos — novos campos, novos arquivos, descontinuações — são sempre comunicadas por meio da página Novidades do Portal.
+
+URL: `https://dados.cvm.gov.br/pages/novidades`
+
+Útil para mudanças de esquema (colunas novas, arquivos renomeados etc.), mas não notifica reapresentações individuais de empresas.
+
+**b) Comparar o `Last-Modified` ou tamanho do arquivo via HTTP**
+
+O servidor da CVM retorna o header `Last-Modified` em requisições HTTP. Você pode fazer um `HEAD` request no arquivo ZIP antes de baixá-lo e comparar com o valor anterior. Se mudou, há dados novos.
+
+```python
+import requests
+
+url = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip"
+r = requests.head(url)
+print(r.headers.get("Last-Modified"))
+# Ex: Mon, 09 Jun 2026 08:03:41 GMT
+```
+
+**c) Comparar o campo `DT_ENTREGA` dentro do CSV**
+
+Dentro de qualquer arquivo de índice (ex: `dfp_cia_aberta_2026.csv`), o campo **`DT_ENTREGA`** registra a data e hora exata em que cada formulário foi entregue à CVM. Ao baixar o arquivo semanalmente e comparar com a versão anterior, qualquer linha com `DT_ENTREGA` nova indica uma entrega ou reapresentação ocorrida naquela semana.
+
+---
+
+### 5. Estratégia recomendada para manter uma base atualizada
+
+```
+1. Toda segunda-feira, faça HEAD no ZIP de interesse
+2. Se Last-Modified mudou → baixe o arquivo
+3. Carregue o CSV e filtre: para cada (CNPJ_CIA, DT_REFER), 
+   mantenha somente o registro com MAX(VERSAO)
+4. Faça um UPSERT na sua base local usando 
+   (CNPJ_CIA, DT_REFER) como chave de negócio
+```
+
+Assim você sempre tem a versão mais recente de cada empresa sem duplicar dados nem reprocessar o histórico inteiro.
+
+---
 
 ## Fontes e Referências
 
@@ -1188,5 +1280,6 @@ Para dúvidas específicas sobre os dados, a CVM disponibiliza canais de atendim
 
 ---
 
-*Documento elaborado com base nas informações públicas disponíveis no Portal de Dados Abertos da CVM, atualizado para o ano de 2026.*
 
+
+*Documento elaborado com base nas informações públicas disponíveis no Portal de Dados Abertos da CVM, atualizado para o ano de 2026.*

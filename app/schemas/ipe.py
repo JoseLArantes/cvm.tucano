@@ -3,10 +3,10 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class IpeDocumentoResposta(BaseModel):
+class IpeDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
@@ -34,3 +34,16 @@ class IpeDocumentoResposta(BaseModel):
 class ListaIpeDocumentosResposta(BaseModel):
     dados: list[IpeDocumentoResposta] = Field(description="Lista paginada de documentos IPE.")
     paginacao: Paginacao
+
+
+class IpeDocumentoAgregado(BaseModel):
+    ano: int | None = None
+    categoria: str | None = None
+    tipo: str | None = None
+    especie: str | None = None
+    total: int
+
+
+class ListaIpeDocumentosAgregadosResposta(BaseModel):
+    dados: list[IpeDocumentoAgregado] = Field(description="Lista de documentos IPE agregados.")
+

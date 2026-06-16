@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.ingestion import IngestionRow, IngestionRun, QuarantineItem
 from app.services.ingestion.fca import _promote_fca_row, normalizar_fca_row
 from app.services.ingestion.financeiro import _promote_financeiro_row, normalizar_financeiro_row
@@ -210,6 +211,7 @@ def replay_ingestion_row(
         row_kind, dados = _renormalize_row(db, row)
         natural_key = build_natural_key(row_kind, dados)
         duplicate_result = classify_duplicate(
+            row_kind=row_kind,
             natural_key=natural_key,
             normalized_hash=row.normalized_hash or "",
             normalized_data=dados,
@@ -264,7 +266,7 @@ def replay_ingestion_row(
             db.commit()
             return {"status": "falha", "row_id": str(row.id), "reason": resolver_result.resolution_method}
 
-        persist_resolution_result(db, ingestion_row=row, result=resolver_result, created_by=resolved_by)
+        persist_resolution_result(db, ingestion_row=row, result=resolver_result, created_by=resolved_by, persist=True)
         companhia = db.get(Companhia, resolver_result.companhia_id) if resolver_result.companhia_id else None
         dados["companhia_id"] = resolver_result.companhia_id
         if dados.get("cnpj_companhia") is None and companhia is not None:
@@ -346,6 +348,29 @@ def replay_file_member(db: Session, *, member_id: Any) -> dict[str, Any]:
 
 
 def replay_ingestion_run(db: Session, *, run_id: Any) -> dict[str, Any]:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise ValueError("ingestion_run_nao_encontrado")
+
+    execucao = None
+    if run.execucao_sincronizacao_id is not None:
+        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+
+    if execucao is not None and execucao.parent_execucao_id is not None:
+        from app.worker.tasks import sincronizar_member_internal
+
+        resultado = sincronizar_member_internal(
+            db=db,
+            tipo_fonte=execucao.tipo_fonte,
+            ano=execucao.ano or 0,
+            member_name=execucao.arquivo,
+            parent_execucao_id=str(execucao.parent_execucao_id),
+            child_execucao_id=str(execucao.id),
+            force_reimport=True,
+            task_id="replay",
+        )
+        return {"status": resultado["status"], "execucao_id": resultado["execucao_id"]}
+
     rows = list(db.execute(select(IngestionRow.id).where(IngestionRow.ingestion_run_id == run_id)).all())
     processed = [replay_ingestion_row(db, row_id=row_id) for (row_id,) in rows]
     return {"status": "sucesso", "rows": processed}
@@ -366,5 +391,13 @@ def replay_quarantine(
     if ano is not None:
         query = query.where(QuarantineItem.ano_origem == ano)
     items = list(db.execute(query.order_by(QuarantineItem.created_at.asc())).scalars())
-    processed = [replay_ingestion_row(db, row_id=item.ingestion_row_id) for item in items]
+    
+    processed = []
+    for item in items:
+        try:
+            res = replay_ingestion_row(db, row_id=item.ingestion_row_id)
+            processed.append(res)
+        except Exception as e:
+            processed.append({"status": "falha", "row_id": str(item.ingestion_row_id), "reason": str(e)})
+            
     return {"status": "sucesso", "total": len(processed), "items": processed}

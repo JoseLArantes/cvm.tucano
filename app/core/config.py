@@ -42,6 +42,16 @@ class Settings(BaseSettings):
         ge=0.0,
         alias="INGESTION_COMPANY_MISSING_MAX_RATIO",
     )
+    celery_worker_max_tasks_per_child: int = Field(
+        default=1,
+        ge=1,
+        alias="CELERY_WORKER_MAX_TASKS_PER_CHILD",
+    )
+    celery_worker_max_memory_per_child_kb: int = Field(
+        default=1_500_000,
+        ge=1,
+        alias="CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB",
+    )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
     storage_dir: str = Field(default="data/storage", alias="STORAGE_DIR")

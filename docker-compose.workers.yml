@@ -1,0 +1,31 @@
+services:
+  cvm_worker:
+    build: .
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    deploy:
+      replicas: ${WORKER_REPLICAS:-4}
+    depends_on:
+      cvm_redis:
+        condition: service_healthy
+
+  cvm_scheduler:
+    build: .
+    container_name: cvm_scheduler
+    command: sh -lc "python -m app.worker.bootstrap && celery -A app.worker.celery_app beat --loglevel=info"
+    env_file:
+      - .env
+
+  cvm_redis:
+    image: redis:7
+    container_name: cvm_redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5

@@ -76,7 +76,7 @@ def _registrar_quarentena(
             arquivo_origem=ARQUIVO_CADASTRO,
             ano_origem=None,
             linha_origem=linha_origem,
-            motivo=motivo,
+            motivo=motivo[:255] if motivo else "",
             dados_originais=dados_originais,
         )
     )

@@ -1,6 +1,7 @@
 import io
 import zipfile
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -105,8 +106,10 @@ def _zip_financeiro(
     cnpj: str,
     codigo_cvm: str,
     empty_members: set[str] | None = None,
+    demonstracao_member_rows: dict[str, list[str]] | None = None,
 ) -> bytes:
     empty_members = empty_members or set()
+    demonstracao_member_rows = demonstracao_member_rows or {}
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
         zip_file.writestr(
@@ -136,13 +139,17 @@ def _zip_financeiro(
         for nome_arquivo, _, _ in arquivos_demonstracao(prefixo, ano):
             payload = (
                 "CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;"
-                "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA\n"
+                "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA;COLUNA_DF\n"
             )
             if nome_arquivo not in empty_members:
-                payload += (
-                    f"{cnpj};2025-12-31;1;EMPRESA A;{codigo_cvm};GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;"
-                    f"1.01;Caixa;{valor_conta};S\n"
-                )
+                custom_rows = demonstracao_member_rows.get(nome_arquivo)
+                if custom_rows is not None:
+                    payload += "".join(custom_rows)
+                else:
+                    payload += (
+                        f"{cnpj};2025-12-31;1;EMPRESA A;{codigo_cvm};GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;"
+                        f"1.01;Caixa;{valor_conta};S;\n"
+                    )
             zip_file.writestr(nome_arquivo, payload.encode("latin1"))
     return buffer.getvalue()
 
@@ -182,6 +189,37 @@ def test_normalizar_financeiro_row_reuses_v1_mapping() -> None:
     assert dados["id_documento"] == 123
 
 
+def test_normalizar_financeiro_row_accepts_live_dot_decimal_shape() -> None:
+    row_kind, dados = normalizar_financeiro_row(
+        prefixo="dfp",
+        tipo_formulario="DFP",
+        arquivo_origem="dfp_cia_aberta_DRE_ind_2025.csv",
+        ano_origem=2025,
+        linha_origem=2,
+        linha={
+            "CNPJ_CIA": "00.000.000/0001-91",
+            "DT_REFER": "2025-12-31",
+            "VERSAO": "1",
+            "DENOM_CIA": "BCO BRASIL S.A.",
+            "CD_CVM": "001023",
+            "GRUPO_DFP": "DF Individual - Demonstração do Resultado",
+            "MOEDA": "REAL",
+            "ESCALA_MOEDA": "MIL",
+            "ORDEM_EXERC": "ÚLTIMO",
+            "DT_INI_EXERC": "2025-01-01",
+            "DT_FIM_EXERC": "2025-12-31",
+            "CD_CONTA": "3.01",
+            "DS_CONTA": "Receitas de Intermediação Financeira",
+            "VL_CONTA": "293379482.0000000000",
+            "ST_CONTA_FIXA": "S",
+            "COLUNA_DF": "",
+        },
+    )
+
+    assert row_kind == "dfp_demonstracao"
+    assert dados["valor_conta"] == Decimal("293379482.0000000000")
+
+
 def test_sincronizar_financeiro_inserts_same_counts_as_v1_for_dfp_and_itr() -> None:
     for prefixo, fn in (("dfp", sincronizar_dfp), ("itr", sincronizar_itr)):
         session = _session()
@@ -210,6 +248,78 @@ def test_sincronizar_financeiro_inserts_same_counts_as_v1_for_dfp_and_itr() -> N
             assert session.query(RegistroQuarentena).count() == 0
         finally:
             session.close()
+
+
+def test_sincronizar_financeiro_accepts_large_valor_conta() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "dfp",
+            2025,
+            valor_conta="44.109.150.000.000.000,00",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            demonstracao_member_rows={
+                "dfp_cia_aberta_DRE_con_2025.csv": [
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;MIL;ULTIMO;2025-01-01;2025-12-31;"
+                    "3.02;Custo dos Bens e/ou Serviços Vendidos;-44.109.150.000.000.000,00;S;\n"
+                ]
+            },
+        )
+
+        resultado = sincronizar_dfp(session, 2025, downloader=lambda _, payload=payload: payload)
+
+        assert resultado["status"] == "sucesso"
+        demonstracao = (
+            session.query(DemonstracaoFinanceira)
+            .filter(DemonstracaoFinanceira.arquivo_origem == "dfp_cia_aberta_DRE_con_2025.csv")
+            .one()
+        )
+        assert demonstracao.valor_conta == Decimal("-44109150000000000")
+    finally:
+        session.close()
+
+
+def test_sincronizar_financeiro_preserves_live_dot_decimal_raw_value() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "dfp",
+            2025,
+            valor_conta="293379482.0000000000",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            demonstracao_member_rows={
+                "dfp_cia_aberta_DRE_ind_2025.csv": [
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;DF Individual - Demonstração do Resultado;REAL;MIL;ÚLTIMO;2025-01-01;2025-12-31;3.01;Receitas de Intermediação Financeira;293379482.0000000000;S;\n"
+                ]
+            },
+        )
+
+        resultado = sincronizar_dfp(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        demonstracao = (
+            session.query(DemonstracaoFinanceira)
+            .filter(DemonstracaoFinanceira.arquivo_origem == "dfp_cia_aberta_DRE_ind_2025.csv")
+            .one()
+        )
+        assert demonstracao.valor_conta == Decimal("293379482.0000000000")
+        assert demonstracao.escala_moeda == "MIL"
+    finally:
+        session.close()
 
 
 def test_sincronizar_financeiro_resolves_foreign_issuer_without_quarantine() -> None:
@@ -328,5 +438,163 @@ def test_sincronizar_dfp_succeeds_when_dfc_md_members_have_only_header() -> None
         assert session.query(ComposicaoCapital).count() == 1
         assert session.query(ParecerFinanceiro).count() == 1
         assert session.query(RegistroQuarentena).count() == 0
+    finally:
+        session.close()
+
+
+def test_sincronizar_dfp_does_not_run_reconcile_on_first_load(monkeypatch) -> None:
+    session = _session()
+    reconcile_calls: list[str] = []
+
+    def _fake_reconcile(*args, **kwargs) -> int:
+        reconcile_calls.append(kwargs["arquivo_origem"])
+        return 0
+
+    monkeypatch.setattr("app.services.ingestion.financeiro.reconcile_promoted_rows", _fake_reconcile)
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "dfp",
+            2025,
+            valor_conta="1.000,00",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+        )
+        resultado = sincronizar_dfp(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert reconcile_calls == []
+    finally:
+        session.close()
+
+
+def test_sincronizar_dfp_dmpl_rows_with_distinct_coluna_df_are_not_rejected() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "dfp",
+            2025,
+            valor_conta="1.000,00",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            demonstracao_member_rows={
+                "dfp_cia_aberta_DMPL_con_2025.csv": [
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;1.000,00;S;Reservas de Lucro\n",
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;2.000,00;S;Lucros ou Prejuizos Acumulados\n",
+                ]
+            },
+        )
+
+        resultado = sincronizar_dfp(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert resultado["total_rejeitados"] == 0
+        assert session.query(RegistroQuarentena).count() == 0
+
+        dmpl_rows = (
+            session.query(DemonstracaoFinanceira)
+            .filter(DemonstracaoFinanceira.arquivo_origem == "dfp_cia_aberta_DMPL_con_2025.csv")
+            .order_by(DemonstracaoFinanceira.coluna_df.asc())
+            .all()
+        )
+        assert len(dmpl_rows) == 2
+        assert [row.coluna_df for row in dmpl_rows] == [
+            "Lucros ou Prejuizos Acumulados",
+            "Reservas de Lucro",
+        ]
+    finally:
+        session.close()
+
+
+def test_sincronizar_itr_dra_rows_with_distinct_data_inicio_exercicio_are_not_rejected() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "itr",
+            2025,
+            valor_conta="0",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            demonstracao_member_rows={
+                "itr_cia_aberta_DRA_ind_2025.csv": [
+                    "08.773.135/0001-00;2025-06-30;1;EMPRESA A;25224;DF Individual - Demonstração de Resultado Abrangente;REAL;UNIDADE;PENÚLTIMO;2024-01-01;2024-06-30;4.02.01.02;Conta;0;S;\n",
+                    "08.773.135/0001-00;2025-06-30;1;EMPRESA A;25224;DF Individual - Demonstração de Resultado Abrangente;REAL;UNIDADE;PENÚLTIMO;2024-04-01;2024-06-30;4.02.01.02;Conta;0;S;\n",
+                ]
+            },
+        )
+
+        resultado = sincronizar_itr(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert resultado["total_rejeitados"] == 0
+        assert session.query(RegistroQuarentena).count() == 0
+
+        dra_rows = (
+            session.query(DemonstracaoFinanceira)
+            .filter(DemonstracaoFinanceira.arquivo_origem == "itr_cia_aberta_DRA_ind_2025.csv")
+            .order_by(DemonstracaoFinanceira.data_inicio_exercicio.asc())
+            .all()
+        )
+        assert len(dra_rows) == 2
+        assert [row.data_inicio_exercicio for row in dra_rows] == [
+            date(2024, 1, 1),
+            date(2024, 4, 1),
+        ]
+    finally:
+        session.close()
+
+
+def test_sincronizar_itr_dmpl_prefers_non_zero_when_duplicate_key_has_zero_shadow_row() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro(
+            "itr",
+            2025,
+            valor_conta="0",
+            cnpj="08.773.135/0001-00",
+            codigo_cvm="25224",
+            demonstracao_member_rows={
+                "itr_cia_aberta_DMPL_ind_2025.csv": [
+                    "08.773.135/0001-00;2025-03-31;1;EMPRESA A;25224;DF Individual - Demonstração das Mutações do Patrimônio Líquido;REAL;UNIDADE;ÚLTIMO;2025-01-01;2025-03-31;5.04;Transações de Capital com os Sócios;-2.0000000000;S;Reservas de Capital, Opções Outorgadas e Ações em Tesouraria\n",
+                    "08.773.135/0001-00;2025-03-31;1;EMPRESA A;25224;DF Individual - Demonstração das Mutações do Patrimônio Líquido;REAL;UNIDADE;ÚLTIMO;2025-01-01;2025-03-31;5.04;Transações de Capital com os Sócios;0.0000000000;S;Reservas de Capital, Opções Outorgadas e Ações em Tesouraria\n",
+                    "08.773.135/0001-00;2025-03-31;1;EMPRESA A;25224;DF Individual - Demonstração das Mutações do Patrimônio Líquido;REAL;UNIDADE;ÚLTIMO;2025-01-01;2025-03-31;5.04;Transações de Capital com os Sócios;-2.0000000000;S;Reservas de Capital, Opções Outorgadas e Ações em Tesouraria\n",
+                ]
+            },
+        )
+
+        resultado = sincronizar_itr(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert resultado["total_rejeitados"] == 0
+        rows = (
+            session.query(DemonstracaoFinanceira)
+            .filter(DemonstracaoFinanceira.arquivo_origem == "itr_cia_aberta_DMPL_ind_2025.csv")
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].valor_conta == Decimal("-2.0000000000")
     finally:
         session.close()

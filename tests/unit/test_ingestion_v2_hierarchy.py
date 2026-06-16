@@ -101,15 +101,15 @@ def test_hierarchy_api_filtering_and_details(client: TestClient, db_session: Ses
     db_session.add(simple)
     db_session.commit()
 
-    # Test GET /admin/sincronizacoes listing
+    # Test GET /ingestion/sincronizacoes listing
     # No filters
-    res = client.get("/admin/sincronizacoes")
+    res = client.get("/ingestion/sincronizacoes")
     assert res.status_code == 200
     dados = res.json()["dados"]
     assert len(dados) >= 3
 
     # Filter by tipo_execucao = arquivo_membro
-    res = client.get("/admin/sincronizacoes?tipo_execucao=arquivo_membro")
+    res = client.get("/ingestion/sincronizacoes?tipo_execucao=arquivo_membro")
     assert res.status_code == 200
     dados = res.json()["dados"]
     assert all(d["tipo_execucao"] == "arquivo_membro" for d in dados)
@@ -118,7 +118,7 @@ def test_hierarchy_api_filtering_and_details(client: TestClient, db_session: Ses
     assert child_summary["arquivo_principal"] == "fre_cia_aberta_2025.zip"
 
     # Filter somente_pais = True
-    res = client.get("/admin/sincronizacoes?somente_pais=true")
+    res = client.get("/ingestion/sincronizacoes?somente_pais=true")
     assert res.status_code == 200
     dados = res.json()["dados"]
     assert all(d["id_execucao_pai"] is None for d in dados)
@@ -130,21 +130,21 @@ def test_hierarchy_api_filtering_and_details(client: TestClient, db_session: Ses
     assert parent_summary["filhos_em_andamento"] == 0
 
     # Filter somente_filhos = True
-    res = client.get("/admin/sincronizacoes?somente_filhos=true")
+    res = client.get("/ingestion/sincronizacoes?somente_filhos=true")
     assert res.status_code == 200
     dados = res.json()["dados"]
     assert all(d["id_execucao_pai"] is not None for d in dados)
 
     # Filter by id_execucao_pai
-    res = client.get(f"/admin/sincronizacoes?id_execucao_pai={parent_id}")
+    res = client.get(f"/ingestion/sincronizacoes?id_execucao_pai={parent_id}")
     assert res.status_code == 200
     dados = res.json()["dados"]
     assert len(dados) == 1
     assert dados[0]["id"] == str(child_id)
 
-    # Test GET /admin/sincronizacoes/{id} detail
+    # Test GET /ingestion/sincronizacoes/{id} detail
     # Parent detail should return the child list in execucoes_filhas
-    res = client.get(f"/admin/sincronizacoes/{parent_id}")
+    res = client.get(f"/ingestion/sincronizacoes/{parent_id}")
     assert res.status_code == 200
     detalhe = res.json()
     assert detalhe["tipo_execucao"] == "arquivo_zip"
@@ -154,7 +154,7 @@ def test_hierarchy_api_filtering_and_details(client: TestClient, db_session: Ses
     assert detalhe["execucoes_filhas"][0]["id"] == str(child_id)
 
     # Child detail should return the parent zip as arquivo_principal
-    res = client.get(f"/admin/sincronizacoes/{child_id}")
+    res = client.get(f"/ingestion/sincronizacoes/{child_id}")
     assert res.status_code == 200
     detalhe = res.json()
     assert detalhe["tipo_execucao"] == "arquivo_membro"

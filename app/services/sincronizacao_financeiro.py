@@ -15,12 +15,12 @@ from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
+from app.services.financeiro_valores import normalizar_decimal_financeiro
 from app.services.normalizacao import (
     gerar_hash_canonico,
     normalizar_cnpj,
     normalizar_conta_fixa,
     normalizar_data,
-    normalizar_decimal_cvm,
     normalizar_inteiro,
     normalizar_texto,
 )
@@ -57,6 +57,7 @@ _CAMPOS_NEGOCIO_DEMONSTRACOES = {
     "data_inicio_exercicio",
     "data_fim_exercicio",
     "codigo_conta",
+    "coluna_df",
     "descricao_conta",
     "valor_conta",
     "conta_fixa",
@@ -141,7 +142,7 @@ def _registrar_quarentena(
             arquivo_origem=arquivo_origem,
             ano_origem=ano_origem,
             linha_origem=linha_origem,
-            motivo=motivo,
+            motivo=motivo[:255] if motivo else "",
             dados_originais=dados_originais,
         )
     )
@@ -201,8 +202,9 @@ def _normalizar_demonstracao(
         "data_inicio_exercicio": normalizar_data(linha.get("DT_INI_EXERC")),
         "data_fim_exercicio": normalizar_data(linha.get("DT_FIM_EXERC")),
         "codigo_conta": normalizar_texto(linha.get("CD_CONTA")),
+        "coluna_df": normalizar_texto(linha.get("COLUNA_DF")) or "",
         "descricao_conta": normalizar_texto(linha.get("DS_CONTA")),
-        "valor_conta": normalizar_decimal_cvm(linha.get("VL_CONTA")),
+        "valor_conta": normalizar_decimal_financeiro(linha.get("VL_CONTA")),
         "conta_fixa": normalizar_conta_fixa(linha.get("ST_CONTA_FIXA")),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,
@@ -228,16 +230,20 @@ def _normalizar_composicao_capital(
         "data_referencia": normalizar_data(linha.get("DT_REFER")),
         "versao": normalizar_inteiro(linha.get("VERSAO")),
         "denominacao_companhia": normalizar_texto(linha.get("DENOM_CIA")),
-        "quantidade_acoes_ordinarias_capital_integralizado": normalizar_decimal_cvm(
+        "quantidade_acoes_ordinarias_capital_integralizado": normalizar_decimal_financeiro(
             linha.get("QT_ACAO_ORDIN_CAP_INTEGR")
         ),
-        "quantidade_acoes_preferenciais_capital_integralizado": normalizar_decimal_cvm(
+        "quantidade_acoes_preferenciais_capital_integralizado": normalizar_decimal_financeiro(
             linha.get("QT_ACAO_PREF_CAP_INTEGR")
         ),
-        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_cvm(linha.get("QT_ACAO_TOTAL_CAP_INTEGR")),
-        "quantidade_acoes_ordinarias_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_ORDIN_TESOURO")),
-        "quantidade_acoes_preferenciais_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_PREF_TESOURO")),
-        "quantidade_total_acoes_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_TOTAL_TESOURO")),
+        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_financeiro(
+            linha.get("QT_ACAO_TOTAL_CAP_INTEGR")
+        ),
+        "quantidade_acoes_ordinarias_tesouraria": normalizar_decimal_financeiro(linha.get("QT_ACAO_ORDIN_TESOURO")),
+        "quantidade_acoes_preferenciais_tesouraria": normalizar_decimal_financeiro(
+            linha.get("QT_ACAO_PREF_TESOURO")
+        ),
+        "quantidade_total_acoes_tesouraria": normalizar_decimal_financeiro(linha.get("QT_ACAO_TOTAL_TESOURO")),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,
         "linha_origem": linha_origem,
@@ -537,6 +543,7 @@ def _sincronizar_formulario(
                                 dados["ordem_exercicio"],
                                 dados["data_fim_exercicio"],
                                 dados["codigo_conta"],
+                                dados["coluna_df"],
                             )
                             tipo_modelo = "demonstracao"
                     except Exception as exc:
@@ -616,6 +623,7 @@ def _sincronizar_formulario(
                                 "ordem_exercicio",
                                 "data_fim_exercicio",
                                 "codigo_conta",
+                                "coluna_df",
                             ),
                             campos_negocio=_CAMPOS_NEGOCIO_DEMONSTRACOES,
                             dados=dados,

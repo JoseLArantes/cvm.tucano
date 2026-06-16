@@ -117,6 +117,36 @@ def _seed_financeiro(db: Session, companhia_id: uuid.UUID) -> None:
             alterado_em=agora,
         )
     )
+    db.add(
+        DemonstracaoFinanceira(
+            companhia_id=companhia_id,
+            tipo_formulario="DFP",
+            tipo_demonstracao="demonstracao_resultado",
+            escopo_demonstracao="individual",
+            cnpj_companhia="00000000000191",
+            codigo_cvm=1023,
+            data_referencia=date(2025, 12, 31),
+            versao=1,
+            denominacao_companhia="Banco do Brasil S.A.",
+            grupo_demonstracao="DFP",
+            moeda="REAL",
+            escala_moeda="MIL",
+            ordem_exercicio="ATUAL",
+            data_inicio_exercicio=date(2025, 1, 1),
+            data_fim_exercicio=date(2025, 12, 31),
+            codigo_conta="3.03",
+            descricao_conta="Receita Líquida",
+            valor_conta=Decimal("740500"),
+            conta_fixa=True,
+            arquivo_origem="dfp_cia_aberta_DRE_ind_2025.csv",
+            ano_origem=2025,
+            linha_origem=3,
+            hash_origem="hash-demo-dre",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
 
     # Seed dynamic DemonstracaoFinanceira for DFP - BPA - CON (Balanço Patrimonial Ativo - Consolidado)
     db.add(
@@ -253,6 +283,21 @@ def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> No
     response = client.get("/exportacoes/dfp/dfc_mi_con?formato=json")
     assert response.status_code == 200
     assert response.json() == []
+
+    response = client.get("/exportacoes/dfp/dre_ind?formato=json")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 1
+    assert data[0]["valor_conta"] == 740500000.0
+    assert data[0]["valor_conta_reportado"] == 740500.0
+    assert data[0]["fator_escala_moeda"] == 1000
+
+    response = client.get("/exportacoes/dfp/dre_ind?formato=csv")
+    assert response.status_code == 200
+    csv_text = response.text
+    assert "valor_conta_reportado" in csv_text
+    assert "fator_escala_moeda" in csv_text
+    assert "740500000" in csv_text
 
     response = client.get("/exportacoes/dfp/demonstracao_dfc_mi_con?formato=json")
     assert response.status_code == 200

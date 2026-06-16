@@ -39,13 +39,15 @@ api:
 
 worker:
   enabled: true
-  replicaCount: 1
+  replicaCount: 6
   command:
     - celery
     - -A
     - app.worker.celery_app
     - worker
     - --loglevel=info
+    - --concurrency=1
+    - -Ofair
   resources: {}
   podAnnotations: {}
 
@@ -53,11 +55,9 @@ beat:
   enabled: true
   replicaCount: 1
   command:
-    - celery
-    - -A
-    - app.worker.celery_app
-    - beat
-    - --loglevel=info
+    - sh
+    - -c
+    - "python -m app.worker.bootstrap && celery -A app.worker.celery_app beat --loglevel=info"
   resources: {}
   podAnnotations: {}
 
@@ -70,6 +70,18 @@ env:
   ANOS_INICIAIS_DFP: "2021,2022,2023,2024,2025"
   ANOS_INICIAIS_ITR: "2021,2022,2023,2024,2025"
   ANOS_INICIAIS_FRE: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_FCA: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_IPE: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_VLMO: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_CGVN: "2021,2022,2023,2024,2025"
+  INGESTION_PROMOTE_ENABLED: "true"
+  INGESTION_PROVISIONAL_COMPANY_ENABLED: "false"
+  INGESTION_MAX_RETRIES: "5"
+  INGESTION_RETRY_BACKOFF_MAX_SECONDS: "600"
+  INGESTION_COMPANY_MISSING_MAX_RATIO: "0.01"
+  INGESTION_STAGE_BATCH_SIZE: "5000"
+  INGESTION_PROMOTE_BATCH_SIZE: "5000"
+  STORAGE_DIR: "data/storage"
   BACKEND_CORS_ORIGINS: "http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com"
 
 appSecret:

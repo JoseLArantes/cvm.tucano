@@ -45,12 +45,14 @@ O pipeline está configurado para escalabilidade dinâmica com múltiplas instâ
 
 - Falhas transientes de rede ou conexão com o banco de dados provocam a retentativa automática das tarefas Celery.
 - O mecanismo de limpeza atômica de staging é executado no início do processamento de cada membro de arquivo, garantindo que execuções parciais anteriores causadas por falhas de tarefas não deixem lixo que cause violações de restrição de chave no banco.
+- O reprocessamento da quarentena é resiliente: falhas inesperadas no parsing ou validação de uma linha individual não abortam a execução em lote das demais linhas.
+- A normalização de dados numéricos e decimais é tolerante a variações frequentes em relatórios CVM, incluindo símbolos monetários (ex: R$), percentuais (ex: %), formatos decimais mistos (PT-BR/EN-US) e termos para valores nulos (ex: 'N/A', 'N.D.').
 """
 
 OPENAPI_TAGS = [
     {
         "name": "auth",
-        "description": "Autenticacao por usuario e senha para obtencao do token bearer.",
+        "description": "Autenticação por usuário e senha para obtenção do token bearer.",
     },
     {
         "name": "health",
@@ -70,11 +72,11 @@ OPENAPI_TAGS = [
     },
     {
         "name": "ipe",
-        "description": "Consultas IPE: documentos eventuais com filtros por companhia, periodo, categoria e assunto.",
+        "description": "Consultas IPE: documentos eventuais com filtros por companhia, período, categoria e assunto.",
     },
     {
         "name": "vlmo",
-        "description": "Consultas VLMO: documentos e consolidado de valores mobiliarios negociados e detidos.",
+        "description": "Consultas VLMO: documentos e consolidado de valores mobiliários negociados e detidos.",
     },
     {
         "name": "cgvn",
@@ -91,15 +93,15 @@ OPENAPI_TAGS = [
         ),
     },
     {
-        "name": "admin",
+        "name": "ingestion",
         "description": (
-            "Operacoes administrativas de sincronizacao, monitoramento de execucao, "
+            "Operações de ingestão de sincronização, monitoramento de execução, "
             "quarentena, replay e rebuild de identidade."
         ),
     },
     {
         "name": "usuarios",
-        "description": "Gestao de usuarios com login e controle administrativo.",
+        "description": "Gestão de usuários com login e controle administrativo.",
     },
     {
         "name": "fontes",

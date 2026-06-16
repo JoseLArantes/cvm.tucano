@@ -26,6 +26,7 @@ Este repositório é voltado para desenvolvedores de backend e plataforma que tr
 - API pública para dados normalizados da CVM.
 - Tarefas assíncronas de sincronização para cadastro, DFP, ITR e FRE.
 - Ingestão idempotente com rastreamento de alterações.
+- Catálogo interno de fontes em `/ingestion/fontes` para cobertura suportada e planejada.
 
 ## Modelo de execução
 
@@ -57,6 +58,8 @@ Variáveis importantes:
 - `ANOS_INICIAIS_DFP`
 - `ANOS_INICIAIS_ITR`
 - `ANOS_INICIAIS_FRE`
+- `INGESTION_V2_ENABLED`
+- `INGESTION_V2_PROMOTE_ENABLED`
 
 ### Execução local
 
@@ -68,7 +71,9 @@ Comandos úteis depois disso:
 
 ```bash
 docker compose run --rm cvm_api alembic upgrade head
-docker compose run --rm cvm_api pytest
+docker compose run --rm cvm_api python -m pytest -q
+docker compose run --rm cvm_api ruff check .
+docker compose run --rm cvm_api mypy .
 scripts/purge-local-db.sh --yes
 ```
 
@@ -84,9 +89,9 @@ scripts/purge-local-db.sh --yes
 ## Testes e qualidade
 
 ```bash
-pytest
-ruff check .
-mypy .
+docker compose run --rm cvm_api python -m pytest -q
+docker compose run --rm cvm_api ruff check .
+docker compose run --rm cvm_api mypy .
 ```
 
 Observações:
@@ -97,6 +102,7 @@ Observações:
 ## Documentos principais
 
 - Referência funcional/comportamental: `docs/prd_app_cvm_fastapi.md`
+- Changelog de contrato para frontend: `docs/frontend_api_changelog.md`
 - Notas de mapeamento das fontes CVM: `ref_cvm.md`
 - Guia detalhado sobre a CVM, suas fontes e o racional de negócio: `CVM.md`
 

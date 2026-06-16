@@ -9,7 +9,7 @@ from app.api.auth import validar_token_api
 from app.api.deps import DbSession
 from app.core.config import get_settings
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun, QuarantineItem
-from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
+from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.schemas.admin import (
     AnaliseArquivo,
     AuditoriaFonteResposta,
@@ -28,9 +28,11 @@ from app.schemas.admin import (
     ListaHistoricoAlteracoes,
     ListaIngestionRuns,
     ListaQuarantineItems,
-    ListaRegistrosQuarentena,
+    QuarentenaResumoResposta,
     QuarantineItemResposta,
-    RegistroQuarentenaResposta,
+    ErroQuantidade,
+    ArquivoQuantidade,
+    ArquivoErroQuantidade,
     ReplayQuarantineRequisicao,
     ReplayResposta,
     RespostaAgendamentoEmLote,
@@ -42,9 +44,15 @@ from app.schemas.admin import (
 from app.schemas.comum import Paginacao
 from app.services.ingestion.audit import build_dataset_discovery_audit
 from app.services.ingestion.cadastro import sincronizar_cadastro_companhias
+from app.services.ingestion.lifecycle import (
+    build_artifact_snapshot_response,
+    build_delivery_snapshot_summary,
+    build_member_snapshot_summary,
+)
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.source_registry import listar_datasets, listar_fontes, obter_fonte
+from app.services.ingestion.staging import update_run_state
 from app.services.ingestion.staging import formatar_tamanho
 from celery import chain, group
 from app.worker.celery_app import celery_app
@@ -61,7 +69,43 @@ from app.worker.tasks import (
     ingerir_sincronizacao_task,
 )
 
-router = APIRouter(prefix="/admin")
+router = APIRouter(prefix="/ingestion")
+
+
+def _reconcile_summary_from_run(run: IngestionRun) -> dict[str, Any] | None:
+    quality_summary = run.quality_summary or {}
+    rows_reconciled_deleted = quality_summary.get("reconciled_deleted")
+    if rows_reconciled_deleted in (None, 0):
+        return None
+    return {
+        "rows_reconciled_deleted": rows_reconciled_deleted,
+        "scope": "member_replace",
+        "target_tables": quality_summary.get("reconcile_target_tables", []),
+    }
+
+
+def _lifecycle_decision_from_run(run: IngestionRun) -> dict[str, Any]:
+    quality_summary = run.quality_summary or {}
+    remote_probe = run.remote_probe or {}
+    return {
+        "remote_probe": remote_probe.get("decision"),
+        "artifact_sha": remote_probe.get("sha_confirmation_result"),
+        "members_skipped_by_sha": quality_summary.get("members_skipped", 0),
+        "members_processed": quality_summary.get("members_processados"),
+    }
+
+_DESC_SYNC_ANUAL = (
+    "Agenda uma sincronizacao administrativa de uma fonte anual CVM. "
+    "A task resultante executa um ciclo em quatro momentos operacionais: "
+    "`acquire` com preflight remoto (`CKAN`/`HEAD`) para decidir se o recurso parece alterado; "
+    "`stage` com extracao de members, headers, contagem de linhas e hashes; "
+    "`promote` com normalizacao, resolucao de companhia, deduplicacao e escrita nas tabelas de dominio; "
+    "e `reconcile`, quando necessario, para remover linhas promovidas antigas do mesmo `arquivo_origem`/`ano_origem` que nao existem mais no member atual. "
+    "A CVM republica pacotes anuais por substituicao completa, nao por append. "
+    "Por isso, uma sincronizacao bem-sucedida pode terminar sem download (`sem_alteracao`), "
+    "com download mas reaproveitamento por SHA (`skipped`), "
+    "ou com processamento parcial de members alterados enquanto members idênticos sao reaproveitados por `member_sha256`."
+)
 
 _RESPOSTA_TOKEN_INVALIDO: dict[int | str, dict[str, Any]] = {
     401: {
@@ -75,6 +119,83 @@ _STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cance
 
 def _agora() -> datetime:
     return datetime.now(UTC)
+
+
+def _mensagem_cancelamento_administrativo(*, motivo: str | None, id_tarefa: str | None) -> str:
+    mensagem = "Execucao cancelada via endpoint administrativo."
+    if motivo:
+        mensagem = f"{mensagem} Motivo: {motivo}"
+    if id_tarefa is None:
+        mensagem = (
+            f"{mensagem} Execucao encerrada apenas no banco, sem revogacao remota, "
+            "pois o registro nao possui id_tarefa associado."
+        )
+    return mensagem
+
+
+def _execucoes_relacionadas_cancelamento(
+    db: DbSession,
+    *,
+    execucao: ExecucaoSincronizacao,
+) -> list[ExecucaoSincronizacao]:
+    if execucao.parent_execucao_id is not None:
+        return [execucao]
+    return db.scalars(
+        select(ExecucaoSincronizacao)
+        .where(
+            (ExecucaoSincronizacao.id == execucao.id)
+            | (ExecucaoSincronizacao.parent_execucao_id == execucao.id)
+        )
+        .order_by(ExecucaoSincronizacao.iniciada_em.asc())
+    ).all()
+
+
+def _cancelar_execucoes_relacionadas(
+    db: DbSession,
+    *,
+    execucoes: list[ExecucaoSincronizacao],
+    motivo: str | None,
+) -> list[str]:
+    if not execucoes:
+        return []
+
+    agora = _agora()
+    task_ids: list[str] = []
+    mensagens_por_execucao: dict[UUID, str] = {}
+
+    for execucao in execucoes:
+        mensagem = _mensagem_cancelamento_administrativo(motivo=motivo, id_tarefa=execucao.id_tarefa)
+        mensagens_por_execucao[execucao.id] = mensagem
+        if execucao.status not in _STATUS_FINAL_EXECUCAO:
+            execucao.status = "cancelada"
+            execucao.finalizada_em = agora
+            execucao.mensagem_erro = mensagem
+        elif execucao.status == "cancelada" and execucao.mensagem_erro is None:
+            execucao.mensagem_erro = mensagem
+        if execucao.id_tarefa:
+            task_ids.append(execucao.id_tarefa)
+
+    run_map = {
+        run.execucao_sincronizacao_id: run
+        for run in db.scalars(
+            select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id.in_([execucao.id for execucao in execucoes])
+            )
+        ).all()
+    }
+    for execucao in execucoes:
+        run = run_map.get(execucao.id)
+        if run is None or run.status in _STATUS_FINAL_EXECUCAO:
+            continue
+        update_run_state(
+            run,
+            status="cancelada",
+            phase="complete",
+            message=mensagens_por_execucao[execucao.id],
+            finished_at=agora,
+        )
+
+    return list(dict.fromkeys(task_ids))
 
 
 def _extrair_ano_arquivo(arquivo: str) -> int | None:
@@ -238,7 +359,7 @@ def disparar_sincronizacao_cadastro(
     "/sincronizacoes/dfp/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao DFP",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual DFP.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoDfpAdmin",
 )
@@ -257,7 +378,7 @@ def disparar_sincronizacao_dfp(
     "/sincronizacoes/itr/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao ITR",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual ITR.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoItrAdmin",
 )
@@ -276,7 +397,7 @@ def disparar_sincronizacao_itr(
     "/sincronizacoes/fre/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao FRE",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual FRE.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoFreAdmin",
 )
@@ -295,7 +416,7 @@ def disparar_sincronizacao_fre(
     "/sincronizacoes/fca/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao FCA",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual FCA.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoFcaAdmin",
 )
@@ -314,7 +435,7 @@ def disparar_sincronizacao_fca(
     "/sincronizacoes/ipe/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao IPE",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual IPE.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoIpeAdmin",
 )
@@ -333,7 +454,7 @@ def disparar_sincronizacao_ipe(
     "/sincronizacoes/vlmo/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao VLMO",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual VLMO.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoVlmoAdmin",
 )
@@ -352,7 +473,7 @@ def disparar_sincronizacao_vlmo(
     "/sincronizacoes/cgvn/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao CGVN",
-    description="Agenda tarefa assincrona de sincronizacao de um ZIP anual CGVN.",
+    description=_DESC_SYNC_ANUAL,
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoCgvnAdmin",
 )
@@ -368,16 +489,22 @@ def disparar_sincronizacao_cgvn(
 
 
 @router.post(
-    "/sincronizacoes/tudo",
+    "/sincronizacoes/tudo/{ano}",
     response_model=RespostaAgendamentoEmLote,
-    summary="Disparar Sincronizacao Completa",
+    summary="Disparar Sincronizacao Completa por Ano",
     description=(
-        "Agenda cadastro e sincronizacoes DFP/ITR/FRE/FCA/IPE/VLMO para os anos iniciais configurados no ambiente."
+        "Agenda um lote administrativo para um ano especifico. "
+        "O workflow sempre dispara primeiro a sincronizacao de `cadastro` e, na sequencia, agenda `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` para o mesmo ano. "
+        "Este endpoint nao usa `ANOS_INICIAIS_*` do ambiente: o ano processado eh exclusivamente o argumento recebido em `/{ano}`. "
+        "Cada fonte anual executa o mesmo mecanismo: preflight remoto em `acquire`, possivel skip sem download quando os metadados remotos permanecem inalterados, "
+        "download apenas quando necessario, `stage` orientado a headers/row counts/member hashes, promocao apenas dos members alterados e `reconcile` para exclusao de linhas promovidas obsoletas do mesmo member. "
+        "A resposta lista todas as tasks Celery criadas para acompanhamento posterior por `id_tarefa`."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoTudoAdmin",
 )
 def disparar_sincronizacao_tudo(
+    ano: Annotated[int, Path(ge=2003, description="Ano que sera usado em todas as sincronizacoes anuais do lote.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do arquivo ja existir.", examples=[False])
@@ -385,7 +512,6 @@ def disparar_sincronizacao_tudo(
 ) -> RespostaAgendamentoEmLote:
     import uuid
 
-    settings = get_settings()
     tarefas: list[TarefaAgendadaResumo] = []
 
     cadastro_id = str(uuid.uuid4())
@@ -394,41 +520,19 @@ def disparar_sincronizacao_tudo(
 
     outras_sigs = []
 
-    for ano in settings.parse_anos(settings.anos_iniciais_dfp):
+    for tipo_fonte, task in (
+        ("dfp", sincronizar_dfp_task),
+        ("itr", sincronizar_itr_task),
+        ("fre", sincronizar_fre_task),
+        ("fca", sincronizar_fca_task),
+        ("ipe", sincronizar_ipe_task),
+        ("vlmo", sincronizar_vlmo_task),
+        ("cgvn", sincronizar_cgvn_task),
+    ):
         tid = str(uuid.uuid4())
-        sig = sincronizar_dfp_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
+        sig = task.si(ano, force_reimport=force_reimport).set(task_id=tid)
         outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="dfp", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_itr):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_itr_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="itr", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_fre):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_fre_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="fre", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_fca):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_fca_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="fca", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_ipe):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_ipe_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="ipe", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_vlmo):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_vlmo_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="vlmo", ano=ano, id_tarefa=tid))
-    for ano in settings.parse_anos(settings.anos_iniciais_cgvn):
-        tid = str(uuid.uuid4())
-        sig = sincronizar_cgvn_task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte="cgvn", ano=ano, id_tarefa=tid))
+        tarefas.append(TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano, id_tarefa=tid))
 
     if outras_sigs:
         workflow = chain(s_cadastro, group(outras_sigs))
@@ -615,7 +719,9 @@ def detalhar_fonte_admin(
     summary="Auditar Fontes Registradas",
     description=(
         "Executa auditoria on-demand das fontes CVM registradas no registry interno. "
-        "Retorna cobertura, datasets encontrados e faltantes, sem persistir resultado."
+        "Retorna cobertura, datasets encontrados e faltantes, drift estrutural resumido, metadados de lifecycle do registry e um resumo consultivo da pagina oficial `Novidades`, sem persistir resultado. "
+        "A auditoria compara a forma remota atual com o `source_registry` interno usando a mesma semantica estrutural do sync normal: "
+        "members obrigatorios/opcionais, nomes esperados por ano, aderencia do pacote, inventario remoto observado, artefato esperado (`artifact_type`), estrategia de probe (`remote_probe_strategy`) e politica de reconcile."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="auditarFontesAdmin",
@@ -633,6 +739,7 @@ def auditar_fontes_admin(
         total_fontes=auditoria["total_fontes"],
         total_fontes_acessiveis=auditoria["total_fontes_acessiveis"],
         total_datasets_faltantes=auditoria["total_datasets_faltantes"],
+        novidades=auditoria.get("novidades"),
     )
 
 
@@ -644,7 +751,7 @@ def auditar_fontes_admin(
         "Interrompe uma sincronização administrativa já disparada. "
         "A operação aceita **um e apenas um** seletor: `id_execucao` ou `id_tarefa`.\n\n"
         "**Quando usar `id_execucao`:**\n"
-        "- a execução já aparece em `GET /admin/sincronizacoes`;\n"
+        "- a execução já aparece em `GET /ingestion/sincronizacoes`;\n"
         "- você deseja cancelar uma execução identificada no banco, "
         "preservando contadores já consolidados;\n"
         "- a API atualizará o status da execução para `cancelada`, "
@@ -674,7 +781,7 @@ def auditar_fontes_admin(
         "`cancelada`;\n"
         "- contadores (`total_linhas_lidas`, `total_inseridos`, etc.) "
         "permanecem com último valor persistido no momento do cancelamento;\n"
-        "- use `GET /admin/sincronizacoes/{id_execucao}` após cancelamento para auditoria detalhada."
+        "- use `GET /ingestion/sincronizacoes/{id_execucao}` após cancelamento para auditoria detalhada."
     ),
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
@@ -727,23 +834,23 @@ def cancelar_sincronizacao(
     if execucao is not None and execucao.status in _STATUS_FINAL_EXECUCAO:
         raise HTTPException(status_code=409, detail="Execucao nao esta em andamento e nao pode ser cancelada.")
 
-    revogacao_solicitada = False
+    execucoes_relacionadas = (
+        _execucoes_relacionadas_cancelamento(db, execucao=execucao) if execucao is not None else []
+    )
+    task_ids_para_revogar = _cancelar_execucoes_relacionadas(
+        db,
+        execucoes=execucoes_relacionadas,
+        motivo=payload.motivo,
+    )
     if id_tarefa is not None:
-        celery_app.control.revoke(id_tarefa, terminate=payload.terminar_imediatamente, signal="SIGTERM")
+        task_ids_para_revogar = list(dict.fromkeys([*task_ids_para_revogar, id_tarefa]))
+
+    revogacao_solicitada = False
+    for task_id in task_ids_para_revogar:
+        celery_app.control.revoke(task_id, terminate=payload.terminar_imediatamente, signal="SIGTERM")
         revogacao_solicitada = True
 
     if execucao is not None:
-        mensagem = "Execucao cancelada via endpoint administrativo."
-        if payload.motivo:
-            mensagem = f"{mensagem} Motivo: {payload.motivo}"
-        if id_tarefa is None:
-            mensagem = (
-                f"{mensagem} Execucao encerrada apenas no banco, sem revogacao remota, "
-                "pois o registro nao possui id_tarefa associado."
-            )
-        execucao.status = "cancelada"
-        execucao.finalizada_em = _agora()
-        execucao.mensagem_erro = mensagem
         db.commit()
         return RespostaCancelamentoSincronizacao(
             id_execucao=str(execucao.id),
@@ -1148,55 +1255,6 @@ def detalhar_execucao(
     )
 
 
-@router.get(
-    "/quarentena",
-    response_model=ListaRegistrosQuarentena,
-    summary="Listar Quarentena",
-    description="Lista paginada dos registros rejeitados para quarentena.",
-    responses=_RESPOSTA_TOKEN_INVALIDO,
-    operation_id="listarQuarentenaAdmin",
-)
-def listar_quarentena(
-    db: DbSession,
-    _: Annotated[None, Depends(validar_token_api)],
-    pagina: Annotated[int, Query(ge=1, description="Numero da pagina.", examples=[1])] = 1,
-    tamanho_pagina: Annotated[
-        int, Query(ge=1, le=500, description="Quantidade de itens por pagina.", examples=[100])
-    ] = 100,
-    motivo: Annotated[
-        str | None,
-        Query(description="Filtrar por motivo da rejeicao.", examples=["companhia_nao_encontrada"]),
-    ] = None,
-) -> ListaRegistrosQuarentena:
-    offset = (pagina - 1) * tamanho_pagina
-    query = select(RegistroQuarentena)
-    query_total = select(func.count()).select_from(RegistroQuarentena)
-    if motivo:
-        query = query.where(RegistroQuarentena.motivo == motivo)
-        query_total = query_total.where(RegistroQuarentena.motivo == motivo)
-    itens = (
-        db.execute(query.order_by(RegistroQuarentena.criado_em.desc()).offset(offset).limit(tamanho_pagina))
-        .scalars()
-        .all()
-    )
-    total = db.scalar(query_total) or 0
-    return ListaRegistrosQuarentena(
-        dados=[
-            RegistroQuarentenaResposta(
-                id=str(item.id),
-                execucao_sincronizacao_id=str(item.execucao_sincronizacao_id),
-                arquivo_origem=item.arquivo_origem,
-                ano_origem=item.ano_origem,
-                linha_origem=item.linha_origem,
-                motivo=item.motivo,
-                dados_originais=item.dados_originais,
-                criado_em=item.criado_em,
-            )
-            for item in itens
-        ],
-        paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
-    )
-
 
 @router.get(
     "/alteracoes",
@@ -1316,13 +1374,19 @@ def dashboard_execucoes(
 
 
 @router.get(
-    "/ingestion/runs",
+    "/runs",
     response_model=ListaIngestionRuns,
     summary="Listar Runs de Ingestion",
     description=(
         "Lista paginada das runs do pipeline de ingestao. "
         "O frontend pode usar este endpoint como visao principal de monitoramento, "
-        "consumindo `status`, `phase` e `quality_summary` para cards, grids e alertas."
+        "consumindo `status`, `phase`, `remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, "
+        "`member_snapshot_summary`, `delivery_snapshot_summary`, `reconcile_summary` e `lifecycle_decision` para cards, grids e alertas. "
+        "`remote_probe` descreve a decisao de preflight remoto antes do download; `change_summary` descreve drift estrutural entre o pacote atual e a referencia anterior; "
+        "`artifact_snapshot` explica a evidencia remota/local usada para decidir skip ou download; `member_snapshot_summary` descreve o inventario de members processados ou reaproveitados; "
+        "`delivery_snapshot_summary` resume o indice documental capturado (protocolo, versao, id_documento, etc.); "
+        "`quality_summary` e a fonte principal de progresso porque linhas staged bem-sucedidas podem ser removidas apos a promocao do member. "
+        "Uma run concluida nao implica permanencia de staging de sucesso: o contrato duravel e o resumo operacional, os itens de quarentena e as linhas promovidas com lineage."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="listarIngestionRunsAdmin",
@@ -1351,7 +1415,15 @@ def listar_ingestion_runs(
                 ano=run.ano,
                 status=run.status,
                 phase=run.phase,
+                remote_probe=run.remote_probe,
+                change_summary=run.change_summary,
                 quality_summary=run.quality_summary,
+                artifact_snapshot=build_artifact_snapshot_response(db, run_id=run.id),
+                member_snapshot_summary=build_member_snapshot_summary(db, run_id=run.id),
+                delivery_snapshot_summary=build_delivery_snapshot_summary(db, run_id=run.id),
+                reconcile_summary=_reconcile_summary_from_run(run),
+                rows_reconciled_deleted=(run.quality_summary or {}).get("reconciled_deleted"),
+                lifecycle_decision=_lifecycle_decision_from_run(run),
             )
             for run in runs
         ],
@@ -1360,14 +1432,15 @@ def listar_ingestion_runs(
 
 
 @router.get(
-    "/ingestion/runs/{run_id}",
+    "/runs/{run_id}",
     response_model=IngestionRunResumo,
     summary="Detalhar Run de Ingestion",
     description=(
         "Retorna uma run especifica do pipeline. "
         "Use este endpoint para telas de detalhe e drill-down operacional, "
-        "especialmente quando o frontend precisar ler "
-        "`quality_summary` consolidado antes de buscar quarentena ou acionar replay."
+        "especialmente quando o frontend precisar ler `remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, `member_snapshot_summary`, `delivery_snapshot_summary` e `reconcile_summary` consolidados antes de buscar quarentena ou acionar replay. "
+        "A resposta descreve o estado agregado da run: decisao de preflight remoto, inventario estrutural do pacote, contadores de processamento, members reaproveitados, indice documental capturado e remocoes feitas no reconcile. "
+        "Ela nao implica que todas as linhas bem-sucedidas ainda existam em staging."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
     operation_id="detalharIngestionRunAdmin",
@@ -1387,28 +1460,55 @@ def detalhar_ingestion_run(
         ano=run.ano,
         status=run.status,
         phase=run.phase,
+        remote_probe=run.remote_probe,
+        change_summary=run.change_summary,
         quality_summary=run.quality_summary,
+        artifact_snapshot=build_artifact_snapshot_response(db, run_id=run.id),
+        member_snapshot_summary=build_member_snapshot_summary(db, run_id=run.id),
+        delivery_snapshot_summary=build_delivery_snapshot_summary(db, run_id=run.id),
+        reconcile_summary=_reconcile_summary_from_run(run),
+        rows_reconciled_deleted=(run.quality_summary or {}).get("reconciled_deleted"),
+        lifecycle_decision=_lifecycle_decision_from_run(run),
     )
 
 
 @router.get(
-    "/ingestion/quarantine",
+    "/quarentena",
     response_model=ListaQuarantineItems,
     summary="Listar Quarentena de Ingestion",
     description=(
-        "Lista paginada da fila de reparo. "
-        "Os filtros atuais suportam `motivo_codigo`; o frontend deve tratar `motivo_codigo`, `status`, "
-        "`reparavel` e `tentativas_reprocessamento` como colunas de primeira classe."
+        "Lista paginada da fila de reparo da quarentena.\n\n"
+        "Os filtros antigos/atuais suportam `motivo_codigo`; o frontend deve tratar `motivo_codigo`, `status`, "
+        "`reparavel` e `tentativas_reprocessamento` como colunas de primeira classe. "
+        "A quarentena representa exceções reais de linha; falhas de schema em nível de membro não são mais expandidas "
+        "automaticamente em milhares de itens. "
+        "Linhas bem-sucedidas podem ser promovidas e depois removidas do staging; por isso a quarentena é o canal durável apenas para falhas realmente linha-a-linha.\n\n"
+        "### Resiliência a Falhas de Banco de Dados (`safe_promote_chunk`):\n"
+        "Este endpoint reflete itens rejeitados pelo mecanismo resiliente de banco de dados (`safe_promote_chunk`). Se um lote de inserção ou atualização no PostgreSQL falhar (por exemplo, devido a limites numéricos excedidos como `NumericValueOutOfRange`, estouro de tamanho de campo texto ou violações de integridade referencial), o processamento do lote é automaticamente revertido via savepoint (`db.begin_nested()`) e cada linha é promovida individualmente. As linhas problemáticas que causarem exceções de banco de dados são capturadas, marcadas com `normalizacao_invalida` contendo os detalhes do erro do banco (ex. `NumericValueOutOfRange`), e direcionadas para a quarentena, enquanto as demais linhas do lote são salvas com sucesso.\n\n"
+        "### Códigos de Erro da Quarentena (`motivo_codigo`):\n"
+        "- **`normalizacao_invalida`**: Erro de conversão ou parse de campos da linha (ex. decimais, inteiros, datas) ou erros persistidos por falha no banco de dados durante a inserção/promoção (ex. limites numéricos excedidos, estouro de campo de texto, etc.). "
+        "Recentemente robustecido para tolerar símbolos monetários (ex: R$), percentuais (ex: %), formatação decimal mista (brasileira/americana) e representações textuais de nulos (ex: 'N/A', 'N.D.', '-'). Além disso, os campos `saldo_existente`, `taxa_juros` e `montante_interesse_parte_relacionada` na tabela de transações com partes relacionadas foram corrigidos para o tipo `Text` no banco de dados e normalizador, alinhados com o layout oficial da CVM, o que aceita livremente descrições textuais das empresas (ex. 'TJLP + 1,72% a.a.' ou '100% do CDI') e elimina falsos positivos por cast numérico.\n"
+        "- **`chave_natural_duplicada_conflitante`**: Múltiplas linhas com a mesma chave natural (identificador de negócio único) "
+        "mas com dados/conteúdo divergentes (conflito). Com a melhoria na normalização, este erro foi mitigado.\n"
+        "- **`companhia_nao_encontrada`**: Nenhuma companhia pôde ser resolvida no grafo de identidade para os identificadores fornecidos (CNPJ/CVM). "
+        "Pode ser resolvido via regras de reparo ou atualizando o cadastro de companhias.\n"
+        "- **`companhia_ambigua`**: Conflito onde os dados da linha apontam para múltiplas companhias ou informações incongruentes (ex: CNPJ associado a uma empresa e Código CVM associado a outra).\n"
+        "- **`schema_inesperado`**: Colunas obrigatórias ausentes no cabeçalho do arquivo CSV de origem (geralmente causa falha no membro de arquivo).\n"
+        "- **`denominacao_social_ausente`**: Não foi possível extrair a denominação social da companhia (erro não reparável).\n"
+        "- **`identidade_ausente`**: Falta de identificadores mínimos (CNPJ e Código CVM) na linha para associar a uma companhia (erro não reparável)."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
-    operation_id="listarIngestionQuarantineAdmin",
+    operation_id="listarIngestionQuarentenaAdmin",
 )
-def listar_ingestion_quarantine(
+def listar_ingestion_quarentena(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
-    pagina: Annotated[int, Query(ge=1)] = 1,
-    tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
-    motivo_codigo: Annotated[str | None, Query()] = None,
+    pagina: Annotated[int, Query(ge=1, description="Número da página para listagem paginada.")] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=500, description="Quantidade de registros por página.")] = 100,
+    motivo_codigo: Annotated[str | None, Query(description="Filtrar itens pelo código estável do motivo de rejeição.")] = None,
+    arquivo_origem: Annotated[str | None, Query(description="Filtrar itens pelo nome do arquivo de origem.")] = None,
+    status: Annotated[str | None, Query(description="Filtrar itens pelo status operacional.")] = None,
+    ano_origem: Annotated[int | None, Query(description="Filtrar itens pelo ano de origem.")] = None,
 ) -> ListaQuarantineItems:
     offset = (pagina - 1) * tamanho_pagina
     query = select(QuarantineItem)
@@ -1416,6 +1516,16 @@ def listar_ingestion_quarantine(
     if motivo_codigo:
         query = query.where(QuarantineItem.motivo_codigo == motivo_codigo)
         query_total = query_total.where(QuarantineItem.motivo_codigo == motivo_codigo)
+    if arquivo_origem:
+        query = query.where(QuarantineItem.arquivo_origem == arquivo_origem)
+        query_total = query_total.where(QuarantineItem.arquivo_origem == arquivo_origem)
+    if status:
+        query = query.where(QuarantineItem.status == status)
+        query_total = query_total.where(QuarantineItem.status == status)
+    if ano_origem is not None:
+        query = query.where(QuarantineItem.ano_origem == ano_origem)
+        query_total = query_total.where(QuarantineItem.ano_origem == ano_origem)
+        
     itens = (
         db.execute(query.order_by(QuarantineItem.created_at.desc()).offset(offset).limit(tamanho_pagina))
         .scalars()
@@ -1445,19 +1555,124 @@ def listar_ingestion_quarantine(
     )
 
 
+@router.get(
+    "/quarentena/resumo",
+    response_model=QuarentenaResumoResposta,
+    summary="Resumo Analítico da Quarentena",
+    description=(
+        "Retorna métricas agregadas e consolidadas de erros na quarentena. "
+        "O retorno inclui o total geral absoluto de erros, distribuição por status "
+        "(pendente, resolvido, etc.), ranking de erros por tipo de motivo (motivo_codigo), "
+        "ranking de arquivos de origem mais afetados, e agrupamentos detalhados cruzando "
+        "arquivo de origem e motivo do erro. "
+        "Suporta filtragem opcional por `status` (ex.: 'pendente'), `ingestion_run_id` ou "
+        "`execucao_sincronizacao_id` para permitir drill-down dinâmico no dashboard do frontend.\n\n"
+        "### Integração com Promoção Resiliente:\n"
+        "Este resumo inclui as estatísticas de erros de banco capturados durante a promoção resiliente de linhas individuais. Quando ocorrem erros de banco de dados (como estouro de valor numérico ou violação de restrições), as linhas afetadas são marcadas com código `normalizacao_invalida` e detalhadas no resumo agregador por arquivo e motivo."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="resumoIngestionQuarentenaAdmin",
+)
+def obter_resumo_quarentena(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    status: Annotated[str | None, Query(description="Filtrar resumo por status específico da fila de reparo.")] = None,
+    ingestion_run_id: Annotated[UUID | None, Query(description="Filtrar resumo por ID de execução de run de ingestão (ingestion_run).")] = None,
+    execucao_sincronizacao_id: Annotated[UUID | None, Query(description="Filtrar resumo por ID de execução de sincronização (execucao_sincronizacao).")] = None,
+) -> QuarentenaResumoResposta:
+    # Construir cláusulas de filtragem compartilhadas
+    filtros = []
+    if status:
+        filtros.append(QuarantineItem.status == status)
+    if ingestion_run_id:
+        filtros.append(QuarantineItem.ingestion_run_id == ingestion_run_id)
+    if execucao_sincronizacao_id:
+        filtros.append(QuarantineItem.execucao_sincronizacao_id == execucao_sincronizacao_id)
+
+    # 1. Total Geral
+    query_total = select(func.count(QuarantineItem.id))
+    if filtros:
+        query_total = query_total.where(*filtros)
+    total = db.scalar(query_total) or 0
+
+    # 2. Por Status
+    # Para por_status, mantemos apenas filtros de run_id/execucao_id se informados
+    filtros_status = []
+    if ingestion_run_id:
+        filtros_status.append(QuarantineItem.ingestion_run_id == ingestion_run_id)
+    if execucao_sincronizacao_id:
+        filtros_status.append(QuarantineItem.execucao_sincronizacao_id == execucao_sincronizacao_id)
+
+    query_status = select(QuarantineItem.status, func.count(QuarantineItem.id)).group_by(QuarantineItem.status)
+    if filtros_status:
+        query_status = query_status.where(*filtros_status)
+    status_rows = db.execute(query_status).all()
+    por_status = {r[0]: r[1] for r in status_rows}
+
+    # 3. Por Erro (motivo_codigo)
+    query_erro = (
+        select(QuarantineItem.motivo_codigo, func.count(QuarantineItem.id))
+        .group_by(QuarantineItem.motivo_codigo)
+        .order_by(func.count(QuarantineItem.id).desc())
+    )
+    if filtros:
+        query_erro = query_erro.where(*filtros)
+    erro_rows = db.execute(query_erro).all()
+    por_erro = [ErroQuantidade(motivo_codigo=r[0], quantidade=r[1]) for r in erro_rows]
+
+    # 4. Por Arquivo
+    query_arquivo = (
+        select(QuarantineItem.arquivo_origem, func.count(QuarantineItem.id))
+        .group_by(QuarantineItem.arquivo_origem)
+        .order_by(func.count(QuarantineItem.id).desc())
+    )
+    if filtros:
+        query_arquivo = query_arquivo.where(*filtros)
+    arquivo_rows = db.execute(query_arquivo).all()
+    por_arquivo = [ArquivoQuantidade(arquivo_origem=r[0], quantidade=r[1]) for r in arquivo_rows]
+
+    # 5. Por Arquivo e Erro
+    query_ae = (
+        select(QuarantineItem.arquivo_origem, QuarantineItem.motivo_codigo, func.count(QuarantineItem.id))
+        .group_by(QuarantineItem.arquivo_origem, QuarantineItem.motivo_codigo)
+        .order_by(QuarantineItem.arquivo_origem, func.count(QuarantineItem.id).desc())
+    )
+    if filtros:
+        query_ae = query_ae.where(*filtros)
+    ae_rows = db.execute(query_ae).all()
+    por_arquivo_e_erro = [
+        ArquivoErroQuantidade(arquivo_origem=r[0], motivo_codigo=r[1], quantidade=r[2]) for r in ae_rows
+    ]
+
+    return QuarentenaResumoResposta(
+        total=total,
+        por_status=por_status,
+        por_erro=por_erro,
+        por_arquivo=por_arquivo,
+        por_arquivo_e_erro=por_arquivo_e_erro,
+    )
+
+
 @router.post(
-    "/ingestion/replay/quarantine",
+    "/replay/quarentena",
     response_model=ReplayResposta,
     summary="Reprocessar Quarentena de Ingestion",
     description=(
         "Executa replay sobre itens pendentes da quarentena. "
-        "A requisicao aceita filtros opcionais por `reason_code`, `arquivo_origem` e `ano`. "
-        "Quando nenhum filtro e enviado, todos os itens `pendente` sao considerados."
+        "A requisição aceita filtros opcionais por `reason_code`, `arquivo_origem` e `ano`. "
+        "Quando nenhum filtro é enviado, todos os itens `pendente` são considerados. "
+        "O replay de quarentena reprocessa apenas exceções persistidas, preservando a arquitetura simplificada do caminho de sucesso. "
+        "Ele não reconstrói todas as linhas bem-sucedidas do arquivo; isso fica reservado ao replay de run/member a partir do payload bruto retido.\n\n"
+        "O processo de replay agora é resiliente no nível da linha individual: se o reprocessamento de uma determinada "
+        "linha falhar (como por erros de parsing residuais ou outras exceções inesperadas), "
+        "essa linha específica registrará um erro no lote, mas a execução do replay continuará sem abortar as demais linhas.\n\n"
+        "### Comportamento sob Falhas de Banco de Dados:\n"
+        "Isso inclui exceções de banco de dados capturadas pelo mecanismo `safe_promote_chunk` durante a promoção no replay: se uma linha reprocessada causar falha no banco de dados, o replay faz o rollback no savepoint da linha correspondente (`db.begin_nested()`), mantém o item na quarentena com o erro atualizado do banco de dados (código `normalizacao_invalida` detalhando a exceção) e prossegue para as próximas linhas do lote."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
-    operation_id="replayIngestionQuarantineAdmin",
+    operation_id="replayIngestionQuarentenaAdmin",
 )
-def replay_ingestion_quarantine(
+def replay_ingestion_quarentena(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
     payload: Annotated[
@@ -1481,13 +1696,16 @@ def replay_ingestion_quarantine(
 
 
 @router.post(
-    "/ingestion/runs/{run_id}/replay",
+    "/runs/{run_id}/replay",
     response_model=ReplayResposta,
     summary="Reprocessar Run de Ingestion",
     description=(
-        "Executa replay de todas as linhas staged pertencentes a uma run. "
+        "Executa replay administrativo de uma run. "
+        "Para runs de membro, a API pode reconstruir o processamento a partir do payload bruto retido do CSV membro, "
+        "sem depender da permanencia das linhas bem-sucedidas em `ingestion_rows`. "
         "A operacao e util quando uma correcao de identidade, parser ou regra de reparo precisa ser aplicada em lote "
-        "sem redownload do arquivo original."
+        "sem redownload do arquivo original. "
+        "No replay completo, o member volta a passar por `stage`, `promote` e `reconcile`, inclusive com nova avaliacao de members reaproveitaveis, quarentena real e remocao de linhas promovidas obsoletas."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
     operation_id="replayIngestionRunAdmin",
@@ -1504,7 +1722,7 @@ def replay_ingestion_run(
 
 
 @router.post(
-    "/ingestion/identity/rebuild",
+    "/identity/rebuild",
     response_model=ReplayResposta,
     summary="Reconstruir Identidade de Ingestion",
     description=(

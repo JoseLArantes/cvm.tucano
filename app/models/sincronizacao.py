@@ -85,3 +85,8 @@ class RegistroQuarentena(Base):
     motivo: Mapped[str] = mapped_column(String(255))
     dados_originais: Mapped[dict[str, Any]] = mapped_column(JSON)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def __init__(self, **kwargs: Any) -> None:
+        if "motivo" in kwargs and isinstance(kwargs["motivo"], str):
+            kwargs["motivo"] = kwargs["motivo"][:255]
+        super().__init__(**kwargs)

@@ -66,10 +66,14 @@ from app.models.ingestion import (
     IngestionFile,
     IngestionFileMember,
     IngestionFileMemberPayload,
+    IngestionReconcileHash,
     IngestionRow,
     IngestionRowEvent,
     IngestionRun,
     QuarantineItem,
+    SourceArtifactSnapshot,
+    SourceDeliverySnapshot,
+    SourceMemberSnapshot,
 )
 from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
@@ -148,6 +152,7 @@ __all__ = [
     "IngestionFile",
     "IngestionFileMember",
     "IngestionFileMemberPayload",
+    "IngestionReconcileHash",
     "IngestionRow",
     "IngestionRowEvent",
     "IngestionRun",
@@ -155,6 +160,9 @@ __all__ = [
     "QuarantineItem",
     "RegistroQuarentena",
     "RepairRule",
+    "SourceArtifactSnapshot",
+    "SourceDeliverySnapshot",
+    "SourceMemberSnapshot",
     "Usuario",
     "VlmoConsolidado",
     "VlmoDocumento",

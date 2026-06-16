@@ -100,6 +100,36 @@ def _seed_dados(db: Session, companhia_id: uuid.UUID) -> None:
         )
     )
     db.add(
+        DemonstracaoFinanceira(
+            companhia_id=companhia_id,
+            tipo_formulario="ITR",
+            tipo_demonstracao="demonstracao_resultado",
+            escopo_demonstracao="individual",
+            cnpj_companhia="08773135000100",
+            codigo_cvm=25224,
+            data_referencia=date(2025, 9, 30),
+            versao=1,
+            denominacao_companhia="EMPRESA A",
+            grupo_demonstracao="GRUPO",
+            moeda="REAL",
+            escala_moeda="MIL",
+            ordem_exercicio="ULTIMO",
+            data_inicio_exercicio=date(2025, 1, 1),
+            data_fim_exercicio=date(2025, 9, 30),
+            codigo_conta="3.03",
+            descricao_conta="Receita Líquida",
+            valor_conta=Decimal("740500"),
+            conta_fixa=True,
+            arquivo_origem="itr_cia_aberta_DRE_ind_2025.csv",
+            ano_origem=2025,
+            linha_origem=3,
+            hash_origem="hash-dem-itr",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db.add(
         ComposicaoCapital(
             companhia_id=companhia_id,
             tipo_formulario="DFP",
@@ -208,5 +238,10 @@ def test_endpoint_mestre_unifica_respostas(client: TestClient, db_session: Sessi
     assert payload["composicao_capital_dfp"]["paginacao"]["total"] == 1
     assert payload["pareceres_dfp"]["paginacao"]["total"] == 1
     assert payload["demonstracoes"]["dfp_demonstracao_resultado_consolidado"]["paginacao"]["total"] == 1
+    assert payload["demonstracoes"]["itr_demonstracao_resultado_individual"]["paginacao"]["total"] == 1
+    itr_demo = payload["demonstracoes"]["itr_demonstracao_resultado_individual"]["dados"][0]
+    assert itr_demo["valor_conta"] == 740500000.0
+    assert itr_demo["valor_conta_reportado"] == 740500.0
+    assert itr_demo["fator_escala_moeda"] == 1000
     assert payload["fre_documentos"]["paginacao"]["total"] == 1
     assert payload["ipe_documentos"]["paginacao"]["total"] == 1

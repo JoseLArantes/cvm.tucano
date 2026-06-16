@@ -22,6 +22,9 @@ class DatasetFonte:
     normalizador: str | None
     chaves_relacao: tuple[str, ...]
     observacoes: str | None = None
+    delivery_index_role: str = "auto"
+    header_compatibility: str = "strict"
+    reconcile_policy: str = "member_replace"
 
     def render_member_name(self, *, ano: int | None) -> str:
         if "{ano}" in self.member_name_template:
@@ -45,6 +48,11 @@ class FonteRegistry:
     status_suporte: StatusSuporte
     dependencias: tuple[FonteChave, ...]
     datasets: tuple[DatasetFonte, ...]
+    artifact_type: str = "annual_package"
+    update_cadence: str = "irregular"
+    remote_probe_strategy: str = "ckan_head_sha"
+    version_semantics: str = "all_versions_retained"
+    reconcile_policy: str = "artifact_member_replace"
 
     @property
     def total_datasets(self) -> int:
@@ -1054,6 +1062,10 @@ _FONTES: tuple[FonteRegistry, ...] = (
                 observacoes="Complementa malha de identidade para documentos ancorados fora do cadastro aberto.",
             ),
         ),
+        artifact_type="current_snapshot",
+        update_cadence="weekday",
+        version_semantics="current_state_only",
+        reconcile_policy="current_snapshot_replace",
     ),
     FonteRegistry(
         fonte="dfp",
@@ -1068,6 +1080,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_financeiro("dfp"),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="itr",
@@ -1082,6 +1096,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_financeiro("itr"),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="fre",
@@ -1096,6 +1112,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_fre(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="fca",
@@ -1110,6 +1128,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_fca(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="ipe",
@@ -1124,6 +1144,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_ipe(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="vlmo",
@@ -1138,6 +1160,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_vlmo(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
     FonteRegistry(
         fonte="cgvn",
@@ -1152,6 +1176,8 @@ _FONTES: tuple[FonteRegistry, ...] = (
         status_suporte="suportado",
         dependencias=("cadastro",),
         datasets=_datasets_cgvn(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekday_or_weekly",
     ),
 )
 

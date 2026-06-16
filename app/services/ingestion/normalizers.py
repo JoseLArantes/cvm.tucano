@@ -10,6 +10,7 @@ from app.services.normalizacao import (
     normalizar_data,
     normalizar_decimal_cvm,
     normalizar_inteiro,
+    normalizar_sigla_uf,
     normalizar_texto,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "normalizar_header",
     "normalizar_inteiro",
     "normalizar_nome_emissor_chave",
+    "normalizar_sigla_uf",
     "normalizar_texto",
     "normalizar_tipo_mercado",
 ]

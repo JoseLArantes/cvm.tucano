@@ -2,12 +2,12 @@ from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, desc, Integer
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.ipe import IpeDocumento
 from app.schemas.comum import Paginacao
-from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta
+from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta, ListaIpeDocumentosAgregadosResposta
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
@@ -225,3 +225,101 @@ def listar_documentos_ipe(
     return ListaIpeDocumentosResposta(
         dados=dados, paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total)
     )
+
+
+@router.get(
+    "/ipe/documentos/agregados",
+    response_model=ListaIpeDocumentosAgregadosResposta,
+    responses=_RESPOSTAS_PADRAO,
+    summary="Obter agregados de documentos IPE",
+    description="Retorna a contagem de documentos IPE agrupados por ano, categoria, tipo ou espécie.",
+)
+def obter_documentos_ipe_agregados(
+    db: DbSession,
+    cnpj_companhia: ParametroCnpj = None,
+    codigo_cvm: ParametroCodigoCvm = None,
+    data_referencia_inicio: ParametroDataInicio = None,
+    data_referencia_fim: ParametroDataFim = None,
+    data_entrega_inicio: ParametroDataInicio = None,
+    data_entrega_fim: ParametroDataFim = None,
+    categoria: Annotated[str | None, Query(description="Filtrar por categoria do documento.")] = None,
+    tipo: Annotated[str | None, Query(description="Filtrar por tipo do documento.")] = None,
+    especie: Annotated[str | None, Query(description="Filtrar por espécie do documento.")] = None,
+    assunto: Annotated[str | None, Query(description="Filtrar por assunto do documento.")] = None,
+    ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
+    versao: ParametroVersao = None,
+    agrupar_por: Annotated[
+        str,
+        Query(
+            description="Campos para agrupamento separados por vírgula. Suporta: ano, categoria, tipo, especie.",
+            examples=["ano,categoria", "categoria,tipo"],
+        ),
+    ] = "ano,categoria",
+) -> ListaIpeDocumentosAgregadosResposta:
+    query = select()
+    query_total = select(func.count()).select_from(IpeDocumento)
+    
+    # We will reuse the filters function by creating dummy select queries
+    dummy_q = select(IpeDocumento)
+    dummy_q, query_total = _aplicar_filtros_base(
+        dummy_q,
+        query_total,
+        modelo=IpeDocumento,
+        cnpj_companhia=cnpj_companhia,
+        codigo_cvm=codigo_cvm,
+        data_referencia_inicio=data_referencia_inicio,
+        data_referencia_fim=data_referencia_fim,
+        data_entrega_inicio=data_entrega_inicio,
+        data_entrega_fim=data_entrega_fim,
+        ano_origem=ano_origem,
+        versao=versao,
+        ano_inicio=ano_inicio,
+        ano_fim=ano_fim,
+    )
+    
+    # Reapply filters to match dummy_q
+    for campo, valor in {"categoria": categoria, "tipo": tipo, "especie": especie, "assunto": assunto}.items():
+        if valor is not None:
+            dummy_q = dummy_q.where(_col(IpeDocumento, campo) == valor)
+
+    # Parse groupings
+    group_cols = []
+    select_cols = []
+    
+    for field in agrupar_por.split(","):
+        field = field.strip()
+        if field == "ano":
+            col = func.extract('year', IpeDocumento.data_referencia).cast(Integer).label("ano")
+            group_cols.append(col)
+            select_cols.append(col)
+        elif field in ("categoria", "tipo", "especie", "assunto"):
+            col = getattr(IpeDocumento, field)
+            group_cols.append(col)
+            select_cols.append(col)
+            
+    if not group_cols:
+        col = IpeDocumento.categoria
+        group_cols.append(col)
+        select_cols.append(col)
+        
+    # Build final query based on filters applied to dummy_q
+    final_query = select(*select_cols, func.count(IpeDocumento.id).label("total"))
+    
+    # Extract where clause from dummy_q
+    if dummy_q._where_criteria:
+        for criteria in dummy_q._where_criteria:
+            final_query = final_query.where(criteria)
+            
+    final_query = final_query.group_by(*group_cols).order_by(desc("total"))
+    
+    rows = db.execute(final_query).all()
+    
+    dados = []
+    for r in rows:
+        r_dict = dict(r._mapping)
+        dados.append(r_dict)
+        
+    return ListaIpeDocumentosAgregadosResposta(dados=dados)
+

@@ -4,10 +4,10 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class VlmoDocumentoResposta(BaseModel):
+class VlmoDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
@@ -37,7 +37,7 @@ class ListaVlmoDocumentosResposta(BaseModel):
     paginacao: Paginacao
 
 
-class VlmoConsolidadoResposta(BaseModel):
+class VlmoConsolidadoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID

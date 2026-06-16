@@ -150,6 +150,12 @@ class FcaDri(Base):
             "cnpj_companhia",
             "cpf_responsavel",
             "tipo_responsavel",
+            "data_inicio_atuacao",
+            "tipo_endereco",
+            "logradouro",
+            "cep",
+            "telefone",
+            "email_dri",
             name="uq_fca_dri_chave_natural",
         ),
     )
@@ -203,6 +209,11 @@ class FcaAuditor(Base):
             "cnpj_companhia",
             "cpf_cnpj_auditor",
             "codigo_cvm_auditor",
+            "data_inicio_atuacao_auditor",
+            "data_fim_atuacao_auditor",
+            "responsavel_tecnico",
+            "cpf_responsavel_tecnico",
+            "data_inicio_atuacao_responsavel_tecnico",
             name="uq_fca_auditores_chave_natural",
         ),
     )
@@ -216,7 +227,7 @@ class FcaAuditor(Base):
     nome_empresarial: Mapped[str | None] = mapped_column(String(255))
     nome_auditor: Mapped[str | None] = mapped_column(String(255), index=True)
     cpf_cnpj_auditor: Mapped[str | None] = mapped_column(String(20))
-    codigo_cvm_auditor: Mapped[int | None] = mapped_column(Integer, index=True)
+    codigo_cvm_auditor: Mapped[str | None] = mapped_column(String(20), index=True)
     origem_auditor: Mapped[str | None] = mapped_column(String(100))
     data_inicio_atuacao_auditor: Mapped[date | None] = mapped_column(Date)
     data_fim_atuacao_auditor: Mapped[date | None] = mapped_column(Date)
@@ -246,6 +257,13 @@ class FcaValorMobiliario(Base):
             "tipo_valor_mobiliario",
             "codigo_negociacao",
             "mercado",
+            "sigla_classe_acao_preferencial",
+            "classe_acao_preferencial",
+            "composicao_bdr_unit",
+            "data_inicio_negociacao",
+            "data_fim_negociacao",
+            "data_inicio_listagem",
+            "data_fim_listagem",
             name="uq_fca_valores_mobiliarios_chave_natural",
         ),
     )

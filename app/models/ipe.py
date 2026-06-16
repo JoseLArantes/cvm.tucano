@@ -10,7 +10,6 @@ from app.db.base import Base
 class IpeDocumento(Base):
     __tablename__ = "ipe_documentos"
     __table_args__ = (
-        UniqueConstraint("protocolo_entrega", "versao", name="uq_ipe_documentos_protocolo_versao"),
         UniqueConstraint(
             "cnpj_companhia",
             "codigo_cvm",
@@ -20,6 +19,7 @@ class IpeDocumento(Base):
             "especie",
             "assunto",
             "data_entrega",
+            "protocolo_entrega",
             "versao",
             name="uq_ipe_documentos_chave_alternativa",
         ),

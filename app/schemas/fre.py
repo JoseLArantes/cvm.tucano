@@ -4,10 +4,10 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class FreDocumentoResposta(BaseModel):
+class FreDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
@@ -41,13 +41,13 @@ class FreAuditorResposta(BaseModel):
     auditor: str | None
     cpf_auditor: str | None
     cnpj_auditor: str | None
-    codigo_cvm_auditor: int | None
+    codigo_cvm_auditor: str | None
     tipo_origem_auditor: str | None
     data_inicio_contratacao: date | None
     data_fim_contratacao: date | None
     data_inicio_prestacao_servico: date | None
     servico_contratado: str | None
-    remuneracao_auditor: Decimal | None
+    remuneracao_auditor: str | None
     justificativa_substituicao: str | None
     razao_apresentada: str | None
     arquivo_origem: str

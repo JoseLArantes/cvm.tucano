@@ -17,6 +17,9 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build app image
+        run: cp .env.example .env
+
+      - name: Build app image
         run: docker compose build cvm_api
 
       - name: Run tests
