@@ -447,7 +447,7 @@ def build_audit_report(
         },
         "cadastro_duplicates": analyze_cadastro_duplicates(open_company_rows),
         "missing_parent": {},
-        "discovery": build_dataset_discovery_audit(year=year, fontes=document_sources),
+        "discovery": build_dataset_discovery_audit(year=year, fontes=document_sources, downloader=downloader),
     }
 
     for document_source in document_sources:

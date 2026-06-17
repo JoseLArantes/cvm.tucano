@@ -174,6 +174,15 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
         "app.api.routers.admin.sincronizar_vlmo_task.delay",
         lambda ano, **kwargs: SimpleNamespace(id=f"task-vlmo-{ano}-{kwargs.get('force_reimport', False)}"),
     )
+    monkeypatch.setattr(
+        "app.worker.tasks.sincronizar_member_task.delay",
+        lambda **kwargs: SimpleNamespace(
+            id=(
+                f"task-{kwargs.get('tipo_fonte')}-member-"
+                f"{kwargs.get('ano')}-{kwargs.get('member_name')}-{kwargs.get('force_reimport', False)}"
+            )
+        ),
+    )
 
     resposta_zip = client.post("/ingestion/sincronizacoes/reprocessar-arquivo", json={"arquivo": "dfp_cia_aberta_2025.zip"})
     resposta_csv = client.post(

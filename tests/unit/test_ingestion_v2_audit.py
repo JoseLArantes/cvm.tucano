@@ -1,3 +1,4 @@
+import os
 import io
 import zipfile
 
@@ -203,6 +204,10 @@ def test_build_audit_report_with_fake_downloader() -> None:
 
 
 @pytest.mark.cvm_live
+@pytest.mark.skipif(
+    os.getenv("RUN_CVM_LIVE") != "1",
+    reason="Live CVM network smoke test is opt-in only.",
+)
 def test_build_audit_report_live_smoke() -> None:
     report = build_audit_report(year=2021, document_sources=("dfp",))
 

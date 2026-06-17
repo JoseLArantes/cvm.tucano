@@ -14,6 +14,11 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models import companhia, fca, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.worker.celery_app import celery_app
+
+# Unit tests must not depend on an external Redis broker/backend.
+celery_app.conf.broker_url = "memory://"
+celery_app.conf.result_backend = "cache+memory://"
 
 
 @pytest.fixture()
