@@ -34,15 +34,15 @@ from app.services.ingestion.resolver import (
     register_document_header,
     resolve_companhia,
 )
-from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
     iter_staged_member_chunks,
     iter_zip_csv_members,
     register_file,
-    update_run_state,
     safe_promote_chunk,
+    update_run_state,
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary_snapshot
 from app.services.ingestion.validation import (

@@ -1,23 +1,22 @@
-import uuid
 import shutil
-import hashlib
 from pathlib import Path
 
 import pytest
-from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.db.base import Base
 from app.core.config import get_settings
+from app.db.base import Base
 from app.models.companhia import Companhia
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.cadastro import (
-    pre_processar_cadastro,
-    ingerir_cadastro,
     ARQUIVO_CADASTRO_ABERTA,
     ARQUIVO_CADASTRO_ESTRANGEIRA,
+    ingerir_cadastro,
+    pre_processar_cadastro,
 )
+
 
 def _session() -> Session:
     engine = create_engine(

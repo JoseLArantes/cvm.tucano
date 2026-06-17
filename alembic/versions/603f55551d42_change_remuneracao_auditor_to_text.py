@@ -4,17 +4,17 @@ Revision ID: 603f55551d42
 Revises: 6ab07a275eb0
 Create Date: 2026-06-15 22:13:08.439760
 """
-from typing import Sequence, Union
+from collections.abc import Sequence
 
-from alembic import op
 import sqlalchemy as sa
 
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '603f55551d42'
-down_revision: Union[str, None] = '6ab07a275eb0'
-branch_labels: Union[str, Sequence[str], None] = None
-depends_on: Union[str, Sequence[str], None] = None
+down_revision: str | None = '6ab07a275eb0'
+branch_labels: str | Sequence[str] | None = None
+depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:

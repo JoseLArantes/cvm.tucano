@@ -45,8 +45,8 @@ from app.services.ingestion.resolver import (
     persist_resolution_result,
     resolve_companhia,
 )
-from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
     iter_zip_csv_members,

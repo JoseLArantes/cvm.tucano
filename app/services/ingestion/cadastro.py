@@ -542,22 +542,20 @@ def pre_processar_cadastro(
     force_reimport: bool = False,
     downloader: Any | None = None,
 ) -> dict[str, Any]:
-    import hashlib
     from pathlib import Path
-    from datetime import UTC, datetime
+
     from app.models.sincronizacao import ExecucaoSincronizacao
-    from app.services.ingestion.dedup import buscar_execucao_hash_existente
+    from app.services.ingestion.file_manager import (
+        count_csv_rows,
+        detect_encoding_and_delimiter,
+        download_file_to_disk,
+        get_csv_header,
+    )
     from app.services.ingestion.staging import (
         create_run,
         register_file,
         register_member,
         update_run_state,
-    )
-    from app.services.ingestion.file_manager import (
-        download_file_to_disk,
-        detect_encoding_and_delimiter,
-        get_csv_header,
-        count_csv_rows,
     )
 
     settings = get_settings()
@@ -698,15 +696,15 @@ def ingerir_cadastro(
     downloader: Any | None = None,
 ) -> dict[str, Any]:
     from pathlib import Path
-    from app.models.sincronizacao import ExecucaoSincronizacao
+
     from app.models.ingestion import IngestionRun
+    from app.services.ingestion.file_manager import (
+        detect_encoding_and_delimiter,
+        download_file_to_disk,
+    )
     from app.services.ingestion.staging import (
         read_staged_csv_rows_from_disk,
         update_run_state,
-    )
-    from app.services.ingestion.file_manager import (
-        download_file_to_disk,
-        detect_encoding_and_delimiter,
     )
 
     settings = get_settings()
@@ -832,7 +830,6 @@ def sincronizar_cadastro_companhias(
     downloader: Any | None = None,
 ) -> dict[str, Any]:
     import uuid
-    from app.models.sincronizacao import ExecucaoSincronizacao
 
     limpar_caches_resolver()
     settings = get_settings()

@@ -12,8 +12,8 @@ from typing import Any
 
 import httpx
 
-from app.services.ingestion.source_registry import FonteRegistry, fontes_implementadas
 from app.services.ingestion.lifecycle import fetch_cvm_novidades_summary
+from app.services.ingestion.source_registry import FonteRegistry, fontes_implementadas
 from app.services.normalizacao import normalizar_inteiro, normalizar_linha_cadastro
 
 CVM_BASE_URL = "https://dados.cvm.gov.br/dados"

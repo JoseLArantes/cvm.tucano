@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import os
 import zipfile
-from collections.abc import Iterator
 from pathlib import Path
+
 import httpx
 
 DEFAULT_CSV_DELIMITER = ";"
@@ -102,7 +101,7 @@ def detect_encoding_and_delimiter(file_path: str) -> tuple[str, str]:
 
 def get_csv_header(file_path: str, encoding: str, delimiter: str) -> list[str]:
     """Reads only the first line of the CSV to retrieve headers."""
-    with open(file_path, "r", encoding=encoding, errors="replace") as f:
+    with open(file_path, encoding=encoding, errors="replace") as f:
         reader = csv.reader(f, delimiter=delimiter)
         try:
             return next(reader)
@@ -115,7 +114,7 @@ def count_csv_rows(file_path: str, encoding: str, delimiter: str) -> int:
     
     Does not load the entire file into memory.
     """
-    with open(file_path, "r", encoding=encoding, errors="replace") as f:
+    with open(file_path, encoding=encoding, errors="replace") as f:
         reader = csv.reader(f, delimiter=delimiter)
         try:
             next(reader)  # Skip header

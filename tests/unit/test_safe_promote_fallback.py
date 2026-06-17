@@ -8,7 +8,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models.ingestion import IngestionRow, QuarantineItem
 from app.models.sincronizacao import ExecucaoSincronizacao, RegistroQuarentena
-from app.services.ingestion.staging import create_run, register_file, stage_csv_payload, safe_promote_chunk
+from app.services.ingestion.staging import create_run, register_file, safe_promote_chunk, stage_csv_payload
 
 
 def _session() -> Session:

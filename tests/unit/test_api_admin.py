@@ -6,9 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.models.ingestion import IngestionRow, IngestionRun, QuarantineItem
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
-from app.models.ingestion import IngestionRun, IngestionRow, QuarantineItem
 
 
 def test_admin_sincronizacao_tudo_agenda_tarefas(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

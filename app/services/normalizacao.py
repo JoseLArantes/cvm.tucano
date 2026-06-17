@@ -6,7 +6,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-
 _UF_POR_NOME: dict[str, str] = {
     "ACRE": "AC",
     "ALAGOAS": "AL",

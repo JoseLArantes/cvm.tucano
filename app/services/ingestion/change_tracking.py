@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import Result, delete, exists, select
+from sqlalchemy import delete, exists, select
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionReconcileHash, IngestionRun

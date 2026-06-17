@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import hashlib
-import io
-import os
 import zipfile
 from pathlib import Path
 from typing import Any
-import pytest
+
 import httpx
+import pytest
+
 from app.services.ingestion.file_manager import (
-    download_file_to_disk,
     compute_file_sha256,
-    extract_zip_member,
-    extract_all_zip_members,
-    detect_encoding_and_delimiter,
-    get_csv_header,
     count_csv_rows,
+    detect_encoding_and_delimiter,
+    download_file_to_disk,
+    extract_all_zip_members,
+    extract_zip_member,
+    get_csv_header,
 )
 
 

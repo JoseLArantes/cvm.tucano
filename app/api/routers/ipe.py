@@ -2,7 +2,7 @@ from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Select, func, select, desc, Integer
+from sqlalchemy import Integer, Select, desc, func, select
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.ipe import IpeDocumento

@@ -1,21 +1,14 @@
-import uuid
 from datetime import UTC, date, datetime
 from decimal import Decimal
+
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.models.cgvn import CgvnPratica
 from app.models.companhia import Companhia
-from app.models.financeiro import DocumentoFinanceiro, DemonstracaoFinanceira, ComposicaoCapital
-from app.models.fre import (
-    FreDocumento,
-    FreRemuneracaoTotalOrgao,
-    FreAdministradorMembroConselhoFiscal,
-    FreAdministradorDeclaracaoGenero,
-    FreCapitalSocialAumento
-)
-from app.models.ipe import IpeDocumento
-from app.models.vlmo import VlmoDocumento, VlmoConsolidado
-from app.models.cgvn import CgvnDocumento, CgvnPratica
+from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro
+from app.models.fre import FreAdministradorDeclaracaoGenero, FreRemuneracaoTotalOrgao
+from app.models.vlmo import VlmoConsolidado
 
 
 def _seed_analise_dados(db: Session) -> Companhia:

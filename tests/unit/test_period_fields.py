@@ -1,6 +1,6 @@
-from datetime import date, datetime
 import uuid
-from app.schemas.comum import PeriodicModel
+from datetime import date, datetime
+
 from app.schemas.financeiro import DocumentoFinanceiroResposta
 
 

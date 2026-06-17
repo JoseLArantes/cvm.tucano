@@ -2,20 +2,23 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
+from celery import chain, group
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import func, select
 
 from app.api.auth import validar_token_api
 from app.api.deps import DbSession
-from app.core.config import get_settings
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun, QuarantineItem
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.schemas.admin import (
     AnaliseArquivo,
+    ArquivoErroQuantidade,
+    ArquivoQuantidade,
     AuditoriaFonteResposta,
     AuditoriaFontesRequisicao,
     AuditoriaFontesResposta,
     DashboardExecucoesResposta,
+    ErroQuantidade,
     ExecucaoSincronizacaoDetalhe,
     ExecucaoSincronizacaoResumo,
     FonteDatasetResumoResposta,
@@ -28,11 +31,8 @@ from app.schemas.admin import (
     ListaHistoricoAlteracoes,
     ListaIngestionRuns,
     ListaQuarantineItems,
-    QuarentenaResumoResposta,
     QuarantineItemResposta,
-    ErroQuantidade,
-    ArquivoQuantidade,
-    ArquivoErroQuantidade,
+    QuarentenaResumoResposta,
     ReplayQuarantineRequisicao,
     ReplayResposta,
     RespostaAgendamentoEmLote,
@@ -52,11 +52,11 @@ from app.services.ingestion.lifecycle import (
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.source_registry import listar_datasets, listar_fontes, obter_fonte
-from app.services.ingestion.staging import update_run_state
-from app.services.ingestion.staging import formatar_tamanho
-from celery import chain, group
+from app.services.ingestion.staging import formatar_tamanho, update_run_state
 from app.worker.celery_app import celery_app
 from app.worker.tasks import (
+    ingerir_sincronizacao_task,
+    pre_processar_sincronizacao_task,
     sincronizar_cadastro_companhias_task,
     sincronizar_cgvn_task,
     sincronizar_dfp_task,
@@ -65,8 +65,6 @@ from app.worker.tasks import (
     sincronizar_ipe_task,
     sincronizar_itr_task,
     sincronizar_vlmo_task,
-    pre_processar_sincronizacao_task,
-    ingerir_sincronizacao_task,
 )
 
 router = APIRouter(prefix="/ingestion")

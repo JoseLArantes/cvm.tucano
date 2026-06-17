@@ -1,7 +1,7 @@
+import uuid
 from typing import Any
 
 import httpx
-import uuid
 import sqlalchemy.exc
 
 from app.core.config import get_settings
@@ -137,31 +137,27 @@ def pre_processar_sincronizacao_zip(
     task_id: str | None = None,
     force_reimport: bool = False,
 ) -> dict[str, Any]:
-    import hashlib
-    import uuid
-    from pathlib import Path
     from datetime import UTC, datetime
-    from sqlalchemy import select
+    from pathlib import Path
 
-    from app.models.ingestion import IngestionFile, IngestionRun
+    from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.dedup import buscar_execucao_hash_existente
+    from app.services.ingestion.file_manager import (
+        compute_file_sha256,
+        count_csv_rows,
+        detect_encoding_and_delimiter,
+        download_file_to_disk,
+        extract_zip_member,
+        get_csv_header,
+    )
     from app.services.ingestion.staging import (
         create_run,
-        get_member_payload,
-        save_member_payload,
         member_has_successful_match,
         register_file,
         register_member,
+        save_member_payload,
         update_run_state,
-    )
-    from app.services.ingestion.file_manager import (
-        download_file_to_disk,
-        extract_zip_member,
-        detect_encoding_and_delimiter,
-        get_csv_header,
-        count_csv_rows,
-        compute_file_sha256,
     )
 
     db = SessionLocal()
@@ -437,10 +433,10 @@ def ingerir_sincronizacao_zip(
     execucao_id: uuid.UUID,
     force_reimport: bool = False,
 ) -> dict[str, Any]:
-    import uuid
     from datetime import UTC, datetime
-    from sqlalchemy import select
+
     from celery import chain
+    from sqlalchemy import select
 
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
@@ -601,18 +597,18 @@ def sincronizar_member_internal(
 
     from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.file_manager import (
+        compute_file_sha256,
+        detect_encoding_and_delimiter,
+        download_file_to_disk,
+        extract_zip_member,
+    )
     from app.services.ingestion.staging import (
         create_run,
         get_member_payload,
         purge_member_success_rows,
         stage_csv_payload_streaming_from_disk,
         update_run_state,
-    )
-    from app.services.ingestion.file_manager import (
-        download_file_to_disk,
-        extract_zip_member,
-        detect_encoding_and_delimiter,
-        compute_file_sha256,
     )
 
     execucao = db.get(ExecucaoSincronizacao, uuid.UUID(child_execucao_id))
@@ -927,11 +923,13 @@ def disparar_dependentes_task(
     parent_execucao_id: str,
     force_reimport: bool = False,
 ) -> dict[str, str]:
-    from celery import group, chord
     import uuid
+
+    from celery import chord, group
     from sqlalchemy import select
-    from app.models.sincronizacao import ExecucaoSincronizacao
+
     from app.db.session import SessionLocal
+    from app.models.sincronizacao import ExecucaoSincronizacao
 
     db = SessionLocal()
     try:
@@ -1002,11 +1000,13 @@ def finalizar_sincronizacao_zip_task(
     import uuid
     from datetime import UTC, datetime
     from pathlib import Path
+
     from sqlalchemy import select
-    from app.models.sincronizacao import ExecucaoSincronizacao
-    from app.models.ingestion import IngestionFile, IngestionRun
-    from app.services.ingestion.staging import purge_member_success_rows, update_run_state
+
     from app.db.session import SessionLocal
+    from app.models.ingestion import IngestionFile, IngestionRun
+    from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.staging import purge_member_success_rows, update_run_state
 
     db = SessionLocal()
     try:

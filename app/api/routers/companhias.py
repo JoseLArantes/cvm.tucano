@@ -1,33 +1,33 @@
-from typing import Annotated, Any
 from datetime import datetime
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy import Select, func, select, case
+from sqlalchemy import Select, case, func, select
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.companhia import Companhia
-from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
-from app.schemas.comum import Paginacao
-from app.services.normalizacao import normalizar_cnpj
 
 # Import analysis schemas and services
 from app.schemas.analise import (
-    OverviewAnaliseResposta,
-    FinanceiroAnaliseResposta,
+    AnaliseConsolidadaResposta,
     ComparativoAnaliseResposta,
     EventoLinhaTempo,
-    PessoasRemuneracaoResposta,
+    FinanceiroAnaliseResposta,
     MercadoInsidersResposta,
-    AnaliseConsolidadaResposta
+    OverviewAnaliseResposta,
+    PessoasRemuneracaoResposta,
 )
+from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
+from app.schemas.comum import Paginacao
 from app.services.analise import (
-    obter_overview,
-    obter_financeiro,
     obter_comparativo,
     obter_eventos,
+    obter_financeiro,
+    obter_mercado_insiders,
+    obter_overview,
     obter_pessoas_remuneracao,
-    obter_mercado_insiders
 )
+from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter(prefix="/companhias")
 

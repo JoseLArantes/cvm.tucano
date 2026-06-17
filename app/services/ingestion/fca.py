@@ -30,6 +30,11 @@ from app.services.ingestion.change_tracking import (
     reconcile_promoted_rows,
 )
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
+from app.services.ingestion.lifecycle import (
+    build_custom_remote_probe,
+    capture_member_lifecycle_snapshot,
+    upsert_artifact_snapshot,
+)
 from app.services.ingestion.normalizers import (
     gerar_hash_canonico,
     normalizar_cnpj,
@@ -38,11 +43,6 @@ from app.services.ingestion.normalizers import (
     normalizar_inteiro,
     normalizar_sigla_uf,
     normalizar_texto,
-)
-from app.services.ingestion.lifecycle import (
-    build_custom_remote_probe,
-    capture_member_lifecycle_snapshot,
-    upsert_artifact_snapshot,
 )
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.quarantine import create_quarantine_item
@@ -55,8 +55,8 @@ from app.services.ingestion.resolver import (
     register_document_header,
     resolve_companhia,
 )
-from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.source_registry import listar_datasets
+from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
     iter_zip_csv_members,

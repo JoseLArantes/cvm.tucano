@@ -1,41 +1,37 @@
 import uuid
 from collections.abc import Sequence
 from datetime import date, datetime
-from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Integer, and_, case, desc, func, select
+from sqlalchemy import Integer, and_, desc, func, select
 from sqlalchemy.orm import Session
 
-from app.models.companhia import Companhia
-from app.models.financeiro import DocumentoFinanceiro, DemonstracaoFinanceira, ComposicaoCapital, ParecerFinanceiro
-from app.models.fre import (
-    FreDocumento,
-    FreCapitalSocial,
-    FreRemuneracaoTotalOrgao,
-    FreAdministradorMembroConselhoFiscal,
-    FreAdministradorDeclaracaoGenero,
-    FreRelacaoFamiliar,
-    FreCapitalSocialAumento
-)
-from app.models.fca import FcaDocumento
-from app.models.ipe import IpeDocumento
-from app.models.vlmo import VlmoDocumento, VlmoConsolidado
 from app.models.cgvn import CgvnDocumento, CgvnPratica
-
+from app.models.companhia import Companhia
+from app.models.fca import FcaDocumento
+from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro
+from app.models.fre import (
+    FreAdministradorDeclaracaoGenero,
+    FreAdministradorMembroConselhoFiscal,
+    FreCapitalSocialAumento,
+    FreDocumento,
+    FreRelacaoFamiliar,
+    FreRemuneracaoTotalOrgao,
+)
+from app.models.ipe import IpeDocumento
+from app.models.vlmo import VlmoConsolidado, VlmoDocumento
 from app.schemas.analise import (
-    OverviewAnaliseResposta,
     AlertaOverview,
-    PeriodoFinanceiro,
-    MetricaFinanceira,
-    ReferenciaProveniencia,
-    FinanceiroAnaliseResposta,
-    DeltaComparativo,
     ComparativoAnaliseResposta,
+    DeltaComparativo,
     EventoLinhaTempo,
+    FinanceiroAnaliseResposta,
+    MercadoInsidersResposta,
+    MetricaFinanceira,
+    OverviewAnaliseResposta,
+    PeriodoFinanceiro,
     PessoasRemuneracaoAno,
-    PessoasRemuneracaoResposta,
-    MercadoInsidersResposta
+    ReferenciaProveniencia,
 )
 
 

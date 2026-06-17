@@ -9,12 +9,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import (
     IngestionFile,
-    IngestionFileMember,
     IngestionRun,
     SourceArtifactSnapshot,
     SourceDeliverySnapshot,

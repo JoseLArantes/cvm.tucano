@@ -1,5 +1,4 @@
 import io
-import uuid
 import zipfile
 from datetime import UTC, date, datetime
 
@@ -9,11 +8,21 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import cgvn, companhia, financeiro, fre, identidade, ingestion, ipe, sincronizacao, usuario, vlmo  # noqa: F401
+from app.models import (  # noqa: F401
+    cgvn,
+    companhia,
+    financeiro,
+    fre,
+    identidade,
+    ingestion,
+    ipe,
+    sincronizacao,
+    usuario,
+    vlmo,
+)
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador
 from app.models.ingestion import (
-    IngestionFile,
     IngestionReconcileHash,
     SourceArtifactSnapshot,
     SourceDeliverySnapshot,

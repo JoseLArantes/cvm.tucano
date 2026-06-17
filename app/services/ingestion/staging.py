@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import Result, delete, insert, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session, load_only
 
 from app.models.ingestion import (
@@ -754,7 +754,7 @@ def read_staged_csv_rows_from_disk(
     *,
     delimiter: str = DEFAULT_CSV_DELIMITER,
 ) -> tuple[list[str], list[tuple[int, dict[str, str]]], str]:
-    with open(file_path, "r", encoding=encoding, errors="replace") as f:
+    with open(file_path, encoding=encoding, errors="replace") as f:
         reader = csv.DictReader(f, delimiter=delimiter)
         header = list(reader.fieldnames or [])
         rows = [(line_number, row) for line_number, row in enumerate(reader, start=2)]
@@ -767,7 +767,7 @@ def iter_csv_rows_from_disk(
     *,
     delimiter: str = DEFAULT_CSV_DELIMITER,
 ) -> tuple[list[str], Iterator[tuple[int, dict[str, str]]], str]:
-    f = open(file_path, "r", encoding=encoding, errors="replace")
+    f = open(file_path, encoding=encoding, errors="replace")
     try:
         reader = csv.DictReader(f, delimiter=delimiter)
         header = list(reader.fieldnames or [])
@@ -872,7 +872,7 @@ def safe_promote_chunk(
         nested.commit()
         for k, v in chunk_contadores.items():
             contadores[k] = contadores.get(k, 0) + v
-    except Exception as exc:
+    except Exception:
         if nested is not None:
             nested.rollback()
         

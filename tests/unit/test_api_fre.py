@@ -8,7 +8,9 @@ from sqlalchemy.orm import Session
 from app.models.companhia import Companhia
 from app.models.fre import (
     FreAcaoEntregue,
+    FreAdministradorDeclaracaoGenero,
     FreAdministradorDeclaracaoRaca,
+    FreAdministradorPcd,
     FreAuditor,
     FreCapitalSocial,
     FreCapitalSocialClasseAcao,
@@ -20,21 +22,19 @@ from app.models.fre import (
     FreEmpregadoLocalDeclaracaoRaca,
     FreEmpregadoLocalFaixaEtaria,
     FreEmpregadoPcd,
-    FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoDeclaracaoRaca,
     FreEmpregadoPosicaoFaixaEtaria,
+    FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreParticipacaoSociedade,
     FrePosicaoAcionaria,
     FrePosicaoAcionariaClasseAcao,
-    FreParticipacaoSociedade,
     FreRelacaoFamiliar,
     FreRemuneracaoAcao,
     FreRemuneracaoMaximaMinimaMedia,
     FreRemuneracaoTotalOrgao,
     FreRemuneracaoVariavel,
     FreResponsavel,
-    FreAdministradorDeclaracaoGenero,
-    FreAdministradorPcd,
 )
 
 
@@ -654,15 +654,15 @@ def _seed_fre(db: Session, companhia_id: UUID) -> None:
     )
     # Phase 3
     from app.models.fre import (
-        FreVolumeValorMobiliario,
-        FreOutroValorMobiliario,
-        FreTitularValorMobiliario,
         FreMercadoEstrangeiro,
-        FreTituloExterior,
+        FreOutroValorMobiliario,
         FrePlanoRecompra,
         FrePlanoRecompraClasseAcao,
+        FreTitularValorMobiliario,
+        FreTituloExterior,
         FreValorMobiliarioTesourariaMovimentacao,
         FreValorMobiliarioTesourariaUltimoExercicio,
+        FreVolumeValorMobiliario,
     )
     db.add(
         FreVolumeValorMobiliario(

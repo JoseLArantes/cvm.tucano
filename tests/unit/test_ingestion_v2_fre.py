@@ -11,6 +11,7 @@ from app.models import financeiro, fre, identidade, ingestion, sincronizacao, us
 from app.models.companhia import Companhia
 from app.models.fre import (
     FreAcaoEntregue,
+    FreAdministradorMembroConselhoFiscal,
     FreAuditor,
     FreCapitalSocial,
     FreCapitalSocialClasseAcao,
@@ -19,17 +20,16 @@ from app.models.fre import (
     FreDistribuicaoCapitalClasseAcao,
     FreDocumento,
     FreEmpregadoPosicaoGenero,
+    FreMembroComite,
     FrePosicaoAcionaria,
     FrePosicaoAcionariaClasseAcao,
+    FreRelacaoFamiliar,
+    FreRelacaoSubordinacao,
     FreRemuneracaoAcao,
     FreRemuneracaoMaximaMinimaMedia,
     FreRemuneracaoTotalOrgao,
     FreRemuneracaoVariavel,
     FreResponsavel,
-    FreAdministradorMembroConselhoFiscal,
-    FreMembroComite,
-    FreRelacaoFamiliar,
-    FreRelacaoSubordinacao,
     FreTransacaoParteRelacionada,
 )
 from app.models.identidade import CompanhiaIdentificador
@@ -1135,16 +1135,16 @@ def test_sincronizar_fre_phase_2_datasets() -> None:
 
 def test_sincronizar_fre_phase_3_datasets() -> None:
     from app.models.fre import (
-        FreVolumeValorMobiliario,
-        FreOutroValorMobiliario,
-        FreTitularValorMobiliario,
+        FreAdministradorDeclaracaoGenero,
         FreMercadoEstrangeiro,
-        FreTituloExterior,
+        FreOutroValorMobiliario,
         FrePlanoRecompra,
         FrePlanoRecompraClasseAcao,
+        FreTitularValorMobiliario,
+        FreTituloExterior,
         FreValorMobiliarioTesourariaMovimentacao,
         FreValorMobiliarioTesourariaUltimoExercicio,
-        FreAdministradorDeclaracaoGenero,
+        FreVolumeValorMobiliario,
     )
     session = _session()
     try:
@@ -1258,10 +1258,10 @@ def test_sincronizar_fre_phase_3_datasets() -> None:
 def test_sincronizar_fre_supports_new_employee_and_sociedade_datasets() -> None:
     from app.models.fre import (
         FreAdministradorDeclaracaoRaca,
+        FreAdministradorPcd,
         FreEmpregadoLocalDeclaracaoGenero,
         FreEmpregadoLocalDeclaracaoRaca,
         FreEmpregadoLocalFaixaEtaria,
-        FreAdministradorPcd,
         FreEmpregadoPcd,
         FreEmpregadoPosicaoDeclaracaoRaca,
         FreEmpregadoPosicaoFaixaEtaria,

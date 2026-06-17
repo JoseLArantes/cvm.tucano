@@ -7,8 +7,8 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.ingestion import IngestionRowEvent
-from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 from app.services.ingestion.quarantine import _normalizar_reason_code
+from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 from app.services.ingestion.validation import (
     ValidationResult,
     build_duplicate_comparison_data,
@@ -394,7 +394,7 @@ def test_validate_member_header_rejects_missing_all_required_for_transacao_parte
 
 def test_normalizacao_invalida_result_is_repairable_with_specific_error() -> None:
     result = invalid_result(
-        f"normalizacao_invalida: campo_obrigatorio_ausente",
+        "normalizacao_invalida: campo_obrigatorio_ausente",
         details={"erro": "campo_obrigatorio_ausente"},
         repairable=True,
     )
@@ -422,7 +422,7 @@ def test_create_quarantine_item_uses_normalizacao_invalida_motivo_codigo() -> No
     try:
         member, row = _staged_row(session)
         result = invalid_result(
-            f"normalizacao_invalida: campo_obrigatorio_ausente",
+            "normalizacao_invalida: campo_obrigatorio_ausente",
             details={"erro": "campo_obrigatorio_ausente"},
             repairable=True,
         )

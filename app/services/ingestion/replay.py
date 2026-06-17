@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
-from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.ingestion import IngestionRow, IngestionRun, QuarantineItem
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.fca import _promote_fca_row, normalizar_fca_row
 from app.services.ingestion.financeiro import _promote_financeiro_row, normalizar_financeiro_row
 from app.services.ingestion.fre import _promote_fre_row, normalizar_fre_row

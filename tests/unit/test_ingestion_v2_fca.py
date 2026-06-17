@@ -6,7 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
-from app.models.fca import FcaAuditor, FcaDepartamentoAcionistas, FcaDocumento, FcaDri, FcaEndereco, FcaGeral, FcaValorMobiliario
+from app.models.fca import (
+    FcaAuditor,
+    FcaDepartamentoAcionistas,
+    FcaDocumento,
+    FcaDri,
+    FcaEndereco,
+    FcaGeral,
+    FcaValorMobiliario,
+)
 from app.models.ingestion import IngestionRow, QuarantineItem
 from app.services.ingestion.fca import normalizar_fca_row, sincronizar_fca
 
