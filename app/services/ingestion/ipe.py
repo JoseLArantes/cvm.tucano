@@ -225,7 +225,7 @@ def _promote_ipe_chunk(
         payload_insercao: list[dict[str, Any]] = []
         historicos: list[dict[str, Any]] = []
 
-        for row, dados in grupo:
+        for _row, dados in grupo:
             chave = _key_tuple(dados, campos_chave)
             existente = existentes_por_chave.get(chave)
             if existente is None:

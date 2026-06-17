@@ -1561,7 +1561,7 @@ def _promote_fre_chunk_internal(
     historicos: list[dict[str, Any]] = []
     chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
 
-    for row, dados in preparados:
+    for _row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
         existente_lote = chaves_no_lote.get(chave)
         if existente_lote is not None:

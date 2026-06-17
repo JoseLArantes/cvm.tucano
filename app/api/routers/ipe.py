@@ -263,7 +263,6 @@ def obter_documentos_ipe_agregados(
         ),
     ] = "ano,categoria",
 ) -> ListaIpeDocumentosAgregadosResposta:
-    query = select()
     query_total = select(func.count()).select_from(IpeDocumento)
     
     # We will reuse the filters function by creating dummy select queries

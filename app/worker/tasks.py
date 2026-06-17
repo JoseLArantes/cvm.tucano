@@ -365,7 +365,7 @@ def pre_processar_sincronizacao_zip(
             db.add(child_exec)
             db.flush()
 
-            child_run = create_run(
+            create_run(
                 db,
                 tipo_fonte=tipo_fonte,
                 ano=ano,
@@ -445,7 +445,6 @@ def ingerir_sincronizacao_zip(
     from app.services.ingestion.staging import update_run_state
 
     db = SessionLocal()
-    settings = get_settings()
     limpar_caches_resolver()
     ensure_identity_graph_ready(db)
 

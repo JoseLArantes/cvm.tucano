@@ -292,12 +292,6 @@ def obter_analise_consolidada_endpoint(
 
     overview = obter_overview(db, companhia)
     financeiro = obter_financeiro(db, companhia, horizonte=horizonte, periodicidade=periodicidade)
-    # Handle comparativo errors or empty years gracefully
-    try:
-        comparativo = obter_comparativo(db, companhia, ano_base=ano_base, ano_comparacao=ano_comparacao)
-    except Exception:
-        comparativo = None
-
     eventos = obter_eventos(db, companhia)
     pessoas_rem = obter_pessoas_remuneracao(db, companhia)
     mercado = obter_mercado_insiders(db, companhia)

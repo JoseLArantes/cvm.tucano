@@ -10,7 +10,6 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import (  # noqa: F401
     cgvn,
-    companhia,
     financeiro,
     fre,
     identidade,

@@ -327,7 +327,7 @@ def _promote_vlmo_chunk_internal(
         existentes_por_chave = {tuple(getattr(item, campo) for campo in group_campos): item for item in existentes}
 
         chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
-        for row, dados in grupo:
+        for _row, dados in grupo:
             chave = _key_tuple(dados, group_campos)
             existente_lote = chaves_no_lote.get(chave)
             if existente_lote is not None:

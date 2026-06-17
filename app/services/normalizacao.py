@@ -119,8 +119,8 @@ def normalizar_decimal_cvm(valor: Any) -> Decimal | None:
 
     try:
         return Decimal(texto)
-    except Exception:
-        raise ValueError(f"Valor decimal invalido: {valor}")
+    except Exception as exc:
+        raise ValueError(f"Valor decimal invalido: {valor}") from exc
 
 
 def normalizar_conta_fixa(valor: Any) -> bool | None:

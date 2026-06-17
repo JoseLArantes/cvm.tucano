@@ -64,13 +64,20 @@ def obter_overview(db: Session, companhia: Companhia) -> OverviewAnaliseResposta
     cobertura = {}
     for y in sorted(all_years):
         families = []
-        if y in dfp_years: families.append("DFP")
-        if y in itr_years: families.append("ITR")
-        if y in fre_years: families.append("FRE")
-        if y in fca_years: families.append("FCA")
-        if y in ipe_years: families.append("IPE")
-        if y in vlmo_years: families.append("VLMO")
-        if y in cgvn_years: families.append("CGVN")
+        if y in dfp_years:
+            families.append("DFP")
+        if y in itr_years:
+            families.append("ITR")
+        if y in fre_years:
+            families.append("FRE")
+        if y in fca_years:
+            families.append("FCA")
+        if y in ipe_years:
+            families.append("IPE")
+        if y in vlmo_years:
+            families.append("VLMO")
+        if y in cgvn_years:
+            families.append("CGVN")
         cobertura[str(y)] = families
 
     # 3. Available periods
@@ -584,7 +591,10 @@ def obter_pessoas_remuneracao(db: Session, companhia: Companhia) -> list[Pessoas
     # 1. Fetch available years from FreRemuneracaoTotalOrgao
     years = db.scalars(
         select(FreRemuneracaoTotalOrgao.ano_origem)
-        .where(FreRemuneracaoTotalOrgao.cnpj_companhia == cnpj, FreRemuneracaoTotalOrgao.ano_origem != None)
+        .where(
+            FreRemuneracaoTotalOrgao.cnpj_companhia == cnpj,
+            FreRemuneracaoTotalOrgao.ano_origem.is_not(None),
+        )
         .distinct().order_by(desc(FreRemuneracaoTotalOrgao.ano_origem))
     ).all()
 

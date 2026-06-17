@@ -1237,7 +1237,7 @@ def test_sincronizar_fre_phase_3_datasets() -> None:
                 ).encode("latin1"),
             )
 
-        payload = z_bytes = b.getvalue()
+        payload = b.getvalue()
         resultado = sincronizar_fre(session, 2025, downloader=lambda _: payload)
 
         assert resultado["status"] == "sucesso"

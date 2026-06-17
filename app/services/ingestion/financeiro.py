@@ -337,7 +337,7 @@ def _promote_financeiro_chunk_internal(
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[Any] = []
     chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
-    for row, dados in preparados:
+    for _row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
         existente_lote = chaves_no_lote.get(chave)
         if existente_lote is not None:
