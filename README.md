@@ -13,6 +13,8 @@ Serviço FastAPI para baixar, normalizar, armazenar e expor dados públicos da C
 
 Este repositório é voltado para desenvolvedores de backend e plataforma que trabalham com ingestão, normalização e comportamento da API.
 
+> **Nota de escopo:** neste momento, o projeto trata apenas dados da CVM relacionados a companhias.
+
 ## Visão geral
 
 - Serviço orientado a API, construído com FastAPI.

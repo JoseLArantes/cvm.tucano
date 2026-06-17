@@ -1,0 +1,84 @@
+/* Custom CSS for Tucano CVM Documentation */
+
+/* Brazilian Portuguese locale formatting */
+:root {
+  --ifm-color-primary: #2563eb;
+  --ifm-color-primary-dark: #1d4ed8;
+  --ifm-color-primary-darker: #1e40af;
+  --ifm-color-primary-darkest: #1e3a8a;
+  --ifm-color-primary-light: #3b82f6;
+  --ifm-color-primary-lighter: #60a5fa;
+  --ifm-color-primary-lightest: #93c5fd;
+  --tucano-surface: #ffffff;
+  --tucano-surface-subtle: #fafafa;
+  --tucano-border: #e1e4e8;
+  --tucano-code-bg: #f6f8fa;
+  --tucano-diagram-bg: #fefefe;
+}
+
+[data-theme='dark'] {
+  --tucano-surface: #111827;
+  --tucano-surface-subtle: #0f172a;
+  --tucano-border: #334155;
+  --tucano-code-bg: #0b1120;
+  --tucano-diagram-bg: #0f172a;
+}
+
+/* Code blocks styling */
+pre[class*="language-"] {
+  background: var(--tucano-code-bg);
+  border-radius: 6px;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+/* Mermaid diagrams */
+.mermaid {
+  background: var(--tucano-diagram-bg);
+  border: 1px solid var(--tucano-border);
+  border-radius: 6px;
+  padding: 1rem;
+  text-align: center;
+}
+
+/* Tables */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+}
+
+td, th {
+  border: 1px solid var(--tucano-border);
+  padding: 0.75rem;
+  text-align: left;
+}
+
+th {
+  background-color: var(--tucano-code-bg);
+  font-weight: 600;
+}
+
+/* Responsive tables */
+@media (max-width: 768px) {
+  table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+/* Footer styling */
+.footer {
+  background-color: #1a1a1a;
+}
+
+/* Navbar styling */
+.navbar {
+  background-color: var(--tucano-surface);
+  border-bottom: 1px solid var(--tucano-border);
+}
+
+/* Sidebar styling */
+.sidebar {
+  background-color: var(--tucano-surface-subtle);
+}

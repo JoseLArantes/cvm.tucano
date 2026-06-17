@@ -11,6 +11,10 @@ __pycache__/
 .env
 dist/
 build/
+docusaurus/node_modules/
+docusaurus/build/
+docusaurus/.docusaurus/
+docusaurus_source/
 *.egg-info/
 alembic/versions/__pycache__/
 celerybeat-schedule
