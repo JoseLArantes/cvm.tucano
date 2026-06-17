@@ -140,7 +140,8 @@ def _execucoes_relacionadas_cancelamento(
 ) -> list[ExecucaoSincronizacao]:
     if execucao.parent_execucao_id is not None:
         return [execucao]
-    return db.scalars(
+    return list(
+        db.scalars(
         select(ExecucaoSincronizacao)
         .where(
             (ExecucaoSincronizacao.id == execucao.id)
@@ -148,6 +149,7 @@ def _execucoes_relacionadas_cancelamento(
         )
         .order_by(ExecucaoSincronizacao.iniciada_em.asc())
     ).all()
+    )
 
 
 def _cancelar_execucoes_relacionadas(

@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, insert, select
+from sqlalchemy import Result, delete, insert, select
 from sqlalchemy.orm import Session, load_only
 
 from app.models.ingestion import (
@@ -501,7 +501,8 @@ def purge_member_success_rows(
         )
     )
     db.flush()
-    return int(deleted_rows.rowcount or 0)
+    rowcount = getattr(deleted_rows, "rowcount", None)
+    return int(rowcount if rowcount is not None else 0)
 
 
 def register_attempt(
@@ -920,4 +921,3 @@ def safe_promote_chunk(
                     dados_originais=row.raw_data,
                 )
                 contadores["rejeitados"] = contadores.get("rejeitados", 0) + 1
-

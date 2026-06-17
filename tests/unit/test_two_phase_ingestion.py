@@ -2,6 +2,8 @@ import uuid
 import shutil
 import hashlib
 from pathlib import Path
+
+import pytest
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine
 from sqlalchemy.pool import StaticPool
@@ -100,7 +102,7 @@ def _csv_content(rows: list[dict[str, str]]) -> bytes:
         lines.append(";".join(row.get(column, "") for column in header))
     return ("\n".join(lines) + "\n").encode("latin1")
 
-def test_two_phase_flow_and_self_healing(monkeypatch) -> None:
+def test_two_phase_flow_and_self_healing(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     settings = get_settings()
     

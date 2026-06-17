@@ -36,6 +36,9 @@ testpaths = ["tests"]
 markers = [
   "cvm_live: hits official CVM endpoints and stays opt-in",
 ]
+filterwarnings = [
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead\\.",
+]
 
 [tool.ruff]
 line-length = 120

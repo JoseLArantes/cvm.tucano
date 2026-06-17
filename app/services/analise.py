@@ -1,8 +1,10 @@
 import uuid
+from collections.abc import Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
-from sqlalchemy import select, func, and_, case, Integer, desc
+
+from sqlalchemy import Integer, and_, case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
@@ -50,17 +52,17 @@ def obter_overview(db: Session, companhia: Companhia) -> OverviewAnaliseResposta
     data_freshness = max(freshness_dates) if freshness_dates else companhia.sincronizado_em
 
     # 2. Coverage
-    def query_years(model, filters):
+    def query_years(model: type[Any], filters: Sequence[Any]) -> set[int]:
         stmt = select(func.extract('year', model.data_referencia).cast(Integer)).where(*filters).distinct()
         return set(db.scalars(stmt).all())
 
-    dfp_years = query_years(DocumentoFinanceiro, (DocumentoFinanceiro.cnpj_companhia == cnpj, DocumentoFinanceiro.tipo_formulario == "DFP"))
-    itr_years = query_years(DocumentoFinanceiro, (DocumentoFinanceiro.cnpj_companhia == cnpj, DocumentoFinanceiro.tipo_formulario == "ITR"))
-    fre_years = query_years(FreDocumento, (FreDocumento.cnpj_companhia == cnpj,))
-    fca_years = query_years(FcaDocumento, (FcaDocumento.cnpj_companhia == cnpj,))
-    ipe_years = query_years(IpeDocumento, (IpeDocumento.cnpj_companhia == cnpj,))
-    vlmo_years = query_years(VlmoDocumento, (VlmoDocumento.cnpj_companhia == cnpj,))
-    cgvn_years = query_years(CgvnDocumento, (CgvnDocumento.cnpj_companhia == cnpj,))
+    dfp_years = query_years(DocumentoFinanceiro, [DocumentoFinanceiro.cnpj_companhia == cnpj, DocumentoFinanceiro.tipo_formulario == "DFP"])
+    itr_years = query_years(DocumentoFinanceiro, [DocumentoFinanceiro.cnpj_companhia == cnpj, DocumentoFinanceiro.tipo_formulario == "ITR"])
+    fre_years = query_years(FreDocumento, [FreDocumento.cnpj_companhia == cnpj])
+    fca_years = query_years(FcaDocumento, [FcaDocumento.cnpj_companhia == cnpj])
+    ipe_years = query_years(IpeDocumento, [IpeDocumento.cnpj_companhia == cnpj])
+    vlmo_years = query_years(VlmoDocumento, [VlmoDocumento.cnpj_companhia == cnpj])
+    cgvn_years = query_years(CgvnDocumento, [CgvnDocumento.cnpj_companhia == cnpj])
 
     all_years = set().union(dfp_years, itr_years, fre_years, fca_years, ipe_years, vlmo_years, cgvn_years)
     cobertura = {}
@@ -194,7 +196,10 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
     rows = db.execute(stmt).all()
 
     # Group by (tipo_formulario, data_referencia) and escopo
-    periods_raw = {}
+    periods_raw: dict[
+        tuple[str, date],
+        dict[str, list[tuple[DemonstracaoFinanceira, uuid.UUID, str | None, datetime | None]]],
+    ] = {}
     for df_row, doc_id, link, data_recebimento in rows:
         key = (df_row.tipo_formulario, df_row.data_referencia)
         if key not in periods_raw:
@@ -205,7 +210,7 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
         periods_raw[key][esc].append((df_row, doc_id, link, data_recebimento))
 
     # Apply consolidado priority and extract metrics
-    periods_extracted = []
+    periods_extracted: list[PeriodoFinanceiro] = []
     for (tf, dt_ref), escopos in periods_raw.items():
         # Filter periodicidade if requested
         if periodicidade == "anual" and tf != "DFP":
@@ -218,7 +223,7 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
             continue
 
         items = escopos[chosen_esc]
-        metrics = {}
+        metrics: dict[str, MetricaFinanceira] = {}
 
         for name, codes in contas_mapeadas.items():
             matched_item = None
@@ -234,7 +239,7 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
                 prov = ReferenciaProveniencia(
                     fonte="CVM",
                     dataset=f"{it.tipo_formulario}/{it.grupo_demonstracao or 'DF'}",
-                    documento_id=doc_id,
+                    documento_id=str(doc_id),
                     linha_id=str(it.id),
                     data_referencia=it.data_referencia,
                     data_entrega=recv_date,
@@ -243,87 +248,101 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
                 metrics[name] = MetricaFinanceira(
                     valor_normalizado=val_norm,
                     valor_original=val_orig,
-                    proveniencia=prov
+                    proveniencia=prov,
+                    yoy=None,
+                    qoq=None,
+                    cagr=None
                 )
             else:
                 metrics[name] = MetricaFinanceira(
                     valor_normalizado=None,
                     valor_original=None,
-                    proveniencia=None
+                    proveniencia=None,
+                    yoy=None,
+                    qoq=None,
+                    cagr=None
                 )
 
         ano = dt_ref.year
         trimestre = (dt_ref.month - 1) // 3 + 1
         label = f"{ano}" if tf == "DFP" else f"{ano}-{trimestre}T"
 
-        periods_extracted.append({
-            "tipo_formulario": tf,
-            "data_referencia": dt_ref,
-            "ano": ano,
-            "trimestre": trimestre,
-            "periodo_tipo": "ANUAL" if tf == "DFP" else "TRIMESTRAL",
-            "periodo_label": label,
-            "metrics": metrics
-        })
+        periods_extracted.append(
+            PeriodoFinanceiro(
+                periodo_label=label,
+                ano=ano,
+                trimestre=trimestre,
+                periodo_tipo="ANUAL" if tf == "DFP" else "TRIMESTRAL",
+                metrics=metrics,
+            )
+        )
 
     # Sort periods chronologically
-    periods_extracted.sort(key=lambda x: (x["ano"], x["trimestre"]))
+    periods_extracted.sort(key=lambda period: (period.ano, period.trimestre))
 
     # Apply horizon filter
     if periods_extracted:
-        latest_year = max(p["ano"] for p in periods_extracted)
+        latest_year = max(period.ano for period in periods_extracted)
         if horizonte == "5a":
-            periods_extracted = [p for p in periods_extracted if p["ano"] >= latest_year - 4]
+            periods_extracted = [period for period in periods_extracted if period.ano >= latest_year - 4]
         elif horizonte == "10a":
-            periods_extracted = [p for p in periods_extracted if p["ano"] >= latest_year - 9]
+            periods_extracted = [period for period in periods_extracted if period.ano >= latest_year - 9]
 
     # Calculate YoY, QoQ, CAGR
     # YoY/QoQ calculations require historical mapping
-    annual_map = {p["ano"]: p for p in periods_extracted if p["periodo_tipo"] == "ANUAL"}
-    quarterly_map = {(p["ano"], p["trimestre"]): p for p in periods_extracted if p["periodo_tipo"] == "TRIMESTRAL"}
+    annual_map = {period.ano: period for period in periods_extracted if period.periodo_tipo == "ANUAL"}
+    quarterly_map = {
+        (period.ano, period.trimestre): period
+        for period in periods_extracted
+        if period.periodo_tipo == "TRIMESTRAL"
+    }
 
-    for p in periods_extracted:
-        is_annual = (p["periodo_tipo"] == "ANUAL")
+    for period in periods_extracted:
+        is_annual = period.periodo_tipo == "ANUAL"
         for m_name in contas_mapeadas.keys():
-            met = p["metrics"][m_name]
+            met = period.metrics[m_name]
             if met.valor_normalizado is None:
                 continue
 
             # 1. YoY
             if is_annual:
-                prev_p = annual_map.get(p["ano"] - 1)
+                prev_p = annual_map.get(period.ano - 1)
                 if prev_p:
-                    prev_val = prev_p["metrics"][m_name].valor_normalizado
+                    prev_val = prev_p.metrics[m_name].valor_normalizado
                     if prev_val and prev_val != 0:
                         met.yoy = (met.valor_normalizado - prev_val) / abs(prev_val)
             else:
-                prev_p = quarterly_map.get((p["ano"] - 1, p["trimestre"]))
+                prev_p = quarterly_map.get((period.ano - 1, period.trimestre))
                 if prev_p:
-                    prev_val = prev_p["metrics"][m_name].valor_normalizado
+                    prev_val = prev_p.metrics[m_name].valor_normalizado
                     if prev_val and prev_val != 0:
                         met.yoy = (met.valor_normalizado - prev_val) / abs(prev_val)
 
             # 2. QoQ (ITR only)
             if not is_annual:
-                y_prev, q_prev = (p["ano"], p["trimestre"] - 1) if p["trimestre"] > 1 else (p["ano"] - 1, 4)
+                y_prev, q_prev = (
+                    (period.ano, period.trimestre - 1)
+                    if period.trimestre > 1
+                    else (period.ano - 1, 4)
+                )
                 prev_p = quarterly_map.get((y_prev, q_prev))
                 if not prev_p and q_prev == 4:
                     # Fallback to DFP of previous year
                     prev_p = annual_map.get(y_prev)
                 
                 if prev_p:
-                    prev_val = prev_p["metrics"][m_name].valor_normalizado
+                    prev_val = prev_p.metrics[m_name].valor_normalizado
                     if prev_val and prev_val != 0:
                         met.qoq = (met.valor_normalizado - prev_val) / abs(prev_val)
 
             # 3. CAGR (DFP only)
             if is_annual:
                 # Find oldest annual record for CAGR
-                oldest_year = min(y for y in annual_map.keys() if y < p["ano"]) if any(y < p["ano"] for y in annual_map.keys()) else None
+                oldest_year = min((year for year in annual_map if year < period.ano), default=None)
                 if oldest_year:
                     old_p = annual_map[oldest_year]
-                    old_val = old_p["metrics"][m_name].valor_normalizado
-                    n_years = p["ano"] - oldest_year
+                    old_val = old_p.metrics[m_name].valor_normalizado
+                    n_years = period.ano - oldest_year
                     if old_val and old_val > 0 and met.valor_normalizado > 0 and n_years > 0:
                         try:
                             met.cagr = (met.valor_normalizado / old_val) ** (1.0 / n_years) - 1.0
@@ -333,7 +352,7 @@ def obter_financeiro(db: Session, companhia: Companhia, horizonte: str = "5a", p
     return FinanceiroAnaliseResposta(
         cnpj_companhia=cnpj,
         codigo_cvm=companhia.codigo_cvm or 0,
-        dados=[PeriodoFinanceiro(**p) for p in periods_extracted]
+        dados=periods_extracted
     )
 
 
@@ -365,7 +384,7 @@ def obter_comparativo(db: Session, companhia: Companhia, ano_base: int, ano_comp
         financeiro_deltas[met_name] = compute_delta(val_base, val_comp)
 
     # 2. Capital deltas
-    def get_shares_for_year(ano: int):
+    def get_shares_for_year(ano: int) -> tuple[float | None, float | None]:
         stmt = (
             select(ComposicaoCapital)
             .where(ComposicaoCapital.cnpj_companhia == cnpj, ComposicaoCapital.tipo_formulario == "DFP", ComposicaoCapital.ano_origem == ano)
@@ -389,7 +408,7 @@ def obter_comparativo(db: Session, companhia: Companhia, ano_base: int, ano_comp
     }
 
     # 3. Governanca deltas
-    def get_board_membros_for_year(ano: int):
+    def get_board_membros_for_year(ano: int) -> int:
         # Membros do Conselho
         stmt = (
             select(func.count(FreAdministradorMembroConselhoFiscal.id))
@@ -408,7 +427,7 @@ def obter_comparativo(db: Session, companhia: Companhia, ano_base: int, ano_comp
     }
 
     # 4. Pessoas deltas (remuneration and total members from FreRemuneracaoTotalOrgao)
-    def get_people_stats_for_year(ano: int):
+    def get_people_stats_for_year(ano: int) -> tuple[float | None, float | None]:
         stmt = (
             select(func.sum(FreRemuneracaoTotalOrgao.numero_membros), func.sum(FreRemuneracaoTotalOrgao.total_remuneracao_orgao))
             .where(FreRemuneracaoTotalOrgao.cnpj_companhia == cnpj, FreRemuneracaoTotalOrgao.ano_origem == ano)
@@ -425,7 +444,7 @@ def obter_comparativo(db: Session, companhia: Companhia, ano_base: int, ano_comp
     }
 
     # 5. Mercado deltas (buy/sell totals from VlmoConsolidado)
-    def get_market_volume_for_year(ano: int):
+    def get_market_volume_for_year(ano: int) -> tuple[float, float]:
         stmt_buy = (
             select(func.sum(VlmoConsolidado.volume))
             .where(VlmoConsolidado.cnpj_companhia == cnpj, VlmoConsolidado.ano_origem == ano, VlmoConsolidado.tipo_operacao == "COMPRA")
@@ -447,7 +466,7 @@ def obter_comparativo(db: Session, companhia: Companhia, ano_base: int, ano_comp
     }
 
     # 6. Eventos IPE delta
-    def get_ipe_count_for_year(ano: int):
+    def get_ipe_count_for_year(ano: int) -> float:
         stmt = (
             select(func.count(IpeDocumento.id))
             .where(IpeDocumento.cnpj_companhia == cnpj, func.extract('year', IpeDocumento.data_entrega) == ano)
@@ -506,16 +525,16 @@ def obter_eventos(db: Session, companhia: Companhia) -> list[EventoLinhaTempo]:
         .limit(100)
     ).all()
 
-    for doc in reapr_docs:
+    for reapr_doc in reapr_docs:
         eventos.append(EventoLinhaTempo(
-            data_evento=doc.data_recebimento or doc.data_referencia,
+            data_evento=reapr_doc.data_recebimento or reapr_doc.data_referencia,
             familia_evento="FINANCEIRO",
             tipo_evento="Reapresentação Financeira",
             severidade="WARNING",
-            titulo=f"Reapresentação de {doc.tipo_formulario} (Versão {doc.versao})",
-            explicacao=f"A companhia reapresentou o formulário {doc.tipo_formulario} referente a {doc.data_referencia}.",
-            link_documento=doc.link_documento,
-            periodo_afetado=f"{doc.data_referencia.year}"
+            titulo=f"Reapresentação de {reapr_doc.tipo_formulario} (Versão {reapr_doc.versao})",
+            explicacao=f"A companhia reapresentou o formulário {reapr_doc.tipo_formulario} referente a {reapr_doc.data_referencia}.",
+            link_documento=reapr_doc.link_documento,
+            periodo_afetado=f"{reapr_doc.data_referencia.year}"
         ))
 
     # 3. Capital Increases (FreCapitalSocialAumento)
@@ -573,8 +592,9 @@ def obter_pessoas_remuneracao(db: Session, companhia: Companhia) -> list[Pessoas
         .distinct().order_by(desc(FreRemuneracaoTotalOrgao.ano_origem))
     ).all()
 
-    result = []
-    for y in sorted(years):
+    valid_years = [year for year in years if year is not None]
+    result: list[PessoasRemuneracaoAno] = []
+    for y in sorted(valid_years):
         # 1. Fetch Board (Conselho) stats
         stmt_conselho = (
             select(func.sum(FreRemuneracaoTotalOrgao.numero_membros), func.sum(FreRemuneracaoTotalOrgao.total_remuneracao_orgao))
@@ -680,15 +700,15 @@ def obter_mercado_insiders(db: Session, companhia: Companhia) -> MercadoInsiders
     )
     
     mov_rows = db.execute(stmt_mov).all()
-    movimentacoes = []
-    for r in mov_rows:
-        if r.ano is not None:
+    movimentacoes: list[dict[str, Any]] = []
+    for mov_row in mov_rows:
+        if mov_row.ano is not None:
             movimentacoes.append({
-                "ano": r.ano,
-                "mes": r.mes,
-                "tipo_operacao": r.tipo_operacao,
-                "total_quantidade": float(r.total_quantidade) if r.total_quantidade else 0.0,
-                "total_volume": float(r.total_volume) if r.total_volume else 0.0
+                "ano": mov_row.ano,
+                "mes": mov_row.mes,
+                "tipo_operacao": mov_row.tipo_operacao,
+                "total_quantidade": float(mov_row.total_quantidade) if mov_row.total_quantidade else 0.0,
+                "total_volume": float(mov_row.total_volume) if mov_row.total_volume else 0.0
             })
 
     # 2. Concentracao por cargo (volume total)
@@ -721,14 +741,18 @@ def obter_mercado_insiders(db: Session, companhia: Companhia) -> MercadoInsiders
         .order_by(ComposicaoCapital.ano_origem)
     )
     tes_rows = db.execute(stmt_tes).all()
-    tesouraria = []
-    for r in tes_rows:
-        if r.ano_origem is not None:
-            pct = float(r.qt_tes) / float(r.qt_total) if (r.qt_tes and r.qt_total and r.qt_total > 0) else 0.0
+    tesouraria: list[dict[str, Any]] = []
+    for tes_row in tes_rows:
+        if tes_row.ano_origem is not None:
+            pct = (
+                float(tes_row.qt_tes) / float(tes_row.qt_total)
+                if (tes_row.qt_tes and tes_row.qt_total and tes_row.qt_total > 0)
+                else 0.0
+            )
             tesouraria.append({
-                "ano": r.ano_origem,
-                "quantidade_tesouraria": float(r.qt_tes) if r.qt_tes else 0.0,
-                "quantidade_total": float(r.qt_total) if r.qt_total else 0.0,
+                "ano": tes_row.ano_origem,
+                "quantidade_tesouraria": float(tes_row.qt_tes) if tes_row.qt_tes else 0.0,
+                "quantidade_total": float(tes_row.qt_total) if tes_row.qt_total else 0.0,
                 "percentual": pct
             })
 
@@ -744,13 +768,13 @@ def obter_mercado_insiders(db: Session, companhia: Companhia) -> MercadoInsiders
         .order_by(FreCapitalSocialAumento.data_deliberacao)
     )
     cap_rows = db.execute(stmt_cap_alt).all()
-    capital_alteracoes = []
-    for r in cap_rows:
+    capital_alteracoes: list[dict[str, Any]] = []
+    for cap_row in cap_rows:
         capital_alteracoes.append({
-            "ano": r.ano_origem,
-            "data_deliberacao": r.data_deliberacao,
-            "valor_aumento": float(r.valor_aumento) if r.valor_aumento else 0.0,
-            "origem_aumento": r.origem_aumento
+            "ano": cap_row.ano_origem,
+            "data_deliberacao": cap_row.data_deliberacao,
+            "valor_aumento": float(cap_row.valor_aumento) if cap_row.valor_aumento else 0.0,
+            "origem_aumento": cap_row.origem_aumento
         })
 
     # 5. Governance practices count

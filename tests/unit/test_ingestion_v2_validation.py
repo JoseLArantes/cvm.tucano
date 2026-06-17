@@ -401,6 +401,7 @@ def test_normalizacao_invalida_result_is_repairable_with_specific_error() -> Non
 
     assert result.status == "invalid"
     assert result.repairable is True
+    assert result.reason_code is not None
     assert "campo_obrigatorio_ausente" in result.reason_code
     assert "normalizacao_invalida" in result.reason_code
 

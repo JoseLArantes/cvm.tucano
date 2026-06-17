@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
@@ -1493,7 +1494,7 @@ def _key_tuple(dados: dict[str, Any], campos_chave: tuple[str, ...]) -> tuple[An
     return tuple(dados[campo] for campo in campos_chave)
 
 
-def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: list[tuple[Any, ...]]) -> Any:
+def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: Sequence[tuple[Any, ...]]) -> Any:
     return or_(
         *[
             and_(*[getattr(model, campo) == valor for campo, valor in zip(campos_chave, chave, strict=False)])
@@ -1558,7 +1559,7 @@ def _promote_fre_chunk_internal(
 
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[dict[str, Any]] = []
-    chaves_no_lote: dict[tuple, dict[str, Any]] = {}
+    chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
 
     for row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)

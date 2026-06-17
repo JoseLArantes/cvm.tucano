@@ -1,4 +1,5 @@
-from datetime import date
+from datetime import date, datetime
+import uuid
 from app.schemas.comum import PeriodicModel
 from app.schemas.financeiro import DocumentoFinanceiroResposta
 
@@ -6,7 +7,7 @@ from app.schemas.financeiro import DocumentoFinanceiroResposta
 def test_periodic_model_autopopulate() -> None:
     # Test with ITR (TRIMESTRAL)
     doc_itr = DocumentoFinanceiroResposta(
-        id="bbf228f5-5627-4fc5-a490-318b8ba31e43",
+        id=uuid.UUID("bbf228f5-5627-4fc5-a490-318b8ba31e43"),
         companhia_id=None,
         tipo_formulario="ITR",
         cnpj_companhia="08773135000100",
@@ -21,9 +22,9 @@ def test_periodic_model_autopopulate() -> None:
         arquivo_origem="itr_cia_aberta_2024.csv",
         ano_origem=2024,
         linha_origem=1,
-        criado_em="2026-05-30T14:30:00Z",
-        sincronizado_em="2026-05-30T14:30:00Z",
-        alterado_em="2026-05-30T14:30:00Z"
+        criado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00"),
+        sincronizado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00"),
+        alterado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00")
     )
 
     assert doc_itr.ano == 2024
@@ -33,7 +34,7 @@ def test_periodic_model_autopopulate() -> None:
 
     # Test with DFP (ANUAL)
     doc_dfp = DocumentoFinanceiroResposta(
-        id="bbf228f5-5627-4fc5-a490-318b8ba31e43",
+        id=uuid.UUID("bbf228f5-5627-4fc5-a490-318b8ba31e43"),
         companhia_id=None,
         tipo_formulario="DFP",
         cnpj_companhia="08773135000100",
@@ -48,9 +49,9 @@ def test_periodic_model_autopopulate() -> None:
         arquivo_origem="dfp_cia_aberta_2024.csv",
         ano_origem=2024,
         linha_origem=1,
-        criado_em="2026-05-30T14:30:00Z",
-        sincronizado_em="2026-05-30T14:30:00Z",
-        alterado_em="2026-05-30T14:30:00Z"
+        criado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00"),
+        sincronizado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00"),
+        alterado_em=datetime.fromisoformat("2026-05-30T14:30:00+00:00")
     )
 
     assert doc_dfp.ano == 2024

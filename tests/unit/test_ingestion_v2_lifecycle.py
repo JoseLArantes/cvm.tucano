@@ -3,6 +3,7 @@ import uuid
 import zipfile
 from datetime import UTC, date, datetime
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -109,7 +110,7 @@ def _ipe_zip(*, protocolo: str = "123456", assunto: str = "Assunto X") -> bytes:
     return buffer.getvalue()
 
 
-def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch) -> None:
+def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     try:
         previous_run = create_run(session, tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")

@@ -26,7 +26,7 @@ class OverviewAnaliseResposta(BaseModel):
 class ReferenciaProveniencia(BaseModel):
     fonte: str = Field(default="CVM", description="Fonte primária do dado")
     dataset: str = Field(description="Dataset / tabela de origem")
-    documento_id: int | None = Field(None, description="ID do documento na CVM")
+    documento_id: str | None = Field(None, description="ID do documento na origem")
     linha_id: str | None = Field(None, description="UUID da linha original no banco de dados")
     data_referencia: date | None = Field(None, description="Data de referência do documento original")
     data_entrega: date | None = Field(None, description="Data de entrega do documento à CVM")

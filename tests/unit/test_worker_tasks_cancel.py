@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -82,7 +84,7 @@ def test_sincronizar_member_internal_cancela_filho_quando_pai_ja_cancelado(db_se
 
 def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
     db_session: Session,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     agora = datetime.now(UTC)
@@ -139,7 +141,7 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
 
     captured: dict[str, object] = {}
 
-    def _fake_process_financeiro_member(*args, **kwargs):
+    def _fake_process_financeiro_member(*args: Any, **kwargs: Any) -> None:
         captured["reconcile_required"] = kwargs["reconcile_required"]
         contadores = kwargs["contadores"]
         contadores["lidas"] = 1

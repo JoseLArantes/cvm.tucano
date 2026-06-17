@@ -2,7 +2,9 @@ import io
 import zipfile
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -442,11 +444,11 @@ def test_sincronizar_dfp_succeeds_when_dfc_md_members_have_only_header() -> None
         session.close()
 
 
-def test_sincronizar_dfp_does_not_run_reconcile_on_first_load(monkeypatch) -> None:
+def test_sincronizar_dfp_does_not_run_reconcile_on_first_load(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     reconcile_calls: list[str] = []
 
-    def _fake_reconcile(*args, **kwargs) -> int:
+    def _fake_reconcile(*args: Any, **kwargs: Any) -> int:
         reconcile_calls.append(kwargs["arquivo_origem"])
         return 0
 

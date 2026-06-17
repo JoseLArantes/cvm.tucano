@@ -1182,8 +1182,8 @@ def pre_processar_sincronizacao_task(
                 ARQUIVO_CADASTRO_ABERTA,
                 ARQUIVO_CADASTRO_ESTRANGEIRA,
                 pre_processar_cadastro,
-                limpar_caches_resolver,
             )
+            from app.services.ingestion.resolver import limpar_caches_resolver
             limpar_caches_resolver()
             settings = get_settings()
             url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"

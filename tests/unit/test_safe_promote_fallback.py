@@ -1,4 +1,6 @@
 import uuid
+from typing import Any
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -62,9 +64,16 @@ def test_safe_promote_chunk_fallback_behavior() -> None:
         # 2. Define a promote function that fails on chunk, but on row-by-row:
         # - row 1 (index 0) succeeds.
         # - row 2 (index 1) fails with NumericValueOutOfRange/Numeric field overflow.
-        calls = []
+        calls: list[int] = []
 
-        def dummy_promote_func(db, *, linhas_promovidas, execucao_id, contadores, **kwargs):
+        def dummy_promote_func(
+            db: Session,
+            *,
+            linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+            execucao_id: Any,
+            contadores: dict[str, int],
+            **kwargs: Any,
+        ) -> None:
             calls.append(len(linhas_promovidas))
             if len(linhas_promovidas) > 1:
                 # Bulk insert fails
@@ -84,7 +93,15 @@ def test_safe_promote_chunk_fallback_behavior() -> None:
             (rows[1], {"col1": "row2", "col2": "data2"}),
         ]
 
-        def dummy_registrar_quarentena(db, execucao_id, arquivo_origem, ano_origem, linha_origem, motivo, dados_originais):
+        def dummy_registrar_quarentena(
+            db: Session,
+            execucao_id: uuid.UUID,
+            arquivo_origem: str,
+            ano_origem: int | None,
+            linha_origem: int | None,
+            motivo: str,
+            dados_originais: dict[str, Any] | None,
+        ) -> None:
             reg = RegistroQuarentena(
                 execucao_sincronizacao_id=execucao_id,
                 arquivo_origem=arquivo_origem,
@@ -124,6 +141,7 @@ def test_safe_promote_chunk_fallback_behavior() -> None:
         quarantines = session.query(QuarantineItem).all()
         assert len(quarantines) == 1
         assert quarantines[0].ingestion_row_id == rows[1].id
+        assert quarantines[0].diagnostico is not None
         assert "NumericValueOutOfRange" in quarantines[0].diagnostico["details"]["erro"]
 
         # - legacy RegistroQuarentena should have been created (both by create_quarantine_item and by registrar_quarentena_fn)

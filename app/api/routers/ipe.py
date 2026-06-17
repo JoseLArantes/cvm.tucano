@@ -7,7 +7,12 @@ from sqlalchemy import Select, func, select, desc, Integer
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.ipe import IpeDocumento
 from app.schemas.comum import Paginacao
-from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta, ListaIpeDocumentosAgregadosResposta
+from app.schemas.ipe import (
+    IpeDocumentoAgregado,
+    IpeDocumentoResposta,
+    ListaIpeDocumentosAgregadosResposta,
+    ListaIpeDocumentosResposta,
+)
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
@@ -285,22 +290,22 @@ def obter_documentos_ipe_agregados(
             dummy_q = dummy_q.where(_col(IpeDocumento, campo) == valor)
 
     # Parse groupings
-    group_cols = []
-    select_cols = []
+    group_cols: list[Any] = []
+    select_cols: list[Any] = []
     
     for field in agrupar_por.split(","):
         field = field.strip()
         if field == "ano":
-            col = func.extract('year', IpeDocumento.data_referencia).cast(Integer).label("ano")
-            group_cols.append(col)
-            select_cols.append(col)
+            ano_col: Any = func.extract('year', IpeDocumento.data_referencia).cast(Integer).label("ano")
+            group_cols.append(ano_col)
+            select_cols.append(ano_col)
         elif field in ("categoria", "tipo", "especie", "assunto"):
-            col = getattr(IpeDocumento, field)
-            group_cols.append(col)
-            select_cols.append(col)
+            text_col: Any = getattr(IpeDocumento, field)
+            group_cols.append(text_col)
+            select_cols.append(text_col)
             
     if not group_cols:
-        col = IpeDocumento.categoria
+        col: Any = IpeDocumento.categoria
         group_cols.append(col)
         select_cols.append(col)
         
@@ -316,10 +321,9 @@ def obter_documentos_ipe_agregados(
     
     rows = db.execute(final_query).all()
     
-    dados = []
+    dados: list[IpeDocumentoAgregado] = []
     for r in rows:
         r_dict = dict(r._mapping)
-        dados.append(r_dict)
+        dados.append(IpeDocumentoAgregado(**r_dict))
         
     return ListaIpeDocumentosAgregadosResposta(dados=dados)
-
