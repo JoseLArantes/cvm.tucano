@@ -1,2 +1,1 @@
-"""Helpers for ingestion v2 and related tooling."""
-
+"""Helpers for ingestion and related tooling."""

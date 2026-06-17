@@ -3,22 +3,32 @@ from __future__ import annotations
 from time import perf_counter
 from typing import Any
 
+counter_factory: Any = None
+gauge_factory: Any = None
+histogram_factory: Any = None
+prom_registry: Any = None
+
 try:
-    from prometheus_client import Counter, Gauge, Histogram, REGISTRY
+    from prometheus_client import REGISTRY as _prom_registry
+    from prometheus_client import Counter as _counter_factory
+    from prometheus_client import Gauge as _gauge_factory
+    from prometheus_client import Histogram as _histogram_factory
 except Exception:  # pragma: no cover
-    Counter = None  # type: ignore[assignment]
-    Gauge = None  # type: ignore[assignment]
-    Histogram = None  # type: ignore[assignment]
-    REGISTRY = None  # type: ignore[assignment]
+    pass
+else:
+    counter_factory = _counter_factory
+    gauge_factory = _gauge_factory
+    histogram_factory = _histogram_factory
+    prom_registry = _prom_registry
 
 
 _METRICS: dict[str, Any] | None = None
 
 
 def _get_or_create_metric(factory: Any, name: str, doc: str, labels: list[str]) -> Any:
-    if factory is None or REGISTRY is None:
+    if factory is None or prom_registry is None:
         return None
-    existing = getattr(REGISTRY, "_names_to_collectors", {}).get(name)
+    existing = getattr(prom_registry, "_names_to_collectors", {}).get(name)
     if existing is not None:
         return existing
     return factory(name, doc, labels)
@@ -30,32 +40,32 @@ def get_ingestion_metrics() -> dict[str, Any]:
         return _METRICS
     _METRICS = {
         "rows": _get_or_create_metric(
-            Counter,
-            "cvm_ingestion_v2_rows_total",
+            counter_factory,
+            "cvm_ingestion_rows_total",
             "Total de linhas por source, status e reason.",
             ["source", "status", "reason"],
         ),
         "run_duration": _get_or_create_metric(
-            Histogram,
-            "cvm_ingestion_v2_run_duration_seconds",
+            histogram_factory,
+            "cvm_ingestion_run_duration_seconds",
             "Duracao de runs por source e phase.",
             ["source", "phase"],
         ),
         "retries": _get_or_create_metric(
-            Counter,
-            "cvm_ingestion_v2_retries_total",
+            counter_factory,
+            "cvm_ingestion_retries_total",
             "Tentativas de retry por operacao e erro.",
             ["operation", "error_type"],
         ),
         "quarantine": _get_or_create_metric(
-            Gauge,
-            "cvm_ingestion_v2_quarantine_total",
+            gauge_factory,
+            "cvm_ingestion_quarantine_total",
             "Total atual em quarentena por reason.",
             ["reason"],
         ),
         "resolution": _get_or_create_metric(
-            Counter,
-            "cvm_ingestion_v2_resolution_total",
+            counter_factory,
+            "cvm_ingestion_resolution_total",
             "Resolucao de identidade por metodo e confianca.",
             ["method", "confidence"],
         ),

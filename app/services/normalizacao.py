@@ -7,6 +7,37 @@ from decimal import Decimal
 from typing import Any
 
 
+_UF_POR_NOME: dict[str, str] = {
+    "ACRE": "AC",
+    "ALAGOAS": "AL",
+    "AMAPA": "AP",
+    "AMAZONAS": "AM",
+    "BAHIA": "BA",
+    "CEARA": "CE",
+    "DISTRITO FEDERAL": "DF",
+    "ESPIRITO SANTO": "ES",
+    "GOIAS": "GO",
+    "MARANHAO": "MA",
+    "MATO GROSSO": "MT",
+    "MATO GROSSO DO SUL": "MS",
+    "MINAS GERAIS": "MG",
+    "PARA": "PA",
+    "PARAIBA": "PB",
+    "PARANA": "PR",
+    "PERNAMBUCO": "PE",
+    "PIAUI": "PI",
+    "RIO DE JANEIRO": "RJ",
+    "RIO GRANDE DO NORTE": "RN",
+    "RIO GRANDE DO SUL": "RS",
+    "RONDONIA": "RO",
+    "RORAIMA": "RR",
+    "SANTA CATARINA": "SC",
+    "SAO PAULO": "SP",
+    "SERGIPE": "SE",
+    "TOCANTINS": "TO",
+}
+
+
 def normalizar_texto(valor: Any) -> str | None:
     if valor is None:
         return None
@@ -38,15 +69,59 @@ def normalizar_inteiro(valor: Any) -> int | None:
     texto = normalizar_texto(valor)
     if texto is None:
         return None
-    return int(texto)
+    try:
+        return int(texto)
+    except ValueError:
+        dec_val = normalizar_decimal_cvm(texto)
+        if dec_val is not None:
+            return int(round(dec_val))
+        return None
 
 
 def normalizar_decimal_cvm(valor: Any) -> Decimal | None:
     texto = normalizar_texto(valor)
     if texto is None:
         return None
-    texto = texto.replace(".", "").replace(",", ".")
-    return Decimal(texto)
+        
+    if texto.upper() in {"-", "N/A", "ND", "N/D", "NI", "NA", "N.A.", "N.A"}:
+        return None
+
+    # Detect and reject narrative descriptions (non-numeric text strings)
+    # 1. Remove currency symbols and codes
+    limpo = re.sub(r"(?i)\b(USD|BRL|EUR|GPB|CAD|AUD|CHF|JPY|CNY)\b|R\$|\$", "", texto)
+    # 2. Remove digits, common signs, spaces, and punctuation
+    limpo = re.sub(r"[\d.,\-+%\s\(\):/\\_]", "", limpo)
+    # 3. Remove currency code letters to be tolerant to minor spacing/typos
+    limpo = re.sub(r"(?i)[bdelrsu]", "", limpo)
+    # 4. If any alphabetical characters remain, it is a narrative description and not a number
+    if any(c.isalpha() for c in limpo):
+        raise ValueError(f"Valor decimal invalido (narrativa detectada): {valor}")
+
+    texto = re.sub(r"[^\d.,\-]", "", texto).strip()
+
+    if not texto or texto == "-" or texto == "." or texto == ",":
+        return None
+
+    has_comma = "," in texto
+    has_dot = "." in texto
+    
+    if has_comma and has_dot:
+        last_comma = texto.rfind(",")
+        last_dot = texto.rfind(".")
+        if last_comma > last_dot:
+            texto = texto.replace(".", "").replace(",", ".")
+        else:
+            texto = texto.replace(",", "")
+    elif has_comma:
+        texto = texto.replace(",", ".")
+    elif has_dot:
+        if texto.count(".") > 1:
+            texto = texto.replace(".", "")
+
+    try:
+        return Decimal(texto)
+    except Exception:
+        raise ValueError(f"Valor decimal invalido: {valor}")
 
 
 def normalizar_conta_fixa(valor: Any) -> bool | None:
@@ -58,6 +133,22 @@ def normalizar_conta_fixa(valor: Any) -> bool | None:
     if texto.upper() in {"N", "NAO", "NÃO", "FALSE", "0"}:
         return False
     raise ValueError(f"Valor invalido para conta_fixa: {valor}")
+
+
+def normalizar_sigla_uf(valor: Any) -> str | None:
+    texto = normalizar_texto(valor)
+    if texto is None:
+        return None
+    canonico = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode("ascii").upper()
+    if canonico in {"EXTERIOR", "ESTRANGEIRO", "INTERNACIONAL"}:
+        return None
+    if canonico in _UF_POR_NOME:
+        return _UF_POR_NOME[canonico]
+    if re.fullmatch(r"[A-Z]{2}", canonico):
+        return canonico
+    if len(canonico) <= 5:
+        return canonico
+    return None
 
 
 def _normalizar_canonico(valor: Any) -> Any:
@@ -148,9 +239,7 @@ def normalizar_linha_cadastro(
         "responsavel": responsavel,
         "auditor": normalizar_texto(linha.get("AUDITOR")),
         "cnpj_auditor": (
-            normalizar_cnpj(str(linha["CNPJ_AUDITOR"]))
-            if normalizar_texto(linha.get("CNPJ_AUDITOR"))
-            else None
+            normalizar_cnpj(str(linha["CNPJ_AUDITOR"])) if normalizar_texto(linha.get("CNPJ_AUDITOR")) else None
         ),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,

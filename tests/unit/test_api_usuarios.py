@@ -1,10 +1,12 @@
+from typing import cast
+
 from fastapi.testclient import TestClient
 
 
 def _login(client: TestClient, username: str, password: str) -> str:
     resposta = client.post("/auth/login", json={"username": username, "password": password})
     assert resposta.status_code == 200
-    return resposta.json()["access_token"]
+    return cast(str, resposta.json()["access_token"])
 
 
 def test_crud_usuarios_com_token_sistema(client: TestClient) -> None:

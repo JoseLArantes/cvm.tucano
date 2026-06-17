@@ -98,6 +98,36 @@ def _popular_financeiro(db: Session, companhia_id: uuid.UUID) -> None:
         )
     )
     db.add(
+        DemonstracaoFinanceira(
+            companhia_id=companhia_id,
+            tipo_formulario="DFP",
+            tipo_demonstracao="demonstracao_resultado",
+            escopo_demonstracao="consolidado",
+            cnpj_companhia="08773135000100",
+            codigo_cvm=25224,
+            data_referencia=date(2024, 12, 31),
+            versao=1,
+            denominacao_companhia="EMPRESA A",
+            grupo_demonstracao="GRUPO",
+            moeda="REAL",
+            escala_moeda="MIL",
+            ordem_exercicio="ULTIMO",
+            data_inicio_exercicio=date(2024, 1, 1),
+            data_fim_exercicio=date(2024, 12, 31),
+            codigo_conta="3.02",
+            descricao_conta="Receita Líquida",
+            valor_conta=Decimal("740500"),
+            conta_fixa=True,
+            arquivo_origem="dfp_cia_aberta_DRE_con_2024.csv",
+            ano_origem=2024,
+            linha_origem=3,
+            hash_origem="hash-dem-mil",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db.add(
         ComposicaoCapital(
             companhia_id=companhia_id,
             tipo_formulario="ITR",
@@ -146,9 +176,7 @@ def _popular_financeiro(db: Session, companhia_id: uuid.UUID) -> None:
     db.commit()
 
 
-def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(
-    client: TestClient, db_session: Session
-) -> None:
+def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(client: TestClient, db_session: Session) -> None:
     companhia = _base_companhia()
     db_session.add(companhia)
     db_session.commit()
@@ -162,6 +190,28 @@ def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(
     payload = resposta.json()
     assert payload["paginacao"]["total"] == 1
     assert payload["dados"][0]["codigo_conta"] == "3.01"
+    assert payload["dados"][0]["valor_conta"] == 123.45
+    assert payload["dados"][0]["valor_conta_reportado"] == 123.45
+    assert payload["dados"][0]["fator_escala_moeda"] == 1
+
+
+def test_endpoint_dfp_demonstracao_returns_adjusted_values_and_sorts_by_adjusted_amount(
+    client: TestClient, db_session: Session
+) -> None:
+    companhia = _base_companhia()
+    db_session.add(companhia)
+    db_session.commit()
+    _popular_financeiro(db_session, companhia.id)
+
+    resposta = client.get("/dfp/demonstracao-resultado/consolidado?ordenar_por=-valor_conta")
+    assert resposta.status_code == 200
+    payload = resposta.json()
+    assert payload["paginacao"]["total"] == 2
+    assert payload["dados"][0]["codigo_conta"] == "3.02"
+    assert payload["dados"][0]["valor_conta"] == 740500000.0
+    assert payload["dados"][0]["valor_conta_reportado"] == 740500.0
+    assert payload["dados"][0]["fator_escala_moeda"] == 1000
+    assert payload["dados"][1]["codigo_conta"] == "3.01"
 
 
 def test_endpoint_documentos_dfp_filtra_por_id_documento(client: TestClient, db_session: Session) -> None:

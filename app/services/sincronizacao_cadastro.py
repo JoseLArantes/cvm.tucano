@@ -76,7 +76,7 @@ def _registrar_quarentena(
             arquivo_origem=ARQUIVO_CADASTRO,
             ano_origem=None,
             linha_origem=linha_origem,
-            motivo=motivo,
+            motivo=motivo[:255] if motivo else "",
             dados_originais=dados_originais,
         )
     )
@@ -114,10 +114,10 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
             )
         )
         if anterior is not None:
-            execucao.status = "sem_alteracao"
+            execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+            return {"execucao_id": str(execucao.id), "status": "skipped"}
 
         csv_texto = _decode_csv(payload)
         leitor = csv.DictReader(io.StringIO(csv_texto), delimiter=";")

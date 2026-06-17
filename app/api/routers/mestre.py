@@ -15,6 +15,7 @@ from app.models.fre import (
     FrePosicaoAcionaria,
     FreRemuneracaoTotalOrgao,
 )
+from app.models.ipe import IpeDocumento
 from app.schemas.companhia import CompanhiaResposta
 from app.schemas.comum import Paginacao
 from app.schemas.financeiro import (
@@ -41,8 +42,10 @@ from app.schemas.fre import (
     ListaFrePosicaoAcionariaResposta,
     ListaFreRemuneracaoTotalOrgaoResposta,
 )
+from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta
 from app.schemas.mestre import ConsultaCompanhiaMestreResposta
 from app.services.financeiro_mapas import DEMONSTRACOES
+from app.services.financeiro_valores import serializar_demonstracao_financeira
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter()
@@ -77,7 +80,9 @@ def _listar(
     summary="Consulta Mestre da Companhia",
     description=(
         "Dado um `cnpj_companhia` ou `codigo_cvm`, agrega a resposta de todos os grupos de endpoints "
-        "de companhia, financeiro (DFP/ITR) e FRE em um unico payload."
+        "de companhia, financeiro (DFP/ITR), FRE e IPE em um unico payload. "
+        "Nas demonstrações financeiras DFP/ITR agregadas, `valor_conta` já é entregue ajustado por "
+        "`escala_moeda`, enquanto `valor_conta_reportado` preserva o número bruto do CSV da CVM."
     ),
     responses={
         404: {
@@ -122,7 +127,7 @@ def consultar_companhia_mestre(
 
     cnpj = companhia.cnpj_companhia
     codigo = companhia.codigo_cvm
-    filtros_financeiro = (DocumentoFinanceiro.cnpj_companhia == cnpj,)
+    filtros_financeiro: tuple[Any, ...] = (DocumentoFinanceiro.cnpj_companhia == cnpj,)
     if codigo is not None:
         filtros_financeiro = filtros_financeiro + (DocumentoFinanceiro.codigo_cvm == codigo,)
 
@@ -205,16 +210,25 @@ def consultar_companhia_mestre(
                 )
                 if codigo is not None:
                     filtros_demonstracao = filtros_demonstracao + (DemonstracaoFinanceira.codigo_cvm == codigo,)
-                dados_demonstracao, total_demonstracao = _listar(
-                    db,
-                    modelo=DemonstracaoFinanceira,
-                    schema=DemonstracaoFinanceiraResposta,
-                    limite=limite_por_endpoint,
-                    filtros=filtros_demonstracao,
+                total_demonstracao = (
+                    db.scalar(select(func.count()).select_from(DemonstracaoFinanceira).where(*filtros_demonstracao)) or 0
+                )
+                itens_demonstracao = (
+                    db.execute(
+                        select(DemonstracaoFinanceira)
+                        .where(*filtros_demonstracao)
+                        .order_by(DemonstracaoFinanceira.data_referencia.desc())
+                        .limit(limite_por_endpoint)
+                    )
+                    .scalars()
+                    .all()
                 )
                 chave = f"{formulario.lower()}_{item['rota'].replace('-', '_')}_{escopo}"
                 demonstracoes[chave] = ListaDemonstracoesFinanceirasResposta(
-                    dados=dados_demonstracao,
+                    dados=[
+                        DemonstracaoFinanceiraResposta.model_validate(serializar_demonstracao_financeira(item))
+                        for item in itens_demonstracao
+                    ],
                     paginacao=_paginacao(total_demonstracao, limite_por_endpoint),
                 )
 
@@ -263,6 +277,23 @@ def consultar_companhia_mestre(
         limite=limite_por_endpoint,
         filtros=(FreEmpregadoPosicaoGenero.cnpj_companhia == cnpj,),
     )
+    ipe_filtros: tuple[Any, ...] = (IpeDocumento.cnpj_companhia == cnpj,)
+    if codigo is not None:
+        ipe_filtros = ipe_filtros + (IpeDocumento.codigo_cvm == codigo,)
+    query_ipe = (
+        select(IpeDocumento)
+        .where(*ipe_filtros)
+        .order_by(
+            IpeDocumento.data_entrega.desc(),
+            IpeDocumento.data_referencia.desc(),
+        )
+    )
+    query_ipe_total = select(func.count()).select_from(IpeDocumento).where(*ipe_filtros)
+    ipe_documentos_dados = [
+        IpeDocumentoResposta.model_validate(item)
+        for item in db.execute(query_ipe.limit(limite_por_endpoint)).scalars().all()
+    ]
+    ipe_documentos_total = db.scalar(query_ipe_total) or 0
 
     return ConsultaCompanhiaMestreResposta(
         companhia=CompanhiaResposta.model_validate(companhia),
@@ -314,5 +345,9 @@ def consultar_companhia_mestre(
         fre_empregados_posicao_genero=ListaFreEmpregadoPosicaoGeneroResposta(
             dados=fre_empregados_dados,
             paginacao=_paginacao(fre_empregados_total, limite_por_endpoint),
+        ),
+        ipe_documentos=ListaIpeDocumentosResposta(
+            dados=ipe_documentos_dados,
+            paginacao=_paginacao(ipe_documentos_total, limite_por_endpoint),
         ),
     )

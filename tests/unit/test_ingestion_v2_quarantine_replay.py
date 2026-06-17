@@ -1,17 +1,14 @@
-from datetime import UTC, datetime
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
-from app.models import companhia, identidade, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.fre import FreAuditor
-from app.models.identidade import CompanhiaIdentificador
-from app.models.ingestion import IngestionAttempt, QuarantineItemV2
+from app.models.ingestion import IngestionAttempt, IngestionFile, IngestionRun, QuarantineItem
 from app.models.sincronizacao import ExecucaoSincronizacao, RegistroQuarentena
-from app.services.ingestion.cadastro import normalizar_linha_cadastro_estrangeira_v2, promover_registros_cadastro_v2
+from app.services.ingestion.cadastro import normalizar_linha_cadastro_estrangeira, promover_registros_cadastro
 from app.services.ingestion.quarantine import create_quarantine_item
 from app.services.ingestion.repair_rules import create_or_update_repair_rule
 from app.services.ingestion.replay import replay_ingestion_row
@@ -30,7 +27,9 @@ def _session() -> Session:
     return local_session()
 
 
-def _run_and_file(session: Session, *, tipo_fonte: str = "fre", ano: int = 2025):
+def _run_and_file(
+    session: Session, *, tipo_fonte: str = "fre", ano: int = 2025
+) -> tuple[ExecucaoSincronizacao, IngestionRun, IngestionFile]:
     execucao = ExecucaoSincronizacao(
         tipo_fonte=tipo_fonte,
         ano=ano,
@@ -58,7 +57,7 @@ def _run_and_file(session: Session, *, tipo_fonte: str = "fre", ano: int = 2025)
 
 
 def _foreign_company(session: Session) -> Companhia:
-    registro = normalizar_linha_cadastro_estrangeira_v2(
+    registro = normalizar_linha_cadastro_estrangeira(
         {
             "CNPJ": "07.857.093/0001-14",
             "DENOM_SOCIAL": "AURA MINERALS INC.",
@@ -76,10 +75,10 @@ def _foreign_company(session: Session) -> Companhia:
         linha_origem=2,
     )
     assert registro.data is not None
-    promover_registros_cadastro_v2(session, [registro.data])
+    promover_registros_cadastro(session, [registro.data])
     session.flush()
-    companhia = session.query(Companhia).filter(Companhia.codigo_cvm == 80187).one()
-    return companhia
+    empresa = session.query(Companhia).filter(Companhia.codigo_cvm == 80187).one()
+    return empresa
 
 
 def test_create_quarantine_item_creates_v2_and_legacy_records() -> None:
@@ -108,7 +107,7 @@ def test_create_quarantine_item_creates_v2_and_legacy_records() -> None:
         create_quarantine_item(session, ingestion_row=row, result=result, execucao_sincronizacao_id=execucao.id)
         session.commit()
 
-        assert session.query(QuarantineItemV2).count() == 1
+        assert session.query(QuarantineItem).count() == 1
         assert session.query(RegistroQuarentena).count() == 1
     finally:
         session.close()
@@ -122,7 +121,10 @@ def test_replay_row_resolves_after_foreign_identity_added() -> None:
             session,
             ingestion_run=run,
             ingestion_file=ingestion_file,
-            payload=b"CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC\n07.857.093/0001-14;2025-12-31;1;AURA MINERALS INC.;80187;DFP;123;2026-01-01;http://doc\n",
+            payload=(
+                b"CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC\n"
+                b"07.857.093/0001-14;2025-12-31;1;AURA MINERALS INC.;80187;DFP;123;2026-01-01;http://doc\n"
+            ),
             member_name="dfp_cia_aberta_2025.csv",
             arquivo_origem="dfp_cia_aberta_2025.csv",
             ano_origem=2025,
@@ -145,7 +147,7 @@ def test_replay_row_resolves_after_foreign_identity_added() -> None:
 
         replay_result = replay_ingestion_row(session, row_id=row.id)
         session.refresh(row)
-        quarantine = session.query(QuarantineItemV2).one()
+        quarantine = session.query(QuarantineItem).one()
 
         assert replay_result["status"] == "sucesso"
         assert row.resolved_companhia_id is not None
@@ -166,7 +168,8 @@ def test_replay_row_uses_manual_repair_rule() -> None:
             ingestion_file=ingestion_file,
             payload=(
                 b"CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Auditor;Auditor;CPF_Auditor;CNPJ_Auditor;Codigo_CVM_Auditor;Tipo_Origem_Auditor;Data_Inicio_Contratacao;Data_Fim_Contratacao;Data_Inicio_Prestacao_Servico;Servico_Contratado;Remuneracao_Auditor;Justificativa_Substituicao;Razao_Apresentada\n"
-                b";2025-12-31;1;123;EMPRESA FINANCEIRA;1;AUDITOR X;12345678900;10.830.108/0001-65;100;ORIGEM;2020-01-01;;2020-01-01;SERVICO;1000,00;JUST;RAZAO\n"
+                b";2025-12-31;1;123;EMPRESA FINANCEIRA;1;AUDITOR X;12345678900;"
+                b"10.830.108/0001-65;100;ORIGEM;2020-01-01;;2020-01-01;SERVICO;1000,00;JUST;RAZAO\n"
             ),
             member_name="fre_cia_aberta_auditor_2025.csv",
             arquivo_origem="fre_cia_aberta_auditor_2025.csv",
@@ -215,7 +218,8 @@ def test_replay_failure_increments_attempt_count() -> None:
             ingestion_file=ingestion_file,
             payload=(
                 b"CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Auditor;Auditor;CPF_Auditor;CNPJ_Auditor;Codigo_CVM_Auditor;Tipo_Origem_Auditor;Data_Inicio_Contratacao;Data_Fim_Contratacao;Data_Inicio_Prestacao_Servico;Servico_Contratado;Remuneracao_Auditor;Justificativa_Substituicao;Razao_Apresentada\n"
-                b";2025-12-31;1;123;EMPRESA SEM REGRA;1;AUDITOR X;12345678900;10.830.108/0001-65;100;ORIGEM;2020-01-01;;2020-01-01;SERVICO;1000,00;JUST;RAZAO\n"
+                b";2025-12-31;1;123;EMPRESA SEM REGRA;1;AUDITOR X;12345678900;"
+                b"10.830.108/0001-65;100;ORIGEM;2020-01-01;;2020-01-01;SERVICO;1000,00;JUST;RAZAO\n"
             ),
             member_name="fre_cia_aberta_auditor_2025.csv",
             arquivo_origem="fre_cia_aberta_auditor_2025.csv",
@@ -235,7 +239,7 @@ def test_replay_failure_increments_attempt_count() -> None:
         session.commit()
 
         replay_result = replay_ingestion_row(session, row_id=row.id)
-        quarantine = session.query(QuarantineItemV2).one()
+        quarantine = session.query(QuarantineItem).one()
         attempts = session.query(IngestionAttempt).all()
 
         assert replay_result["status"] == "falha"

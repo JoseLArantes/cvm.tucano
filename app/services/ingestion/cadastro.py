@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
-from sqlalchemy import and_, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.normalizers import (
     gerar_hash_canonico,
-    normalizar_chave_natural,
     normalizar_cnpj_opcional,
     normalizar_codigo_cvm,
     normalizar_data,
@@ -22,6 +24,7 @@ from app.services.ingestion.normalizers import (
     normalizar_texto,
     normalizar_tipo_mercado,
 )
+from app.services.ingestion.resolver import limpar_caches_resolver
 
 ARQUIVO_CADASTRO_ABERTA = "cad_cia_aberta.csv"
 ARQUIVO_CADASTRO_ESTRANGEIRA = "cad_cia_estrang.csv"
@@ -90,7 +93,7 @@ def _normalizar_responsavel(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def normalizar_linha_cadastro_aberta_v2(
+def normalizar_linha_cadastro_aberta(
     row: dict[str, Any],
     *,
     linha_origem: int,
@@ -152,7 +155,7 @@ def normalizar_linha_cadastro_aberta_v2(
     return CadastroNormalizationResult(status="valid", data=data)
 
 
-def normalizar_linha_cadastro_estrangeira_v2(
+def normalizar_linha_cadastro_estrangeira(
     row: dict[str, Any],
     *,
     linha_origem: int,
@@ -279,7 +282,9 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
             responsavel=registro_canonico.get("responsavel") or {},
             auditor=registro_canonico.get("auditor"),
             cnpj_auditor=registro_canonico.get("cnpj_auditor"),
-            tipo_emissor="estrangeira" if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA else "aberta",
+            tipo_emissor="estrangeira"
+            if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA
+            else "aberta",
             fonte_identidade_principal=registro_canonico["fonte_cadastro"],
             qualidade_identidade="alta",
             arquivo_origem=registro_canonico["arquivo_origem"],
@@ -314,7 +319,9 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
     companhia.responsavel = registro_canonico.get("responsavel") or {}
     companhia.auditor = registro_canonico.get("auditor")
     companhia.cnpj_auditor = registro_canonico.get("cnpj_auditor")
-    companhia.tipo_emissor = "estrangeira" if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA else "aberta"
+    companhia.tipo_emissor = (
+        "estrangeira" if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA else "aberta"
+    )
     companhia.fonte_identidade_principal = registro_canonico["fonte_cadastro"]
     companhia.qualidade_identidade = "alta"
     companhia.arquivo_origem = registro_canonico["arquivo_origem"]
@@ -327,21 +334,19 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
 
 
 def _upsert_registro_cvm(db: Session, companhia: Companhia, registro: dict[str, Any]) -> CompanhiaRegistroCvm:
+    cnpj_companhia = registro.get("cnpj_companhia")
+    codigo_cvm = registro.get("codigo_cvm")
+
     existente = db.scalar(
         select(CompanhiaRegistroCvm).where(
             CompanhiaRegistroCvm.companhia_id == companhia.id,
             CompanhiaRegistroCvm.fonte_cadastro == registro["fonte_cadastro"],
-            or_(
-                and_(
-                    CompanhiaRegistroCvm.cnpj_companhia.is_(None),
-                    registro.get("cnpj_companhia") is None,
-                ),
-                CompanhiaRegistroCvm.cnpj_companhia == registro.get("cnpj_companhia"),
-            ),
-            or_(
-                and_(CompanhiaRegistroCvm.codigo_cvm.is_(None), registro.get("codigo_cvm") is None),
-                CompanhiaRegistroCvm.codigo_cvm == registro.get("codigo_cvm"),
-            ),
+            CompanhiaRegistroCvm.cnpj_companhia.is_(None)
+            if cnpj_companhia is None
+            else CompanhiaRegistroCvm.cnpj_companhia == cnpj_companhia,
+            CompanhiaRegistroCvm.codigo_cvm.is_(None)
+            if codigo_cvm is None
+            else CompanhiaRegistroCvm.codigo_cvm == codigo_cvm,
         )
     )
     if existente is None:
@@ -408,10 +413,9 @@ def _upsert_mercado(db: Session, registro_cvm: CompanhiaRegistroCvm, registro: d
     existente = db.scalar(
         select(CompanhiaMercado).where(
             CompanhiaMercado.companhia_registro_cvm_id == registro_cvm.id,
-            or_(
-                and_(CompanhiaMercado.tipo_mercado.is_(None), tipo_mercado is None),
-                CompanhiaMercado.tipo_mercado == tipo_mercado,
-            ),
+            CompanhiaMercado.tipo_mercado.is_(None)
+            if tipo_mercado is None
+            else CompanhiaMercado.tipo_mercado == tipo_mercado,
         )
     )
     if existente is None:
@@ -487,7 +491,7 @@ def gerar_identificadores_companhia(db: Session, *, companhia: Companhia, regist
             )
 
 
-def promover_registros_cadastro_v2(db: Session, registros: Iterable[dict[str, Any]]) -> dict[str, int]:
+def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]) -> dict[str, int]:
     grupos: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for registro in registros:
         grupos.setdefault(_chave_grupo_companhia(registro), []).append(registro)
@@ -505,7 +509,12 @@ def promover_registros_cadastro_v2(db: Session, registros: Iterable[dict[str, An
                 contadores["mercados"] += 1
         gerar_identificadores_companhia(db, companhia=companhia, registros=registros_companhia)
         contadores["identificadores"] += len(
-            [valor for registro in registros_companhia for valor in (registro.get("cnpj_companhia"), registro.get("codigo_cvm")) if valor is not None]
+            [
+                valor
+                for registro in registros_companhia
+                for valor in (registro.get("cnpj_companhia"), registro.get("codigo_cvm"))
+                if valor is not None
+            ]
         )
     db.flush()
     return contadores
@@ -524,18 +533,314 @@ def _download(url: str, *, timeout: float) -> bytes:
     return response.content
 
 
-def sincronizar_cadastro_companhias_v2(
+def pre_processar_cadastro(
+    db: Session,
+    *,
+    execucao_id: uuid.UUID,
+    task_id: str | None = None,
+    force_reimport: bool = False,
+    downloader: Any | None = None,
+) -> dict[str, Any]:
+    import hashlib
+    from pathlib import Path
+    from datetime import UTC, datetime
+    from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.dedup import buscar_execucao_hash_existente
+    from app.services.ingestion.staging import (
+        create_run,
+        register_file,
+        register_member,
+        update_run_state,
+    )
+    from app.services.ingestion.file_manager import (
+        download_file_to_disk,
+        detect_encoding_and_delimiter,
+        get_csv_header,
+        count_csv_rows,
+    )
+
+    settings = get_settings()
+    execucao = db.get(ExecucaoSincronizacao, execucao_id)
+    if execucao is None:
+        raise ValueError(f"Execution not found: {execucao_id}")
+
+    run = create_run(
+        db,
+        tipo_fonte="cadastro",
+        ano=None,
+        status="em_execucao",
+        phase="stage",
+        execucao_sincronizacao_id=execucao.id,
+        requested_by_task_id=task_id,
+    )
+
+    url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
+    url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
+
+    storage_path = Path(settings.storage_dir) / str(execucao.id)
+    dest_abertas = storage_path / ARQUIVO_CADASTRO_ABERTA
+    dest_estrangeiras = storage_path / ARQUIVO_CADASTRO_ESTRANGEIRA
+
+    try:
+        if downloader is not None:
+            dest_abertas.parent.mkdir(parents=True, exist_ok=True)
+            content_ab = downloader(url_aberta)
+            dest_abertas.write_bytes(content_ab)
+            hash_abertas = hashlib.sha256(content_ab).hexdigest()
+
+            content_es = downloader(url_estrang)
+            dest_estrangeiras.write_bytes(content_es)
+            hash_estrangeiras = hashlib.sha256(content_es).hexdigest()
+        else:
+            hash_abertas = download_file_to_disk(url_aberta, str(dest_abertas), timeout=120)
+            hash_estrangeiras = download_file_to_disk(url_estrang, str(dest_estrangeiras), timeout=120)
+
+        hash_arquivo = hashlib.sha256(f"{hash_abertas}:{hash_estrangeiras}".encode()).hexdigest()
+        execucao.hash_arquivo = hash_arquivo
+
+        anterior = buscar_execucao_hash_existente(
+            db,
+            tipo_fonte="cadastro",
+            ano=None,
+            hash_arquivo=hash_arquivo,
+            execucao_atual_id=execucao.id,
+        )
+        if anterior is not None and not force_reimport:
+            execucao.status = "skipped"
+            execucao.finalizada_em = _agora()
+            update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
+            db.commit()
+
+            # Clean up disk
+            import shutil
+            try:
+                shutil.rmtree(storage_path)
+            except Exception:
+                pass
+
+            return {"execucao_id": str(execucao.id), "status": "skipped"}
+
+        # Register abertas
+        file_aberta = register_file(
+            db,
+            ingestion_run=run,
+            source_url=url_aberta,
+            source_filename=ARQUIVO_CADASTRO_ABERTA,
+            content_sha256=hash_abertas,
+            content_length_bytes=dest_abertas.stat().st_size,
+        )
+        enc_aberta, del_aberta = detect_encoding_and_delimiter(str(dest_abertas))
+        header_aberta = get_csv_header(str(dest_abertas), enc_aberta, del_aberta)
+        rows_aberta = count_csv_rows(str(dest_abertas), enc_aberta, del_aberta)
+        register_member(
+            db,
+            ingestion_file=file_aberta,
+            member_name=ARQUIVO_CADASTRO_ABERTA,
+            member_sha256=hash_abertas,
+            member_size_bytes=dest_abertas.stat().st_size,
+            header=header_aberta,
+            row_count=rows_aberta,
+            encoding=enc_aberta,
+            delimiter=del_aberta,
+        )
+
+        # Register estrangeiras
+        file_estrang = register_file(
+            db,
+            ingestion_run=run,
+            source_url=url_estrang,
+            source_filename=ARQUIVO_CADASTRO_ESTRANGEIRA,
+            content_sha256=hash_estrangeiras,
+            content_length_bytes=dest_estrangeiras.stat().st_size,
+        )
+        enc_estrang, del_estrang = detect_encoding_and_delimiter(str(dest_estrangeiras))
+        header_estrang = get_csv_header(str(dest_estrangeiras), enc_estrang, del_estrang)
+        rows_estrang = count_csv_rows(str(dest_estrangeiras), enc_estrang, del_estrang)
+        register_member(
+            db,
+            ingestion_file=file_estrang,
+            member_name=ARQUIVO_CADASTRO_ESTRANGEIRA,
+            member_sha256=hash_estrangeiras,
+            member_size_bytes=dest_estrangeiras.stat().st_size,
+            header=header_estrang,
+            row_count=rows_estrang,
+            encoding=enc_estrang,
+            delimiter=del_estrang,
+        )
+
+        execucao.status = "aguardando_ingestao"
+        update_run_state(run, status="aguardando_ingestao", phase="stage")
+        db.commit()
+        return {"execucao_id": str(execucao.id), "status": "aguardando_ingestao"}
+
+    except Exception as exc:
+        db.rollback()
+        execucao_erro = db.get(ExecucaoSincronizacao, execucao.id)
+        if execucao_erro is not None:
+            execucao_erro.status = "falha"
+            execucao_erro.mensagem_erro = str(exc)
+            execucao_erro.finalizada_em = _agora()
+            db.commit()
+
+        import shutil
+        try:
+            shutil.rmtree(storage_path)
+        except Exception:
+            pass
+        raise
+
+
+def ingerir_cadastro(
+    db: Session,
+    *,
+    execucao_id: uuid.UUID,
+    downloader: Any | None = None,
+) -> dict[str, Any]:
+    from pathlib import Path
+    from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.models.ingestion import IngestionRun
+    from app.services.ingestion.staging import (
+        read_staged_csv_rows_from_disk,
+        update_run_state,
+    )
+    from app.services.ingestion.file_manager import (
+        download_file_to_disk,
+        detect_encoding_and_delimiter,
+    )
+
+    settings = get_settings()
+    execucao = db.get(ExecucaoSincronizacao, execucao_id)
+    if execucao is None:
+        raise ValueError(f"Execution not found: {execucao_id}")
+
+    if execucao.status != "aguardando_ingestao":
+        return {
+            "execucao_id": str(execucao.id),
+            "status": execucao.status,
+            "message": f"Execution is in state '{execucao.status}', not 'aguardando_ingestao'."
+        }
+
+    execucao.status = "em_execucao"
+    run = db.scalar(
+        select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+    )
+    if run is not None:
+        update_run_state(run, status="em_execucao", phase="stage")
+    db.commit()
+
+    storage_path = Path(settings.storage_dir) / str(execucao.id)
+    dest_abertas = storage_path / ARQUIVO_CADASTRO_ABERTA
+    dest_estrangeiras = storage_path / ARQUIVO_CADASTRO_ESTRANGEIRA
+
+    try:
+        # Self-healing fallback: make sure both files are on disk
+        url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
+        url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
+
+        if not dest_abertas.exists():
+            if downloader is not None:
+                dest_abertas.parent.mkdir(parents=True, exist_ok=True)
+                dest_abertas.write_bytes(downloader(url_aberta))
+            else:
+                download_file_to_disk(url_aberta, str(dest_abertas), timeout=120)
+        if not dest_estrangeiras.exists():
+            if downloader is not None:
+                dest_estrangeiras.parent.mkdir(parents=True, exist_ok=True)
+                dest_estrangeiras.write_bytes(downloader(url_estrang))
+            else:
+                download_file_to_disk(url_estrang, str(dest_estrangeiras), timeout=120)
+
+        enc_aberta, del_aberta = detect_encoding_and_delimiter(str(dest_abertas))
+        _, rows_aberta_tuples, _ = read_staged_csv_rows_from_disk(str(dest_abertas), enc_aberta, delimiter=del_aberta)
+        abertas = [row for _, row in rows_aberta_tuples]
+
+        enc_estrang, del_estrang = detect_encoding_and_delimiter(str(dest_estrangeiras))
+        _, rows_estrang_tuples, _ = read_staged_csv_rows_from_disk(str(dest_estrangeiras), enc_estrang, delimiter=del_estrang)
+        estrangeiras = [row for _, row in rows_estrang_tuples]
+
+        normalizados: list[dict[str, Any]] = []
+        rejeitados = 0
+
+        for linha_origem, row in enumerate(abertas, start=2):
+            resultado = normalizar_linha_cadastro_aberta(row, linha_origem=linha_origem)
+            if resultado.status != "valid" or resultado.data is None:
+                rejeitados += 1
+                continue
+            normalizados.append(resultado.data)
+
+        for linha_origem, row in enumerate(estrangeiras, start=2):
+            resultado = normalizar_linha_cadastro_estrangeira(row, linha_origem=linha_origem)
+            if resultado.status != "valid" or resultado.data is None:
+                rejeitados += 1
+                continue
+            normalizados.append(resultado.data)
+
+        contadores = promover_registros_cadastro(db, normalizados)
+
+        execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
+        execucao.total_inseridos = contadores["registros"]
+        execucao.total_atualizados = 0
+        execucao.total_inalterados = 0
+        execucao.total_rejeitados = rejeitados
+        execucao.status = "sucesso"
+        execucao.finalizada_em = _agora()
+
+        if run is not None:
+            update_run_state(run, status="sucesso", phase="complete", finished_at=_agora())
+        db.commit()
+
+        # Clean up files
+        import shutil
+        try:
+            shutil.rmtree(storage_path)
+        except Exception:
+            pass
+
+        return {
+            "execucao_id": str(execucao.id),
+            "status": "sucesso",
+            "total_linhas_lidas": execucao.total_linhas_lidas,
+            "total_rejeitados": rejeitados,
+            "total_companhias_promovidas": contadores["companhias"],
+            "total_registros_promovidos": contadores["registros"],
+        }
+
+    except Exception as exc:
+        db.rollback()
+        execucao_erro = db.get(ExecucaoSincronizacao, execucao.id)
+        if execucao_erro is not None:
+            execucao_erro.status = "falha"
+            execucao_erro.mensagem_erro = str(exc)
+            execucao_erro.finalizada_em = _agora()
+            db.commit()
+
+        # Clean up files
+        import shutil
+        try:
+            shutil.rmtree(storage_path)
+        except Exception:
+            pass
+        raise
+
+
+def sincronizar_cadastro_companhias(
     db: Session,
     *,
     task_id: str | None = None,
+    force_reimport: bool = False,
     downloader: Any | None = None,
 ) -> dict[str, Any]:
+    import uuid
+    from app.models.sincronizacao import ExecucaoSincronizacao
+
+    limpar_caches_resolver()
     settings = get_settings()
-    downloader = downloader or (lambda url: _download(url, timeout=120))
+
     url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
     url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
+
     execucao = ExecucaoSincronizacao(
-        tipo_fonte="cadastro_v2",
+        tipo_fonte="cadastro",
         ano=None,
         id_tarefa=task_id,
         arquivo=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
@@ -546,49 +851,20 @@ def sincronizar_cadastro_companhias_v2(
     db.commit()
     db.refresh(execucao)
 
-    try:
-        abertas = _ler_csv(downloader(url_aberta))
-        estrangeiras = _ler_csv(downloader(url_estrang))
-        normalizados: list[dict[str, Any]] = []
-        rejeitados = 0
+    # 1. Pre-process
+    phase1_res = pre_processar_cadastro(
+        db,
+        execucao_id=execucao.id,
+        task_id=task_id,
+        force_reimport=force_reimport,
+        downloader=downloader,
+    )
+    if phase1_res["status"] == "skipped":
+        return phase1_res
 
-        for linha_origem, row in enumerate(abertas, start=2):
-            resultado = normalizar_linha_cadastro_aberta_v2(row, linha_origem=linha_origem)
-            if resultado.status != "valid" or resultado.data is None:
-                rejeitados += 1
-                continue
-            normalizados.append(resultado.data)
-
-        for linha_origem, row in enumerate(estrangeiras, start=2):
-            resultado = normalizar_linha_cadastro_estrangeira_v2(row, linha_origem=linha_origem)
-            if resultado.status != "valid" or resultado.data is None:
-                rejeitados += 1
-                continue
-            normalizados.append(resultado.data)
-
-        contadores = promover_registros_cadastro_v2(db, normalizados)
-        execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
-        execucao.total_inseridos = contadores["registros"]
-        execucao.total_atualizados = 0
-        execucao.total_inalterados = 0
-        execucao.total_rejeitados = rejeitados
-        execucao.status = "sucesso"
-        execucao.finalizada_em = _agora()
-        db.commit()
-        return {
-            "execucao_id": str(execucao.id),
-            "status": "sucesso",
-            "total_linhas_lidas": execucao.total_linhas_lidas,
-            "total_rejeitados": rejeitados,
-            "total_companhias_promovidas": contadores["companhias"],
-            "total_registros_promovidos": contadores["registros"],
-        }
-    except Exception as exc:
-        db.rollback()
-        execucao_erro = db.get(ExecucaoSincronizacao, execucao.id)
-        if execucao_erro is not None:
-            execucao_erro.status = "falha"
-            execucao_erro.mensagem_erro = str(exc)
-            execucao_erro.finalizada_em = _agora()
-            db.commit()
-        raise
+    # 2. Ingest
+    return ingerir_cadastro(
+        db,
+        execucao_id=uuid.UUID(phase1_res["execucao_id"]),
+        downloader=downloader,
+    )

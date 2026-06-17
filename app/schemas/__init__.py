@@ -5,13 +5,17 @@ from app.schemas.admin import (
     HistoricoAlteracaoCampoResposta,
     ListaExecucoesSincronizacao,
     ListaHistoricoAlteracoes,
-    ListaRegistrosQuarentena,
-    RegistroQuarentenaResposta,
     RespostaAgendamentoEmLote,
     RespostaAgendamentoSincronizacao,
     TarefaAgendadaResumo,
 )
 from app.schemas.auth import LoginRequisicao, LoginResposta
+from app.schemas.cgvn import (
+    CgvnDocumentoResposta,
+    CgvnPraticaResposta,
+    ListaCgvnDocumentosResposta,
+    ListaCgvnPraticasResposta,
+)
 from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
 from app.schemas.erros import ErroPadrao
 from app.schemas.financeiro import (
@@ -38,8 +42,15 @@ from app.schemas.fre import (
     ListaFrePosicaoAcionariaResposta,
     ListaFreRemuneracaoTotalOrgaoResposta,
 )
+from app.schemas.ipe import IpeDocumentoResposta, ListaIpeDocumentosResposta
 from app.schemas.mestre import ConsultaCompanhiaMestreResposta
 from app.schemas.usuario import ListaUsuariosResposta, UsuarioAtualizacao, UsuarioCriacao, UsuarioResposta
+from app.schemas.vlmo import (
+    ListaVlmoConsolidadoResposta,
+    ListaVlmoDocumentosResposta,
+    VlmoConsolidadoResposta,
+    VlmoDocumentoResposta,
+)
 
 __all__ = [
     "ConsultaCompanhiaMestreResposta",
@@ -60,13 +71,14 @@ __all__ = [
     "DocumentoFinanceiroResposta",
     "ListaExecucoesSincronizacao",
     "ListaHistoricoAlteracoes",
-    "ListaRegistrosQuarentena",
     "ListaFreAuditoresResposta",
     "ListaFreCapitalSocialResposta",
     "ListaFreDocumentosResposta",
     "ListaFreEmpregadoPosicaoGeneroResposta",
     "ListaFrePosicaoAcionariaResposta",
     "ListaFreRemuneracaoTotalOrgaoResposta",
+    "IpeDocumentoResposta",
+    "ListaIpeDocumentosResposta",
     "ListaCompanhiasResposta",
     "ListaComposicoesCapitalResposta",
     "ListaDemonstracoesFinanceirasResposta",
@@ -75,7 +87,6 @@ __all__ = [
     "LoginRequisicao",
     "LoginResposta",
     "ParecerFinanceiroResposta",
-    "RegistroQuarentenaResposta",
     "RespostaAgendamentoEmLote",
     "RespostaAgendamentoSincronizacao",
     "TarefaAgendadaResumo",
@@ -83,4 +94,12 @@ __all__ = [
     "UsuarioAtualizacao",
     "UsuarioCriacao",
     "UsuarioResposta",
+    "ListaVlmoConsolidadoResposta",
+    "ListaVlmoDocumentosResposta",
+    "VlmoConsolidadoResposta",
+    "VlmoDocumentoResposta",
+    "CgvnDocumentoResposta",
+    "ListaCgvnDocumentosResposta",
+    "CgvnPraticaResposta",
+    "ListaCgvnPraticasResposta",
 ]

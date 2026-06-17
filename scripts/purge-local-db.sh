@@ -50,25 +50,17 @@ if [[ "$STOP_WRITERS" == "1" ]]; then
   docker compose stop cvm_worker cvm_scheduler >/dev/null
 fi
 
-echo "Purging public tables except alembic_version from database: $DB_NAME"
-docker compose exec -T "$DB_SERVICE" psql -U "$DB_USER" -d "$DB_NAME" <<'SQL'
-\set ON_ERROR_STOP on
-DO $$
-DECLARE
-  tables_to_truncate text;
-BEGIN
-  SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
-  INTO tables_to_truncate
-  FROM pg_tables
-  WHERE schemaname = 'public'
-    AND tablename <> 'alembic_version';
+echo "Flushing Redis cache and task queues..."
+docker compose exec -T cvm_redis redis-cli flushall >/dev/null
 
-  IF tables_to_truncate IS NULL THEN
-    RAISE NOTICE 'No application tables found.';
-  ELSE
-    EXECUTE 'TRUNCATE TABLE ' || tables_to_truncate || ' RESTART IDENTITY CASCADE';
-  END IF;
-END $$;
+echo "Purging all database data (dropping and recreating schema 'public') from database: $DB_NAME"
+docker compose exec -T "$DB_SERVICE" psql -U "$DB_USER" -d "$DB_NAME" <<SQL
+\set ON_ERROR_STOP on
+DROP SCHEMA public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO "$DB_USER";
+GRANT ALL ON SCHEMA public TO public;
+COMMENT ON SCHEMA public IS 'standard public schema';
 SQL
 
 echo "Local database purged."

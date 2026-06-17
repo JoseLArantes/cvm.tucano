@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.identidade import CompanhiaIdentificador
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
 from app.services.ingestion.retry import DependencyNotReady
 
 
@@ -17,10 +18,10 @@ def ensure_identity_graph_ready(db: Session) -> None:
         select(func.count())
         .select_from(ExecucaoSincronizacao)
         .where(
-            ExecucaoSincronizacao.tipo_fonte == "cadastro_v2",
-            ExecucaoSincronizacao.status.in_(("sucesso", "sem_alteracao")),
+            ExecucaoSincronizacao.tipo_fonte == "cadastro",
+            ExecucaoSincronizacao.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
         )
     )
     if not cadastro_ok:
-        raise DependencyNotReady("cadastro_v2_nao_concluido")
+        raise DependencyNotReady("cadastro_nao_concluido")
     raise DependencyNotReady("identity_graph_nao_pronto")

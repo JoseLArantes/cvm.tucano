@@ -51,8 +51,7 @@ class LoginResposta(BaseModel):
     )
     expires_in: int = Field(
         description=(
-            "Tempo de validade do token em segundos. Derivado de `ACCESS_TOKEN_TTL_MINUTES` "
-            "no momento do login."
+            "Tempo de validade do token em segundos. Derivado de `ACCESS_TOKEN_TTL_MINUTES` no momento do login."
         ),
         examples=[28800],
     )

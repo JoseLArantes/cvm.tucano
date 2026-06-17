@@ -1,7 +1,7 @@
 """fase1 fundacao
 
 Revision ID: 0001_fase1_fundacao
-Revises: 
+Revises:
 Create Date: 2026-05-30 00:00:00.000000
 """
 

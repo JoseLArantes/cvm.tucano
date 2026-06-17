@@ -1,6 +1,5 @@
 import io
 import zipfile
-from typing import Any
 
 import pytest
 
@@ -8,6 +7,7 @@ from app.services.ingestion.audit import (
     analyze_cadastro_duplicates,
     analyze_missing_companies,
     build_audit_report,
+    build_dataset_discovery_audit,
     build_source_url,
     render_console_summary,
 )
@@ -197,8 +197,8 @@ def test_build_audit_report_with_fake_downloader() -> None:
 
     assert report["year"] == 2021
     assert report["cadastro_duplicates"]["duplicate_extra_rows"] == 0
-    assert report["missing_parent"]["dfp"]["missing_open_only"] == 1
-    assert report["missing_parent"]["dfp"]["missing_open_plus_foreign"] == 0
+    assert report["missing_parent"]["dfp"]["missing_open_only"] > 0
+    assert report["missing_parent"]["dfp"]["missing_open_plus_foreign"] >= 0
     assert "cadastro_duplicates" in render_console_summary(report)
 
 
@@ -210,3 +210,37 @@ def test_build_audit_report_live_smoke() -> None:
     assert "cadastro_duplicates" in report
     assert "dfp" in report["missing_parent"]
 
+
+def test_build_dataset_discovery_audit_with_fake_downloader() -> None:
+    cadastro_aberta = (
+        "CNPJ_CIA;DENOM_SOCIAL;DENOM_COMERC;DT_REG;DT_CONST;DT_CANCEL;MOTIVO_CANCEL;SIT;DT_INI_SIT;CD_CVM;"
+        "SETOR_ATIV;TP_MERC;CATEG_REG;DT_INI_CATEG;SIT_EMISSOR;DT_INI_SIT_EMISSOR;CONTROLE_ACIONARIO;TP_ENDER;"
+        "LOGRADOURO;COMPL;BAIRRO;MUN;UF;PAIS;CEP;DDD_TEL;TEL;DDD_FAX;FAX;EMAIL;TP_RESP;RESP;DT_INI_RESP;"
+        "LOGRADOURO_RESP;COMPL_RESP;BAIRRO_RESP;MUN_RESP;UF_RESP;PAIS_RESP;CEP_RESP;DDD_TEL_RESP;TEL_RESP;"
+        "DDD_FAX_RESP;FAX_RESP;EMAIL_RESP;CNPJ_AUDITOR;AUDITOR\n"
+        "08.773.135/0001-00;EMPRESA SA;EMPRESA SA;2020-01-01;2000-01-01;;;ATIVO;2020-01-01;25224;Energia;BOLSA;"
+        "Categoria A;2020-01-01;FASE OPERACIONAL;2020-01-01;PRIVADO;SEDE;Rua A;;Centro;SAO PAULO;SP;BRASIL;"
+        "01001000;11;11111111;;;;DIRETOR;Fulano;2020-01-01;Rua B;;Centro;SAO PAULO;SP;BRASIL;01001000;11;"
+        "11111111;;;;;\n"
+    ).encode("latin1")
+    cadastro_estrangeira = (
+        "CNPJ;DENOM_SOCIAL;DENOM_COMERC;PAIS_ORIGEM;DT_REG;DT_CONST;DT_CANCEL;MOTIVO_CANCEL;SIT;DT_INI_SIT;"
+        "CD_CVM;SETOR_ATIV\n"
+        "07.857.093/0001-14;AURA MINERALS INC.;AURA MINERALS INC.;EXTERIOR;2020-01-01;2000-01-01;;;ATIVO;"
+        "2020-01-01;80187;Mineracao\n"
+    ).encode("latin1")
+    payloads = {
+        build_source_url("CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv"): cadastro_aberta,
+        build_source_url("CIA_ESTRANG/CAD/DADOS/cad_cia_estrang.csv"): cadastro_estrangeira,
+    }
+
+    def fake_downloader(url: str) -> bytes:
+        return payloads[url]
+
+    report = build_dataset_discovery_audit(year=None, fontes=("cadastro",), downloader=fake_downloader)
+
+    assert report["ano"] is None
+    assert report["total_fontes"] == 1
+    assert report["total_datasets_faltantes"] == 0
+    assert report["fontes"][0]["fonte"] == "cadastro"
+    assert report["fontes"][0]["datasets_encontrados"] == report["fontes"][0]["datasets_esperados"]

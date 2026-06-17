@@ -15,12 +15,12 @@ from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
+from app.services.financeiro_valores import normalizar_decimal_financeiro
 from app.services.normalizacao import (
     gerar_hash_canonico,
     normalizar_cnpj,
     normalizar_conta_fixa,
     normalizar_data,
-    normalizar_decimal_cvm,
     normalizar_inteiro,
     normalizar_texto,
 )
@@ -57,6 +57,7 @@ _CAMPOS_NEGOCIO_DEMONSTRACOES = {
     "data_inicio_exercicio",
     "data_fim_exercicio",
     "codigo_conta",
+    "coluna_df",
     "descricao_conta",
     "valor_conta",
     "conta_fixa",
@@ -141,7 +142,7 @@ def _registrar_quarentena(
             arquivo_origem=arquivo_origem,
             ano_origem=ano_origem,
             linha_origem=linha_origem,
-            motivo=motivo,
+            motivo=motivo[:255] if motivo else "",
             dados_originais=dados_originais,
         )
     )
@@ -201,8 +202,9 @@ def _normalizar_demonstracao(
         "data_inicio_exercicio": normalizar_data(linha.get("DT_INI_EXERC")),
         "data_fim_exercicio": normalizar_data(linha.get("DT_FIM_EXERC")),
         "codigo_conta": normalizar_texto(linha.get("CD_CONTA")),
+        "coluna_df": normalizar_texto(linha.get("COLUNA_DF")) or "",
         "descricao_conta": normalizar_texto(linha.get("DS_CONTA")),
-        "valor_conta": normalizar_decimal_cvm(linha.get("VL_CONTA")),
+        "valor_conta": normalizar_decimal_financeiro(linha.get("VL_CONTA")),
         "conta_fixa": normalizar_conta_fixa(linha.get("ST_CONTA_FIXA")),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,
@@ -228,18 +230,20 @@ def _normalizar_composicao_capital(
         "data_referencia": normalizar_data(linha.get("DT_REFER")),
         "versao": normalizar_inteiro(linha.get("VERSAO")),
         "denominacao_companhia": normalizar_texto(linha.get("DENOM_CIA")),
-        "quantidade_acoes_ordinarias_capital_integralizado": normalizar_decimal_cvm(
+        "quantidade_acoes_ordinarias_capital_integralizado": normalizar_decimal_financeiro(
             linha.get("QT_ACAO_ORDIN_CAP_INTEGR")
         ),
-        "quantidade_acoes_preferenciais_capital_integralizado": normalizar_decimal_cvm(
+        "quantidade_acoes_preferenciais_capital_integralizado": normalizar_decimal_financeiro(
             linha.get("QT_ACAO_PREF_CAP_INTEGR")
         ),
-        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_cvm(
+        "quantidade_total_acoes_capital_integralizado": normalizar_decimal_financeiro(
             linha.get("QT_ACAO_TOTAL_CAP_INTEGR")
         ),
-        "quantidade_acoes_ordinarias_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_ORDIN_TESOURO")),
-        "quantidade_acoes_preferenciais_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_PREF_TESOURO")),
-        "quantidade_total_acoes_tesouraria": normalizar_decimal_cvm(linha.get("QT_ACAO_TOTAL_TESOURO")),
+        "quantidade_acoes_ordinarias_tesouraria": normalizar_decimal_financeiro(linha.get("QT_ACAO_ORDIN_TESOURO")),
+        "quantidade_acoes_preferenciais_tesouraria": normalizar_decimal_financeiro(
+            linha.get("QT_ACAO_PREF_TESOURO")
+        ),
+        "quantidade_total_acoes_tesouraria": normalizar_decimal_financeiro(linha.get("QT_ACAO_TOTAL_TESOURO")),
         "arquivo_origem": arquivo_origem,
         "ano_origem": ano_origem,
         "linha_origem": linha_origem,
@@ -306,7 +310,9 @@ def _resolver_companhia_indexada(
     return por_codigo.get(codigo_cvm)
 
 
-def _atualizar_execucao(execucao: ExecucaoSincronizacao, contadores: dict[str, int], *, status: str | None = None) -> None:
+def _atualizar_execucao(
+    execucao: ExecucaoSincronizacao, contadores: dict[str, int], *, status: str | None = None
+) -> None:
     execucao.total_linhas_lidas = contadores["lidas"]
     execucao.total_inseridos = contadores["inseridos"]
     execucao.total_atualizados = contadores["atualizados"]
@@ -326,7 +332,7 @@ def _upsert_registro(
     dados: dict[str, Any],
     execucao_id: Any,
     contadores: dict[str, int],
-) -> None:
+) -> Any:
     filtro = [getattr(model, campo) == dados[campo] for campo in campos_chave]
     query: Select[tuple[Any]] = select(model).where(*filtro)
     existente = db.scalar(query)
@@ -336,9 +342,10 @@ def _upsert_registro(
     dados["hash_origem"] = gerar_hash_canonico(dados_para_hash, campos_ignorados={"hash_origem"})
 
     if existente is None:
-        db.add(model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora))
+        novo_obj = model(**dados, criado_em=agora, sincronizado_em=agora, alterado_em=agora)
+        db.add(novo_obj)
         contadores["inseridos"] += 1
-        return
+        return novo_obj
 
     alteracoes: dict[str, tuple[Any, Any]] = {}
     for campo in campos_negocio:
@@ -355,7 +362,7 @@ def _upsert_registro(
 
     if not alteracoes:
         contadores["inalterados"] += 1
-        return
+        return existente
 
     for campo, (_, valor_novo) in alteracoes.items():
         setattr(existente, campo, valor_novo)
@@ -376,6 +383,7 @@ def _upsert_registro(
                 ano_origem=dados["ano_origem"],
             )
         )
+    return existente
 
 
 def _arquivos_esperados(prefixo: str, ano: int) -> set[str]:
@@ -428,10 +436,10 @@ def _sincronizar_formulario(
             )
         )
         if anterior is not None:
-            execucao.status = "sem_alteracao"
+            execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             db.commit()
-            return {"execucao_id": str(execucao.id), "status": "sem_alteracao"}
+            return {"execucao_id": str(execucao.id), "status": "skipped"}
 
         zip_buffer = io.BytesIO(payload)
         with zipfile.ZipFile(zip_buffer) as zip_ref:
@@ -535,6 +543,7 @@ def _sincronizar_formulario(
                                 dados["ordem_exercicio"],
                                 dados["data_fim_exercicio"],
                                 dados["codigo_conta"],
+                                dados["coluna_df"],
                             )
                             tipo_modelo = "demonstracao"
                     except Exception as exc:
@@ -614,6 +623,7 @@ def _sincronizar_formulario(
                                 "ordem_exercicio",
                                 "data_fim_exercicio",
                                 "codigo_conta",
+                                "coluna_df",
                             ),
                             campos_negocio=_CAMPOS_NEGOCIO_DEMONSTRACOES,
                             dados=dados,

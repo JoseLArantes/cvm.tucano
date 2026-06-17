@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import unicodedata
-from typing import Any
+from typing import Any, cast
 
 from app.services.normalizacao import (
     gerar_hash_canonico,
@@ -10,6 +10,7 @@ from app.services.normalizacao import (
     normalizar_data,
     normalizar_decimal_cvm,
     normalizar_inteiro,
+    normalizar_sigla_uf,
     normalizar_texto,
 )
 
@@ -44,7 +45,7 @@ def normalizar_header(header: list[str] | None) -> list[str]:
 
 def normalizar_chave_natural(valor: dict[str, Any]) -> dict[str, Any]:
     texto = json.dumps(valor, ensure_ascii=False, sort_keys=True, default=str)
-    return json.loads(texto)
+    return cast(dict[str, Any], json.loads(texto))
 
 
 __all__ = [
@@ -58,6 +59,7 @@ __all__ = [
     "normalizar_header",
     "normalizar_inteiro",
     "normalizar_nome_emissor_chave",
+    "normalizar_sigla_uf",
     "normalizar_texto",
     "normalizar_tipo_mercado",
 ]

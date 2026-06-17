@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -24,6 +24,55 @@ STATUS_RESOLVED = "resolved"
 STATUS_AMBIGUOUS = "ambiguous"
 STATUS_NOT_FOUND = "not_found"
 STATUS_PROVISIONAL_CREATED = "provisional_created"
+
+
+def _session_cache(db: Session) -> Any:
+    return cast(Any, db)
+
+# Session-scoped caching helper functions for company resolution
+def limpar_caches_resolver() -> None:
+    pass
+
+def _ensure_identifiers_loaded(db: Session) -> None:
+    if getattr(db, "_identifiers_loaded", False):
+        return
+    rows = db.execute(
+        select(
+            CompanhiaIdentificador.companhia_id,
+            CompanhiaIdentificador.tipo,
+            CompanhiaIdentificador.valor_normalizado,
+        ).where(CompanhiaIdentificador.ativo.is_(True))
+    ).all()
+    cache: dict[tuple[str, str], set[UUID]] = {}
+    for companhia_id, tipo, valor_normalizado in rows:
+        if valor_normalizado:
+            cache.setdefault((tipo, valor_normalizado), set()).add(companhia_id)
+    session_cache = _session_cache(db)
+    session_cache._identifier_cache = cache
+    session_cache._identifiers_loaded = True
+
+def _ensure_repair_rules_loaded(db: Session) -> None:
+    if hasattr(db, "_repair_rules_cache"):
+        return
+    _session_cache(db)._repair_rules_cache = list(
+        db.execute(
+            select(RepairRule).where(
+                RepairRule.rule_type == "identity_exact",
+                RepairRule.enabled.is_(True),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+def _ensure_companhias_loaded(db: Session) -> None:
+    if hasattr(db, "_companhia_by_cnpj_cache"):
+        return
+    companhias = db.execute(select(Companhia)).scalars().all()
+    session_cache = _session_cache(db)
+    session_cache._companhia_by_cnpj_cache = {c.cnpj_companhia: c for c in companhias if c.cnpj_companhia}
+    session_cache._companhia_by_codigo_cache = {c.codigo_cvm: c for c in companhias if c.codigo_cvm is not None}
+
 
 
 @dataclass(frozen=True)
@@ -123,14 +172,8 @@ def register_document_header(
 def _query_identifier_company_ids(db: Session, *, tipo: str, valor_normalizado: str | None) -> set[UUID]:
     if valor_normalizado is None:
         return set()
-    rows = db.execute(
-        select(CompanhiaIdentificador.companhia_id).where(
-            CompanhiaIdentificador.tipo == tipo,
-            CompanhiaIdentificador.valor_normalizado == valor_normalizado,
-            CompanhiaIdentificador.ativo.is_(True),
-        )
-    ).all()
-    return {row[0] for row in rows}
+    _ensure_identifiers_loaded(db)
+    return cast(set[UUID], _session_cache(db)._identifier_cache.get((tipo, valor_normalizado), set()))
 
 
 def _resolve_exact_identifier_sets(
@@ -166,12 +209,31 @@ def _resolve_exact_identifier_result(
                 resolution_confidence="alta",
                 details={"cnpj_match_count": len(cnpj_ids), "codigo_match_count": len(codigo_ids)},
             )
+        if len(codigo_ids) == 1:
+            return ResolverResult(
+                status=STATUS_RESOLVED,
+                companhia_id=next(iter(codigo_ids)),
+                resolution_method="codigo_cvm_identificador_alta",
+                resolution_confidence="alta",
+                details={"codigo_match_count": 1},
+            )
+        if len(cnpj_ids) == 1:
+            return ResolverResult(
+                status=STATUS_RESOLVED,
+                companhia_id=next(iter(cnpj_ids)),
+                resolution_method="cnpj_identificador_alta",
+                resolution_confidence="alta",
+                details={"cnpj_match_count": 1},
+            )
         return ResolverResult(
             status=STATUS_AMBIGUOUS,
             companhia_id=None,
             resolution_method="companhia_ambigua",
             resolution_confidence=None,
-            details={"cnpj_ids": sorted(str(valor) for valor in cnpj_ids), "codigo_ids": sorted(str(valor) for valor in codigo_ids)},
+            details={
+                "cnpj_ids": sorted(str(valor) for valor in cnpj_ids),
+                "codigo_ids": sorted(str(valor) for valor in codigo_ids),
+            },
         )
 
     if len(cnpj_ids) == 1:
@@ -210,7 +272,9 @@ def _resolve_exact_identifier_result(
     return None
 
 
-def _resolve_document_header(header_map: DocumentHeaderMap | None, resolver_input: ResolverInput) -> ResolverResult | None:
+def _resolve_document_header(
+    header_map: DocumentHeaderMap | None, resolver_input: ResolverInput
+) -> ResolverResult | None:
     if not header_map:
         return None
     resolution = header_map.get(resolver_input.document_header_key)
@@ -235,14 +299,9 @@ def _resolve_document_header(header_map: DocumentHeaderMap | None, resolver_inpu
 
 
 def _resolve_repair_rule(db: Session, resolver_input: ResolverInput) -> ResolverResult | None:
+    _ensure_repair_rules_loaded(db)
     payload = resolver_input.to_rule_payload()
-    rules = db.execute(
-        select(RepairRule).where(
-            RepairRule.rule_type == "identity_exact",
-            RepairRule.enabled.is_(True),
-        )
-    ).scalars()
-    for rule in rules:
+    for rule in _session_cache(db)._repair_rules_cache:
         if all(payload.get(key) == value for key, value in rule.match_payload.items()):
             companhia_id = rule.action_payload.get("companhia_id")
             if companhia_id is None:
@@ -258,16 +317,15 @@ def _resolve_repair_rule(db: Session, resolver_input: ResolverInput) -> Resolver
 
 
 def _resolve_legacy_company(db: Session, resolver_input: ResolverInput) -> ResolverResult | None:
+    _ensure_companhias_loaded(db)
     companhia_por_cnpj = None
     companhia_por_codigo = None
 
     if resolver_input.cnpj_normalizado is not None:
-        companhia_por_cnpj = db.scalar(
-            select(Companhia).where(Companhia.cnpj_companhia == resolver_input.cnpj_normalizado)
-        )
+        companhia_por_cnpj = _session_cache(db)._companhia_by_cnpj_cache.get(resolver_input.cnpj_normalizado)
     if resolver_input.codigo_cvm_normalizado is not None:
-        companhia_por_codigo = db.scalar(
-            select(Companhia).where(Companhia.codigo_cvm == resolver_input.codigo_cvm_normalizado)
+        companhia_por_codigo = _session_cache(db)._companhia_by_codigo_cache.get(
+            resolver_input.codigo_cvm_normalizado
         )
 
     if companhia_por_cnpj is not None and companhia_por_codigo is not None:
@@ -333,12 +391,12 @@ def _create_provisional_company(db: Session, resolver_input: ResolverInput) -> R
         denominacao_social=normalizar_texto(resolver_input.denominacao_companhia),
         denominacao_comercial=normalizar_texto(resolver_input.denominacao_companhia),
         tipo_emissor="provisorio",
-        fonte_identidade_principal="resolver_v2_provisional",
+        fonte_identidade_principal="resolver_provisional",
         qualidade_identidade="baixa",
-        arquivo_origem="resolver_v2_provisional",
+        arquivo_origem="resolver_provisional",
         ano_origem=resolver_input.data_referencia.year if resolver_input.data_referencia is not None else None,
         linha_origem=None,
-        hash_origem="resolver_v2_provisional",
+        hash_origem="resolver_provisional",
     )
     db.add(companhia)
     db.flush()
@@ -350,7 +408,7 @@ def _create_provisional_company(db: Session, resolver_input: ResolverInput) -> R
                 tipo="cnpj",
                 valor=resolver_input.cnpj_normalizado,
                 valor_normalizado=resolver_input.cnpj_normalizado,
-                fonte="resolver_v2_provisional",
+                fonte="resolver_provisional",
                 confianca="baixa",
                 ativo=True,
             )
@@ -363,12 +421,31 @@ def _create_provisional_company(db: Session, resolver_input: ResolverInput) -> R
                 tipo="codigo_cvm",
                 valor=codigo_texto,
                 valor_normalizado=codigo_texto,
-                fonte="resolver_v2_provisional",
+                fonte="resolver_provisional",
                 confianca="baixa",
                 ativo=True,
             )
         )
     db.flush()
+
+    # Update in-memory caches to include the newly created provisional company
+    _ensure_identifiers_loaded(db)
+    _ensure_companhias_loaded(db)
+    if resolver_input.cnpj_normalizado:
+        _session_cache(db)._identifier_cache.setdefault(("cnpj", resolver_input.cnpj_normalizado), set()).add(
+            companhia.id
+        )
+    if resolver_input.codigo_cvm_normalizado is not None:
+        _session_cache(db)._identifier_cache.setdefault(
+            ("codigo_cvm", str(resolver_input.codigo_cvm_normalizado)),
+            set(),
+        ).add(companhia.id)
+
+    if companhia.cnpj_companhia:
+        _session_cache(db)._companhia_by_cnpj_cache[companhia.cnpj_companhia] = companhia
+    if companhia.codigo_cvm is not None:
+        _session_cache(db)._companhia_by_codigo_cache[companhia.codigo_cvm] = companhia
+
     return ResolverResult(
         status=STATUS_PROVISIONAL_CREATED,
         companhia_id=companhia.id,
@@ -378,7 +455,7 @@ def _create_provisional_company(db: Session, resolver_input: ResolverInput) -> R
     )
 
 
-def resolve_companhia_v2(
+def resolve_companhia(
     db: Session,
     resolver_input: ResolverInput,
     *,
@@ -403,7 +480,7 @@ def resolve_companhia_v2(
         return legacy_result
 
     if provisional_enabled is None:
-        provisional_enabled = get_settings().ingestion_v2_provisional_company_enabled
+        provisional_enabled = get_settings().ingestion_provisional_company_enabled
     if provisional_enabled:
         return _create_provisional_company(db, resolver_input)
 
@@ -421,8 +498,11 @@ def persist_resolution_result(
     *,
     ingestion_row: IngestionRow,
     result: ResolverResult,
-    created_by: str = "resolver_v2",
+    created_by: str = "resolver",
+    persist: bool = False,
 ) -> IngestionRow:
+    if not persist:
+        return ingestion_row
     ingestion_row.resolved_companhia_id = result.companhia_id
     ingestion_row.resolution_method = result.resolution_method
     ingestion_row.resolution_confidence = result.resolution_confidence

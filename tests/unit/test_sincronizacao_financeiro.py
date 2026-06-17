@@ -116,7 +116,7 @@ def test_sincronizacao_dfp_idempotencia_e_alteracao(db_session: Session, monkeyp
     assert resultado_1["total_inseridos"] == 19
 
     resultado_2 = sincronizar_dfp(db_session, 2025)
-    assert resultado_2["status"] == "sem_alteracao"
+    assert resultado_2["status"] == "skipped"
 
     resultado_3 = sincronizar_dfp(db_session, 2025)
     assert resultado_3["status"] == "sucesso"
@@ -127,14 +127,20 @@ def test_sincronizacao_dfp_idempotencia_e_alteracao(db_session: Session, monkeyp
     assert db_session.query(ComposicaoCapital).count() == 1
     assert db_session.query(ParecerFinanceiro).count() == 1
 
-    historicos = db_session.execute(
-        select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "demonstracoes_financeiras")
-    ).scalars().all()
+    historicos = (
+        db_session.execute(
+            select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "demonstracoes_financeiras")
+        )
+        .scalars()
+        .all()
+    )
     assert any(item.campo == "valor_conta" for item in historicos)
 
-    execucoes = db_session.execute(
-        select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.tipo_fonte == "dfp")
-    ).scalars().all()
+    execucoes = (
+        db_session.execute(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.tipo_fonte == "dfp"))
+        .scalars()
+        .all()
+    )
     assert len(execucoes) == 3
 
 
@@ -147,9 +153,7 @@ def test_sincronizacao_itr_exige_cadastro(db_session: Session, monkeypatch: Any)
         sincronizar_itr(db_session, 2025)
 
 
-def test_sincronizacao_dfp_envia_para_quarentena_quando_sem_companhia(
-    db_session: Session, monkeypatch: Any
-) -> None:
+def test_sincronizacao_dfp_envia_para_quarentena_quando_sem_companhia(db_session: Session, monkeypatch: Any) -> None:
     db_session.add(_companhia())
     db_session.commit()
     monkeypatch.setattr(

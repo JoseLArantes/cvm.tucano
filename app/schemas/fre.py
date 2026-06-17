@@ -4,10 +4,10 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class FreDocumentoResposta(BaseModel):
+class FreDocumentoResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
@@ -41,13 +41,13 @@ class FreAuditorResposta(BaseModel):
     auditor: str | None
     cpf_auditor: str | None
     cnpj_auditor: str | None
-    codigo_cvm_auditor: int | None
+    codigo_cvm_auditor: str | None
     tipo_origem_auditor: str | None
     data_inicio_contratacao: date | None
     data_fim_contratacao: date | None
     data_inicio_prestacao_servico: date | None
     servico_contratado: str | None
-    remuneracao_auditor: Decimal | None
+    remuneracao_auditor: str | None
     justificativa_substituicao: str | None
     razao_apresentada: str | None
     arquivo_origem: str
@@ -186,6 +186,465 @@ class FreEmpregadoPosicaoGeneroResposta(BaseModel):
     alterado_em: datetime
 
 
+class FreParticipacaoSociedadeResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_sociedade: int
+    razao_social: str | None
+    cnpj: str | None
+    tipo_sociedade: str | None
+    descricao_atividades: str | None
+    pais_sede: str | None
+    uf_sede: str | None
+    municipio_sede: str | None
+    participacao_emissor: Decimal | None
+    possui_registro_cvm: bool | None
+    codigo_cvm: int | None
+    razao_aquisicao_manutencao: str | None
+    data_valor_mercado: date | None
+    data_valor_contabil: date | None
+    valor_mercado: Decimal | None
+    valor_contabil: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoPosicaoLocalResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    posicao: str
+    quantidade_norte: int | None
+    quantidade_nordeste: int | None
+    quantidade_centro_oeste: int | None
+    quantidade_sudeste: int | None
+    quantidade_sul: int | None
+    quantidade_exterior: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoPosicaoFaixaEtariaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    posicao: str
+    quantidade_ate_30_anos: int | None
+    quantidade_30_a_50_anos: int | None
+    quantidade_acima_50_anos: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoPosicaoDeclaracaoRacaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    posicao: str
+    quantidade_amarelo: int | None
+    quantidade_branco: int | None
+    quantidade_preto: int | None
+    quantidade_pardo: int | None
+    quantidade_indigena: int | None
+    quantidade_outros: int | None
+    quantidade_sem_resposta: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoPcdResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    codigo_posicao: int | None
+    posicao: str
+    quantidade_pcd: int | None
+    quantidade_nao_pcd: int | None
+    quantidade_sem_resposta: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoLocalFaixaEtariaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    local: str
+    quantidade_ate_30_anos: int | None
+    quantidade_30_a_50_anos: int | None
+    quantidade_acima_50_anos: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoLocalDeclaracaoRacaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    local: str
+    quantidade_amarelo: int | None
+    quantidade_branco: int | None
+    quantidade_preto: int | None
+    quantidade_pardo: int | None
+    quantidade_indigena: int | None
+    quantidade_outros: int | None
+    quantidade_sem_resposta: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreEmpregadoLocalDeclaracaoGeneroResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    local: str
+    quantidade_feminino: int | None
+    quantidade_masculino: int | None
+    quantidade_nao_binario: int | None
+    quantidade_outros: int | None
+    quantidade_sem_resposta: int | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreRelacaoFamiliarResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_administrador: str
+    cpf_administrador: str | None
+    nome_emissor: str | None
+    cnpj_emissor: str | None
+    cargo_administrador: str | None
+    nome_pessoa_relacionada: str
+    cpf_pessoa_relacionada: str | None
+    nome_emissor_pessoa_relacionada: str | None
+    cnpj_emissor_pessoa_relacionada: str | None
+    cargo_Pessoa_relacionada: str | None
+    tipo_parentesco: str | None
+    observacao: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreResponsavelResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_responsavel: str | None
+    cargo_responsavel: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreCapitalSocialClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    tipo_classe_acao_preferencial: str | None
+    quantidade_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreCapitalSocialTituloConversivelResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    titulo_conversivel_acao: str | None
+    condicoes_conversao: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreDistribuicaoCapitalResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    data_ultima_assembleia: date | None
+    quantidade_acoes_ordinarias_circulacao: Decimal | None
+    percentual_acoes_ordinarias_circulacao: Decimal | None
+    quantidade_acoes_preferenciais_circulacao: Decimal | None
+    percentual_acoes_preferenciais_circulacao: Decimal | None
+    quantidade_total_acoes_circulacao: Decimal | None
+    percentual_total_acoes_circulacao: Decimal | None
+    quantidade_acionistas_pf: Decimal | None
+    quantidade_acionistas_pj: Decimal | None
+    quantidade_acionistas_investidores_institucionais: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreDistribuicaoCapitalClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    classe_acoes_preferenciais: str | None
+    sigla_classe_acoes_preferenciais: str | None
+    quantidade_acoes_preferenciais_circulacao: Decimal | None
+    percentual_acoes_preferenciais_circulacao: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FrePosicaoAcionariaClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_acionista: int
+    tipo_classe_acao_preferencial: str | None
+    quantidade_acoes: Decimal | None
+    percentual_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreRemuneracaoMaximaMinimaMediaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    data_inicio_exercicio_social: date | None
+    data_fim_exercicio_social: date | None
+    orgao_administracao: str | None
+    numero_membros: Decimal | None
+    numero_membros_remunerados: Decimal | None
+    valor_maior_remuneracao: Decimal | None
+    valor_medio_remuneracao: Decimal | None
+    valor_menor_remuneracao: Decimal | None
+    observacao: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreRemuneracaoVariavelResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    data_inicio_exercicio_social: date | None
+    data_fim_exercicio_social: date | None
+    orgao_administracao: str | None
+    quantidade_total_membros: Decimal | None
+    quantidade_membros_remunerados: Decimal | None
+    bonus_valor_minimo: Decimal | None
+    bonus_valor_maximo: Decimal | None
+    bonus_valor_metas_atingidas: Decimal | None
+    bonus_valor_efetivo: Decimal | None
+    participacao_valor_minimo: Decimal | None
+    participacao_valor_maximo: Decimal | None
+    participacao_valor_metas_atingidas: Decimal | None
+    participacao_valor_efetivo: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreRemuneracaoAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    data_inicio_exercicio_social: date | None
+    data_fim_exercicio_social: date | None
+    orgao_administracao: str | None
+    quantidade_total_membros: Decimal | None
+    quantidade_membros_remunerados: Decimal | None
+    preco_medio_ponderado_opcoes_em_aberto: Decimal | None
+    preco_medio_ponderado_opcoes_exercidas: Decimal | None
+    preco_medio_ponderado_opcoes_perdidas: Decimal | None
+    diluicao_potencial: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreAcaoEntregueResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    data_inicio_exercicio_social: date | None
+    data_fim_exercicio_social: date | None
+    orgao_administracao: str | None
+    quantidade_total_membros: Decimal | None
+    quantidade_membros_remunerados: Decimal | None
+    quantidade_acoes: int | None
+    preco_medio_ponderado_aquisicao: Decimal | None
+    preco_medio_ponderado_mercado: Decimal | None
+    valor_diferenca_aquisicao_mercado: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
 class ListaFreDocumentosResposta(BaseModel):
     dados: list[FreDocumentoResposta] = Field(description="Lista paginada de documentos FRE.")
     paginacao: Paginacao
@@ -217,4 +676,614 @@ class ListaFreEmpregadoPosicaoGeneroResposta(BaseModel):
     dados: list[FreEmpregadoPosicaoGeneroResposta] = Field(
         description="Lista paginada de empregados por posição e gênero FRE."
     )
+    paginacao: Paginacao
+
+
+class ListaFreParticipacoesSociedadesResposta(BaseModel):
+    dados: list[FreParticipacaoSociedadeResposta] = Field(description="Lista paginada de participacoes em sociedades FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoPosicaoLocalResposta(BaseModel):
+    dados: list[FreEmpregadoPosicaoLocalResposta] = Field(description="Lista paginada de empregados por posicao e local FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoPosicaoFaixaEtariaResposta(BaseModel):
+    dados: list[FreEmpregadoPosicaoFaixaEtariaResposta] = Field(description="Lista paginada de empregados por posicao e faixa etaria FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoPosicaoDeclaracaoRacaResposta(BaseModel):
+    dados: list[FreEmpregadoPosicaoDeclaracaoRacaResposta] = Field(description="Lista paginada de empregados por posicao e declaracao de raca FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoPcdResposta(BaseModel):
+    dados: list[FreEmpregadoPcdResposta] = Field(description="Lista paginada de empregados PCD FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoLocalFaixaEtariaResposta(BaseModel):
+    dados: list[FreEmpregadoLocalFaixaEtariaResposta] = Field(description="Lista paginada de empregados por local e faixa etaria FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoLocalDeclaracaoRacaResposta(BaseModel):
+    dados: list[FreEmpregadoLocalDeclaracaoRacaResposta] = Field(description="Lista paginada de empregados por local e declaracao de raca FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEmpregadoLocalDeclaracaoGeneroResposta(BaseModel):
+    dados: list[FreEmpregadoLocalDeclaracaoGeneroResposta] = Field(description="Lista paginada de empregados por local e declaracao de genero FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreRelacoesFamiliaresResposta(BaseModel):
+    dados: list[FreRelacaoFamiliarResposta] = Field(description="Lista paginada de relacoes familiares declaradas no FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreResponsaveisResposta(BaseModel):
+    dados: list[FreResponsavelResposta] = Field(description="Lista paginada de pessoas responsaveis pelo FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreCapitalSocialClassesAcoesResposta(BaseModel):
+    dados: list[FreCapitalSocialClasseAcaoResposta] = Field(
+        description="Lista paginada de classes de acoes do capital social FRE."
+    )
+    paginacao: Paginacao
+
+
+class ListaFreCapitalSocialTitulosConversiveisResposta(BaseModel):
+    dados: list[FreCapitalSocialTituloConversivelResposta] = Field(
+        description="Lista paginada de titulos conversiveis do capital social FRE."
+    )
+    paginacao: Paginacao
+
+
+class ListaFreDistribuicaoCapitalResposta(BaseModel):
+    dados: list[FreDistribuicaoCapitalResposta] = Field(description="Lista paginada de distribuicao de capital FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreDistribuicaoCapitalClassesAcoesResposta(BaseModel):
+    dados: list[FreDistribuicaoCapitalClasseAcaoResposta] = Field(
+        description="Lista paginada de classes de acoes da distribuicao de capital FRE."
+    )
+    paginacao: Paginacao
+
+
+class ListaFrePosicoesAcionariasClassesAcoesResposta(BaseModel):
+    dados: list[FrePosicaoAcionariaClasseAcaoResposta] = Field(
+        description="Lista paginada de classes de acoes da posicao acionaria FRE."
+    )
+    paginacao: Paginacao
+
+
+class ListaFreRemuneracoesMaximasMinimasMediasResposta(BaseModel):
+    dados: list[FreRemuneracaoMaximaMinimaMediaResposta] = Field(
+        description="Lista paginada de remuneracoes maximas, minimas e medias FRE."
+    )
+    paginacao: Paginacao
+
+
+class ListaFreRemuneracoesVariaveisResposta(BaseModel):
+    dados: list[FreRemuneracaoVariavelResposta] = Field(description="Lista paginada de remuneracoes variaveis FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreRemuneracoesAcoesResposta(BaseModel):
+    dados: list[FreRemuneracaoAcaoResposta] = Field(description="Lista paginada de remuneracoes baseadas em acoes FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreAcoesEntreguesResposta(BaseModel):
+    dados: list[FreAcaoEntregueResposta] = Field(description="Lista paginada de acoes entregues FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialAumentoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    data_deliberacao: date | None
+    valor_aumento: Decimal | None
+    origem_aumento: str | None
+    quantidade_acoes_ordinarias: Decimal | None
+    quantidade_acoes_preferenciais: Decimal | None
+    quantidade_total_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialAumentosResposta(BaseModel):
+    dados: list[FreCapitalSocialAumentoResposta] = Field(description="Lista paginada de aumentos de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialAumentoClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    tipo_classe_acao_preferencial: str
+    quantidade_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialAumentoClassesAcoesResposta(BaseModel):
+    dados: list[FreCapitalSocialAumentoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nos aumentos de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialDesdobramentoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    data_deliberacao: date | None
+    tipo_desdobramento: str | None
+    proporcao_acoes_novas: Decimal | None
+    proporcao_acoes_antigas: Decimal | None
+    quantidade_acoes_ordinarias: Decimal | None
+    quantidade_acoes_preferenciais: Decimal | None
+    quantidade_total_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialDesdobramentosResposta(BaseModel):
+    dados: list[FreCapitalSocialDesdobramentoResposta] = Field(description="Lista paginada de desdobramentos de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialDesdobramentoClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    tipo_classe_acao_preferencial: str
+    quantidade_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialDesdobramentoClassesAcoesResposta(BaseModel):
+    dados: list[FreCapitalSocialDesdobramentoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nos desdobramentos de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialReducaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    data_deliberacao: date | None
+    valor_reducao: Decimal | None
+    motivo_reducao: str | None
+    quantidade_acoes_ordinarias: Decimal | None
+    quantidade_acoes_preferenciais: Decimal | None
+    quantidade_total_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialReducoesResposta(BaseModel):
+    dados: list[FreCapitalSocialReducaoResposta] = Field(description="Lista paginada de reducoes de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreCapitalSocialReducaoClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_capital_social: int
+    tipo_classe_acao_preferencial: str
+    quantidade_acoes: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreCapitalSocialReducaoClassesAcoesResposta(BaseModel):
+    dados: list[FreCapitalSocialReducaoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nas reducoes de capital social FRE.")
+    paginacao: Paginacao
+
+
+class FreDireitoAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    tipo_classe_acao: str
+    direito_voto: str
+    outros_direitos: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreDireitosAcoesResposta(BaseModel):
+    dados: list[FreDireitoAcaoResposta] = Field(description="Lista paginada de direitos de acoes FRE.")
+    paginacao: Paginacao
+
+
+class FreVolumeValorMobiliarioResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    classe_valor_mobiliario: str
+    sigla_classe_acoes_preferenciais: str | None
+    volume_negociacao: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreVolumeValoresMobiliariosResposta(BaseModel):
+    dados: list[FreVolumeValorMobiliarioResposta] = Field(description="Lista paginada de volumes de valores mobiliarios FRE.")
+    paginacao: Paginacao
+
+
+class FreOutroValorMobiliarioResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_valor_mobiliario: str
+    caracteristicas_valor_mobiliario: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreOutrosValoresMobiliariosResposta(BaseModel):
+    dados: list[FreOutroValorMobiliarioResposta] = Field(description="Lista paginada de outros valores mobiliarios FRE.")
+    paginacao: Paginacao
+
+
+class FreTitularValorMobiliarioResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_titular: str
+    cpf_cnpj_titular: str | None
+    classe_valor_mobiliario: str
+    quantidade_valores_mobiliarios: Decimal | None
+    percentual_classe: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreTitularesValoresMobiliariosResposta(BaseModel):
+    dados: list[FreTitularValorMobiliarioResposta] = Field(description="Lista paginada de titulares de valores mobiliarios FRE.")
+    paginacao: Paginacao
+
+
+class FreMercadoEstrangeiroResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_mercado: str
+    orgao_regulador: str | None
+    data_admissao: date | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreMercadosEstrangeirosResposta(BaseModel):
+    dados: list[FreMercadoEstrangeiroResposta] = Field(description="Lista paginada de mercados estrangeiros FRE.")
+    paginacao: Paginacao
+
+
+class FreTituloExteriorResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    nome_titulo: str
+    pais_emissao: str | None
+    caracteristicas: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreTitulosExteriorResposta(BaseModel):
+    dados: list[FreTituloExteriorResposta] = Field(description="Lista paginada de titulos emitidos no exterior FRE.")
+    paginacao: Paginacao
+
+
+class FrePlanoRecompraResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_plano_recompra: int
+    data_deliberacao: date | None
+    objetivo_plano: str | None
+    limite_prazo_aquisicao: str | None
+    quantidade_total_ordinarias_adquiridas: Decimal | None
+    quantidade_total_preferenciais_adquiridas: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFrePlanosRecompraResposta(BaseModel):
+    dados: list[FrePlanoRecompraResposta] = Field(description="Lista paginada de planos de recompra de acoes FRE.")
+    paginacao: Paginacao
+
+
+class FrePlanoRecompraClasseAcaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    id_plano_recompra: int
+    tipo_classe_acao_preferencial: str
+    quantidade_acoes_adquiridas: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFrePlanoRecompraClassesAcoesResposta(BaseModel):
+    dados: list[FrePlanoRecompraClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nos planos de recompra FRE.")
+    paginacao: Paginacao
+
+
+class FreValorMobiliarioTesourariaMovimentacaoResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    classe_valor_mobiliario: str
+    data_movimentacao: date
+    quantidade_movimentada: Decimal | None
+    natureza_movimentacao: str | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreValoresMobiliariosTesourariaMovimentacoesResposta(BaseModel):
+    dados: list[FreValorMobiliarioTesourariaMovimentacaoResposta] = Field(description="Lista paginada de movimentacoes de valores mobiliarios em tesouraria FRE.")
+    paginacao: Paginacao
+
+
+class FreValorMobiliarioTesourariaUltimoExercicioResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    classe_valor_mobiliario: str
+    historico_exercicio: str
+    quantidade_acoes_tesouraria: Decimal | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreValoresMobiliariosTesourariaUltimosExerciciosResposta(BaseModel):
+    dados: list[FreValorMobiliarioTesourariaUltimoExercicioResposta] = Field(description="Lista paginada de saldos do ultimo exercicio de valores mobiliarios em tesouraria FRE.")
+    paginacao: Paginacao
+
+
+class FreAdministradorDeclaracaoGeneroResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    orgao_administracao: str
+    quantidade_feminino: int | None
+    quantidade_masculino: int | None
+    quantidade_nao_binario: int | None
+    quantidade_outros: int | None
+    quantidade_sem_resposta: int | None
+    nao_aplicavel: bool | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreAdministradorDeclaracaoRacaResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    orgao_administracao: str
+    quantidade_amarelo: int | None
+    quantidade_branco: int | None
+    quantidade_preto: int | None
+    quantidade_pardo: int | None
+    quantidade_indigena: int | None
+    quantidade_outros: int | None
+    quantidade_sem_resposta: int | None
+    nao_aplicavel: bool | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class FreAdministradorPcdResposta(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID
+    companhia_id: uuid.UUID | None
+    cnpj_companhia: str
+    data_referencia: date
+    versao: int
+    id_documento: int
+    nome_companhia: str | None
+    orgao_administracao: str
+    quantidade_pcd: int | None
+    quantidade_nao_pcd: int | None
+    quantidade_sem_resposta: int | None
+    nao_aplicavel: bool | None
+    arquivo_origem: str
+    ano_origem: int | None
+    linha_origem: int | None
+    criado_em: datetime
+    sincronizado_em: datetime
+    alterado_em: datetime
+
+
+class ListaFreAdministradoresDeclaracaoGeneroResposta(BaseModel):
+    dados: list[FreAdministradorDeclaracaoGeneroResposta] = Field(description="Lista paginada de declarações de gênero de administradores FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreAdministradoresDeclaracaoRacaResposta(BaseModel):
+    dados: list[FreAdministradorDeclaracaoRacaResposta] = Field(description="Lista paginada de declarações de raça de administradores FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreAdministradoresPcdResposta(BaseModel):
+    dados: list[FreAdministradorPcdResposta] = Field(description="Lista paginada de declarações PCD de administradores FRE.")
     paginacao: Paginacao

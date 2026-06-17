@@ -58,7 +58,7 @@ def test_sincronizacao_idempotencia_e_historico(db_session: Session, monkeypatch
     primeiro_sincronizado = companhia.sincronizado_em
 
     resultado_2 = sincronizar_cadastro_companhias(db_session)
-    assert resultado_2["status"] == "sem_alteracao"
+    assert resultado_2["status"] == "skipped"
 
     resultado_3 = sincronizar_cadastro_companhias(db_session)
     assert resultado_3["status"] == "sucesso"
@@ -78,13 +78,15 @@ def test_sincronizacao_idempotencia_e_historico(db_session: Session, monkeypatch
     assert companhia.alterado_em > primeiro_alterado
     assert companhia.sincronizado_em > sincronizado_sem_alteracao
 
-    historicos = db_session.execute(
-        select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "companhias")
-    ).scalars().all()
+    historicos = (
+        db_session.execute(select(HistoricoAlteracaoCampo).where(HistoricoAlteracaoCampo.entidade == "companhias"))
+        .scalars()
+        .all()
+    )
     assert any(item.campo == "denominacao_social" for item in historicos)
 
     execucoes = db_session.execute(select(ExecucaoSincronizacao)).scalars().all()
     assert len(execucoes) == 4
-    assert any(item.status == "sem_alteracao" for item in execucoes)
+    assert any(item.status == "skipped" for item in execucoes)
     assert any(item.status == "sucesso" for item in execucoes)
     assert all(isinstance(item.iniciada_em, datetime) for item in execucoes)

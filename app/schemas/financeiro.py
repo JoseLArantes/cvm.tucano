@@ -4,12 +4,13 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import Paginacao, PeriodicModel
 
 
-class DocumentoFinanceiroResposta(BaseModel):
+class DocumentoFinanceiroResposta(PeriodicModel):
     model_config = ConfigDict(
         from_attributes=True,
+        json_encoders={Decimal: float},
         json_schema_extra={
             "example": {
                 "id": "bbf228f5-5627-4fc5-a490-318b8ba31e43",
@@ -54,8 +55,43 @@ class DocumentoFinanceiroResposta(BaseModel):
     alterado_em: datetime = Field(description="Timestamp da ultima alteracao real de dados de negocio.")
 
 
-class DemonstracaoFinanceiraResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+class DemonstracaoFinanceiraResposta(PeriodicModel):
+    model_config = ConfigDict(
+        from_attributes=True,
+        json_schema_extra={
+            "example": {
+                "id": "bbf228f5-5627-4fc5-a490-318b8ba31e43",
+                "companhia_id": "f4f6a9d8-7e26-45f2-b3fb-ec43a0f8a89a",
+                "tipo_formulario": "DFP",
+                "tipo_demonstracao": "demonstracao_resultado",
+                "escopo_demonstracao": "individual",
+                "cnpj_companhia": "00000000000191",
+                "codigo_cvm": 1023,
+                "data_referencia": "2025-12-31",
+                "versao": 1,
+                "denominacao_companhia": "BCO BRASIL S.A.",
+                "grupo_demonstracao": "DF Individual - Demonstração do Resultado",
+                "moeda": "REAL",
+                "escala_moeda": "MIL",
+                "fator_escala_moeda": 1000,
+                "ordem_exercicio": "ÚLTIMO",
+                "data_inicio_exercicio": "2025-01-01",
+                "data_fim_exercicio": "2025-12-31",
+                "codigo_conta": "3.03",
+                "coluna_df": "",
+                "descricao_conta": "Receita Líquida",
+                "valor_conta": 740500000.0,
+                "valor_conta_reportado": 740500.0,
+                "conta_fixa": True,
+                "arquivo_origem": "dfp_cia_aberta_DRE_ind_2025.csv",
+                "ano_origem": 2025,
+                "linha_origem": 2960,
+                "criado_em": "2026-05-30T14:30:00Z",
+                "sincronizado_em": "2026-05-30T14:30:00Z",
+                "alterado_em": "2026-05-30T14:30:00Z",
+            }
+        },
+    )
 
     id: uuid.UUID = Field(description="Identificador interno da linha de demonstracao.")
     companhia_id: uuid.UUID | None = Field(description="FK para a companhia relacionada, quando resolvida.")
@@ -69,13 +105,37 @@ class DemonstracaoFinanceiraResposta(BaseModel):
     denominacao_companhia: str | None = Field(description="Denominacao da companhia na origem.")
     grupo_demonstracao: str | None = Field(description="Grupo do formulario reportado pela CVM (GRUPO_DFP).")
     moeda: str | None = Field(description="Moeda do valor contabil.")
-    escala_moeda: str | None = Field(description="Escala aplicada aos valores monetarios.")
+    escala_moeda: str | None = Field(
+        description=(
+            "Escala monetaria informada pela CVM no arquivo de origem, como `UNIDADE`, `MIL` ou `MILHAO`. "
+            "A API preserva este valor para auditoria, mas `valor_conta` ja retorna o montante ajustado por essa escala."
+        )
+    )
+    fator_escala_moeda: int = Field(
+        description=(
+            "Multiplicador numerico derivado de `escala_moeda` e aplicado ao valor reportado. "
+            "Exemplos: `UNIDADE` => 1, `MIL` => 1000, `MILHAO` => 1000000."
+        )
+    )
     ordem_exercicio: str | None = Field(description="Ordem do exercicio (ultimo, penultimo, etc.).")
     data_inicio_exercicio: date | None = Field(description="Data de inicio do exercicio.")
     data_fim_exercicio: date | None = Field(description="Data de fim do exercicio.")
     codigo_conta: str | None = Field(description="Codigo da conta contabil.")
+    coluna_df: str = Field(
+        description="Eixo COLUNA_DF reportado pela CVM em demonstracoes matriciais, como DMPL. Vazio quando o arquivo nao usa esse eixo."
+    )
     descricao_conta: str | None = Field(description="Descricao textual da conta contabil.")
-    valor_conta: Decimal | None = Field(description="Valor contabil da conta.")
+    valor_conta: float | None = Field(
+        description=(
+            "Valor contabil ajustado para o montante monetario absoluto em reais. "
+            "Este campo e calculado a partir do valor reportado pela CVM multiplicado por `fator_escala_moeda`."
+        )
+    )
+    valor_conta_reportado: float | None = Field(
+        description=(
+            "Valor bruto exatamente como representado no CSV da CVM, apos parsing numerico, antes da aplicacao de `escala_moeda`."
+        )
+    )
     conta_fixa: bool | None = Field(description="Indica se a conta e fixa na taxonomia CVM.")
     arquivo_origem: str = Field(description="Arquivo CSV de origem no ZIP anual.")
     ano_origem: int | None = Field(description="Ano do ZIP de origem processado.")
@@ -85,7 +145,7 @@ class DemonstracaoFinanceiraResposta(BaseModel):
     alterado_em: datetime = Field(description="Timestamp da ultima alteracao real de dados de negocio.")
 
 
-class ComposicaoCapitalResposta(BaseModel):
+class ComposicaoCapitalResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID = Field(description="Identificador interno da linha de composicao de capital.")
@@ -111,9 +171,7 @@ class ComposicaoCapitalResposta(BaseModel):
     quantidade_acoes_preferenciais_tesouraria: Decimal | None = Field(
         description="Quantidade de acoes preferenciais em tesouraria."
     )
-    quantidade_total_acoes_tesouraria: Decimal | None = Field(
-        description="Quantidade total de acoes em tesouraria."
-    )
+    quantidade_total_acoes_tesouraria: Decimal | None = Field(description="Quantidade total de acoes em tesouraria.")
     arquivo_origem: str = Field(description="Arquivo CSV de origem no ZIP anual.")
     ano_origem: int | None = Field(description="Ano do ZIP de origem processado.")
     linha_origem: int | None = Field(description="Linha do CSV de origem.")
@@ -122,7 +180,7 @@ class ComposicaoCapitalResposta(BaseModel):
     alterado_em: datetime = Field(description="Timestamp da ultima alteracao real de dados de negocio.")
 
 
-class ParecerFinanceiroResposta(BaseModel):
+class ParecerFinanceiroResposta(PeriodicModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID = Field(description="Identificador interno da linha de parecer.")

@@ -47,7 +47,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("ingestion_row_id", name="uq_quarantine_items_v2_ingestion_row_id"),
     )
-    op.create_index(op.f("ix_quarantine_items_v2_arquivo_origem"), "quarantine_items_v2", ["arquivo_origem"], unique=False)
+    op.create_index(
+        op.f("ix_quarantine_items_v2_arquivo_origem"), "quarantine_items_v2", ["arquivo_origem"], unique=False
+    )
     op.create_index(op.f("ix_quarantine_items_v2_ano_origem"), "quarantine_items_v2", ["ano_origem"], unique=False)
     op.create_index(
         op.f("ix_quarantine_items_v2_execucao_sincronizacao_id"),
@@ -55,9 +57,15 @@ def upgrade() -> None:
         ["execucao_sincronizacao_id"],
         unique=False,
     )
-    op.create_index(op.f("ix_quarantine_items_v2_ingestion_row_id"), "quarantine_items_v2", ["ingestion_row_id"], unique=False)
-    op.create_index(op.f("ix_quarantine_items_v2_ingestion_run_id"), "quarantine_items_v2", ["ingestion_run_id"], unique=False)
-    op.create_index(op.f("ix_quarantine_items_v2_motivo_codigo"), "quarantine_items_v2", ["motivo_codigo"], unique=False)
+    op.create_index(
+        op.f("ix_quarantine_items_v2_ingestion_row_id"), "quarantine_items_v2", ["ingestion_row_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_quarantine_items_v2_ingestion_run_id"), "quarantine_items_v2", ["ingestion_run_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_quarantine_items_v2_motivo_codigo"), "quarantine_items_v2", ["motivo_codigo"], unique=False
+    )
     op.create_index(op.f("ix_quarantine_items_v2_row_kind"), "quarantine_items_v2", ["row_kind"], unique=False)
     op.create_index(op.f("ix_quarantine_items_v2_status"), "quarantine_items_v2", ["status"], unique=False)
 

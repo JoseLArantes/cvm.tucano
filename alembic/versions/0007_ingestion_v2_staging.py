@@ -104,9 +104,18 @@ def upgrade() -> None:
             name="uq_ingestion_file_members_ingestion_file_id_member_name",
         ),
     )
-    op.create_index(op.f("ix_ingestion_file_members_ingestion_file_id"), "ingestion_file_members", ["ingestion_file_id"], unique=False)
-    op.create_index(op.f("ix_ingestion_file_members_member_name"), "ingestion_file_members", ["member_name"], unique=False)
-    op.create_index(op.f("ix_ingestion_file_members_member_sha256"), "ingestion_file_members", ["member_sha256"], unique=False)
+    op.create_index(
+        op.f("ix_ingestion_file_members_ingestion_file_id"),
+        "ingestion_file_members",
+        ["ingestion_file_id"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_ingestion_file_members_member_name"), "ingestion_file_members", ["member_name"], unique=False
+    )
+    op.create_index(
+        op.f("ix_ingestion_file_members_member_sha256"), "ingestion_file_members", ["member_sha256"], unique=False
+    )
 
     op.create_table(
         "ingestion_rows",
@@ -144,11 +153,17 @@ def upgrade() -> None:
     )
     op.create_index(op.f("ix_ingestion_rows_ano_origem"), "ingestion_rows", ["ano_origem"], unique=False)
     op.create_index(op.f("ix_ingestion_rows_arquivo_origem"), "ingestion_rows", ["arquivo_origem"], unique=False)
-    op.create_index(op.f("ix_ingestion_rows_ingestion_file_member_id"), "ingestion_rows", ["ingestion_file_member_id"], unique=False)
+    op.create_index(
+        op.f("ix_ingestion_rows_ingestion_file_member_id"), "ingestion_rows", ["ingestion_file_member_id"], unique=False
+    )
     op.create_index(op.f("ix_ingestion_rows_ingestion_run_id"), "ingestion_rows", ["ingestion_run_id"], unique=False)
-    op.create_index(op.f("ix_ingestion_rows_promoted_entity_id"), "ingestion_rows", ["promoted_entity_id"], unique=False)
+    op.create_index(
+        op.f("ix_ingestion_rows_promoted_entity_id"), "ingestion_rows", ["promoted_entity_id"], unique=False
+    )
     op.create_index(op.f("ix_ingestion_rows_raw_hash"), "ingestion_rows", ["raw_hash"], unique=False)
-    op.create_index(op.f("ix_ingestion_rows_resolved_companhia_id"), "ingestion_rows", ["resolved_companhia_id"], unique=False)
+    op.create_index(
+        op.f("ix_ingestion_rows_resolved_companhia_id"), "ingestion_rows", ["resolved_companhia_id"], unique=False
+    )
     op.create_index(op.f("ix_ingestion_rows_row_kind"), "ingestion_rows", ["row_kind"], unique=False)
     op.create_index(
         op.f("ix_ingestion_rows_validation_reason_code"),

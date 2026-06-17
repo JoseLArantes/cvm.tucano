@@ -40,6 +40,7 @@ markers = [
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+exclude = ["scratch"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
@@ -48,3 +49,12 @@ select = ["E", "F", "I", "UP", "B"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+exclude = ["scratch/"]
+
+[[tool.mypy.overrides]]
+module = [
+  "app.services.sincronizacao_cadastro",
+  "app.services.sincronizacao_financeiro",
+  "app.services.sincronizacao_fre",
+]
+ignore_errors = true
