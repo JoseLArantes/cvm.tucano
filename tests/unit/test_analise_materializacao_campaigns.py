@@ -638,6 +638,59 @@ def test_recuperar_chunks_materializacao_stale_preserva_itens_ja_concluidos(db_s
     assert chunk_atualizado.status == "stale"
 
 
+def test_materializar_analise_campanha_recupera_stale_inline_e_reenfileira(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+    chunk.status = "running"
+    chunk.lease_expires_at = datetime.now(UTC) - timedelta(seconds=120)
+    chunk.heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+    item.status = "running"
+    db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+
+    chunk_atualizado = db_session.get(AnaliseMaterializacaoChunkExecucao, chunk.id)
+    item_atualizado = db_session.get(AnaliseMaterializacaoCampanhaItem, item.id)
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "recovered_stale_and_requeued"
+    assert resultado["recovered_chunks"] == 1
+    assert resultado["recovered_items"] == 1
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
+    assert captured["queue"] == "analise_materializacao"
+    assert chunk_atualizado is not None
+    assert chunk_atualizado.status == "stale"
+    assert item_atualizado is not None
+    assert item_atualizado.status == "pending"
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["wait_reason"] == "STALE_CHUNK_RECOVERED"
+
+
 def test_reconciliar_materializacao_stale_task_reagenda_campanha(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,

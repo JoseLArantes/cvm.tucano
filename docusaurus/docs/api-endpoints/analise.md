@@ -228,6 +228,7 @@ Semântica importante:
 - a operação é limitada à campanha informada
 - a operação é idempotente do ponto de vista operacional: se nada estiver recuperável, a resposta será `noop`
 - a operação não modifica o gate e não altera limites de concorrência
+- o worker de campanha também tenta recuperar chunks stale inline antes de cair no estado de espera; o endpoint continua sendo o gatilho delegado suportado para API users
 
 ## `POST /analise/materializacoes/recuperacao/trigger`
 

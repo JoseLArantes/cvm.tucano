@@ -116,10 +116,10 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
     from app.services.analise import (
         _recalcular_materializacao_campanha,
         claim_materializacao_campanha_chunk,
-        contar_chunks_stale_campanha,
         obter_chunk_ativo_campanha,
         obter_chunks_stale_ativos,
         obter_estado_gate_materializacao,
+        recuperar_chunks_materializacao_stale,
     )
 
     db = SessionLocal()
@@ -146,6 +146,15 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
             }
         stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha_uuid))
         if stale_chunks > 0:
+            recuperacao = recuperar_chunks_materializacao_stale(db, campanha_id=campanha_uuid)
+            if recuperacao.recovered_chunks > 0:
+                _reagendar_campanha_materializacao(campanha_id, countdown=0)
+                return {
+                    "status": "recovered_stale_and_requeued",
+                    "campanha_id": campanha_id,
+                    "recovered_chunks": recuperacao.recovered_chunks,
+                    "recovered_items": recuperacao.recovered_items,
+                }
             campanha.status = "pending"
             campanha.summary = {
                 **(campanha.summary or {}),

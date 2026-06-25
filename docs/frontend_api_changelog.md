@@ -88,6 +88,7 @@ Campos adicionais do sweep global:
 
 - `PENDING_UNDISPATCHED` representa campanha pendente com itens pendentes, sem chunk ativo, sem execucao canônica `running` e sem bloqueio operacional explícito
 - `STALE_CHUNK` continua significando campanha com chunk stale ou recuperável
+- quando o worker de campanha encontra chunks stale ativos, ele tenta recuperar e reenfileirar inline antes de permanecer em espera operacional
 - a reativacao delegada nao ignora gate vermelho, nao ignora saturacao de slots e nao interrompe chunk vivo
 - o trigger global executa apenas uma varredura limitada, respeitando os limites configurados de sweep e reenfileiramento
 - o backend agora persiste o resumo do ultimo sweep automatico, usado pelo monitoramento
