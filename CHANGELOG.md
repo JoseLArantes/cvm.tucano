@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/JoseLArantes/cvm.tucano/compare/v1.0.1...v1.1.0) (2026-06-25)
+
+
+### Features
+
+* ingestion v2 and materializing improvements ([#3](https://github.com/JoseLArantes/cvm.tucano/issues/3)) ([75d09c6](https://github.com/JoseLArantes/cvm.tucano/commit/75d09c6b8743d35b20f63ece2fddb81c93d31081))
+
 ## [1.0.1](https://github.com/JoseLArantes/cvm.tucano/compare/v1.0.0...v1.0.1) (2026-06-17)
 
 
