@@ -17,6 +17,7 @@ def test_crud_usuarios_com_token_sistema(client: TestClient) -> None:
             "password": "senha-segura",
             "nome": "Analista",
             "is_admin": False,
+            "pode_operar_materializacao": True,
             "ativo": True,
         },
     )
@@ -31,11 +32,16 @@ def test_crud_usuarios_com_token_sistema(client: TestClient) -> None:
     obtido = client.get(f"/usuarios/{usuario_id}")
     assert obtido.status_code == 200
     assert obtido.json()["username"] == "analista"
+    assert obtido.json()["pode_operar_materializacao"] is True
 
-    atualizado = client.patch(f"/usuarios/{usuario_id}", json={"nome": "Analista CVM", "ativo": False})
+    atualizado = client.patch(
+        f"/usuarios/{usuario_id}",
+        json={"nome": "Analista CVM", "ativo": False, "pode_operar_materializacao": False},
+    )
     assert atualizado.status_code == 200
     assert atualizado.json()["nome"] == "Analista CVM"
     assert atualizado.json()["ativo"] is False
+    assert atualizado.json()["pode_operar_materializacao"] is False
 
     excluido = client.delete(f"/usuarios/{usuario_id}")
     assert excluido.status_code == 204
@@ -52,11 +58,18 @@ def test_usuario_admin_pode_gerenciar_usuarios(client: TestClient) -> None:
 
     resposta = client.post(
         "/usuarios",
-        json={"username": "operador", "password": "senha-operador", "nome": "Operador", "ativo": True},
+        json={
+            "username": "operador",
+            "password": "senha-operador",
+            "nome": "Operador",
+            "ativo": True,
+            "pode_operar_materializacao": True,
+        },
     )
 
     assert resposta.status_code == 201
     assert resposta.json()["username"] == "operador"
+    assert resposta.json()["pode_operar_materializacao"] is True
 
 
 def test_usuario_sem_admin_le_api_mas_nao_gerencia_usuarios(client: TestClient) -> None:

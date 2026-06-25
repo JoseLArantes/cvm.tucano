@@ -11,6 +11,7 @@ def _criar_usuario(
     username: str = "frontend-teste",
     password: str = "senha-teste",
     is_admin: bool = False,
+    pode_operar_materializacao: bool = False,
     ativo: bool = True,
 ) -> Usuario:
     usuario = Usuario(
@@ -18,6 +19,7 @@ def _criar_usuario(
         nome="Usuario Teste",
         senha_hash=gerar_hash_senha(password),
         is_admin=is_admin,
+        pode_operar_materializacao=pode_operar_materializacao,
         ativo=ativo,
     )
     db_session.add(usuario)
@@ -91,3 +93,14 @@ def test_me_retorna_usuario_logado(client: TestClient, db_session: Session) -> N
 
     assert resposta.status_code == 200
     assert resposta.json()["id"] == str(usuario.id)
+
+
+def test_me_retorna_permissao_operacional_materializacao(client: TestClient, db_session: Session) -> None:
+    _criar_usuario(db_session, pode_operar_materializacao=True)
+    login = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
+    client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+
+    resposta = client.get("/auth/me")
+
+    assert resposta.status_code == 200
+    assert resposta.json()["pode_operar_materializacao"] is True

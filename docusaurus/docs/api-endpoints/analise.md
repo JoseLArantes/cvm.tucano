@@ -199,8 +199,9 @@ Endpoint operacional delegado para reativar uma campanha específica sem exigir 
 
 Autenticação:
 
-- requer bearer token dedicado de operação de materialização
-- o token operacional não substitui o token geral da API para outros endpoints protegidos
+- aceita token de sistema (`TUCANO_CVM_TOKEN`)
+- aceita usuário com `is_admin=true`
+- aceita usuário com `pode_operar_materializacao=true`
 
 Estados tratados:
 
@@ -234,7 +235,9 @@ Executa um sweep limitado sobre campanhas pendentes para self-healing operaciona
 
 Autenticação:
 
-- requer o mesmo bearer token dedicado de operação de materialização
+- aceita token de sistema (`TUCANO_CVM_TOKEN`)
+- aceita usuário com `is_admin=true`
+- aceita usuário com `pode_operar_materializacao=true`
 
 Comportamento:
 

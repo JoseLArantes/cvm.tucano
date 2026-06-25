@@ -21,6 +21,10 @@ class UsuarioCriacao(BaseModel):
     password: str = Field(min_length=8, max_length=256, description="Senha inicial do usuario.")
     nome: str | None = Field(default=None, max_length=255, description="Nome de exibicao do usuario.")
     is_admin: bool = Field(default=False, description="Permite administrar usuarios.")
+    pode_operar_materializacao: bool = Field(
+        default=False,
+        description="Permite acionar reativacao e sweep operacional da materializacao analitica.",
+    )
     ativo: bool = Field(default=True, description="Permite login e uso do token.")
 
     @field_validator("username", mode="before")
@@ -42,6 +46,10 @@ class UsuarioAtualizacao(BaseModel):
     password: str | None = Field(default=None, min_length=8, max_length=256, description="Nova senha.")
     nome: str | None = Field(default=None, max_length=255, description="Novo nome de exibicao.")
     is_admin: bool | None = Field(default=None, description="Novo status administrativo.")
+    pode_operar_materializacao: bool | None = Field(
+        default=None,
+        description="Novo status de permissao operacional da materializacao analitica.",
+    )
     ativo: bool | None = Field(default=None, description="Novo status de ativacao.")
 
     @field_validator("username", mode="before")
@@ -59,6 +67,9 @@ class UsuarioResposta(BaseModel):
     username: str = Field(description="Identificador usado no login.")
     nome: str | None = Field(description="Nome de exibicao.")
     is_admin: bool = Field(description="Indica se o usuario pode administrar usuarios.")
+    pode_operar_materializacao: bool = Field(
+        description="Indica se o usuario pode acionar operacoes delegadas de recuperacao da materializacao analitica."
+    )
     ativo: bool = Field(description="Indica se login e tokens do usuario sao aceitos.")
     criado_em: BrazilianDateTime = Field(description="Data e hora de criacao, em `DD/MM/AAAA HH:MM:SS`.")
     alterado_em: BrazilianDateTime = Field(description="Data e hora da ultima alteracao, em `DD/MM/AAAA HH:MM:SS`.")

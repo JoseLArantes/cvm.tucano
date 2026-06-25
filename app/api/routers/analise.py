@@ -95,6 +95,20 @@ _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     },
 }
 
+_RESPOSTAS_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    401: {
+        "description": "Token ausente ou invalido.",
+        "content": {"application/json": {"example": {"detail": "Token de acesso invalido."}}},
+    },
+    403: {
+        "description": "Permissao operacional de materializacao requerida.",
+        "content": {
+            "application/json": {"example": {"detail": "Permissao de operacao de materializacao requerida."}}
+        },
+    },
+}
+
 
 def _obter_companhia_por_codigo_cvm_or_404(db: DbSession, codigo_cvm: int) -> Companhia:
     companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
@@ -717,13 +731,14 @@ def recuperar_materializacao_campanha_analitica(
     summary="Reativar Campanha de Materializacao",
     description=(
         "Classifica uma campanha pendente da materialização analítica e executa reativação operacional limitada. "
+        "A chamada exige token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`. "
         "A operação pode reenfileirar uma campanha presa sem chunk inicial ou recuperar chunks stale já detectados, "
         "mas não ignora gate vermelho nem saturação de slots. A resposta sempre traz `status`, `reason_code`, "
         "`affected_campaigns`, `requeued_campaigns`, `recovered_chunks`, `recovered_items`, "
         "`dispatcher_enqueued` e `triggered_at`, permitindo que o cliente diferencie retry efetivo de `noop` "
         "operacional."
     ),
-    responses=_RESPOSTAS_PADRAO,
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
     operation_id="reativarMaterializacaoCampanha",
 )
 def reativar_materializacao_campanha_analitica(
@@ -757,11 +772,12 @@ def reativar_materializacao_campanha_analitica(
     summary="Disparar Sweep de Recuperacao de Materializacao",
     description=(
         "Executa uma varredura operacional limitada sobre campanhas pendentes da materialização analítica, "
+        "exigindo token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`. "
         "reativando apenas campanhas elegíveis para self-healing e respeitando os limites configurados de batch. "
         "O sweep não força bypass de gate nem de concorrência; ele apenas recupera `STALE_CHUNK` e reenfileira "
         "`PENDING_UNDISPATCHED` maduros o suficiente para reativação automática."
     ),
-    responses=_RESPOSTAS_PADRAO,
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
     operation_id="triggerMaterializacaoRecoverySweep",
 )
 def trigger_recuperacao_materializacao_analitica(

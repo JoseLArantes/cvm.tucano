@@ -52,6 +52,7 @@ curl -X GET "http://localhost:8007/usuarios?ativo=true&pagina=1&tamanho_pagina=5
       "username": "admin",
       "nome": "Administrador",
       "is_admin": true,
+      "pode_operar_materializacao": true,
       "ativo": true,
       "criado_em": "2026-01-15T10:30:00Z",
       "alterado_em": "2026-01-15T10:30:00Z"
@@ -81,6 +82,7 @@ Cria um novo usuário para login na API.
   "password": "senha-segura-123",
   "nome": "Analista Financeiro",
   "is_admin": false,
+  "pode_operar_materializacao": true,
   "ativo": true
 }
 ```
@@ -91,6 +93,7 @@ Cria um novo usuário para login na API.
 | `password` | string | Sim | 8-256 caracteres | Senha inicial |
 | `nome` | string | Não | máx 255 chars | Nome de exibição |
 | `is_admin` | boolean | Não | padrão `false` | Permite administrar usuários |
+| `pode_operar_materializacao` | boolean | Não | padrão `false` | Permite reativar campanhas e disparar sweep operacional de materialização |
 | `ativo` | boolean | Não | padrão `true` | Permite login e uso de tokens |
 
 ### Response 201
@@ -103,6 +106,7 @@ Cria um novo usuário para login na API.
   "username": "analista",
   "nome": "Analista Financeiro",
   "is_admin": false,
+  "pode_operar_materializacao": true,
   "ativo": true,
   "criado_em": "2026-06-17T10:00:00Z",
   "alterado_em": "2026-06-17T10:00:00Z"
@@ -129,6 +133,7 @@ curl -X POST "http://localhost:8007/usuarios" \
     "password": "senha-segura-123",
     "nome": "Analista Financeiro",
     "is_admin": false,
+    "pode_operar_materializacao": true,
     "ativo": true
   }'
 ```
@@ -176,6 +181,7 @@ Atualiza dados, senha, status e perfil administrativo de um usuário.
 {
   "nome": "Novo Nome",
   "is_admin": false,
+  "pode_operar_materializacao": true,
   "ativo": true,
   "password": "nova-senha-segura",
   "username": "novo_username"
@@ -188,6 +194,7 @@ Atualiza dados, senha, status e perfil administrativo de um usuário.
 | `password` | string | 8-256 caracteres | Nova senha |
 | `nome` | string | máx 255 chars | Novo nome de exibição |
 | `is_admin` | boolean | - | Novo status administrativo |
+| `pode_operar_materializacao` | boolean | - | Nova permissão operacional de materialização |
 | `ativo` | boolean | - | Novo status de ativação |
 
 ### Response 200
@@ -252,6 +259,7 @@ curl -X DELETE "http://localhost:8007/usuarios/f4f6a9d8-..." \
 ### Para Administradores de Sistema
 
 - Crie usuários com `is_admin=false` para operadores e analistas
+- Use `pode_operar_materializacao=true` para delegar apenas a recuperação operacional da materialização
 - Use `ativo=false` para suspender acessos sem excluir o histórico
 - Mantenha um usuário administrativo de backup
 

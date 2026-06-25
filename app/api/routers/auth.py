@@ -26,6 +26,8 @@ Regras de autenticacao:
 - Usuario precisa existir e estar com `ativo=true`.
 - Token expira conforme `ACCESS_TOKEN_TTL_MINUTES`; valor padrao: 480 minutos.
 - Se o usuario for desativado depois do login, tokens ja emitidos deixam de ser aceitos.
+- O token herda as capacidades persistidas do usuario, incluindo `is_admin` e
+  `pode_operar_materializacao`.
 
 Falhas comuns:
 
@@ -90,7 +92,10 @@ def realizar_login(payload: LoginRequisicao, db: DbSession) -> LoginResposta:
     "/me",
     response_model=UsuarioResposta,
     summary="Obter Usuario Atual",
-    description="Retorna dados do usuario autenticado pelo token bearer.",
+    description=(
+        "Retorna dados do usuario autenticado pelo token bearer, incluindo capacidades persistidas como "
+        "`is_admin` e `pode_operar_materializacao`."
+    ),
     operation_id="obterUsuarioAtualAuth",
 )
 def obter_me(usuario: Annotated[Usuario, Depends(obter_usuario_atual)]) -> UsuarioResposta:

@@ -24,8 +24,25 @@ from app.services.analise import materializar_analise_companhia
 from app.worker.celery_app import celery_app
 
 
-def _ops_headers() -> dict[str, str]:
-    return {"Authorization": "Bearer token-materializacao-teste"}
+def _ops_headers(client: TestClient) -> dict[str, str]:
+    criado = client.post(
+        "/usuarios",
+        json={
+            "username": "operador-materializacao",
+            "password": "senha-operador",
+            "nome": "Operador Materializacao",
+            "is_admin": False,
+            "pode_operar_materializacao": True,
+            "ativo": True,
+        },
+    )
+    assert criado.status_code == 201
+    login = client.post(
+        "/auth/login",
+        json={"username": "operador-materializacao", "password": "senha-operador"},
+    )
+    assert login.status_code == 200
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
 def _doc(
@@ -1364,7 +1381,7 @@ def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, 
 
     resp = client.post(
         f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
-        headers=_ops_headers(),
+        headers=_ops_headers(client),
     )
 
     assert resp.status_code == 200
@@ -1384,7 +1401,7 @@ def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: Tes
 
     resp = client.post(
         "/analise/materializacoes/recuperacao/trigger",
-        headers=_ops_headers(),
+        headers=_ops_headers(client),
     )
 
     assert resp.status_code == 200
@@ -1396,7 +1413,7 @@ def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: Tes
     assert str(campanha.id) in payload["requeued_campaigns"]
 
 
-def test_analise_materializacoes_operador_endpoints_exigem_token_dedicado(
+def test_analise_materializacoes_operador_endpoints_exigem_permissao_de_usuario_ou_token_sistema(
     client: TestClient,
     db_session: Session,
 ) -> None:
@@ -1410,12 +1427,25 @@ def test_analise_materializacoes_operador_endpoints_exigem_token_dedicado(
     )
     assert com_token_invalido.status_code == 401
 
-    com_token_padrao = client.post(
+    com_token_sistema = client.post(
         f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
         headers={"Authorization": "Bearer token-teste"},
     )
-    assert com_token_padrao.status_code == 403
-    assert com_token_padrao.json()["detail"] == "Permissao de operacao de materializacao requerida."
+    assert com_token_sistema.status_code == 200
+
+    criado = client.post(
+        "/usuarios",
+        json={"username": "leitor", "password": "senha-leitor", "nome": "Leitor", "ativo": True},
+    )
+    assert criado.status_code == 201
+    login = client.post("/auth/login", json={"username": "leitor", "password": "senha-leitor"})
+    assert login.status_code == 200
+    com_usuario_sem_permissao = client.post(
+        f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert com_usuario_sem_permissao.status_code == 403
+    assert com_usuario_sem_permissao.json()["detail"] == "Permissao de operacao de materializacao requerida."
 
 
 def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> None:

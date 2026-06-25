@@ -1,5 +1,43 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-25 - Autorizacao consistente para operacoes delegadas de materializacao
+
+### Endpoints impactados
+
+- `GET /auth/me`
+- `GET /usuarios`
+- `GET /usuarios/{usuario_id}`
+- `POST /usuarios`
+- `PATCH /usuarios/{usuario_id}`
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+- `POST /analise/materializacoes/recuperacao/trigger`
+
+### Mudanca de autorizacao
+
+- os endpoints delegados de recuperacao da materializacao deixam de usar token dedicado
+- a autorizacao agora aceita:
+  - token de sistema
+  - usuario com `is_admin=true`
+  - usuario com `pode_operar_materializacao=true`
+
+### Campos novos em contratos de usuario
+
+- `pode_operar_materializacao` em:
+  - `GET /auth/me`
+  - itens de `GET /usuarios`
+  - `GET /usuarios/{usuario_id}`
+  - resposta de `POST /usuarios`
+  - resposta de `PATCH /usuarios/{usuario_id}`
+  - payloads de `POST /usuarios`
+  - payloads de `PATCH /usuarios/{usuario_id}`
+
+### Impacto esperado no frontend
+
+- telas administrativas podem conceder ou revogar a capacidade operacional de materializacao sem promover o usuario a admin
+- o frontend pode usar `GET /auth/me` para habilitar ou ocultar acoes de reativacao e sweep sem depender de configuracao externa
+- clientes que usavam token dedicado para os endpoints delegados devem migrar para login de usuario ou token de sistema
+- `is_admin` continua implicando acesso operacional, mas a UI nao precisa mais acoplar retry de materializacao a perfil administrativo amplo
+
 ## 2026-06-25 - Self-healing delegado para materializacao presa
 
 ### Endpoints novos
@@ -9,8 +47,8 @@
 
 ### Modelo de autenticacao
 
-- os endpoints acima usam bearer token dedicado de operacao de materializacao
-- esse token operacional nao substitui o token geral da API para os demais endpoints protegidos
+- os endpoints acima usam o mesmo modelo geral da API
+- autorizacao valida token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`
 
 ### Campos novos em `/analise/materializacoes/monitoramento`
 

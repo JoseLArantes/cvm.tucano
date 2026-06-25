@@ -98,6 +98,9 @@ class UsuarioResposta(BaseModel):
     username: str = Field(description="Identificador usado no login.")
     nome: Optional[str] = Field(description="Nome de exibição.")
     is_admin: bool = Field(description="Indica se pode administrar usuários.")
+    pode_operar_materializacao: bool = Field(
+        description="Indica se pode acionar operações delegadas de recuperação da materialização analítica."
+    )
     ativo: bool = Field(description="Indica se login e tokens são aceitos.")
     criado_em: datetime = Field(description="Timestamp de criação (UTC).")
     alterado_em: datetime = Field(description="Timestamp da última alteração (UTC).")
@@ -111,6 +114,7 @@ class UsuarioResposta(BaseModel):
   "username": "admin",
   "nome": "Administrador",
   "is_admin": true,
+  "pode_operar_materializacao": true,
   "ativo": true,
   "criado_em": "2026-01-15T10:30:00Z",
   "alterado_em": "2026-01-15T10:30:00Z"
@@ -147,6 +151,10 @@ class UsuarioCriacao(BaseModel):
         default=False,
         description="Permite administrar usuários."
     )
+    pode_operar_materializacao: bool = Field(
+        default=False,
+        description="Permite acionar reativação e sweep operacional da materialização analítica."
+    )
     ativo: bool = Field(
         default=True,
         description="Permite login e uso do token."
@@ -161,6 +169,7 @@ class UsuarioCriacao(BaseModel):
   "password": "senha-segura-123",
   "nome": "Analista Financeiro",
   "is_admin": false,
+  "pode_operar_materializacao": true,
   "ativo": true
 }
 ```
@@ -199,6 +208,9 @@ class UsuarioAtualizacao(BaseModel):
     is_admin: Optional[bool] = Field(
         description="Novo status administrativo."
     )
+    pode_operar_materializacao: Optional[bool] = Field(
+        description="Novo status de permissão operacional da materialização analítica."
+    )
     ativo: Optional[bool] = Field(
         description="Novo status de ativação."
     )
@@ -210,6 +222,7 @@ class UsuarioAtualizacao(BaseModel):
 {
   "nome": "Novo Nome",
   "is_admin": false,
+  "pode_operar_materializacao": true,
   "ativo": true
 }
 ```
@@ -238,6 +251,7 @@ class ListaUsuariosResposta(BaseModel):
       "username": "admin",
       "nome": "Administrador",
       "is_admin": true,
+      "pode_operar_materializacao": true,
       "ativo": true,
       "criado_em": "2026-01-15T10:30:00Z",
       "alterado_em": "2026-01-15T10:30:00Z"

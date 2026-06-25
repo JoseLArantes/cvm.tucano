@@ -34,6 +34,7 @@ Autentica um usuário cadastrado e emite um token temporário.
 - O usuário precisa existir e estar com `ativo=true`
 - O token expira conforme `ACCESS_TOKEN_TTL_MINUTES` (padrão: **480 minutos = 8 horas**)
 - Se o usuário for desativado **depois** do login, tokens já emitidos deixam de ser aceitos
+- O token reflete as capacidades persistidas do usuário, incluindo `is_admin` e `pode_operar_materializacao`
 
 ### Request Body
 
@@ -139,6 +140,7 @@ Authorization: Bearer <access_token>
   "username": "admin",
   "nome": "Administrador",
   "is_admin": true,
+  "pode_operar_materializacao": true,
   "ativo": true,
   "criado_em": "2026-01-15T10:30:00Z",
   "alterado_em": "2026-01-15T10:30:00Z"
@@ -151,6 +153,7 @@ Authorization: Bearer <access_token>
 | `username` | string | Identificador usado no login |
 | `nome` | string \| null | Nome de exibição |
 | `is_admin` | boolean | Indica se pode administrar outros usuários |
+| `pode_operar_materializacao` | boolean | Indica se pode acionar recuperação delegada da materialização analítica |
 | `ativo` | boolean | Indica se login e tokens são aceitos |
 | `criado_em` | datetime (ISO 8601) | Timestamp de criação |
 | `alterado_em` | datetime (ISO 8601) | Timestamp da última alteração |
@@ -181,6 +184,8 @@ curl -X POST "http://localhost:8007/usuarios" \
 ```
 
 Após isso, o administrador pode criar outros usuários via `POST /usuarios`.
+
+Para delegar apenas a operação de recuperação da materialização sem conceder perfil administrativo amplo, crie ou atualize o usuário com `pode_operar_materializacao=true`.
 
 ---
 

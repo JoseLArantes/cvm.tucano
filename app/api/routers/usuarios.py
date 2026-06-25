@@ -32,6 +32,17 @@ _RESPOSTAS_USUARIOS: dict[int | str, dict[str, Any]] = {
     },
 }
 
+_DESCRICAO_USUARIO_CRIACAO = (
+    "Cria usuario para login na API. O campo `pode_operar_materializacao` delega apenas as operacoes "
+    "de reativacao e sweep da materializacao analitica. Ele nao concede acesso administrativo amplo."
+)
+
+_DESCRICAO_USUARIO_ATUALIZACAO = (
+    "Atualiza dados, senha, status, perfil administrativo e permissao operacional de materializacao de usuario. "
+    "O campo `pode_operar_materializacao` controla o acesso aos endpoints delegados de recuperacao "
+    "de materializacao sem promover o usuario a admin."
+)
+
 
 def _buscar_usuario_ou_404(db: DbSession, usuario_id: uuid.UUID) -> Usuario:
     usuario = db.get(Usuario, usuario_id)
@@ -101,7 +112,7 @@ def listar_usuarios(
     response_model=UsuarioResposta,
     status_code=status.HTTP_201_CREATED,
     summary="Criar Usuario",
-    description="Cria usuario para login na API.",
+    description=_DESCRICAO_USUARIO_CRIACAO,
     responses=_RESPOSTAS_USUARIOS,
     operation_id="criarUsuario",
 )
@@ -118,6 +129,7 @@ def criar_usuario(
         nome=payload.nome,
         senha_hash=gerar_hash_senha(payload.password),
         is_admin=payload.is_admin,
+        pode_operar_materializacao=payload.pode_operar_materializacao,
         ativo=payload.ativo,
     )
     db.add(usuario)
@@ -146,7 +158,7 @@ def obter_usuario(
     "/{usuario_id}",
     response_model=UsuarioResposta,
     summary="Atualizar Usuario",
-    description="Atualiza dados, senha, status e perfil administrativo de usuario.",
+    description=_DESCRICAO_USUARIO_ATUALIZACAO,
     responses=_RESPOSTAS_USUARIOS,
     operation_id="atualizarUsuario",
 )
@@ -172,6 +184,8 @@ def atualizar_usuario(
         usuario.is_admin = payload.is_admin
     elif payload.is_admin is not None:
         usuario.is_admin = payload.is_admin
+    if payload.pode_operar_materializacao is not None:
+        usuario.pode_operar_materializacao = payload.pode_operar_materializacao
     if payload.ativo is not None and usuario.ativo and not payload.ativo:
         _garantir_admin_remanescente(db, usuario)
         usuario.ativo = payload.ativo

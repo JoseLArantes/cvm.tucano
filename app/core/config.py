@@ -32,10 +32,6 @@ class Settings(BaseSettings):
     )
     access_token_ttl_minutes: int = Field(default=480, gt=0, alias="ACCESS_TOKEN_TTL_MINUTES")
     admin_token: str = Field(default="trocar-token", alias="ADMIN_TOKEN")
-    materializacao_operations_token: str = Field(
-        default="trocar-token-materializacao",
-        alias="MATERIALIZACAO_OPERATIONS_TOKEN",
-    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     ambiente: str = Field(default="desenvolvimento", alias="AMBIENTE")
     enable_prometheus_metrics: bool = Field(default=False, alias="ENABLE_PROMETHEUS_METRICS")
