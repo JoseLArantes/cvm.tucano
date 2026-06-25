@@ -57,6 +57,7 @@ const sidebars = {
         'api-endpoints/ipe',
         'api-endpoints/vlmo',
         'api-endpoints/cgvn',
+        'api-endpoints/updates',
       ],
     },
     {
@@ -68,6 +69,7 @@ const sidebars = {
         'ingestion/monitoring',
         'ingestion/quarantine',
         'ingestion/identity',
+        'ingestion/updates-service',
       ],
     },
     {

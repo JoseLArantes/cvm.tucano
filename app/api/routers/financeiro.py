@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDate, Paginacao
 from app.schemas.financeiro import (
     ComposicaoCapitalResposta,
     DemonstracaoFinanceiraResposta,
@@ -40,12 +40,12 @@ ParametroCnpj = Annotated[
 ]
 ParametroCodigoCvm = Annotated[int | None, Query(description="Código CVM da companhia.", examples=[25224])]
 ParametroDataInicio = Annotated[
-    date | None,
-    Query(description="Data inicial de referência no formato ISO (YYYY-MM-DD).", examples=["2025-01-01"]),
+    BrazilianDate | None,
+    Query(description="Data inicial de referência no formato brasileiro (DD/MM/AAAA).", examples=["01/01/2025"]),
 ]
 ParametroDataFim = Annotated[
-    date | None,
-    Query(description="Data final de referência no formato ISO (YYYY-MM-DD).", examples=["2025-12-31"]),
+    BrazilianDate | None,
+    Query(description="Data final de referência no formato brasileiro (DD/MM/AAAA).", examples=["31/12/2025"]),
 ]
 ParametroAnoOrigem = Annotated[int | None, Query(description="Ano do ZIP de origem.", examples=[2025])]
 ParametroAnoInicio = Annotated[int | None, Query(description="Ano inicial do ZIP/dados de origem.", examples=[2010])]
@@ -691,7 +691,9 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
             f"para o formulário {tipo_formulario}. "
             "Suporta filtros por companhia, período, versão, ano de origem e código da conta. "
             "Nos retornos financeiros, `valor_conta` já representa o montante monetário absoluto após aplicação "
-            "de `escala_moeda`; `valor_conta_reportado` preserva o número bruto informado pela CVM."
+            "de `escala_moeda`; `valor_conta_reportado` preserva o número bruto informado pela CVM. "
+            "Ambos são serializados como strings decimais canônicas, sem separadores de milhares e sem localização pt-BR. "
+            "No CSV estruturado da CVM, o separador decimal aceito é `.` e a escala monetária vem exclusivamente da coluna `ESCALA_MOEDA`."
         ),
         responses=_RESPOSTAS_PADRAO,
         operation_id=(f"listar{tipo_formulario.title()}{tipo_demonstracao.title().replace('_', '')}{escopo.title()}"),

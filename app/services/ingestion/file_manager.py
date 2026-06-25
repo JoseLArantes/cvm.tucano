@@ -2,10 +2,25 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import sys
 import zipfile
 from pathlib import Path
 
 import httpx
+
+
+# Aumentar o limite de tamanho do campo do parser de CSV para lidar com os longos campos de texto da CVM (ex: FRE)
+def _setup_csv_limit() -> None:
+    max_int = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(max_int)
+            break
+        except OverflowError:
+            max_int = int(max_int / 10)
+
+
+_setup_csv_limit()
 
 DEFAULT_CSV_DELIMITER = ";"
 

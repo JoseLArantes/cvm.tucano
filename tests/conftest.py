@@ -13,7 +13,7 @@ os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
 from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
-from app.models import companhia, fca, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
+from app.models import analise, companhia, fca, financeiro, fre, ingestion, sincronizacao, usuario  # noqa: F401
 from app.worker.celery_app import celery_app
 
 # Unit tests must not depend on an external Redis broker/backend.

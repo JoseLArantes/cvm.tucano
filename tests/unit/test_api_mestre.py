@@ -240,8 +240,8 @@ def test_endpoint_mestre_unifica_respostas(client: TestClient, db_session: Sessi
     assert payload["demonstracoes"]["dfp_demonstracao_resultado_consolidado"]["paginacao"]["total"] == 1
     assert payload["demonstracoes"]["itr_demonstracao_resultado_individual"]["paginacao"]["total"] == 1
     itr_demo = payload["demonstracoes"]["itr_demonstracao_resultado_individual"]["dados"][0]
-    assert itr_demo["valor_conta"] == 740500000.0
-    assert itr_demo["valor_conta_reportado"] == 740500.0
+    assert itr_demo["valor_conta"] == "740500000"
+    assert itr_demo["valor_conta_reportado"] == "740500"
     assert itr_demo["fator_escala_moeda"] == 1000
     assert payload["fre_documentos"]["paginacao"]["total"] == 1
     assert payload["ipe_documentos"]["paginacao"]["total"] == 1

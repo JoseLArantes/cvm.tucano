@@ -797,6 +797,7 @@ def _seed_fre(db: Session, companhia_id: UUID) -> None:
             id_documento=123,
             nome_companhia="EMPRESA A",
             id_plano_recompra=1,
+            especie_acao="Preferencial",
             tipo_classe_acao_preferencial="PN A",
             quantidade_acoes_adquiridas=Decimal("50"),
             arquivo_origem="fre_cia_aberta_plano_recompra_classe_acao_2025.csv",
@@ -928,15 +929,6 @@ def test_endpoints_fre_mvp(client: TestClient, db_session: Session) -> None:
     assert client.get("/fre/acoes-entregues?orgao_administracao=Conselho").json()["paginacao"]["total"] == 1
     assert client.get("/fre/acoes-entregues?orgao_administracao=Inexistente").json()["paginacao"]["total"] == 0
 
-    # Phase 2 Endpoints
-    assert client.get("/fre/capital-social/aumentos?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/capital-social/aumentos-classes-acoes?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/capital-social/desdobramentos?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/capital-social/desdobramentos-classes-acoes?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/capital-social/reducoes?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/capital-social/reducoes-classes-acoes?id_capital_social=1").json()["paginacao"]["total"] == 1
-    assert client.get("/fre/direitos-acoes?versao=1").json()["paginacao"]["total"] == 1
-
     # Phase 3 Endpoints
     assert client.get("/fre/volume-valor-mobiliario?versao=1").json()["paginacao"]["total"] == 1
     assert client.get("/fre/outro-valor-mobiliario?versao=1").json()["paginacao"]["total"] == 1
@@ -962,6 +954,35 @@ def test_endpoints_fre_mvp(client: TestClient, db_session: Session) -> None:
 
     # Test invalid order field returns 422
     assert client.get("/fre/responsaveis?ordenar_por=invalid_field").status_code == 422
+
+
+def test_endpoints_fre_phase_2_discontinued_members_are_removed(client: TestClient) -> None:
+    urls = [
+        "/fre/capital-social/aumentos",
+        "/fre/capital-social/aumentos-classes-acoes",
+        "/fre/capital-social/reducoes",
+        "/fre/capital-social/reducoes-classes-acoes",
+        "/fre/capital-social/desdobramentos",
+        "/fre/capital-social/desdobramentos-classes-acoes",
+        "/fre/direitos-acoes",
+    ]
+    for url in urls:
+        response = client.get(url)
+        assert response.status_code == 404
+
+
+def test_openapi_does_not_expose_removed_fre_phase_2_endpoints(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    paths = response.json()["paths"]
+
+    assert "/fre/capital-social/aumentos" not in paths
+    assert "/fre/capital-social/aumentos-classes-acoes" not in paths
+    assert "/fre/capital-social/desdobramentos" not in paths
+    assert "/fre/capital-social/desdobramentos-classes-acoes" not in paths
+    assert "/fre/capital-social/reducoes" not in paths
+    assert "/fre/capital-social/reducoes-classes-acoes" not in paths
+    assert "/fre/direitos-acoes" not in paths
 
 
 def test_endpoints_fre_new_employee_and_sociedade_datasets(client: TestClient, db_session: Session) -> None:

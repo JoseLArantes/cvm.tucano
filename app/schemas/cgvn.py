@@ -1,9 +1,8 @@
 import uuid
-from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao, PeriodicModel
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, Paginacao, PeriodicModel
 
 
 class CgvnDocumentoResposta(PeriodicModel):
@@ -14,10 +13,10 @@ class CgvnDocumentoResposta(PeriodicModel):
     cnpj_companhia: str | None
     codigo_cvm: int | None
     nome_companhia: str | None
-    data_referencia: date
-    data_entrega: date
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
+    data_referencia: BrazilianDate
+    data_entrega: BrazilianDate
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
     id_documento: int
     versao: int
     link_download: str | None
@@ -26,9 +25,9 @@ class CgvnDocumentoResposta(PeriodicModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaCgvnDocumentosResposta(BaseModel):
@@ -43,7 +42,7 @@ class CgvnPraticaResposta(PeriodicModel):
     companhia_id: uuid.UUID | None
     cnpj_companhia: str | None
     nome_companhia: str | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     id_documento: int
     versao: int
     id_item: str
@@ -55,9 +54,9 @@ class CgvnPraticaResposta(PeriodicModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaCgvnPraticasResposta(BaseModel):

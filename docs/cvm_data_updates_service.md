@@ -206,7 +206,30 @@ Tracks which specific members within a ZIP have changes.
 | `is_required` | Boolean | YES | Whether member is required per source_registry |
 | `status` | String(32) | NO | Member analysis status |
 
-#### 5.1.3 `update_session` (User Session Tracking)
+#### 5.1.3 `update_scan_run` (Persisted Scanner Summary)
+
+Tracks every scanner execution, including artifacts that did not change.
+
+| Column | Type | Nullable | Description |
+|---|---|---|---|
+| `id` | UUID | NO | Primary key |
+| `status` | String(32) | NO | `queued`, `running`, `completed`, `failed` |
+| `started_at` | DateTime | YES | When the worker started processing this scan run |
+| `finished_at` | DateTime | YES | When the summary was finalized |
+| `summary` | JSON | YES | Full per-source/per-year summary of artifact and member decisions |
+| `created_at` | DateTime | NO | Record creation timestamp |
+| `updated_at` | DateTime | NO | Last update timestamp |
+
+The `summary` field is the new operator-facing control plane for scans. It includes:
+
+- artifact decision per source/year: `changed`, `unchanged`, `unknown`, `error`
+- decision reason explaining whether the scan stopped at the artifact or advanced
+- `member_scan.analyzed=false` with `stop_reason=artifact_unchanged` when the ZIP/CSV itself did not change
+- `member_scan.analyzed=true` with `changed_members`, `unchanged_members`, counters and per-member details when the artifact changed
+
+This ensures the user can see not only what changed, but also what was checked and remained unchanged.
+
+#### 5.1.4 `update_session` (User Session Tracking)
 
 Tracks user sessions for the "update available" view.
 
@@ -219,7 +242,7 @@ Tracks user sessions for the "update available" view.
 | `expires_at` | DateTime | NO | Session expiration |
 | `status` | String(32) | NO | 'active', 'expired' |
 
-#### 5.1.4 `update_session_item` (Session Contents)
+#### 5.1.5 `update_session_item` (Session Contents)
 
 Items in a user's update session.
 
@@ -273,32 +296,26 @@ Items in a user's update session.
 │                                                                      │
 │  2. For each source/year combination:                             │
 │     ┌─────────────────────────────────────────────────────────┐  │
-│     │  2.1 Check if already have pending_update in                │  │
-│     │     status ∈ [change_detected, analyzing, ready_for_       │  │
-│     │                ingestion]                                  │  │
-│     │     └─ If YES: Skip (already being processed)             │  │
-│     │     └─ If NO: Continue                                    │  │
-│     │                                                             │  │
-│     │  2.2 Perform HTTP HEAD on artifact URL                   │  │
-│     │     └─ If HTTP error: Log and continue                    │  │
-│     │     └─ If success: Extract ETag, Last-Modified,           │  │
-│     │        Content-Length                                    │  │
-│     │                                                             │  │
-│     │  2.3 Query last SourceArtifactSnapshot for this          │  │
-│     │     source/year                                           │  │
-│     │     └─ If exists AND metadata matches:                    │  │
-│     │        • No change detected                              │  │
-│     │        • Update last_probe_timestamp                      │  │
-│     │        • Continue to next source/year                    │  │
-│     │     └─ If NO snapshot OR metadata differs:                │  │
-│     │        • Change detected!                               │  │
-│     │        • Create/update pending_update record              │  │
-│     │        • status = 'change_detected'                      │  │
-│     │        • Store probe metadata                            │  │
+│     │  2.1 Probe artifact metadata                            │  │
+│     │     └─ ZIP sources: remote probe on yearly ZIP          │  │
+│     │     └─ cadastro: evaluate both CSV files as one scope   │  │
+│     │                                                         │  │
+│     │  2.2 Persist artifact decision in update_scan_run       │  │
+│     │     └─ `unchanged`: stop here and record                │  │
+│     │        member_scan.analyzed = false                     │  │
+│     │     └─ `unknown`: stop here and record                  │  │
+│     │        member_scan.analyzed = false                     │  │
+│     │     └─ `changed`: continue                              │  │
+│     │                                                         │  │
+│     │  2.3 Only confirmed `changed` creates/refreshes         │  │
+│     │      pending_update                                     │  │
+│     │     └─ `download_required` alone is NOT enough          │  │
+│     │     └─ stale false positives can be marked `stale`      │  │
 │     └─────────────────────────────────────────────────────────┘  │
 │                                                                      │
-│  3. Queue deep analysis for all new change_detected records       │
-│     (or run immediately if configured to do so)                  │
+│  3. For confirmed changed artifacts, run member analysis and       │
+│     record changed and unchanged internal files in the same        │
+│     persisted summary                                              │
 │                                                                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -481,7 +498,9 @@ Base path: `/api/updates`
 | Method | Endpoint | Description | Auth |
 |---|---|---|---|
 | `GET` | `/scanner/status` | Get scanner status and last run info | No |
-| `POST` | `/scanner/run` | Manually trigger scanner (admin) | Yes |
+| `POST` | `/scanner/run` | Manually trigger scanner and create a persisted scan summary run | Yes |
+| `GET` | `/scanner/runs/latest` | Get the most recent persisted scanner run summary | Yes |
+| `GET` | `/scanner/runs/{id}` | Get one persisted scanner run summary by UUID | Yes |
 | `GET` | `/scanner/history` | Get scanner execution history | Yes |
 
 #### 7.1.2 Pending Updates
@@ -512,7 +531,64 @@ Base path: `/api/updates`
 | Method | Endpoint | Description | Auth |
 |---|---|---|---|
 | `GET` | `/summary` | Get summary statistics (total pending, by source, etc.) | Yes |
-| `POST` | `/refresh-all` | Force refresh all sources | Yes (admin) |
+| `POST` | `/refresh-all` | Force refresh all sources and create a persisted scan summary run | Yes (admin) |
+
+Scanner summary contract:
+
+- `POST /scanner/run` and `POST /refresh-all` return `scan_run_id`
+- frontend should poll `GET /scanner/runs/{id}`
+- `summary.items[]` is the canonical list of everything the scan touched
+- unchanged artifacts are first-class results and must be shown to the user
+- changed artifacts include `member_scan.changed_members` and `member_scan.unchanged_members`
+- when `member_scan.analyzed=false`, the frontend should render `member_scan.stop_reason` so the operator can see whether the scan stopped because the artifact was unchanged, the probe was inconclusive, or the remote probe itself failed
+
+Example persisted scanner summary:
+
+```json
+{
+  "id": "f2f8d148-5b7f-4f44-8bbf-8f0ccf37a6a0",
+  "status": "completed",
+  "summary": {
+    "scanned_scopes": 2,
+    "detected_count": 1,
+    "unchanged_count": 1,
+    "changed_count": 1,
+    "inconclusive_count": 0,
+    "error_count": 0,
+    "items": [
+      {
+        "fonte": "dfp",
+        "ano": 2025,
+        "artifact_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip",
+        "artifact_decision": "unchanged",
+        "decision_reason": "metadata_matched:resource_etag",
+        "member_scan": {
+          "analyzed": false,
+          "stop_reason": "artifact_unchanged"
+        }
+      },
+      {
+        "fonte": "itr",
+        "ano": 2025,
+        "artifact_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/ITR/DADOS/itr_cia_aberta_2025.zip",
+        "artifact_decision": "changed",
+        "decision_reason": "metadata_changed:resource_etag",
+        "member_scan": {
+          "analyzed": true,
+          "changed_members": [
+            "itr_cia_aberta_DRE_ind_2025.csv"
+          ],
+          "unchanged_members": [
+            "itr_cia_aberta_2025.csv"
+          ],
+          "changed_count": 1,
+          "unchanged_count": 1
+        }
+      }
+    ]
+  }
+}
+```
 
 ### 7.2 CLI Commands
 

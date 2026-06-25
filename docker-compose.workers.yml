@@ -1,13 +1,26 @@
 services:
   cvm_worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q celery
     env_file:
       - .env
     volumes:
       - .:/app
     deploy:
       replicas: ${WORKER_REPLICAS:-4}
+    depends_on:
+      cvm_redis:
+        condition: service_healthy
+
+  cvm_analise_materializacao_worker:
+    build: .
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q analise_materializacao
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    deploy:
+      replicas: ${ANALISE_MATERIALIZACAO_WORKER_REPLICAS:-2}
     depends_on:
       cvm_redis:
         condition: service_healthy

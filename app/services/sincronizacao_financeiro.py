@@ -15,7 +15,7 @@ from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
-from app.services.financeiro_valores import normalizar_decimal_financeiro
+from app.services.financeiro_valores import normalizar_decimal_financeiro, validar_escala_moeda
 from app.services.normalizacao import (
     gerar_hash_canonico,
     normalizar_cnpj,
@@ -197,7 +197,7 @@ def _normalizar_demonstracao(
         "denominacao_companhia": normalizar_texto(linha.get("DENOM_CIA")),
         "grupo_demonstracao": normalizar_texto(linha.get("GRUPO_DFP")),
         "moeda": normalizar_texto(linha.get("MOEDA")),
-        "escala_moeda": normalizar_texto(linha.get("ESCALA_MOEDA")),
+        "escala_moeda": validar_escala_moeda(linha.get("ESCALA_MOEDA")),
         "ordem_exercicio": normalizar_texto(linha.get("ORDEM_EXERC")),
         "data_inicio_exercicio": normalizar_data(linha.get("DT_INI_EXERC")),
         "data_fim_exercicio": normalizar_data(linha.get("DT_FIM_EXERC")),

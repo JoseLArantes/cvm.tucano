@@ -48,6 +48,24 @@ worker:
     - --loglevel=info
     - --concurrency=1
     - -Ofair
+    - -Q
+    - celery
+  resources: {}
+  podAnnotations: {}
+
+materializationWorker:
+  enabled: true
+  replicaCount: 2
+  command:
+    - celery
+    - -A
+    - app.worker.celery_app
+    - worker
+    - --loglevel=info
+    - --concurrency=1
+    - -Ofair
+    - -Q
+    - analise_materializacao
   resources: {}
   podAnnotations: {}
 
@@ -79,6 +97,10 @@ env:
   INGESTION_MAX_RETRIES: "5"
   INGESTION_RETRY_BACKOFF_MAX_SECONDS: "600"
   INGESTION_COMPANY_MISSING_MAX_RATIO: "0.01"
+  ANALISE_MATERIALIZACAO_CHUNK_SIZE: "25"
+  ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS: "1"
+  ANALISE_MATERIALIZACAO_QUEUE_NAME: "analise_materializacao"
+  ANALISE_MATERIALIZACAO_DEDUP_WINDOW_SECONDS: "0"
   INGESTION_STAGE_BATCH_SIZE: "5000"
   INGESTION_PROMOTE_BATCH_SIZE: "5000"
   STORAGE_DIR: "data/storage"

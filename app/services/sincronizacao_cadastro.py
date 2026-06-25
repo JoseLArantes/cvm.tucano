@@ -166,9 +166,18 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
             agora = _agora()
             if existente is None:
                 companhia = Companhia(**normalizada, criado_em=agora, sincronizado_em=agora, alterado_em=agora)
-                db.add(companhia)
-                inseridos += 1
-                continue
+                from sqlalchemy.exc import IntegrityError
+                try:
+                    with db.begin_nested():
+                        db.add(companhia)
+                        db.flush()
+                    inseridos += 1
+                    continue
+                except IntegrityError:
+                    # Concorrentemente inserido! Recuperamos o existente e seguimos para atualização
+                    existente = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
+                    if existente is None:
+                        raise
 
             alteracoes: dict[str, tuple[Any, Any]] = {}
             for campo in _CAMPOS_NEGOCIO_COMPANHIA:

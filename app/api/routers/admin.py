@@ -1478,6 +1478,8 @@ def detalhar_ingestion_run(
     summary="Listar Quarentena de Ingestion",
     description=(
         "Lista paginada da fila de reparo da quarentena.\n\n"
+        "Quando o parâmetro `status` não é enviado, o endpoint retorna apenas itens `pendente`, "
+        "ou seja, a fila aberta de reparo. Para consultar histórico completo, envie `status=all`.\n\n"
         "Os filtros antigos/atuais suportam `motivo_codigo`; o frontend deve tratar `motivo_codigo`, `status`, "
         "`reparavel` e `tentativas_reprocessamento` como colunas de primeira classe. "
         "A quarentena representa exceções reais de linha; falhas de schema em nível de membro não são mais expandidas "
@@ -1507,7 +1509,10 @@ def listar_ingestion_quarentena(
     tamanho_pagina: Annotated[int, Query(ge=1, le=500, description="Quantidade de registros por página.")] = 100,
     motivo_codigo: Annotated[str | None, Query(description="Filtrar itens pelo código estável do motivo de rejeição.")] = None,
     arquivo_origem: Annotated[str | None, Query(description="Filtrar itens pelo nome do arquivo de origem.")] = None,
-    status: Annotated[str | None, Query(description="Filtrar itens pelo status operacional.")] = None,
+    status: Annotated[
+        str | None,
+        Query(description="Filtrar itens pelo status operacional. Padrão implícito: `pendente`. Use `all` para não filtrar por status.")
+    ] = None,
     ano_origem: Annotated[int | None, Query(description="Filtrar itens pelo ano de origem.")] = None,
 ) -> ListaQuarantineItems:
     offset = (pagina - 1) * tamanho_pagina
@@ -1519,9 +1524,15 @@ def listar_ingestion_quarentena(
     if arquivo_origem:
         query = query.where(QuarantineItem.arquivo_origem == arquivo_origem)
         query_total = query_total.where(QuarantineItem.arquivo_origem == arquivo_origem)
-    if status:
-        query = query.where(QuarantineItem.status == status)
-        query_total = query_total.where(QuarantineItem.status == status)
+    status_filter = status
+    if status_filter is None:
+        status_filter = "pendente"
+    elif status_filter == "all" or status_filter == "":
+        status_filter = None
+
+    if status_filter:
+        query = query.where(QuarantineItem.status == status_filter)
+        query_total = query_total.where(QuarantineItem.status == status_filter)
     if ano_origem is not None:
         query = query.where(QuarantineItem.ano_origem == ano_origem)
         query_total = query_total.where(QuarantineItem.ano_origem == ano_origem)
@@ -1561,6 +1572,8 @@ def listar_ingestion_quarentena(
     summary="Resumo Analítico da Quarentena",
     description=(
         "Retorna métricas agregadas e consolidadas de erros na quarentena. "
+        "Quando o parâmetro `status` não é enviado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` "
+        "consideram apenas itens `pendente`. Para histórico completo, envie `status=all`. "
         "O retorno inclui o total geral absoluto de erros, distribuição por status "
         "(pendente, resolvido, etc.), ranking de erros por tipo de motivo (motivo_codigo), "
         "ranking de arquivos de origem mais afetados, e agrupamentos detalhados cruzando "
@@ -1576,27 +1589,35 @@ def listar_ingestion_quarentena(
 def obter_resumo_quarentena(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
-    status: Annotated[str | None, Query(description="Filtrar resumo por status específico da fila de reparo.")] = None,
+    status: Annotated[
+        str | None,
+        Query(description="Filtrar resumo por status específico da fila de reparo. Padrão implícito: `pendente`. Use `all` para não filtrar por status.")
+    ] = None,
     ingestion_run_id: Annotated[UUID | None, Query(description="Filtrar resumo por ID de execução de run de ingestão (ingestion_run).")] = None,
     execucao_sincronizacao_id: Annotated[UUID | None, Query(description="Filtrar resumo por ID de execução de sincronização (execucao_sincronizacao).")] = None,
 ) -> QuarentenaResumoResposta:
     # Construir cláusulas de filtragem compartilhadas
+    status_filter = status
+    if status_filter is None:
+        status_filter = "pendente"
+    elif status_filter == "all" or status_filter == "":
+        status_filter = None
+
     filtros = []
-    if status:
-        filtros.append(QuarantineItem.status == status)
+    if status_filter:
+        filtros.append(QuarantineItem.status == status_filter)
     if ingestion_run_id:
         filtros.append(QuarantineItem.ingestion_run_id == ingestion_run_id)
     if execucao_sincronizacao_id:
         filtros.append(QuarantineItem.execucao_sincronizacao_id == execucao_sincronizacao_id)
 
-    # 1. Total Geral
+    # 1. Total Geral (sob filtros)
     query_total = select(func.count(QuarantineItem.id))
     if filtros:
         query_total = query_total.where(*filtros)
     total = db.scalar(query_total) or 0
 
-    # 2. Por Status
-    # Para por_status, mantemos apenas filtros de run_id/execucao_id se informados
+    # 2. Por Status (sem filtro de status, apenas filtros contextuais)
     filtros_status = []
     if ingestion_run_id:
         filtros_status.append(QuarantineItem.ingestion_run_id == ingestion_run_id)
@@ -1644,12 +1665,31 @@ def obter_resumo_quarentena(
         ArquivoErroQuantidade(arquivo_origem=r[0], motivo_codigo=r[1], quantidade=r[2]) for r in ae_rows
     ]
 
+    # 6. Métricas Independentes de Status
+    total_historico_query = select(func.count(QuarantineItem.id))
+    if filtros_status:
+        total_historico_query = total_historico_query.where(*filtros_status)
+    total_historico = db.scalar(total_historico_query) or 0
+
+    total_pendentes_query = select(func.count(QuarantineItem.id)).where(QuarantineItem.status == "pendente")
+    if filtros_status:
+        total_pendentes_query = total_pendentes_query.where(*filtros_status)
+    total_pendentes = db.scalar(total_pendentes_query) or 0
+
+    total_resolvidos_query = select(func.count(QuarantineItem.id)).where(QuarantineItem.status.like("resolvido_%"))
+    if filtros_status:
+        total_resolvidos_query = total_resolvidos_query.where(*filtros_status)
+    total_resolvidos = db.scalar(total_resolvidos_query) or 0
+
     return QuarentenaResumoResposta(
         total=total,
         por_status=por_status,
         por_erro=por_erro,
         por_arquivo=por_arquivo,
         por_arquivo_e_erro=por_arquivo_e_erro,
+        total_pendentes=total_pendentes,
+        total_resolvidos=total_resolvidos,
+        total_historico=total_historico,
     )
 
 

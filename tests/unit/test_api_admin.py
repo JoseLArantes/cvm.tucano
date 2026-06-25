@@ -621,6 +621,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     esquema_run = payload["components"]["schemas"]["IngestionRunResumo"]
     esquema_quarentena = payload["components"]["schemas"]["QuarantineItemResposta"]
     esquema_replay_req = payload["components"]["schemas"]["ReplayQuarantineRequisicao"]
+    esquema_resumo_quarentena = payload["components"]["schemas"]["QuarentenaResumoResposta"]
 
     assert "quality_summary" in esquema_run["properties"]
     assert "artifact_snapshot" in esquema_run["properties"]
@@ -629,6 +630,9 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "reconcile_summary" in esquema_run["properties"]
     assert "lifecycle_decision" in esquema_run["properties"]
     assert "tentativas_reprocessamento" in esquema_quarentena["properties"]
+    assert "total_pendentes" in esquema_resumo_quarentena["properties"]
+    assert "total_resolvidos" in esquema_resumo_quarentena["properties"]
+    assert "total_historico" in esquema_resumo_quarentena["properties"]
     assert esquema_replay_req["properties"]["reason_code"]["anyOf"][1]["type"] == "null"
     assert len(esquema_replay_req["examples"]) == 3
 

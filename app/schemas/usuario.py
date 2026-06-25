@@ -1,10 +1,9 @@
 import uuid
-from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDateTime, Paginacao
 
 
 def normalizar_username(valor: str) -> str:
@@ -61,8 +60,8 @@ class UsuarioResposta(BaseModel):
     nome: str | None = Field(description="Nome de exibicao.")
     is_admin: bool = Field(description="Indica se o usuario pode administrar usuarios.")
     ativo: bool = Field(description="Indica se login e tokens do usuario sao aceitos.")
-    criado_em: datetime = Field(description="Timestamp de criacao.")
-    alterado_em: datetime = Field(description="Timestamp da ultima alteracao.")
+    criado_em: BrazilianDateTime = Field(description="Data e hora de criacao, em `DD/MM/AAAA HH:MM:SS`.")
+    alterado_em: BrazilianDateTime = Field(description="Data e hora da ultima alteracao, em `DD/MM/AAAA HH:MM:SS`.")
 
 
 class ListaUsuariosResposta(BaseModel):

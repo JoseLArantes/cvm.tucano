@@ -2,6 +2,7 @@ import io
 import zipfile
 from datetime import UTC, date, datetime
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -230,7 +231,161 @@ def test_normalizar_fre_row_allows_child_without_cnpj_for_header_map() -> None:
 
     assert row_kind == "fre_auditor"
     assert dados["cnpj_companhia"] is None
-    assert dados["id_documento"] == 123
+
+
+def test_normalizar_fre_row_plano_recompra_classe_acao_allows_empty_tipo_preferencial() -> None:
+    row_kind, dados = normalizar_fre_row(
+        tipo="plano_recompra_classe_acao",
+        arquivo_origem="fre_cia_aberta_plano_recompra_classe_acao_2021.csv",
+        ano_origem=2021,
+        linha_origem=3,
+        linha={
+            "CNPJ_Companhia": "08.773.135/0001-00",
+            "Data_Referencia": "2021-12-31",
+            "Versao": "1",
+            "ID_Documento": "123",
+            "Nome_Companhia": "EMPRESA A",
+            "ID_Plano_Recompra": "41951",
+            "Especie_Acao": "Ordinária",
+            "Tipo_Classe_Acao_Preferencial": "",
+            "Quantidade_Acoes_Adquiridas": "0",
+        },
+    )
+
+    assert row_kind == "fre_plano_recompra_classe_acao"
+    assert dados["id_plano_recompra"] == 41951
+    assert dados["especie_acao"] == "Ordinária"
+    assert dados["tipo_classe_acao_preferencial"] is None
+
+
+def test_normalizar_fre_row_relacao_subordinacao_allows_empty_related_name() -> None:
+    row_kind, dados = normalizar_fre_row(
+        tipo="relacao_subordinacao",
+        arquivo_origem="fre_cia_aberta_relacao_subordinacao_2021.csv",
+        ano_origem=2021,
+        linha_origem=3309,
+        linha={
+            "CNPJ_Companhia": "08.613.550/0001-98",
+            "Data_Referencia": "2021-01-01",
+            "Versao": "10",
+            "ID_Documento": "113739",
+            "Nome_Companhia": "NEXPE PARTICIPAÇÕES S.A",
+            "Data_Inicio_Exercicio_Social": "2020-01-01",
+            "Data_Fim_Exercicio_Social": "2020-12-31",
+            "Nome_Administrador": "Daniel Abramant Guerbatin",
+            "CPF_Administrador": "075.498.587-30",
+            "Cargo_Administrador": "Membro do Conselho de Admistração, Diretor Presidente e de Operações",
+            "Nome_Pessoa_Relacionada": "",
+            "Tipo_Pessoa_Relacionada": "",
+            "Documento_Pessoa_Relacionada": "",
+            "Cargo_Pessoa_Relacionada": "",
+            "Categoria_Pessoa_Relacionada": "Controlador Direto",
+            "Tipo_Relacao": "Subordinação",
+            "Observacao": "",
+        },
+    )
+
+    assert row_kind == "fre_relacao_subordinacao"
+    assert dados["nome_administrador"] == "Daniel Abramant Guerbatin"
+    assert dados["nome_pessoa_relacionada"] is None
+
+
+def test_normalizar_fre_row_relacao_subordinacao_rejects_blank_placeholder_row() -> None:
+    with pytest.raises(ValueError, match="linha_sem_conteudo_material"):
+        normalizar_fre_row(
+            tipo="relacao_subordinacao",
+            arquivo_origem="fre_cia_aberta_relacao_subordinacao_2021.csv",
+            ano_origem=2021,
+            linha_origem=732,
+            linha={
+                "CNPJ_Companhia": "02.338.534/0001-58",
+                "Data_Referencia": "2021-01-01",
+                "Versao": "2",
+                "ID_Documento": "109598",
+                "Nome_Companhia": "LONGDIS S.A.",
+                "Data_Inicio_Exercicio_Social": "2020-01-01",
+                "Data_Fim_Exercicio_Social": "2020-12-31",
+                "Nome_Administrador": "",
+                "CPF_Administrador": "",
+                "Cargo_Administrador": "",
+                "Nome_Pessoa_Relacionada": "",
+                "Tipo_Pessoa_Relacionada": "",
+                "Documento_Pessoa_Relacionada": "",
+                "Cargo_Pessoa_Relacionada": "",
+                "Categoria_Pessoa_Relacionada": "",
+                "Tipo_Relacao": "",
+                "Observacao": "",
+            },
+        )
+
+
+def test_normalizar_fre_row_relacao_subordinacao_allows_empty_administrator_name() -> None:
+    row_kind, dados = normalizar_fre_row(
+        tipo="relacao_subordinacao",
+        arquivo_origem="fre_cia_aberta_relacao_subordinacao_2021.csv",
+        ano_origem=2021,
+        linha_origem=9530,
+        linha={
+            "CNPJ_Companhia": "92.781.335/0001-02",
+            "Data_Referencia": "2021-01-01",
+            "Versao": "9",
+            "ID_Documento": "114750",
+            "Nome_Companhia": "TAURUS ARMAS S.A.",
+            "Data_Inicio_Exercicio_Social": "2020-01-01",
+            "Data_Fim_Exercicio_Social": "2020-12-31",
+            "Nome_Administrador": "",
+            "CPF_Administrador": "",
+            "Cargo_Administrador": "",
+            "Nome_Pessoa_Relacionada": "Polimetal Metalurgia e Plásticos Ltda.",
+            "Tipo_Pessoa_Relacionada": "PJ",
+            "Documento_Pessoa_Relacionada": "89.545.511/0001-00",
+            "Cargo_Pessoa_Relacionada": "",
+            "Categoria_Pessoa_Relacionada": "",
+            "Tipo_Relacao": "",
+            "Observacao": "",
+        },
+    )
+
+    assert row_kind == "fre_relacao_subordinacao"
+    assert dados["nome_administrador"] is None
+    assert dados["nome_pessoa_relacionada"] == "Polimetal Metalurgia e Plásticos Ltda."
+
+
+def test_normalizar_fre_row_participacao_sociedade_treats_zero_cnpj_as_missing() -> None:
+    row_kind, dados = normalizar_fre_row(
+        tipo="participacao_sociedade",
+        arquivo_origem="fre_cia_aberta_participacao_sociedade_2021.csv",
+        ano_origem=2021,
+        linha_origem=3244,
+        linha={
+            "CNPJ_Companhia": "53.113.791/0001-22",
+            "Data_Referencia": "2021-01-01",
+            "Versao": "9",
+            "ID_Documento": "114000",
+            "Nome_Companhia": "TOTVS S.A.",
+            "ID_Sociedade": "669126",
+            "Razao_Social": "TOTVS Argentina S.A.",
+            "CNPJ": "0000000000000",
+            "Tipo_Sociedade": "Controlada",
+            "Descricao_Atividades": "Consultoria em tecnologia da informação",
+            "Pais_Sede": "Argentina",
+            "UF_Sede": "",
+            "Municipio_Sede": "Praia da Pipa",
+            "Participacao_Emissor": "100.00000000",
+            "Possui_Registro_CVM": "N",
+            "Codigo_CVM": "",
+            "Razao_Aquisicao_Manutencao": "Texto",
+            "Data_Valor_Mercado": "",
+            "Data_Valor_Contabil": "2021-06-30",
+            "Valor_Mercado": "0.00",
+            "Valor_Contabil": "13345818.42",
+        },
+    )
+
+    assert row_kind == "fre_participacao_sociedade"
+    assert dados["id_sociedade"] == 669126
+    assert dados["cnpj"] is None
+    assert dados["id_documento"] == 114000
 
 
 def test_normalizar_fre_row_normalizes_sigla_uf_and_uf_sede() -> None:
@@ -1207,8 +1362,8 @@ def test_sincronizar_fre_phase_3_datasets() -> None:
                 "fre_cia_aberta_plano_recompra_classe_acao_2025.csv",
                 (
                     "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;ID_Plano_Recompra;"
-                    "Tipo_Classe_Acao_Preferencial;Quantidade_Acoes_Adquiridas\n"
-                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;1;PN A;50\n"
+                    "Especie_Acao;Tipo_Classe_Acao_Preferencial;Quantidade_Acoes_Adquiridas\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;1;Preferencial;PN A;50\n"
                 ).encode("latin1"),
             )
             z.writestr(

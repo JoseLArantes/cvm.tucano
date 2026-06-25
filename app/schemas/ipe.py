@@ -1,9 +1,8 @@
 import uuid
-from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao, PeriodicModel
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, Paginacao, PeriodicModel
 
 
 class IpeDocumentoResposta(PeriodicModel):
@@ -13,12 +12,12 @@ class IpeDocumentoResposta(PeriodicModel):
     cnpj_companhia: str | None
     codigo_cvm: int | None
     nome_companhia: str | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     categoria: str | None
     tipo: str | None
     especie: str | None
     assunto: str | None
-    data_entrega: date
+    data_entrega: BrazilianDate
     tipo_apresentacao: str | None
     protocolo_entrega: str | None
     versao: int
@@ -26,9 +25,9 @@ class IpeDocumentoResposta(PeriodicModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaIpeDocumentosResposta(BaseModel):

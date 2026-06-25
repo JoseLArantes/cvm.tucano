@@ -11,6 +11,20 @@ Este documento registra mudanças significativas na API do Tucano CVM.
 
 **Data**: Junho 2026
 
+### Alterações recentes
+
+- Removidos do OpenAPI e da superfície pública os endpoints FRE explicitamente descontinuados pela CVM:
+  - `GET /fre/capital-social/aumentos`
+  - `GET /fre/capital-social/aumentos-classes-acoes`
+  - `GET /fre/capital-social/desdobramentos`
+  - `GET /fre/capital-social/desdobramentos-classes-acoes`
+  - `GET /fre/capital-social/reducoes`
+  - `GET /fre/capital-social/reducoes-classes-acoes`
+  - `GET /fre/direitos-acoes`
+- O catálogo `GET /fontes/fre/datasets` deixou de listar esses datasets como opções públicas.
+- `GET /exportacoes/{fonte}/{dataset}` agora retorna `404` com orientação explícita quando o cliente solicita um dataset FRE publicamente descontinuado pela CVM.
+- A documentação do FRE passou a orientar o uso de `capital_social`, `capital_social_classe_acao`, `distribuicao_capital` e `posicao_acionaria` como quadros públicos ativos para 2024 em diante.
+
 ### Funcionalidades Principais
 
 #### Autenticação e Usuários
@@ -27,14 +41,15 @@ Este documento registra mudanças significativas na API do Tucano CVM.
 - `GET /companhias/{cnpj_companhia}` - Buscar por CNPJ
 - `GET /companhias/mestre` - Consulta agregada (master endpoint)
 
-#### Análise Estratégica
-- `GET /companhias/{codigo_cvm}/analise/overview` - Visão geral
-- `GET /companhias/{codigo_cvm}/analise/financeiro` - Métricas financeiras com YoY/CAGR
-- `GET /companhias/{codigo_cvm}/analise/comparativo` - Comparação anual
-- `GET /companhias/{codigo_cvm}/analise/eventos` - Timeline de eventos
-- `GET /companhias/{codigo_cvm}/analise/pessoas-remuneracao` - Remuneração e diversidade
-- `GET /companhias/{codigo_cvm}/analise/mercado-insiders` - Insider trading
-- `GET /companhias/{codigo_cvm}/analise` - Análise consolidada
+#### API Analítica
+- `GET /analise/metricas` - Catálogo de métricas analíticas
+- `GET /analise/companhias/{codigo_cvm}` - Manifesto analítico da companhia
+- `GET /analise/companhias/{codigo_cvm}/series` - Séries normalizadas
+- `GET /analise/companhias/{codigo_cvm}/comparacoes` - Comparações analíticas prontas
+- `GET /analise/companhias/{codigo_cvm}/qualidade` - Diagnóstico de qualidade
+- `GET /analise/companhias/{codigo_cvm}/sinais` - Sinais determinísticos
+- `GET /analise/companhias/{codigo_cvm}/eventos` - Timeline analítica
+- `GET /analise/companhias/{codigo_cvm}/restatements` - Histórico de reapresentações
 
 #### Dados Financeiros (DFP/ITR)
 - `GET /dfp/documentos` - Listar documentos DFP

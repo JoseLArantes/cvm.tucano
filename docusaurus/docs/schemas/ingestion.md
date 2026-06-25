@@ -168,6 +168,8 @@ class QuarantineItemResposta(BaseModel):
     diagnostico: Optional[Dict[str, Any]]
 ```
 
+Consultas à fila de reparo usam `status=pendente` como padrão implícito. Use `status=all` para listar também itens já resolvidos.
+
 ### Códigos de Motivo (`motivo_codigo`)
 
 | Código | Descrição | Reparável |

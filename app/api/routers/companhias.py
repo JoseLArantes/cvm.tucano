@@ -1,35 +1,21 @@
+import re
 from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query
-from sqlalchemy import Select, case, func, select
+from sqlalchemy import Select, case, func, or_, select
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.companhia import Companhia
-
-# Import analysis schemas and services
-from app.schemas.analise import (
-    AnaliseConsolidadaResposta,
-    ComparativoAnaliseResposta,
-    EventoLinhaTempo,
-    FinanceiroAnaliseResposta,
-    MercadoInsidersResposta,
-    OverviewAnaliseResposta,
-    PessoasRemuneracaoResposta,
-)
+from app.models.fca import FcaValorMobiliario
 from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
 from app.schemas.comum import Paginacao
-from app.services.analise import (
-    obter_comparativo,
-    obter_eventos,
-    obter_financeiro,
-    obter_mercado_insiders,
-    obter_overview,
-    obter_pessoas_remuneracao,
-)
 from app.services.normalizacao import normalizar_cnpj
 
 router = APIRouter(prefix="/companhias")
+
+_LOGO_BASE_URL = "https://pub-04fd7aefad4846c98bccc4719b2eaed1.r2.dev/png"
+_PADRAO_TICKER_LOGO = re.compile(r"^[A-Z]{4}\d{1,2}$")
 
 _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     404: {
@@ -41,6 +27,60 @@ _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
         "content": {"application/json": {"example": {"detail": "Campo invalido."}}},
     },
 }
+
+
+def _ticker_serve_para_logo(codigo_negociacao: str | None) -> bool:
+    if not codigo_negociacao:
+        return False
+    return bool(_PADRAO_TICKER_LOGO.fullmatch(codigo_negociacao.strip().upper()))
+
+
+def _montar_logo_url_por_ticker(codigo_negociacao: str | None) -> str | None:
+    if not _ticker_serve_para_logo(codigo_negociacao):
+        return None
+    assert codigo_negociacao is not None
+    ticker = codigo_negociacao.strip().upper()
+    return f"{_LOGO_BASE_URL}/{ticker[0]}/{ticker}.png"
+
+
+def _obter_logo_urls_por_cnpj(db: DbSession, cnpjs: list[str]) -> dict[str, str | None]:
+    if not cnpjs:
+        return {}
+
+    hoje = datetime.now().date()
+    registros = (
+        db.execute(
+            select(FcaValorMobiliario)
+            .where(FcaValorMobiliario.cnpj_companhia.in_(cnpjs))
+            .where(FcaValorMobiliario.codigo_negociacao.is_not(None))
+            .where(or_(FcaValorMobiliario.data_fim_listagem.is_(None), FcaValorMobiliario.data_fim_listagem >= hoje))
+            .order_by(
+                FcaValorMobiliario.cnpj_companhia.asc(),
+                FcaValorMobiliario.data_referencia.desc(),
+                FcaValorMobiliario.versao.desc(),
+                FcaValorMobiliario.data_inicio_listagem.desc().nullslast(),
+                FcaValorMobiliario.codigo_negociacao.asc(),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    logo_por_cnpj: dict[str, str | None] = {cnpj: None for cnpj in cnpjs}
+
+    for registro in registros:
+        cnpj = registro.cnpj_companhia
+        if logo_por_cnpj.get(cnpj) is not None:
+            continue
+        logo_url = _montar_logo_url_por_ticker(registro.codigo_negociacao)
+        if logo_url is not None:
+            logo_por_cnpj[cnpj] = logo_url
+
+    return logo_por_cnpj
+
+
+def _serializar_companhia(companhia: Companhia, logo_url: str | None) -> CompanhiaResposta:
+    return CompanhiaResposta.model_validate(companhia).model_copy(update={"logo_url": logo_url})
 
 
 @router.get(
@@ -133,8 +173,10 @@ def listar_companhias(
         .all()
     )
 
+    logos_por_cnpj = _obter_logo_urls_por_cnpj(db, [item.cnpj_companhia for item in itens if item.cnpj_companhia])
+
     return ListaCompanhiasResposta(
-        dados=[CompanhiaResposta.model_validate(item) for item in itens],
+        dados=[_serializar_companhia(item, logos_por_cnpj.get(item.cnpj_companhia)) for item in itens],
         paginacao=Paginacao(
             pagina=paginacao.pagina,
             tamanho_pagina=paginacao.tamanho_pagina,
@@ -164,164 +206,8 @@ def obter_companhia_por_codigo_cvm(
     companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
     if companhia is None:
         raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return CompanhiaResposta.model_validate(companhia)
-
-
-# --- NEW ANALYSIS ENDPOINTS ---
-
-@router.get(
-    "/{codigo_cvm}/analise/overview",
-    response_model=OverviewAnaliseResposta,
-    summary="Visão Geral de Análise da Companhia",
-    description="Retorna cobertura anual de dados, frescor das fontes e alertas cadastrais.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseOverview",
-)
-def obter_analise_overview_endpoint(codigo_cvm: int, db: DbSession) -> OverviewAnaliseResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return obter_overview(db, companhia)
-
-
-@router.get(
-    "/{codigo_cvm}/analise/financeiro",
-    response_model=FinanceiroAnaliseResposta,
-    summary="Análise Financeira com Proveniência",
-    description="Retorna métricas financeiras anuais e trimestrais normalizadas com variação YoY/QoQ/CAGR e proveniência.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseFinanceiro",
-)
-def obter_analise_financeiro_endpoint(
-    codigo_cvm: int,
-    db: DbSession,
-    horizonte: str = Query("5a", description="Horizonte de anos para análise (5a, 10a, todos)"),
-    periodicidade: str = Query("anual", description="Tipo de formulários (anual, trimestral, todos)")
-) -> FinanceiroAnaliseResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return obter_financeiro(db, companhia, horizonte=horizonte, periodicidade=periodicidade)
-
-
-@router.get(
-    "/{codigo_cvm}/analise/comparativo",
-    response_model=ComparativoAnaliseResposta,
-    summary="Análise Comparativa Anual",
-    description="Compara o desempenho financeiro, composição de capital e governança entre dois anos específicos.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseComparativo",
-)
-def obter_analise_comparativo_endpoint(
-    codigo_cvm: int,
-    db: DbSession,
-    ano_base: int = Query(..., description="Ano base da comparação"),
-    ano_comparacao: int = Query(..., description="Ano a ser comparado")
-) -> ComparativoAnaliseResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return obter_comparativo(db, companhia, ano_base=ano_base, ano_comparacao=ano_comparacao)
-
-
-@router.get(
-    "/{codigo_cvm}/analise/eventos",
-    response_model=list[EventoLinhaTempo],
-    summary="Timeline de Eventos da Companhia",
-    description="Retorna uma linha do tempo unificada de fatos relevantes (IPE), reapresentações financeiras e grandes negociações.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseEventos",
-)
-def obter_analise_eventos_endpoint(codigo_cvm: int, db: DbSession) -> list[EventoLinhaTempo]:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return obter_eventos(db, companhia)
-
-
-@router.get(
-    "/{codigo_cvm}/analise/pessoas-remuneracao",
-    response_model=PessoasRemuneracaoResposta,
-    summary="Estrutura de Administração e Remuneração",
-    description="Retorna estatísticas anuais de remuneração de órgãos, número de membros e diversidade de gênero.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnalisePessoasRemuneracao",
-)
-def obter_analise_pessoas_remuneracao_endpoint(codigo_cvm: int, db: DbSession) -> PessoasRemuneracaoResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    dados = obter_pessoas_remuneracao(db, companhia)
-    return PessoasRemuneracaoResposta(cnpj_companhia=companhia.cnpj_companhia, codigo_cvm=codigo_cvm, dados=dados)
-
-
-@router.get(
-    "/{codigo_cvm}/analise/mercado-insiders",
-    response_model=MercadoInsidersResposta,
-    summary="Insider Trading e Inteligência de Mercado",
-    description="Retorna movimentações de insiders, ações em tesouraria, alterações de capital social e governança.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseMercadoInsiders",
-)
-def obter_analise_mercado_insiders_endpoint(codigo_cvm: int, db: DbSession) -> MercadoInsidersResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return obter_mercado_insiders(db, companhia)
-
-
-@router.get(
-    "/{codigo_cvm}/analise",
-    response_model=AnaliseConsolidadaResposta,
-    summary="Análise Consolidada (Endpoint Estratégico)",
-    description="Retorna todos os blocos de análise consolidados em um único payload estruturado.",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="obterAnaliseConsolidada",
-)
-def obter_analise_consolidada_endpoint(
-    codigo_cvm: int,
-    db: DbSession,
-    horizonte: str = Query("5a", description="Horizonte temporal de análise (5a, 10a, todos)"),
-    periodicidade: str = Query("anual", description="Periodicidade das demonstrações (anual, trimestral, todos)"),
-    ano_base: int = Query(2025, description="Ano base para comparação"),
-    ano_comparacao: int = Query(2024, description="Ano de comparação")
-) -> AnaliseConsolidadaResposta:
-    companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
-    if companhia is None:
-        raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-
-    overview = obter_overview(db, companhia)
-    financeiro = obter_financeiro(db, companhia, horizonte=horizonte, periodicidade=periodicidade)
-    eventos = obter_eventos(db, companhia)
-    pessoas_rem = obter_pessoas_remuneracao(db, companhia)
-    mercado = obter_mercado_insiders(db, companhia)
-
-    # Serialize and return Consolidated Analysis
-    return AnaliseConsolidadaResposta(
-        companhia=CompanhiaResposta.model_validate(companhia).model_dump(),
-        periodos_disponiveis=overview.periodos_disponiveis,
-        cobertura=overview.cobertura,
-        financeiro=financeiro.dados,
-        eventos=eventos,
-        governanca={
-            "situacao_registro": companhia.situacao_registro,
-            "categoria_registro": companhia.categoria_registro,
-            "controle_acionario": companhia.controle_acionario,
-            "tipo_mercado": companhia.tipo_mercado,
-            "praticas_governanca_resumo": mercado.governanca_resumo
-        },
-        pessoas_remuneracao=pessoas_rem,
-        mercado_insiders={
-            "movimentacoes": mercado.movimentacoes,
-            "concentracao_cargo": mercado.concentracao_cargo,
-            "tesouraria": mercado.tesouraria,
-            "capital_alteracoes": mercado.capital_alteracoes
-        },
-        proveniencia={
-            "fontes_consultadas": ["DFP", "ITR", "FRE", "FCA", "IPE", "VLMO", "CGVN"],
-            "data_geracao": datetime.now()
-        }
-    )
+    logo_url = _obter_logo_urls_por_cnpj(db, [companhia.cnpj_companhia]).get(companhia.cnpj_companhia)
+    return _serializar_companhia(companhia, logo_url)
 
 
 # --- EXISTING GET BY CNPJ ENDPOINT (CATCH-ALL) REGISTERED LAST ---
@@ -338,15 +224,18 @@ def obter_companhia_por_cnpj(
     cnpj_companhia: Annotated[
         str,
         Path(
-            pattern=r"^[0-9./-]+$",
             description="CNPJ da companhia (aceita com ou sem pontuação).",
             examples=["08.773.135/0001-00", "08773135000100"],
         ),
     ],
     db: DbSession,
 ) -> CompanhiaResposta:
-    cnpj = normalizar_cnpj(cnpj_companhia)
+    try:
+        cnpj = normalizar_cnpj(cnpj_companhia)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Companhia nao encontrada.") from exc
     companhia = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
     if companhia is None:
         raise HTTPException(status_code=404, detail="Companhia nao encontrada.")
-    return CompanhiaResposta.model_validate(companhia)
+    logo_url = _obter_logo_urls_por_cnpj(db, [companhia.cnpj_companhia]).get(companhia.cnpj_companhia)
+    return _serializar_companhia(companhia, logo_url)

@@ -5,55 +5,52 @@ sidebar_position: 1
 
 # Fontes de Dados - Visão Geral
 
-## Contexto Regulatório
+## Contexto
 
-O serviço ingere dados públicos disponibilizados pela **Comissão de Valores Mobiliários (CVM)** através do [Portal de Dados Abertos](https://dados.cvm.gov.br/). Cada fonte possui periodicidade, granularidade e finalidade regulatória distintas.
+O Tucano CVM ingere dados públicos disponibilizados pela Comissão de Valores Mobiliários no Portal de Dados Abertos. Cada fonte possui uma finalidade própria: algumas identificam companhias, outras registram documentos financeiros, formulários estruturados, eventos corporativos ou práticas de governança.
 
-## Matriz de Fontes
+As páginas desta seção descrevem como cada fonte é entendida no projeto, quais arquivos entram na ingestão, quais dados são promovidos para consulta e quais cuidados de leitura devem acompanhar o uso da informação.
 
-| Fonte | Nome Completo | Periodicidade CVM | Desde | Tabela Raiz | Endpoints Principais |
-|-------|---------------|-------------------|-------|-------------|---------------------|
-| `cadastro` | Cadastro de Companhias Abertas | Diária | Contínuo | `companhias` | `/companhias`, `/companhias/codigo-cvm/{id}` |
-| `dfp` | Demonstrações Financeiras Padronizadas | Semanal/Anual | 2010 | `documentos_financeiros` | `/dfp/documentos`, `/dfp/balanco-patrimonial-ativo/{escopo}` |
-| `itr` | Informações Trimestrais | Semanal/Trimestral | 2011 | `documentos_financeiros` | `/itr/documentos`, `/itr/demonstracao-resultado/{escopo}` |
-| `fre` | Formulário de Referência | Semanal | 2010 | `fre_documentos` | `/fre/documentos`, `/fre/posicao-acionaria`, `/fre/remuneracao` |
-| `fca` | Formulário Cadastral | Semanal | 2010 | `fca_documentos` | `/fca/documentos`, `/fca/geral`, `/fca/auditores` |
-| `ipe` | Informações Periódicas e Eventuais | Semanal | 2003 | `ipe_documentos` | `/ipe/documentos` |
-| `vlmo` | Valores Mobiliários Negociados e Detidos | Semanal | Últimos 5 anos | `vlmo_documentos` | `/vlmo/documentos`, `/vlmo/consolidado` |
-| `cgvn` | Código de Governança Corporativa | Semanal | 2018 | `cgvn_documentos` | `/cgvn/documentos`, `/cgvn/praticas` |
+## Matriz de fontes
 
-## Padrão de Ingestão
+| Fonte | Conteúdo principal | Distribuição | Raiz de consulta |
+|-------|--------------------|--------------|------------------|
+| `cadastro` | Identidade e situação cadastral das companhias | CSV corrente | `/companhias` |
+| `dfp` | Demonstrações financeiras anuais | ZIP anual | `/dfp/documentos` |
+| `itr` | Demonstrações financeiras trimestrais | ZIP anual | `/itr/documentos` |
+| `fre` | Formulário de Referência | ZIP anual | `/fre/documentos` |
+| `fca` | Formulário Cadastral | ZIP anual | `/fca/documentos` |
+| `ipe` | Informações periódicas e eventuais | ZIP anual | `/ipe/documentos` |
+| `vlmo` | Valores mobiliários negociados e detidos | ZIP anual | `/vlmo/documentos` |
+| `cgvn` | Informe de governança corporativa | ZIP anual | `/cgvn/documentos` |
 
-Todas as fontes seguem o mesmo pipeline de duas fases:
-1. **Aquisição**: Download ZIP → verificação SHA-256 → extração CSVs
-2. **Processamento**: Stage → Validação → Resolução de Identidade → Promoção → Reconcile
+## Relação entre as fontes
 
-## Normalização de Dados
+O cadastro é a base de identidade. DFP e ITR formam a família financeira. FRE e FCA descrevem formulários estruturados com finalidades diferentes. IPE registra comunicações e eventos documentais. VLMO trata posições e movimentações de valores mobiliários. CGVN registra práticas de governança declaradas.
 
-Os dados brutos passam por:
-- **Padronização monetária**: Conversão automática de escalas (`UNIDADE`, `MIL`, `MILHAO`)
-- **Resolução de identidade**: Vinculação de CNPJ/Código CVM à tabela `companhias`
-- **Tratamento de nulos**: Conversão de `N/A`, `N.D.`, `-` para `null`
-- **Fallback de tipos**: Campos originalmente numéricos com texto livre são preservados como `Text`
+Essas fontes não substituem umas às outras. Elas formam camadas complementares em torno da companhia e dos documentos enviados à CVM.
 
-## Auditoria e Rastreabilidade
+## Processo de ingestão
 
-Cada registro promovido contém metadados de origem:
-```json
-{
-  "arquivo_origem": "dfp_cia_aberta_2024.csv",
-  "ano_origem": 2024,
-  "linha_origem": 142,
-  "hash_origem": "sha256:...",
-  "criado_em": "2026-05-15T10:00:00Z",
-  "sincronizado_em": "2026-05-20T08:30:00Z",
-  "alterado_em": "2026-05-20T08:30:00Z"
-}
-```
+A ingestão preserva a origem dos dados e busca promover somente registros que passam por normalização e vínculo de identidade. O processamento inclui:
 
-## Próximos Passos
+- aquisição do arquivo publicado pela CVM
+- verificação de metadados remotos e hash do artefato
+- leitura dos CSVs
+- normalização de tipos, datas, textos e identificadores
+- resolução da companhia pelo cadastro
+- promoção para tabelas de domínio quando há suporte
+- registro de quarentena para linhas inválidas ou não vinculadas
+- reconciliação do pacote processado com o estado promovido
 
-Consulte a documentação específica de cada fonte:
+## Rastreabilidade
+
+Os registros promovidos mantêm metadados de origem, como arquivo, ano, linha e hash. Esses campos ajudam a explicar de onde veio um dado e qual execução o processou.
+
+Em fontes documentais, versão, protocolo, data de referência e data de entrega são parte da interpretação. Em fontes financeiras, tipo de demonstração, escopo, conta, moeda e escala também devem acompanhar a leitura.
+
+## Documentos desta seção
+
 - [Cadastro](./cadastro.md)
 - [DFP](./dfp.md)
 - [ITR](./itr.md)

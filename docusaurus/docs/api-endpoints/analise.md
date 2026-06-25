@@ -1,651 +1,357 @@
 ---
-title: Análise Estratégica
+title: API Analitica
 sidebar_position: 7
 ---
 
-# Análise Estratégica
+# API Analitica
 
-## Visão Geral
+A API analítica é composta por um catálogo global de métricas e por blocos por companhia em `/analise/companhias/{codigo_cvm}`. O backend resolve períodos canônicos, unidades, comparabilidade, qualidade e evidências a partir de fatos CVM normalizados, com leitura preferencial da camada canônica persistida e fallback controlado para resolução em tempo de execução.
 
-Os endpoints de análise fornecem **visões consolidadas e enriquecidas** dos dados CVM, com cálculos automáticos de indicadores financeiros (YoY, QoQ, CAGR), proveniência e alertas. São ideais para dashboards executivos e análises rápidas.
+A materialização canônica usa uma fila dedicada, campanhas agregadas, processamento em chunks, lease persistido por chunk, dispatcher de campanhas pendentes e um gate de admissão. Quando a ingestão está ativa, a materialização permanece pendente e só retoma novos chunks quando o sistema volta a verde. Por padrão, campanhas automáticas e fluxos operacionais padrão não incluem companhias com `situacao_registro=CANCELADA`. A materialização pontual de uma companhia cancelada exige override explícito no disparo manual.
 
 ## Endpoints
 
 | Método | Rota | Descrição |
-|--------|------|-----------|
-| `GET` | `/companhias/{codigo_cvm}/analise/overview` | Visão geral da companhia |
-| `GET` | `/companhias/{codigo_cvm}/analise/financeiro` | Análise financeira com proveniência |
-| `GET` | `/companhias/{codigo_cvm}/analise/comparativo` | Comparativo anual |
-| `GET` | `/companhias/{codigo_cvm}/analise/eventos` | Timeline de eventos |
-| `GET` | `/companhias/{codigo_cvm}/analise/pessoas-remuneracao` | Estrutura de administração e remuneração |
-| `GET` | `/companhias/{codigo_cvm}/analise/mercado-insiders` | Insider trading e inteligência de mercado |
-| `GET` | `/companhias/{codigo_cvm}/analise` | Análise consolidada (endpoint estratégico) |
+| --- | --- | --- |
+| `GET` | `/analise/metricas` | Catálogo versionado de métricas analíticas |
+| `GET` | `/analise/materializacoes` | Listagem de execuções de materialização analítica |
+| `GET` | `/analise/materializacoes/monitoramento` | Snapshot operacional da fila e dos workers de materialização |
+| `GET` | `/analise/materializacoes/controle` | Estado atual do gate de materialização |
+| `POST` | `/analise/materializacoes/controle/pause` | Pausa manual do gate de materialização |
+| `POST` | `/analise/materializacoes/controle/resume` | Retorno ao modo automático do gate |
+| `POST` | `/analise/materializacoes/recuperar-stale` | Recuperação imediata de chunks stale |
+| `POST` | `/analise/materializacoes/campanhas/{campanha_id}/recuperar` | Recuperação imediata de chunks stale de uma campanha |
+| `GET` | `/analise/materializacoes/{execucao_id}` | Detalhe de uma execução de materialização |
+| `GET` | `/analise/companhias/{codigo_cvm}` | Manifesto analítico da companhia |
+| `GET` | `/analise/companhias/{codigo_cvm}/series` | Séries normalizadas por métrica e período |
+| `GET` | `/analise/companhias/{codigo_cvm}/comparacoes` | Comparações prontas sobre as séries |
+| `GET` | `/analise/companhias/{codigo_cvm}/qualidade` | Diagnóstico de qualidade analítica |
+| `GET` | `/analise/companhias/{codigo_cvm}/sinais` | Sinais determinísticos com evidências |
+| `GET` | `/analise/companhias/{codigo_cvm}/eventos` | Timeline analítica de eventos |
+| `GET` | `/analise/companhias/{codigo_cvm}/restatements` | Histórico de reapresentações |
+| `GET` | `/analise/companhias/{codigo_cvm}/governanca` | Observações temporais anuais de governança |
+| `GET` | `/analise/companhias/{codigo_cvm}/pessoas` | Observações temporais anuais de pessoas e remuneração |
+| `GET` | `/analise/companhias/{codigo_cvm}/brief` | Brief analítico consolidado da companhia |
 
----
+## Convenções do contrato
 
-## `GET /companhias/{codigo_cvm}/analise/overview`
+- Datas e datetimes usam ISO 8601.
+- Valores decimais são serializados como string decimal canônica.
+- Razões usam `unit=ratio` e o valor decimal correspondente.
+- Variações em pontos percentuais usam `unit=percentage_point`.
+- O escopo societário é explícito: `consolidated` ou `individual`.
+- Para fluxo trimestral, `base_periodo=quarter` significa trimestre isolado. `base_periodo=ytd` significa acumulado no exercício.
+- As respostas analíticas expõem `resolution` para indicar se o payload veio da camada canônica persistida (`canonical`) ou do resolvedor em tempo de execução (`runtime_fallback`).
+- O parâmetro `as_of` representa o que era conhecido na data informada, usando `data_recebimento` do documento quando disponível.
 
-Retorna **cobertura anual de dados**, frescor das fontes e alertas cadastrais.
+## `GET /analise/metricas`
 
-### Path Parameters
+Retorna o catálogo oficial de métricas com identificador estável, tipo, unidade, fórmula, contas CVM candidatas, estratégia de resolução, bases temporais e limitações metodológicas.
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
+```bash
+curl -X GET "http://localhost:8007/analise/metricas" \
+  -H "Authorization: Bearer <token>"
+```
+
+## `GET /analise/materializacoes`
+
+Lista execuções da camada canônica com status, modo de materialização, janela efetivamente recomposta, progresso parcial, tempo decorrido, estimativa de conclusão e vínculo opcional com campanhas, itens e chunks de materialização.
+
+Cada execução pode ser:
+
+- `full`: recompõe toda a linha do tempo canônica da companhia/escopo
+- `incremental`: recompõe apenas o sufixo a partir de `invalidated_from`, preservando o prefixo canônico anterior
+
+Regra operacional atual:
+
+- campanhas automáticas e fluxos padrão excluem companhias com `situacao_registro=CANCELADA`
+- se uma execução pontual for disparada sem override para uma companhia cancelada, a execução é registrada e concluída sem produzir revisões, com sinalização de skip operacional no `summary`
+- a materialização pontual de canceladas só ocorre quando o operador informa explicitamente o override de inclusão
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `status` | string | `running`, `success` ou `failed` |
+| `codigo_cvm` | integer | Filtra por companhia |
+| `escopo` | string | `consolidated` ou `individual` |
+| `source` | string | Origem do disparo, como `post_ingestion`, `manual` ou `backfill` |
+| `campanha_id` | string | Filtra por campanha de materialização |
+| `pagina` | integer | Página da listagem |
+| `tamanho_pagina` | integer | Quantidade de itens por página |
+
+```bash
+curl -X GET "http://localhost:8007/analise/materializacoes?status=running" \
+  -H "Authorization: Bearer <token>"
+```
+
+## `GET /analise/materializacoes/monitoramento`
+
+Retorna um snapshot operacional das filas e campanhas de materialização, combinando:
+
+- quantidade de execuções `running` persistidas no banco;
+- quantidade de execuções `running` em modo `full` versus `incremental`;
+- quantidade de tasks ativas, reservadas e agendadas nos workers Celery;
+- estado atual do gate de admissão da materialização;
+- quantidade de campanhas pendentes e em andamento;
+- quantidade de campanhas em recuperação por chunk stale;
+- quantidade de campanhas pendentes especificamente porque o gate está fechado;
+- quantidade de itens pendentes, em andamento, com sucesso, falha e skipped;
+- quantidade de chunks `queued`, `running` e `stale`;
+- quantidade de tasks orquestradoras e de chunk em execução;
+- previews dos itens correntes, da fila pendente e de chunks stale já recuperáveis;
+- previews das execuções correntes, incluindo modo, cutoff incremental e contadores de revisões afetadas;
+- exclusão padrão de companhias canceladas nas campanhas automáticas;
+- execução em andamento mais antiga;
+- execuções com `updated_at` sem heartbeat recente.
+
+O snapshot distingue:
+
+- gate automático por ingestão ativa versus pausa manual;
+- campanha aguardando recuperação automática de chunk stale;
+- campanha aguardando dispatcher após liberação do gate;
+- task orquestradora da campanha;
+- tasks de chunk;
+- execuções canônicas por companhia;
+- profundidade observada da fila dedicada `analise_materializacao`, quando disponível;
+- worker da fila dedicada versus workers da fila padrão `celery`.
+
+```bash
+curl -X GET "http://localhost:8007/analise/materializacoes/monitoramento" \
+  -H "Authorization: Bearer <token>"
+```
+
+Campos operacionais principais do gate:
+
+- `gate.status`: `green` ou `red`
+- `gate.reason_code`: `NO_BLOCKERS`, `INGESTION_ACTIVE`, `MANUAL_PAUSE` ou `GATE_DISABLED`
+- `gate.blocking_ingestions`: quantidade de execuções/runs que mantêm o gate fechado
+- `gate.pending_ingestions`: quantidade de execuções em `aguardando_ingestao`, expostas para contexto
+- `gate.blockers`: preview das execuções/runs que estão bloqueando novos chunks
+- `waiting_for_gate_campaigns`: campanhas pendentes especificamente por bloqueio do gate
+- `recovering_campaigns`: campanhas pendentes aguardando recuperação de chunk stale
+- `running_full_executions`, `running_incremental_executions`: divisão das execuções correntes por modo
+- `lowest_running_invalidated_from`: menor cutoff incremental observado entre as execuções correntes
+- `queued_chunks`, `running_chunks`, `stale_chunks`: contadores globais por estado do chunk
+- `stale_item_count`: itens ainda associados a chunks marcados como `stale`
+- `stale_chunk_preview`: preview dos chunks já identificados como `stale`
+- `stalled_incremental_execution_ids`: subset stalled apenas do modo incremental
+- `running_execution_previews`: previews das execuções correntes com `materialization_mode`, `invalidated_from` e progresso
+
+Comportamento operacional importante:
+
+- o gate vermelho impede progresso material da campanha;
+- o orquestrador não fica mais em polling contínuo por campanha enquanto o gate está fechado;
+- novas campanhas pendentes são retomadas por um dispatcher específico quando a ingestão termina ou quando o controle volta ao modo liberado.
+
+## `GET /analise/materializacoes/controle`
+
+Retorna o estado consolidado do gate de materialização e do modo manual persistido.
+
+## `POST /analise/materializacoes/controle/pause`
+
+Ativa pausa manual. Novos chunks deixam de iniciar, mas a companhia já em processamento termina antes da pausa efetiva.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `reason` | string | Motivo textual opcional para a pausa manual |
+
+```bash
+curl -X POST "http://localhost:8007/analise/materializacoes/controle/pause?reason=janela-de-carga" \
+  -H "Authorization: Bearer <token>"
+```
+
+## `POST /analise/materializacoes/controle/resume`
+
+Remove a pausa manual e devolve o gate ao modo automático. Se ainda houver ingestão ativa, o gate continua vermelho por `INGESTION_ACTIVE`.
+
+## `POST /analise/materializacoes/recuperar-stale`
+
+Executa a recuperação imediata de chunks com lease expirado e já classificados como stale pelo backend. Os itens ainda não concluídos retornam para `pending` e a campanha volta a poder progredir.
+
+Retorna:
+
+- `recovered_chunks`
+- `recovered_items`
+- `affected_campaigns`
+- `chunk_ids`
+
+## `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+
+Executa a mesma recuperação, mas limitada a uma campanha específica.
+
+## `GET /analise/materializacoes/{execucao_id}`
+
+Retorna o detalhe de uma execução específica, incluindo `summary` bruto persistido pela materialização para auditoria operacional, o modo da execução (`full` ou `incremental`), o cutoff `invalidated_from` quando aplicável, os contadores de revisões inseridas/encerradas/removidas e os vínculos opcionais `campanha_id`, `campanha_item_id`, `chunk_execucao_id`, `queue_name` e `position_in_chunk`.
+
+Quando uma companhia estiver com `situacao_registro=CANCELADA` e não houver override explícito de inclusão, o `summary` pode trazer:
+
+- `skipped_reason=COMPANHIA_CANCELADA`
+- `company_status=CANCELADA`
+- contadores de revisões em zero
+
+## `GET /analise/companhias/{codigo_cvm}`
+
+Retorna o manifesto analítico da companhia: contexto padrão, períodos disponíveis, resumo de qualidade e links para os demais blocos.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
 | `codigo_cvm` | integer | Código CVM da companhia |
-
-### Exemplo
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
 
 ```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/overview" \
+curl -X GET "http://localhost:8007/analise/companhias/9512?escopo=consolidated" \
   -H "Authorization: Bearer <token>"
 ```
 
-### Response 200
+## `GET /analise/companhias/{codigo_cvm}/series`
 
-**Schema:** `OverviewAnaliseResposta`
+Resolve observações analíticas normalizadas.
 
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "denominacao_social": "2W ECOBANK S.A. - EM RECUPERACAO JUDICIAL",
-  "situacao_registro": "SUSPENSO(A) - DECISAO ADM",
-  "status_ativo": false,
-  "data_freshness": "2026-06-15T08:00:00Z",
-  "cobertura": {
-    "2024": ["DFP", "FRE", "FCA", "IPE"],
-    "2023": ["DFP", "ITR", "FRE", "FCA", "IPE"],
-    "2022": ["DFP", "ITR", "FRE", "FCA", "IPE"]
-  },
-  "periodos_disponiveis": {
-    "DFP": ["2024-12-31", "2023-12-31", "2022-12-31"],
-    "ITR": ["2024-09-30", "2024-06-30", "2024-03-31"]
-  },
-  "alertas": [
-    {
-      "tipo": "SITUACAO_REGISTRO",
-      "descricao": "Companhia com registro suspenso",
-      "severidade": "WARNING"
-    },
-    {
-      "tipo": "ATRASO_FILING",
-      "descricao": "DFP 2024 entregue após prazo regulatório",
-      "severidade": "INFO"
-    }
-  ],
-  "anos_comparacao_disponiveis": [2024, 2023, 2022, 2021, 2020]
-}
-```
+Parâmetros:
 
-### Campos da Resposta
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `cnpj_companhia` | string | CNPJ da companhia |
-| `codigo_cvm` | integer | Código CVM |
-| `denominacao_social` | string | Razão social |
-| `situacao_registro` | string | Situação atual |
-| `status_ativo` | boolean | Se está ativa |
-| `data_freshness` | datetime | Timestamp da última sincronização geral |
-| `cobertura` | object | Mapeamento de ano para famílias de dados disponíveis |
-| `periodos_disponiveis` | object | Períodos disponíveis por tipo documental |
-| `alertas` | array | Lista de alertas de conformidade ou operacionais |
-| `anos_comparacao_disponiveis` | array | Anos com DFP disponível para comparação |
-
-### Tipos de Alerta
-
-| Tipo | Descrição | Severidade Típica |
-|------|-----------|-------------------|
-| `SITUACAO_REGISTRO` | Problema com registro na CVM | WARNING/CRITICAL |
-| `ATRASO_FILING` | Entrega após prazo regulatório | INFO/WARNING |
-| `REAPRESENTACAO` | Documento reapresentado | INFO |
-| `AUDITOR_RESSALVA` | Parecer com ressalvas | WARNING |
-
----
-
-## `GET /companhias/{codigo_cvm}/analise/financeiro`
-
-Retorna **métricas financeiras anuais e trimestrais normalizadas** com variação YoY/QoQ/CAGR e proveniência.
-
-### Query Parameters
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `horizonte` | string | `5a` | Horizonte de anos: `5a`, `10a`, `todos` |
-| `periodicidade` | string | `anual` | Tipo de formulários: `anual`, `trimestral`, `todos` |
-
-### Exemplo
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `metricas` | string | Lista CSV de métricas estáveis |
+| `periodicidade` | string | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual máximo quando `periodicidade=annual` e `base_periodo=fy` |
 
 ```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/financeiro?horizonte=5a&periodicidade=anual" \
+curl -X GET "http://localhost:8007/analise/companhias/9512/series?metricas=receita_liquida,lucro_liquido&periodicidade=quarterly&base_periodo=quarter&escopo=consolidated" \
   -H "Authorization: Bearer <token>"
 ```
 
-### Response 200
-
-**Schema:** `FinanceiroAnaliseResposta`
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "dados": [
-    {
-      "periodo_label": "2024",
-      "ano": 2024,
-      "trimestre": 0,
-      "periodo_tipo": "ANUAL",
-      "metrics": {
-        "receita_liquida": {
-          "valor_normalizado": 740500000.0,
-          "valor_original": "740500",
-          "yoy": 15.5,
-          "qoq": null,
-          "cagr": 12.3,
-          "proveniencia": {
-            "fonte": "CVM",
-            "dataset": "demonstracao_resultado",
-            "documento_id": 123456,
-            "linha_id": "bbf228f5-5627-4fc5-a490-318b8ba31e43",
-            "data_referencia": "2024-12-31",
-            "data_entrega": "2025-03-15",
-            "link_download": "https://dados.cvm.gov.br/..."
-          }
-        },
-        "lucro_liquido": {
-          "valor_normalizado": 85000000.0,
-          "valor_original": "85000",
-          "yoy": 8.2,
-          "cagr": 6.5,
-          "proveniencia": { "..." }
-        },
-        "ativo_total": {
-          "valor_normalizado": 1200000000.0,
-          "valor_original": "1200000",
-          "yoy": 5.1,
-          "cagr": 4.8,
-          "proveniencia": { "..." }
-        }
-      }
-    },
-    {
-      "periodo_label": "2023",
-      "ano": 2023,
-      "trimestre": 0,
-      "periodo_tipo": "ANUAL",
-      "metrics": { "..." }
-    }
-  ]
-}
-```
-
-### Campos da Métrica
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `valor_normalizado` | number | Valor absoluto em reais (ajustado por escala) |
-| `valor_original` | string | Valor exatamente como reportado pela CVM |
-| `yoy` | number | Variação ano contra ano (%) |
-| `qoq` | number | Variação trimestre contra trimestre anterior (%) |
-| `cagr` | number | Taxa de crescimento anual composta (%) |
-| `proveniencia` | object | Metadados de proveniência do dado contábil |
-
-### Métricas Disponíveis
-
-- `receita_liquida`
-- `lucro_liquido`
-- `ativo_total`
-- `patrimonio_liquido`
-- `divida_liquida`
-- `ebitda`
-- `margem_liquida`
-- `roe`
-- `roa`
-
-### Códigos de Erro
-
-| Status | Descrição |
-|--------|-----------|
-| `404` | Companhia não encontrada |
-| `422` | Parâmetro inválido |
-
----
-
-## `GET /companhias/{codigo_cvm}/analise/comparativo`
-
-Compara o desempenho financeiro, composição de capital e governança entre **dois anos específicos**.
-
-### Query Parameters
-
-| Parâmetro | Tipo | Obrigatório | Descrição |
-|-----------|------|-------------|-----------|
-| `ano_base` | integer | Sim | Ano base da comparação |
-| `ano_comparacao` | integer | Sim | Ano a ser comparado |
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/comparativo?ano_base=2024&ano_comparacao=2023" \
-  -H "Authorization: Bearer <token>"
-```
-
-### Response 200
-
-**Schema:** `ComparativoAnaliseResposta`
-
-```json
-{
-  "ano_base": 2024,
-  "ano_comparacao": 2023,
-  "financeiro": {
-    "receita_liquida": {
-      "valor_base": 740500000.0,
-      "valor_comparacao": 641000000.0,
-      "delta_absoluto": 99500000.0,
-      "delta_percentual": 15.5
-    },
-    "lucro_liquido": {
-      "valor_base": 85000000.0,
-      "valor_comparacao": 78500000.0,
-      "delta_absoluto": 6500000.0,
-      "delta_percentual": 8.2
-    }
-  },
-  "capital": {
-    "quantidade_total_acoes": {
-      "valor_base": 1000000000,
-      "valor_comparacao": 1000000000,
-      "delta_absoluto": 0,
-      "delta_percentual": 0.0
-    }
-  },
-  "governanca": {
-    "numero_conselheiros": {
-      "valor_base": 7,
-      "valor_comparacao": 6,
-      "delta_absoluto": 1,
-      "delta_percentual": 16.7
-    }
-  },
-  "pessoas": {
-    "total_empregados": {
-      "valor_base": 15000,
-      "valor_comparacao": 14200,
-      "delta_absoluto": 800,
-      "delta_percentual": 5.6
-    }
-  },
-  "mercado": {
-    "volume_negociacao_insiders": {
-      "valor_base": 5000000.0,
-      "valor_comparacao": 3200000.0,
-      "delta_absoluto": 1800000.0,
-      "delta_percentual": 56.3
-    }
-  },
-  "eventos_ipe": {
-    "valor_base": 45,
-    "valor_comparacao": 38,
-    "delta_absoluto": 7,
-    "delta_percentual": 18.4
-  }
-}
-```
-
-### Campos do Delta
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `valor_base` | number | Valor no ano base |
-| `valor_comparacao` | number | Valor no ano de comparação |
-| `delta_absoluto` | number | Diferença absoluta (Base - Comparação) |
-| `delta_percentual` | number | Variação percentual |
-
----
-
-## `GET /companhias/{codigo_cvm}/analise/eventos`
-
-Retorna uma **linha do tempo unificada** de fatos relevantes (IPE), reapresentações financeiras e grandes negociações.
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/eventos" \
-  -H "Authorization: Bearer <token>"
-```
-
-### Response 200
-
-**Schema:** Array de `EventoLinhaTempo`
-
-```json
-[
-  {
-    "data_evento": "2026-05-15",
-    "familia_evento": "IPE",
-    "tipo_evento": "Fato Relevante",
-    "severidade": "INFO",
-    "titulo": "Resultado do 1T26",
-    "explicacao": "Divulgação dos resultados do primeiro trimestre de 2026",
-    "link_documento": "https://dados.cvm.gov.br/...",
-    "periodo_afetado": "2026-1T"
-  },
-  {
-    "data_evento": "2026-04-20",
-    "familia_evento": "FINANCEIRO",
-    "tipo_evento": "Reapresentação",
-    "severidade": "WARNING",
-    "titulo": "DFP 2025 reapresentado",
-    "explicacao": "Reclassificação de contas contábeis",
-    "link_documento": null,
-    "periodo_afetado": "2025"
-  },
-  {
-    "data_evento": "2026-03-10",
-    "familia_evento": "VLMO",
-    "tipo_evento": "Negociação de Insider",
-    "severidade": "INFO",
-    "titulo": "Diretor adquiriu 50.000 ações",
-    "explicacao": "Compra de ações ordinárias por membro da diretoria",
-    "link_documento": null,
-    "periodo_afetado": null
-  }
-]
-```
-
-### Campos do Evento
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `data_evento` | date | Data da publicação/entrega |
-| `familia_evento` | string | Família de origem: `IPE`, `FRE`, `VLMO`, `CGVN`, `FCA`, `FINANCEIRO` |
-| `tipo_evento` | string | Tipo específico (ex: Fato Relevante, Reapresentação) |
-| `severidade` | string | `INFO`, `WARNING`, `CRITICAL` |
-| `titulo` | string | Título do evento |
-| `explicacao` | string | Descrição resumida |
-| `link_documento` | string \| null | Link para download do documento |
-| `periodo_afetado` | string \| null | Período correspondente (ex: 2024, 2024-3T) |
-
----
-
-## `GET /companhias/{codigo_cvm}/analise/pessoas-remuneracao`
-
-Retorna **estatísticas anuais de remuneração** de órgãos, número de membros e diversidade de gênero.
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/pessoas-remuneracao" \
-  -H "Authorization: Bearer <token>"
-```
-
-### Response 200
-
-**Schema:** `PessoasRemuneracaoResposta`
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "dados": [
-    {
-      "ano": 2024,
-      "total_remuneracao_conselho": 2500000.0,
-      "membros_conselho": 7,
-      "remuneracao_media_conselho": 357142.86,
-      "total_remuneracao_diretoria": 8000000.0,
-      "membros_diretoria": 5,
-      "remuneracao_media_diretoria": 1600000.0,
-      "yoy_remuneracao_total": 12.5,
-      "proporcao_feminino_conselho": 0.286,
-      "proporcao_feminino_diretoria": 0.2,
-      "relacoes_familiares_total": 2
-    },
-    {
-      "ano": 2023,
-      "total_remuneracao_conselho": 2200000.0,
-      "membros_conselho": 6,
-      "remuneracao_media_conselho": 366666.67,
-      "total_remuneracao_diretoria": 7200000.0,
-      "membros_diretoria": 5,
-      "remuneracao_media_diretoria": 1440000.0,
-      "yoy_remuneracao_total": 8.3,
-      "proporcao_feminino_conselho": 0.167,
-      "proporcao_feminino_diretoria": 0.2,
-      "relacoes_familiares_total": 1
-    }
-  ]
-}
-```
-
-### Campos por Ano
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `ano` | integer | Ano de referência |
-| `total_remuneracao_conselho` | number | Remuneração anual total do Conselho |
-| `membros_conselho` | integer | Quantidade de membros no Conselho |
-| `remuneracao_media_conselho` | number | Remuneração média por membro |
-| `total_remuneracao_diretoria` | number | Remuneração anual total da Diretoria |
-| `membros_diretoria` | integer | Quantidade de membros na Diretoria |
-| `remuneracao_media_diretoria` | number | Remuneração média por membro |
-| `yoy_remuneracao_total` | number | Variação YoY da remuneração total |
-| `proporcao_feminino_conselho` | number | Proporção de mulheres no Conselho |
-| `proporcao_feminino_diretoria` | number | Proporção de mulheres na Diretoria |
-| `relacoes_familiares_total` | integer | Quantidade de relações familiares reportadas |
-
----
-
-## `GET /companhias/{codigo_cvm}/analise/mercado-insiders`
-
-Retorna **movimentações de insiders**, ações em tesouraria, alterações de capital social e governança.
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise/mercado-insiders" \
-  -H "Authorization: Bearer <token>"
-```
-
-### Response 200
-
-**Schema:** `MercadoInsidersResposta`
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "movimentacoes": [
-    {
-      "ano_mes": "2026-05",
-      "total_compras": 1500000.0,
-      "total_vendas": 800000.0,
-      "volume_liquido": 700000.0,
-      "quantidade_operacoes": 12
-    }
-  ],
-  "concentracao_cargo": {
-    "Diretor": 0.45,
-    "Conselheiro": 0.35,
-    "Acionista Controlador": 0.20
-  },
-  "tesouraria": [
-    {
-      "data": "2026-05-31",
-      "quantidade_acoes": 5000000,
-      "percentual_capital": 0.5
-    }
-  ],
-  "capital_alteracoes": [
-    {
-      "data": "2026-04-15",
-      "tipo": "Aumento",
-      "valor": 100000000.0,
-      "descricao": "Aumento de capital por subscrição pública"
-    }
-  ],
-  "governanca_resumo": {
-    "Adotada": 45,
-    "Nao Adotada": 12,
-    "Parcialmente": 8,
-    "Nao se Aplica": 5
-  }
-}
-```
-
----
-
-## `GET /companhias/{codigo_cvm}/analise`
-
-**Endpoint estratégico** que retorna **todos os blocos de análise consolidados** em um único payload estruturado.
-
-### Query Parameters
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `horizonte` | string | `5a` | Horizonte temporal: `5a`, `10a`, `todos` |
-| `periodicidade` | string | `anual` | Periodicidade: `anual`, `trimestral`, `todos` |
-| `ano_base` | integer | `2025` | Ano base para comparação |
-| `ano_comparacao` | integer | `2024` | Ano de comparação |
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/companhias/25224/analise?horizonte=5a&ano_base=2024&ano_comparacao=2023" \
-  -H "Authorization: Bearer <token>"
-```
-
-### Response 200
-
-**Schema:** `AnaliseConsolidadaResposta`
-
-```json
-{
-  "companhia": {
-    "cnpj_companhia": "08773135000100",
-    "codigo_cvm": 25224,
-    "denominacao_social": "2W ECOBANK S.A."
-  },
-  "periodos_disponiveis": {
-    "DFP": ["2024-12-31", "2023-12-31"],
-    "ITR": ["2024-09-30"]
-  },
-  "cobertura": {
-    "2024": ["DFP", "FRE", "FCA", "IPE"],
-    "2023": ["DFP", "ITR", "FRE", "FCA", "IPE"]
-  },
-  "financeiro": [
-    {
-      "periodo_label": "2024",
-      "ano": 2024,
-      "trimestre": 0,
-      "periodo_tipo": "ANUAL",
-      "metrics": { "..." }
-    }
-  ],
-  "eventos": [
-    { "..." }
-  ],
-  "governanca": {
-    "praticas_adotadas": 45,
-    "praticas_nao_adotadas": 12,
-    "score_governanca": 78.9
-  },
-  "pessoas_remuneracao": [
-    { "..." }
-  ],
-  "mercado_insiders": {
-    "movimentacoes": [...],
-    "concentracao_cargo": {...},
-    "tesouraria": [...],
-    "capital_alteracoes": [...],
-    "governanca_resumo": {...}
-  },
-  "proveniencia": {
-    "fontes_utilizadas": ["DFP", "ITR", "FRE", "FCA", "IPE", "VLMO", "CGVN"],
-    "ultima_atualizacao": "2026-06-15T08:00:00Z"
-  }
-}
-```
-
----
-
-## Casos de Uso
-
-### Caso 1: Dashboard Executivo
-
-Use o endpoint consolidado para obter todos os dados em uma única chamada:
-
-```bash
-GET /companhias/{codigo_cvm}/analise?horizonte=5a
-```
-
-### Caso 2: Análise de Governança
-
-Combine `pessoas-remuneracao` com `mercado-insiders` para avaliar qualidade da gestão:
-
-```bash
-GET /companhias/25224/analise/pessoas-remuneracao
-GET /companhias/25224/analise/mercado-insiders
-```
-
-### Caso 3: Monitoramento de Eventos
-
-Use `eventos` para criar alertas em tempo real:
-
-```python
-import httpx
-
-def verificar_eventos_criticos(codigo_cvm, token):
-    response = httpx.get(
-        f"http://localhost:8007/companhias/{codigo_cvm}/analise/eventos",
-        headers={"Authorization": f"Bearer {token}"}
-    )
-    eventos = response.json()
-    
-    criticos = [e for e in eventos if e["severidade"] == "CRITICAL"]
-    if criticos:
-        print(f"⚠️ {len(criticos)} eventos críticos encontrados!")
-        for evento in criticos:
-            print(f"  - {evento['titulo']} ({evento['data_evento']})")
-```
-
-### Caso 4: Comparação Anual
-
-Use `comparativo` para análises YoY:
-
-```bash
-GET /companhias/25224/analise/comparativo?ano_base=2024&ano_comparacao=2023
-```
-
----
-
-## Notas para Usuários
-
-### Para Analistas Financeiros
-- Use `financeiro` para séries históricas com cálculos automáticos de YoY/CAGR
-- Use `comparativo` para análises rápidas entre dois exercícios
-- A proveniência permite rastrear cada métrica até o documento original
-
-### Para Auditores
-- Use `overview` para verificar cobertura e frescor dos dados
-- Use `eventos` para identificar reapresentações e atrasos
-- Os alertas ajudam a priorizar áreas de risco
-
-### Para Compliance
-- Use `mercado-insiders` para monitorar negociações de insiders
-- Use `pessoas-remuneracao` para avaliar conformidade com políticas de remuneração
-- Use `eventos` para rastrear fatos relevantes e comunicados obrigatórios
-
-### Para Operadores de Backoffice
-- Use o endpoint consolidado (`/analise`) para dashboards executivos
-- Use `overview` para verificar status de sincronização
-- Os alertas indicam problemas operacionais que precisam de atenção
-
----
-
-## Próximos Passos
-
-- [Financeiro](./financeiro.md) - Endpoints detalhados de DFP/ITR
-- [FRE](./fre.md) - Endpoints do Formulário de Referência
-- [Ingestion](../ingestion/monitoring.md) - Monitoramento de sincronizações
+Cada resposta de série inclui:
+
+- `resolution.mode`: `canonical` ou `runtime_fallback`
+- `resolution.materialization_execution_id`: UUID da materialização canônica usada, quando houver
+- `resolution.materialized_at`: instante de conclusão da materialização
+- `resolution.as_of`: data de corte informacional efetivamente aplicada
+- `horizonte_anos`: horizonte anual efetivamente aplicado em consultas históricas FY
+
+## `GET /analise/companhias/{codigo_cvm}/comparacoes`
+
+Retorna comparações analíticas prontas sobre as séries resolvidas. O backend produz YoY, QoQ, CAGR, análise vertical e índice base 100 quando matematicamente definidos. Quando uma comparação não puder ser produzida, a resposta traz `status=unavailable` e `reason_code`.
+
+As comparações reutilizam a mesma origem de resolução declarada em `resolution`.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `metricas` | string | Lista CSV de métricas estáveis |
+| `periodicidade` | string | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual máximo quando `periodicidade=annual` e `base_periodo=fy` |
+
+Cada comparação expõe:
+
+- `metric_unit`: unidade dos valores `current_value` e `comparable_value`
+- `comparison_unit`: unidade do resultado comparativo, como `ratio`, `percentage_point` ou `index`
+- `horizonte_anos`: horizonte anual efetivamente aplicado em consultas históricas FY
+
+## `GET /analise/companhias/{codigo_cvm}/qualidade`
+
+Executa verificações auditáveis de completude, comparabilidade, consistência e reapresentações.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `periodicidade` | string | `annual` ou `quarterly` |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+
+## `GET /analise/companhias/{codigo_cvm}/sinais`
+
+Avalia regras determinísticas do backend e retorna o sinal com threshold, valor observado e evidências.
+
+Os sinais são calculados sobre as séries e comparáveis corretos para o `as_of` informado.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+
+## `GET /analise/companhias/{codigo_cvm}/eventos`
+
+Retorna a timeline analítica atual unificando IPE, reapresentações financeiras, alterações de capital e negociações relevantes.
+
+Cada evento expõe `event_id`, identificador estável adequado para chave de renderização, paginação incremental e deep links.
+
+## `GET /analise/companhias/{codigo_cvm}/restatements`
+
+Compara versões consecutivas de DFP e ITR no escopo solicitado e informa as contas alteradas, com valores antes/depois e impacto absoluto/relativo.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+
+## `GET /analise/companhias/{codigo_cvm}/governanca`
+
+Retorna observações temporais anuais de governança, com corte `as_of` e horizonte histórico explícito.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual máximo a retornar |
+
+O contrato atual expõe, entre outras observações:
+
+- `governanca_praticas_adotadas_ratio`
+- `governanca_praticas_com_explicacao`
+
+## `GET /analise/companhias/{codigo_cvm}/pessoas`
+
+Retorna observações temporais anuais de pessoas e remuneração, com corte `as_of` e horizonte histórico explícito.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual máximo a retornar |
+
+O contrato atual expõe, entre outras observações:
+
+- `pessoas_remuneracao_total_orgao`
+- `pessoas_empregados_total`
+
+## `GET /analise/companhias/{codigo_cvm}/brief`
+
+Retorna um brief analítico com:
+
+- trimestre corrente;
+- trimestre anterior;
+- mesmo trimestre do ano anterior;
+- exercício corrente;
+- exercício anterior;
+- métricas, comparações, sinais, qualidade e eventos recentes.
+
+Parâmetros:
+
+| Nome | Tipo | Descrição |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `metricas` | string | Lista CSV opcional de métricas a priorizar |
+| `incluir_eventos` | boolean | Controla a inclusão dos eventos recentes |

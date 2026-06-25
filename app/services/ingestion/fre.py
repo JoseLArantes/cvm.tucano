@@ -102,6 +102,7 @@ from app.services.ingestion.staging import (
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary
 from app.services.ingestion.validation import (
+    ValidationResult,
     build_natural_key,
     classify_duplicate,
     invalid_result,
@@ -118,6 +119,16 @@ from app.services.sincronizacao_fre import (
 )
 
 _BATCH_COMMIT_LINHAS = 5000
+
+
+def _resultado_linha_ignorada_sem_conteudo_material() -> ValidationResult:
+    return ValidationResult(
+        status="ignored_duplicate",
+        reason_code="ignored_duplicate",
+        severity="info",
+        details={"duplicate_status": "blank_material_row"},
+        repairable=False,
+    )
 
 
 def map_fre_members(ano: int) -> tuple[dict[str, str], set[str], set[str]]:
@@ -604,8 +615,28 @@ def normalizar_fre_row(
     if tipo == "relacao_subordinacao":
         nome_admin = normalizar_texto(linha.get("Nome_Administrador"))
         nome_rel = normalizar_texto(linha.get("Nome_Pessoa_Relacionada"))
-        if nome_admin is None or nome_rel is None:
-            raise ValueError("campo_obrigatorio_ausente")
+        tipo_relacao = normalizar_texto(linha.get("Tipo_Relacao"))
+        cargo_admin = normalizar_texto(linha.get("Cargo_Administrador"))
+        cargo_rel = normalizar_texto(linha.get("Cargo_Pessoa_Relacionada"))
+        categoria_rel = normalizar_texto(linha.get("Categoria_Pessoa_Relacionada"))
+        tipo_pessoa_rel = normalizar_texto(linha.get("Tipo_Pessoa_Relacionada"))
+        documento_pessoa_rel = _digitos(linha.get("Documento_Pessoa_Relacionada"))
+        observacao = normalizar_texto(linha.get("Observacao"))
+        if all(
+            valor is None
+            for valor in (
+                nome_admin,
+                nome_rel,
+                tipo_relacao,
+                cargo_admin,
+                cargo_rel,
+                categoria_rel,
+                tipo_pessoa_rel,
+                documento_pessoa_rel,
+                observacao,
+            )
+        ):
+            raise ValueError("linha_sem_conteudo_material")
         return (
             "fre_relacao_subordinacao",
             base
@@ -614,14 +645,14 @@ def normalizar_fre_row(
                 "data_fim_exercicio_social": normalizar_data(linha.get("Data_Fim_Exercicio_Social")),
                 "nome_administrador": nome_admin,
                 "cpf_administrador": _digitos(linha.get("CPF_Administrador")),
-                "cargo_administrador": normalizar_texto(linha.get("Cargo_Administrador")),
+                "cargo_administrador": cargo_admin,
                 "nome_pessoa_relacionada": nome_rel,
-                "tipo_pessoa_relacionada": normalizar_texto(linha.get("Tipo_Pessoa_Relacionada")),
-                "documento_pessoa_relacionada": _digitos(linha.get("Documento_Pessoa_Relacionada")),
-                "cargo_pessoa_relacionada": normalizar_texto(linha.get("Cargo_Pessoa_Relacionada")),
-                "categoria_pessoa_relacionada": normalizar_texto(linha.get("Categoria_Pessoa_Relacionada")),
-                "tipo_relacao": normalizar_texto(linha.get("Tipo_Relacao")),
-                "observacao": normalizar_texto(linha.get("Observacao")),
+                "tipo_pessoa_relacionada": tipo_pessoa_rel,
+                "documento_pessoa_relacionada": documento_pessoa_rel,
+                "cargo_pessoa_relacionada": cargo_rel,
+                "categoria_pessoa_relacionada": categoria_rel,
+                "tipo_relacao": tipo_relacao,
+                "observacao": observacao,
             },
         )
     if tipo == "transacao_parte_relacionada":
@@ -844,14 +875,16 @@ def normalizar_fre_row(
         )
     if tipo == "plano_recompra_classe_acao":
         id_plano = normalizar_inteiro(linha.get("ID_Plano_Recompra"))
+        especie_acao = normalizar_texto(linha.get("Especie_Acao"))
         tipo_classe = normalizar_texto(linha.get("Tipo_Classe_Acao_Preferencial"))
-        if id_plano is None or tipo_classe is None:
+        if id_plano is None or (especie_acao is None and tipo_classe is None):
             raise ValueError("campo_obrigatorio_ausente")
         return (
             "fre_plano_recompra_classe_acao",
             base
             | {
                 "id_plano_recompra": id_plano,
+                "especie_acao": especie_acao,
                 "tipo_classe_acao_preferencial": tipo_classe,
                 "quantidade_acoes_adquiridas": normalizar_decimal_cvm(linha.get("Quantidade_Acoes_Adquiridas")),
             },
@@ -1451,7 +1484,15 @@ def _fre_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str, ...]]
         return (
             FrePlanoRecompraClasseAcao,
             "fre_plano_recompra_classes_acoes",
-            ("id_documento", "versao", "data_referencia", "cnpj_companhia", "id_plano_recompra", "tipo_classe_acao_preferencial"),
+            (
+                "id_documento",
+                "versao",
+                "data_referencia",
+                "cnpj_companhia",
+                "id_plano_recompra",
+                "especie_acao",
+                "tipo_classe_acao_preferencial",
+            ),
         )
     if row_kind == "fre_valor_mobiliario_tesouraria_movimentacao":
         return (
@@ -1702,6 +1743,14 @@ def _process_fre_rows(
                     linha=row.raw_data,
                 )
             except Exception as exc:
+                if str(exc) == "linha_sem_conteudo_material":
+                    write_validation_result(
+                        db,
+                        ingestion_row=row,
+                        result=_resultado_linha_ignorada_sem_conteudo_material(),
+                    )
+                    contadores["inalterados"] += 1
+                    continue
                 result = invalid_result(
                     f"normalizacao_invalida: {exc}",
                     details={"erro": str(exc)},
@@ -1909,6 +1958,14 @@ def _process_fre_member(
                     linha=row.raw_data,
                 )
             except Exception as exc:
+                if str(exc) == "linha_sem_conteudo_material":
+                    write_validation_result(
+                        db,
+                        ingestion_row=row,
+                        result=_resultado_linha_ignorada_sem_conteudo_material(),
+                    )
+                    contadores["inalterados"] += 1
+                    continue
                 result = invalid_result(
                     f"normalizacao_invalida: {exc}",
                     details={"erro": str(exc)},

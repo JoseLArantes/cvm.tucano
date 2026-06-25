@@ -14,15 +14,8 @@ from app.models.fre import (
     FreAdministradorPcd,
     FreAuditor,
     FreCapitalSocial,
-    FreCapitalSocialAumento,
-    FreCapitalSocialAumentoClasseAcao,
     FreCapitalSocialClasseAcao,
-    FreCapitalSocialDesdobramento,
-    FreCapitalSocialDesdobramentoClasseAcao,
-    FreCapitalSocialReducao,
-    FreCapitalSocialReducaoClasseAcao,
     FreCapitalSocialTituloConversivel,
-    FreDireitoAcao,
     FreDistribuicaoCapital,
     FreDistribuicaoCapitalClasseAcao,
     FreDocumento,
@@ -53,23 +46,16 @@ from app.models.fre import (
     FreValorMobiliarioTesourariaUltimoExercicio,
     FreVolumeValorMobiliario,
 )
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDate, Paginacao
 from app.schemas.fre import (
     FreAcaoEntregueResposta,
     FreAdministradorDeclaracaoGeneroResposta,
     FreAdministradorDeclaracaoRacaResposta,
     FreAdministradorPcdResposta,
     FreAuditorResposta,
-    FreCapitalSocialAumentoClasseAcaoResposta,
-    FreCapitalSocialAumentoResposta,
     FreCapitalSocialClasseAcaoResposta,
-    FreCapitalSocialDesdobramentoClasseAcaoResposta,
-    FreCapitalSocialDesdobramentoResposta,
-    FreCapitalSocialReducaoClasseAcaoResposta,
-    FreCapitalSocialReducaoResposta,
     FreCapitalSocialResposta,
     FreCapitalSocialTituloConversivelResposta,
-    FreDireitoAcaoResposta,
     FreDistribuicaoCapitalClasseAcaoResposta,
     FreDistribuicaoCapitalResposta,
     FreDocumentoResposta,
@@ -104,16 +90,9 @@ from app.schemas.fre import (
     ListaFreAdministradoresDeclaracaoRacaResposta,
     ListaFreAdministradoresPcdResposta,
     ListaFreAuditoresResposta,
-    ListaFreCapitalSocialAumentoClassesAcoesResposta,
-    ListaFreCapitalSocialAumentosResposta,
     ListaFreCapitalSocialClassesAcoesResposta,
-    ListaFreCapitalSocialDesdobramentoClassesAcoesResposta,
-    ListaFreCapitalSocialDesdobramentosResposta,
-    ListaFreCapitalSocialReducaoClassesAcoesResposta,
-    ListaFreCapitalSocialReducoesResposta,
     ListaFreCapitalSocialResposta,
     ListaFreCapitalSocialTitulosConversiveisResposta,
-    ListaFreDireitosAcoesResposta,
     ListaFreDistribuicaoCapitalClassesAcoesResposta,
     ListaFreDistribuicaoCapitalResposta,
     ListaFreDocumentosResposta,
@@ -161,12 +140,12 @@ ParametroCnpj = Annotated[
 ]
 ParametroCodigoCvm = Annotated[int | None, Query(description="Código CVM da companhia.", examples=[25224])]
 ParametroDataInicio = Annotated[
-    date | None,
-    Query(description="Data inicial de referência no formato ISO (YYYY-MM-DD).", examples=["2025-01-01"]),
+    BrazilianDate | None,
+    Query(description="Data inicial de referência no formato brasileiro (DD/MM/AAAA).", examples=["01/01/2025"]),
 ]
 ParametroDataFim = Annotated[
-    date | None,
-    Query(description="Data final de referência no formato ISO (YYYY-MM-DD).", examples=["2025-12-31"]),
+    BrazilianDate | None,
+    Query(description="Data final de referência no formato brasileiro (DD/MM/AAAA).", examples=["31/12/2025"]),
 ]
 ParametroAnoOrigem = Annotated[int | None, Query(description="Ano do ZIP de origem.", examples=[2025])]
 ParametroAnoInicio = Annotated[int | None, Query(description="Ano inicial do ZIP/dados de origem.", examples=[2010])]
@@ -416,7 +395,11 @@ def listar_auditores_fre(
     "/fre/capital-social",
     response_model=ListaFreCapitalSocialResposta,
     summary="Listar Capital Social FRE",
-    description="Retorna registros de capital social (`fre_cia_aberta_capital_social_{ano}.csv`).",
+    description=(
+        "Retorna registros de capital social (`fre_cia_aberta_capital_social_{ano}.csv`). "
+        "Para exercícios de 2024 em diante, este é um dos quadros públicos ativos que substituem "
+        "os detalhamentos descontinuados pela CVM sobre aumentos, reduções e desdobramentos do capital."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarCapitalSocialFre",
 )
@@ -1105,7 +1088,9 @@ def listar_responsaveis_fre(
     response_model=ListaFreCapitalSocialClassesAcoesResposta,
     summary="Listar Classes de Ações do Capital Social FRE",
     description=(
-        "Retorna classes de ações do capital social FRE (`fre_cia_aberta_capital_social_classe_acao_{ano}.csv`)."
+        "Retorna classes de ações do capital social FRE (`fre_cia_aberta_capital_social_classe_acao_{ano}.csv`). "
+        "Para exercícios de 2024 em diante, este quadro deve ser usado em conjunto com `/fre/capital-social` "
+        "e `/fre/distribuicao-capital` para analisar a composição atualizada do capital."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarCapitalSocialClassesAcoesFre",
@@ -1207,7 +1192,12 @@ def listar_capital_social_titulos_conversiveis_fre(
     "/fre/distribuicao-capital",
     response_model=ListaFreDistribuicaoCapitalResposta,
     summary="Listar Distribuição de Capital FRE",
-    description="Retorna distribuição de capital FRE (`fre_cia_aberta_distribuicao_capital_{ano}.csv`).",
+    description=(
+        "Retorna distribuição de capital FRE (`fre_cia_aberta_distribuicao_capital_{ano}.csv`). "
+        "Para exercícios de 2024 em diante, este é um dos quadros ativos recomendados para consultar a "
+        "posição atualizada do capital após a descontinuação, pela CVM, dos membros específicos de "
+        "aumentos, reduções e desdobramentos."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarDistribuicaoCapitalFre",
 )
@@ -1549,347 +1539,6 @@ def listar_acoes_entregues_fre(
         filtros_adicionais={"orgao_administracao": orgao_administracao},
     )
     return ListaFreAcoesEntreguesResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/aumentos",
-    response_model=ListaFreCapitalSocialAumentosResposta,
-    summary="Listar Aumentos de Capital Social FRE",
-    description="Retorna aumentos do capital social do FRE (`fre_cia_aberta_capital_social_aumento_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialAumentosFre",
-)
-def listar_capital_social_aumentos_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialAumentosResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialAumento,
-        schema=FreCapitalSocialAumentoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialAumentosResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/aumentos-classes-acoes",
-    response_model=ListaFreCapitalSocialAumentoClassesAcoesResposta,
-    summary="Listar Classes de Ações nos Aumentos de Capital Social FRE",
-    description="Retorna classes de ações nos aumentos de capital social do FRE (`fre_cia_aberta_capital_social_aumento_classe_acao_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialAumentoClassesAcoesFre",
-)
-def listar_capital_social_aumento_classes_acoes_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialAumentoClassesAcoesResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialAumentoClasseAcao,
-        schema=FreCapitalSocialAumentoClasseAcaoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialAumentoClassesAcoesResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/desdobramentos",
-    response_model=ListaFreCapitalSocialDesdobramentosResposta,
-    summary="Listar Desdobramentos de Capital Social FRE",
-    description="Retorna desdobramentos do capital social do FRE (`fre_cia_aberta_capital_social_desdobramento_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialDesdobramentosFre",
-)
-def listar_capital_social_desdobramentos_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialDesdobramentosResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialDesdobramento,
-        schema=FreCapitalSocialDesdobramentoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialDesdobramentosResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/desdobramentos-classes-acoes",
-    response_model=ListaFreCapitalSocialDesdobramentoClassesAcoesResposta,
-    summary="Listar Classes de Ações nos Desdobramentos de Capital Social FRE",
-    description="Retorna classes de ações nos desdobramentos de capital social do FRE (`fre_cia_aberta_capital_social_desdobramento_classe_acao_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialDesdobramentoClassesAcoesFre",
-)
-def listar_capital_social_desdobramento_classes_acoes_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialDesdobramentoClassesAcoesResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialDesdobramentoClasseAcao,
-        schema=FreCapitalSocialDesdobramentoClasseAcaoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialDesdobramentoClassesAcoesResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/reducoes",
-    response_model=ListaFreCapitalSocialReducoesResposta,
-    summary="Listar Reduções de Capital Social FRE",
-    description="Retorna reduções do capital social do FRE (`fre_cia_aberta_capital_social_reducao_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialReducoesFre",
-)
-def listar_capital_social_reducoes_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialReducoesResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialReducao,
-        schema=FreCapitalSocialReducaoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialReducoesResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/capital-social/reducoes-classes-acoes",
-    response_model=ListaFreCapitalSocialReducaoClassesAcoesResposta,
-    summary="Listar Classes de Ações nas Reduções de Capital Social FRE",
-    description="Retorna classes de ações nas reduções de capital social do FRE (`fre_cia_aberta_capital_social_reducao_classe_acao_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarCapitalSocialReducaoClassesAcoesFre",
-)
-def listar_capital_social_reducao_classes_acoes_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    id_capital_social: ParametroIdCapitalSocial = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_capital_social.")
-    ] = "-data_referencia",
-) -> ListaFreCapitalSocialReducaoClassesAcoesResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreCapitalSocialReducaoClasseAcao,
-        schema=FreCapitalSocialReducaoClasseAcaoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_capital_social"},
-        filtros_adicionais={"id_capital_social": id_capital_social},
-    )
-    return ListaFreCapitalSocialReducaoClassesAcoesResposta(
-        dados=dados,
-        paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
-    )
-
-
-@router.get(
-    "/fre/direitos-acoes",
-    response_model=ListaFreDireitosAcoesResposta,
-    summary="Listar Direitos de Ações FRE",
-    description="Retorna direitos de ações declarados no FRE (`fre_cia_aberta_direito_acao_{ano}.csv`).",
-    responses=_RESPOSTAS_PADRAO,
-    operation_id="listarDireitosAcoesFre",
-)
-def listar_direitos_acoes_fre(
-    db: DbSession,
-    paginacao: Annotated[PaginacaoQuery, Depends()],
-    cnpj_companhia: ParametroCnpj = None,
-    codigo_cvm: ParametroCodigoCvm = None,
-    data_referencia_inicio: ParametroDataInicio = None,
-    data_referencia_fim: ParametroDataFim = None,
-    ano_origem: ParametroAnoOrigem = None,
-    ano_inicio: ParametroAnoInicio = None,
-    ano_fim: ParametroAnoFim = None,
-    versao: ParametroVersao = None,
-    id_documento: ParametroIdDocumento = None,
-    ordenar_por: Annotated[
-        str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, tipo_classe_acao.")
-    ] = "-data_referencia",
-) -> ListaFreDireitosAcoesResposta:
-    dados, total = _lista_fre_generica(
-        db,
-        modelo=FreDireitoAcao,
-        schema=FreDireitoAcaoResposta,
-        paginacao=paginacao,
-        cnpj_companhia=cnpj_companhia,
-        codigo_cvm=codigo_cvm,
-        data_referencia_inicio=data_referencia_inicio,
-        data_referencia_fim=data_referencia_fim,
-        ano_origem=ano_origem,
-        ano_inicio=ano_inicio,
-        ano_fim=ano_fim,
-        versao=versao,
-        id_documento=id_documento,
-        ordenar_por=ordenar_por,
-        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "tipo_classe_acao"},
-    )
-    return ListaFreDireitosAcoesResposta(
         dados=dados,
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
     )

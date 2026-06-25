@@ -6,7 +6,7 @@ from sqlalchemy import Integer, Select, desc, func, select
 
 from app.api.deps import DbSession, PaginacaoQuery
 from app.models.ipe import IpeDocumento
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDate, Paginacao
 from app.schemas.ipe import (
     IpeDocumentoAgregado,
     IpeDocumentoResposta,
@@ -30,12 +30,12 @@ ParametroCnpj = Annotated[
 ]
 ParametroCodigoCvm = Annotated[int | None, Query(description="Código CVM da companhia.", examples=[1023])]
 ParametroDataInicio = Annotated[
-    date | None,
-    Query(description="Data inicial do evento no formato ISO (YYYY-MM-DD).", examples=["2025-01-01"]),
+    BrazilianDate | None,
+    Query(description="Data inicial do evento no formato brasileiro (DD/MM/AAAA).", examples=["01/01/2025"]),
 ]
 ParametroDataFim = Annotated[
-    date | None,
-    Query(description="Data final do evento no formato ISO (YYYY-MM-DD).", examples=["2025-12-31"]),
+    BrazilianDate | None,
+    Query(description="Data final do evento no formato brasileiro (DD/MM/AAAA).", examples=["31/12/2025"]),
 ]
 ParametroAnoOrigem = Annotated[int | None, Query(description="Ano do ZIP de origem.", examples=[2025])]
 ParametroAnoInicio = Annotated[int | None, Query(description="Ano inicial do ZIP/dados de origem.", examples=[2010])]

@@ -82,7 +82,8 @@ def _listar(
         "Dado um `cnpj_companhia` ou `codigo_cvm`, agrega a resposta de todos os grupos de endpoints "
         "de companhia, financeiro (DFP/ITR), FRE e IPE em um unico payload. "
         "Nas demonstrações financeiras DFP/ITR agregadas, `valor_conta` já é entregue ajustado por "
-        "`escala_moeda`, enquanto `valor_conta_reportado` preserva o número bruto do CSV da CVM."
+        "`escala_moeda`, enquanto `valor_conta_reportado` preserva o número bruto do CSV da CVM. "
+        "Campos decimais retornam como strings decimais canônicas, sem separadores de milhares."
     ),
     responses={
         404: {

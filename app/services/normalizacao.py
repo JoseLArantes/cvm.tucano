@@ -2,7 +2,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -121,6 +121,29 @@ def normalizar_decimal_cvm(valor: Any) -> Decimal | None:
         return Decimal(texto)
     except Exception as exc:
         raise ValueError(f"Valor decimal invalido: {valor}") from exc
+
+
+def decimal_para_canonical_string(valor: Decimal | None) -> str | None:
+    if valor is None:
+        return None
+    texto = format(valor, "f")
+    if "." in texto:
+        texto = texto.rstrip("0").rstrip(".")
+    if texto in {"", "-0"}:
+        return "0"
+    return texto
+
+
+def data_para_string_br(valor: date | None) -> str | None:
+    if valor is None:
+        return None
+    return valor.strftime("%d/%m/%Y")
+
+
+def datetime_para_string_br(valor: datetime | None) -> str | None:
+    if valor is None:
+        return None
+    return valor.strftime("%d/%m/%Y %H:%M:%S")
 
 
 def normalizar_conta_fixa(valor: Any) -> bool | None:

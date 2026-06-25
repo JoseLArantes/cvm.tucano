@@ -5,61 +5,71 @@ sidebar_position: 9
 
 # Código de Governança Corporativa (CGVN)
 
-## Visão Geral
+## O que é CGVN
 
-Declaração anual de práticas de governança adotadas pela companhia, conforme modelo CVM.
+CGVN é a fonte de informes relacionados ao Código Brasileiro de Governança Corporativa. Ela registra o documento entregue pela companhia e as práticas declaradas, incluindo a adoção ou não adoção de recomendações e as explicações apresentadas.
 
-## Metadados Técnicos
+No Tucano CVM, a fonte é dividida em cabeçalho documental e práticas. Isso permite consultar tanto a entrega do informe quanto o conteúdo item a item.
+
+## Por que esse conjunto existe
+
+O CGVN organiza informações qualitativas sobre práticas de governança. Diferente de DFP e ITR, que têm foco financeiro, ou de IPE, que registra eventos documentais, CGVN descreve como a companhia responde às práticas recomendadas no código.
+
+Essa fonte deve ser lida como uma declaração estruturada da companhia em uma data e versão específicas.
+
+## Metadados técnicos
 
 | Campo | Valor |
 |-------|-------|
-| **Fonte CVM** | `cgvn` |
-| **Arquivo ZIP** | `cgvn_companhias_abertas_{ano}.zip` |
-| **Periodicidade** | Anual |
-| **Desde** | 2018 |
-| **Tabelas Alvo** | `cgvn_documentos`, `cgvn_praticas` |
+| Fonte no sistema | `cgvn` |
+| Distribuição CVM | ZIP anual |
+| Arquivo principal | `cgvn_cia_aberta_{ano}.zip` |
+| Membros promovidos | `cgvn_cia_aberta_{ano}.csv`, `cgvn_cia_aberta_praticas_{ano}.csv` |
+| Primeiro ano no registro da fonte | 2018 |
+| Dependência | `cadastro` |
+| Tabelas promovidas | `cgvn_documentos`, `cgvn_praticas` |
+| Chaves de referência | `cnpj_companhia`, `codigo_cvm`, `id_documento`, `versao`, `id_item` |
 
-## Endpoints Principais
+## Arquivos do pacote anual
+
+```text
+cgvn_cia_aberta_{ano}.csv
+cgvn_cia_aberta_praticas_{ano}.csv
+```
+
+O primeiro arquivo contém o cabeçalho documental. O segundo contém os itens de prática e as respostas associadas.
+
+## Estrutura no Tucano CVM
+
+| Dataset | Tabela | Conteúdo |
+|---------|--------|----------|
+| Documento | `cgvn_documentos` | Companhia, documento, versão, data de referência e metadados da entrega. |
+| Práticas | `cgvn_praticas` | Itens do código, prática recomendada, resposta declarada e explicação textual. |
+
+Nos registros de práticas, a leitura normalmente passa por:
+
+- `id_item`, que identifica o item do código
+- prática recomendada
+- prática adotada ou resposta equivalente
+- explicação informada pela companhia
+- seção ou agrupamento temático, quando disponível na origem
+- data de referência e versão do documento
+
+## Endpoints principais
 
 ```bash
 GET /cgvn/documentos?codigo_cvm=25224
 GET /cgvn/praticas?codigo_cvm=25224&ano=2024
 ```
 
-## Campos Principais (`cgvn_praticas`)
+## Como a ingestão trata a fonte
 
-| Campo | Descrição |
-|-------|-----------|
-| `id_item` | Código da prática (ex: `1.1.1`, `2.3.4`) |
-| `pratica_recomendada` | Texto da recomendação CVM |
-| `pratica_adotada` | `Sim`, `Não`, `Parcialmente`, `Não se Aplica` |
-| `explicacao` | Justificativa quando não adotada ou parcialmente |
-| `secao` | Área temática (ex: Conselho de Administração, Auditoria, Remuneração) |
+O cabeçalho documental é processado antes das práticas. As práticas são promovidas depois de vinculadas ao documento, preservando linha de origem, arquivo, ano e hash.
 
-## Regras de Processamento
+O vínculo com `cadastro` resolve a companhia antes da promoção dos registros. Quando a linha não pode ser vinculada ou não passa pela normalização, o processo registra a falha operacional em vez de promover dados incompletos.
 
-1. **Estrutura Hierárquica**: `id_item` segue padrão `secao.subsecao.item`
-2. **Compliance Score**: Pode ser calculado pelo cliente: `adotadas / (total - nao_se_aplica)`
-3. **Explicações Obrigatórias**: `pratica_adotada != 'Sim'` geralmente exige `explicacao`
-4. **Comparativo Ano-a-Ano**: Útil para tracking de maturidade de governança
+## Como ler os dados
 
-## Exemplo: Score de Governança
+CGVN é uma fonte declaratória. A resposta de uma prática deve ser interpretada junto com a explicação textual, a versão do documento e a data de referência. Para comparações entre anos, acompanhe o mesmo `id_item` e considere mudanças na redação ou estrutura do informe.
 
-```bash
-GET /cgvn/praticas?codigo_cvm=25224&ano=2024
-```
-
-**Cálculo sugerido:**
-```python
-total = len(praticas)
-nao_aplica = sum(1 for p in praticas if p['pratica_adotada'] == 'Não se Aplica')
-adotadas = sum(1 for p in praticas if p['pratica_adotada'] == 'Sim')
-score = adotadas / (total - nao_aplica) * 100
-```
-
-## Notas para Auditores e Compliance
-
-- CGVN complementa FRE na análise de governança
-- Use para scoring ESG/Corporate Governance em matrizes de risco
-- `explicacao` contém detalhes qualitativos valiosos
-- Cruze com `fre_relativas_familiares` e `fre_auditores` para visão 360°
+Indicadores agregados podem ser calculados fora da API a partir dos itens de prática, mas a documentação da fonte prioriza os campos oficiais e a rastreabilidade do documento.

@@ -218,6 +218,29 @@ curl -X GET "http://localhost:8007/companhias/mestre?codigo_cvm=25224&limite_por
 }
 ```
 
+## 7. Consultar a API Analitica
+
+### Manifesto analitico da companhia
+
+```bash
+curl -X GET "http://localhost:8007/analise/companhias/25224?escopo=consolidated" \
+  -H "Authorization: Bearer seu-token-aqui"
+```
+
+### Series trimestrais normalizadas
+
+```bash
+curl -X GET "http://localhost:8007/analise/companhias/25224/series?metricas=receita_liquida,lucro_liquido&periodicidade=quarterly&base_periodo=quarter&escopo=consolidated" \
+  -H "Authorization: Bearer seu-token-aqui"
+```
+
+### Comparacoes analiticas prontas
+
+```bash
+curl -X GET "http://localhost:8007/analise/companhias/25224/comparacoes?metricas=receita_liquida&periodicidade=quarterly&base_periodo=quarter" \
+  -H "Authorization: Bearer seu-token-aqui"
+```
+
 ## 7. Análise Financeira Consolidada
 
 Para obter métricas financeiras com cálculos automáticos (YoY, QoQ, CAGR):

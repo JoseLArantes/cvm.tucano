@@ -1,10 +1,8 @@
 import uuid
-from datetime import date, datetime
-from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao, PeriodicModel
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, CanonicalDecimal, Paginacao, PeriodicModel
 
 
 class FreDocumentoResposta(PeriodicModel):
@@ -13,19 +11,19 @@ class FreDocumentoResposta(PeriodicModel):
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
     codigo_cvm: int | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     denominacao_companhia: str | None
     categoria_documento: str | None
     id_documento: int
-    data_recebimento: date | None
+    data_recebimento: BrazilianDate | None
     link_documento: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreAuditorResposta(BaseModel):
@@ -33,7 +31,7 @@ class FreAuditorResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -43,9 +41,9 @@ class FreAuditorResposta(BaseModel):
     cnpj_auditor: str | None
     codigo_cvm_auditor: str | None
     tipo_origem_auditor: str | None
-    data_inicio_contratacao: date | None
-    data_fim_contratacao: date | None
-    data_inicio_prestacao_servico: date | None
+    data_inicio_contratacao: BrazilianDate | None
+    data_fim_contratacao: BrazilianDate | None
+    data_inicio_prestacao_servico: BrazilianDate | None
     servico_contratado: str | None
     remuneracao_auditor: str | None
     justificativa_substituicao: str | None
@@ -53,9 +51,9 @@ class FreAuditorResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreCapitalSocialResposta(BaseModel):
@@ -63,24 +61,24 @@ class FreCapitalSocialResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     id_capital_social: int
     tipo_capital: str | None
-    data_autorizacao_aprovacao: date | None
-    valor_capital: Decimal | None
+    data_autorizacao_aprovacao: BrazilianDate | None
+    valor_capital: CanonicalDecimal | None
     prazo_integralizacao: str | None
-    quantidade_acoes_ordinarias: Decimal | None
-    quantidade_acoes_preferenciais: Decimal | None
-    quantidade_total_acoes: Decimal | None
+    quantidade_acoes_ordinarias: CanonicalDecimal | None
+    quantidade_acoes_preferenciais: CanonicalDecimal | None
+    quantidade_total_acoes: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FrePosicaoAcionariaResposta(BaseModel):
@@ -88,7 +86,7 @@ class FrePosicaoAcionariaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -100,28 +98,28 @@ class FrePosicaoAcionariaResposta(BaseModel):
     acionista_relacionado: str | None
     tipo_pessoa_acionista_relacionado: str | None
     cpf_cnpj_acionista_relacionado: str | None
-    quantidade_acao_ordinaria_circulacao: Decimal | None
-    percentual_acao_ordinaria_circulacao: Decimal | None
-    quantidade_acao_preferencial_circulacao: Decimal | None
-    percentual_acao_preferencial_circulacao: Decimal | None
-    quantidade_total_acoes_circulacao: Decimal | None
-    percentual_total_acoes_circulacao: Decimal | None
+    quantidade_acao_ordinaria_circulacao: CanonicalDecimal | None
+    percentual_acao_ordinaria_circulacao: CanonicalDecimal | None
+    quantidade_acao_preferencial_circulacao: CanonicalDecimal | None
+    percentual_acao_preferencial_circulacao: CanonicalDecimal | None
+    quantidade_total_acoes_circulacao: CanonicalDecimal | None
+    percentual_total_acoes_circulacao: CanonicalDecimal | None
     nacionalidade: str | None
     sigla_uf: str | None
     residente_exterior: bool | None
     representante_legal: str | None
     tipo_pessoa_representante_legal: str | None
     cpf_cnpj_representante_legal: str | None
-    data_composicao_capital_social: date | None
-    data_ultima_alteracao: date | None
+    data_composicao_capital_social: BrazilianDate | None
+    data_ultima_alteracao: BrazilianDate | None
     acionista_controlador: bool | None
     participante_acordo_acionistas: bool | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreRemuneracaoTotalOrgaoResposta(BaseModel):
@@ -129,38 +127,38 @@ class FreRemuneracaoTotalOrgaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
-    total_remuneracao: Decimal | None
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
+    total_remuneracao: CanonicalDecimal | None
     orgao_administracao: str | None
     numero_membros: int | None
-    total_remuneracao_orgao: Decimal | None
+    total_remuneracao_orgao: CanonicalDecimal | None
     numero_membros_remunerados: int | None
-    salario: Decimal | None
-    beneficios_diretos_indiretos: Decimal | None
-    participacoes_comites: Decimal | None
-    outros_valores_fixos: Decimal | None
+    salario: CanonicalDecimal | None
+    beneficios_diretos_indiretos: CanonicalDecimal | None
+    participacoes_comites: CanonicalDecimal | None
+    outros_valores_fixos: CanonicalDecimal | None
     descricao_outros_remuneracoes_fixas: str | None
-    bonus: Decimal | None
-    participacao_resultados: Decimal | None
-    participacao_reunioes: Decimal | None
-    outros_valores_variaveis: Decimal | None
-    comissoes: Decimal | None
+    bonus: CanonicalDecimal | None
+    participacao_resultados: CanonicalDecimal | None
+    participacao_reunioes: CanonicalDecimal | None
+    outros_valores_variaveis: CanonicalDecimal | None
+    comissoes: CanonicalDecimal | None
     descricao_outros_remuneracoes_variaveis: str | None
-    pos_emprego: Decimal | None
-    cessacao_cargo: Decimal | None
-    baseada_acoes: Decimal | None
+    pos_emprego: CanonicalDecimal | None
+    cessacao_cargo: CanonicalDecimal | None
+    baseada_acoes: CanonicalDecimal | None
     observacao: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoPosicaoGeneroResposta(BaseModel):
@@ -168,7 +166,7 @@ class FreEmpregadoPosicaoGeneroResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -181,9 +179,9 @@ class FreEmpregadoPosicaoGeneroResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreParticipacaoSociedadeResposta(BaseModel):
@@ -191,7 +189,7 @@ class FreParticipacaoSociedadeResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -203,20 +201,20 @@ class FreParticipacaoSociedadeResposta(BaseModel):
     pais_sede: str | None
     uf_sede: str | None
     municipio_sede: str | None
-    participacao_emissor: Decimal | None
+    participacao_emissor: CanonicalDecimal | None
     possui_registro_cvm: bool | None
     codigo_cvm: int | None
     razao_aquisicao_manutencao: str | None
-    data_valor_mercado: date | None
-    data_valor_contabil: date | None
-    valor_mercado: Decimal | None
-    valor_contabil: Decimal | None
+    data_valor_mercado: BrazilianDate | None
+    data_valor_contabil: BrazilianDate | None
+    valor_mercado: CanonicalDecimal | None
+    valor_contabil: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoPosicaoLocalResposta(BaseModel):
@@ -224,7 +222,7 @@ class FreEmpregadoPosicaoLocalResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -238,9 +236,9 @@ class FreEmpregadoPosicaoLocalResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoPosicaoFaixaEtariaResposta(BaseModel):
@@ -248,7 +246,7 @@ class FreEmpregadoPosicaoFaixaEtariaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -259,9 +257,9 @@ class FreEmpregadoPosicaoFaixaEtariaResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoPosicaoDeclaracaoRacaResposta(BaseModel):
@@ -269,7 +267,7 @@ class FreEmpregadoPosicaoDeclaracaoRacaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -284,9 +282,9 @@ class FreEmpregadoPosicaoDeclaracaoRacaResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoPcdResposta(BaseModel):
@@ -294,7 +292,7 @@ class FreEmpregadoPcdResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -306,9 +304,9 @@ class FreEmpregadoPcdResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoLocalFaixaEtariaResposta(BaseModel):
@@ -316,7 +314,7 @@ class FreEmpregadoLocalFaixaEtariaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -327,9 +325,9 @@ class FreEmpregadoLocalFaixaEtariaResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoLocalDeclaracaoRacaResposta(BaseModel):
@@ -337,7 +335,7 @@ class FreEmpregadoLocalDeclaracaoRacaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -352,9 +350,9 @@ class FreEmpregadoLocalDeclaracaoRacaResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreEmpregadoLocalDeclaracaoGeneroResposta(BaseModel):
@@ -362,7 +360,7 @@ class FreEmpregadoLocalDeclaracaoGeneroResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -375,9 +373,9 @@ class FreEmpregadoLocalDeclaracaoGeneroResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreRelacaoFamiliarResposta(BaseModel):
@@ -385,11 +383,11 @@ class FreRelacaoFamiliarResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    nome_administrador: str
+    nome_administrador: str | None
     cpf_administrador: str | None
     nome_emissor: str | None
     cnpj_emissor: str | None
@@ -404,9 +402,9 @@ class FreRelacaoFamiliarResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreResponsavelResposta(BaseModel):
@@ -414,7 +412,7 @@ class FreResponsavelResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -423,9 +421,9 @@ class FreResponsavelResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreCapitalSocialClasseAcaoResposta(BaseModel):
@@ -433,19 +431,19 @@ class FreCapitalSocialClasseAcaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     id_capital_social: int
     tipo_classe_acao_preferencial: str | None
-    quantidade_acoes: Decimal | None
+    quantidade_acoes: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreCapitalSocialTituloConversivelResposta(BaseModel):
@@ -453,7 +451,7 @@ class FreCapitalSocialTituloConversivelResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -463,9 +461,9 @@ class FreCapitalSocialTituloConversivelResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreDistribuicaoCapitalResposta(BaseModel):
@@ -473,26 +471,26 @@ class FreDistribuicaoCapitalResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_ultima_assembleia: date | None
-    quantidade_acoes_ordinarias_circulacao: Decimal | None
-    percentual_acoes_ordinarias_circulacao: Decimal | None
-    quantidade_acoes_preferenciais_circulacao: Decimal | None
-    percentual_acoes_preferenciais_circulacao: Decimal | None
-    quantidade_total_acoes_circulacao: Decimal | None
-    percentual_total_acoes_circulacao: Decimal | None
-    quantidade_acionistas_pf: Decimal | None
-    quantidade_acionistas_pj: Decimal | None
-    quantidade_acionistas_investidores_institucionais: Decimal | None
+    data_ultima_assembleia: BrazilianDate | None
+    quantidade_acoes_ordinarias_circulacao: CanonicalDecimal | None
+    percentual_acoes_ordinarias_circulacao: CanonicalDecimal | None
+    quantidade_acoes_preferenciais_circulacao: CanonicalDecimal | None
+    percentual_acoes_preferenciais_circulacao: CanonicalDecimal | None
+    quantidade_total_acoes_circulacao: CanonicalDecimal | None
+    percentual_total_acoes_circulacao: CanonicalDecimal | None
+    quantidade_acionistas_pf: CanonicalDecimal | None
+    quantidade_acionistas_pj: CanonicalDecimal | None
+    quantidade_acionistas_investidores_institucionais: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreDistribuicaoCapitalClasseAcaoResposta(BaseModel):
@@ -500,20 +498,20 @@ class FreDistribuicaoCapitalClasseAcaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     classe_acoes_preferenciais: str | None
     sigla_classe_acoes_preferenciais: str | None
-    quantidade_acoes_preferenciais_circulacao: Decimal | None
-    percentual_acoes_preferenciais_circulacao: Decimal | None
+    quantidade_acoes_preferenciais_circulacao: CanonicalDecimal | None
+    percentual_acoes_preferenciais_circulacao: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FrePosicaoAcionariaClasseAcaoResposta(BaseModel):
@@ -521,20 +519,20 @@ class FrePosicaoAcionariaClasseAcaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     id_acionista: int
     tipo_classe_acao_preferencial: str | None
-    quantidade_acoes: Decimal | None
-    percentual_acoes: Decimal | None
+    quantidade_acoes: CanonicalDecimal | None
+    percentual_acoes: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreRemuneracaoMaximaMinimaMediaResposta(BaseModel):
@@ -542,25 +540,25 @@ class FreRemuneracaoMaximaMinimaMediaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
     orgao_administracao: str | None
-    numero_membros: Decimal | None
-    numero_membros_remunerados: Decimal | None
-    valor_maior_remuneracao: Decimal | None
-    valor_medio_remuneracao: Decimal | None
-    valor_menor_remuneracao: Decimal | None
+    numero_membros: CanonicalDecimal | None
+    numero_membros_remunerados: CanonicalDecimal | None
+    valor_maior_remuneracao: CanonicalDecimal | None
+    valor_medio_remuneracao: CanonicalDecimal | None
+    valor_menor_remuneracao: CanonicalDecimal | None
     observacao: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreRemuneracaoVariavelResposta(BaseModel):
@@ -568,29 +566,29 @@ class FreRemuneracaoVariavelResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
     orgao_administracao: str | None
-    quantidade_total_membros: Decimal | None
-    quantidade_membros_remunerados: Decimal | None
-    bonus_valor_minimo: Decimal | None
-    bonus_valor_maximo: Decimal | None
-    bonus_valor_metas_atingidas: Decimal | None
-    bonus_valor_efetivo: Decimal | None
-    participacao_valor_minimo: Decimal | None
-    participacao_valor_maximo: Decimal | None
-    participacao_valor_metas_atingidas: Decimal | None
-    participacao_valor_efetivo: Decimal | None
+    quantidade_total_membros: CanonicalDecimal | None
+    quantidade_membros_remunerados: CanonicalDecimal | None
+    bonus_valor_minimo: CanonicalDecimal | None
+    bonus_valor_maximo: CanonicalDecimal | None
+    bonus_valor_metas_atingidas: CanonicalDecimal | None
+    bonus_valor_efetivo: CanonicalDecimal | None
+    participacao_valor_minimo: CanonicalDecimal | None
+    participacao_valor_maximo: CanonicalDecimal | None
+    participacao_valor_metas_atingidas: CanonicalDecimal | None
+    participacao_valor_efetivo: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreRemuneracaoAcaoResposta(BaseModel):
@@ -598,25 +596,25 @@ class FreRemuneracaoAcaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
     orgao_administracao: str | None
-    quantidade_total_membros: Decimal | None
-    quantidade_membros_remunerados: Decimal | None
-    preco_medio_ponderado_opcoes_em_aberto: Decimal | None
-    preco_medio_ponderado_opcoes_exercidas: Decimal | None
-    preco_medio_ponderado_opcoes_perdidas: Decimal | None
-    diluicao_potencial: Decimal | None
+    quantidade_total_membros: CanonicalDecimal | None
+    quantidade_membros_remunerados: CanonicalDecimal | None
+    preco_medio_ponderado_opcoes_em_aberto: CanonicalDecimal | None
+    preco_medio_ponderado_opcoes_exercidas: CanonicalDecimal | None
+    preco_medio_ponderado_opcoes_perdidas: CanonicalDecimal | None
+    diluicao_potencial: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreAcaoEntregueResposta(BaseModel):
@@ -624,25 +622,25 @@ class FreAcaoEntregueResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
-    data_inicio_exercicio_social: date | None
-    data_fim_exercicio_social: date | None
+    data_inicio_exercicio_social: BrazilianDate | None
+    data_fim_exercicio_social: BrazilianDate | None
     orgao_administracao: str | None
-    quantidade_total_membros: Decimal | None
-    quantidade_membros_remunerados: Decimal | None
+    quantidade_total_membros: CanonicalDecimal | None
+    quantidade_membros_remunerados: CanonicalDecimal | None
     quantidade_acoes: int | None
-    preco_medio_ponderado_aquisicao: Decimal | None
-    preco_medio_ponderado_mercado: Decimal | None
-    valor_diferenca_aquisicao_mercado: Decimal | None
+    preco_medio_ponderado_aquisicao: CanonicalDecimal | None
+    preco_medio_ponderado_mercado: CanonicalDecimal | None
+    valor_diferenca_aquisicao_mercado: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreDocumentosResposta(BaseModel):
@@ -784,212 +782,24 @@ class ListaFreAcoesEntreguesResposta(BaseModel):
     paginacao: Paginacao
 
 
-class FreCapitalSocialAumentoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    data_deliberacao: date | None
-    valor_aumento: Decimal | None
-    origem_aumento: str | None
-    quantidade_acoes_ordinarias: Decimal | None
-    quantidade_acoes_preferenciais: Decimal | None
-    quantidade_total_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialAumentosResposta(BaseModel):
-    dados: list[FreCapitalSocialAumentoResposta] = Field(description="Lista paginada de aumentos de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreCapitalSocialAumentoClasseAcaoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    tipo_classe_acao_preferencial: str
-    quantidade_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialAumentoClassesAcoesResposta(BaseModel):
-    dados: list[FreCapitalSocialAumentoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nos aumentos de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreCapitalSocialDesdobramentoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    data_deliberacao: date | None
-    tipo_desdobramento: str | None
-    proporcao_acoes_novas: Decimal | None
-    proporcao_acoes_antigas: Decimal | None
-    quantidade_acoes_ordinarias: Decimal | None
-    quantidade_acoes_preferenciais: Decimal | None
-    quantidade_total_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialDesdobramentosResposta(BaseModel):
-    dados: list[FreCapitalSocialDesdobramentoResposta] = Field(description="Lista paginada de desdobramentos de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreCapitalSocialDesdobramentoClasseAcaoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    tipo_classe_acao_preferencial: str
-    quantidade_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialDesdobramentoClassesAcoesResposta(BaseModel):
-    dados: list[FreCapitalSocialDesdobramentoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nos desdobramentos de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreCapitalSocialReducaoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    data_deliberacao: date | None
-    valor_reducao: Decimal | None
-    motivo_reducao: str | None
-    quantidade_acoes_ordinarias: Decimal | None
-    quantidade_acoes_preferenciais: Decimal | None
-    quantidade_total_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialReducoesResposta(BaseModel):
-    dados: list[FreCapitalSocialReducaoResposta] = Field(description="Lista paginada de reducoes de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreCapitalSocialReducaoClasseAcaoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    id_capital_social: int
-    tipo_classe_acao_preferencial: str
-    quantidade_acoes: Decimal | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreCapitalSocialReducaoClassesAcoesResposta(BaseModel):
-    dados: list[FreCapitalSocialReducaoClasseAcaoResposta] = Field(description="Lista paginada de classes de acoes nas reducoes de capital social FRE.")
-    paginacao: Paginacao
-
-
-class FreDireitoAcaoResposta(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: uuid.UUID
-    companhia_id: uuid.UUID | None
-    cnpj_companhia: str
-    data_referencia: date
-    versao: int
-    id_documento: int
-    nome_companhia: str | None
-    tipo_classe_acao: str
-    direito_voto: str
-    outros_direitos: str | None
-    arquivo_origem: str
-    ano_origem: int | None
-    linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
-
-
-class ListaFreDireitosAcoesResposta(BaseModel):
-    dados: list[FreDireitoAcaoResposta] = Field(description="Lista paginada de direitos de acoes FRE.")
-    paginacao: Paginacao
-
-
 class FreVolumeValorMobiliarioResposta(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     classe_valor_mobiliario: str
     sigla_classe_acoes_preferenciais: str | None
-    volume_negociacao: Decimal | None
+    volume_negociacao: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreVolumeValoresMobiliariosResposta(BaseModel):
@@ -1002,7 +812,7 @@ class FreOutroValorMobiliarioResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -1011,9 +821,9 @@ class FreOutroValorMobiliarioResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreOutrosValoresMobiliariosResposta(BaseModel):
@@ -1026,21 +836,21 @@ class FreTitularValorMobiliarioResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     nome_titular: str
     cpf_cnpj_titular: str | None
     classe_valor_mobiliario: str
-    quantidade_valores_mobiliarios: Decimal | None
-    percentual_classe: Decimal | None
+    quantidade_valores_mobiliarios: CanonicalDecimal | None
+    percentual_classe: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreTitularesValoresMobiliariosResposta(BaseModel):
@@ -1053,19 +863,19 @@ class FreMercadoEstrangeiroResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     nome_mercado: str
     orgao_regulador: str | None
-    data_admissao: date | None
+    data_admissao: BrazilianDate | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreMercadosEstrangeirosResposta(BaseModel):
@@ -1078,7 +888,7 @@ class FreTituloExteriorResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -1088,9 +898,9 @@ class FreTituloExteriorResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreTitulosExteriorResposta(BaseModel):
@@ -1103,22 +913,22 @@ class FrePlanoRecompraResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     id_plano_recompra: int
-    data_deliberacao: date | None
+    data_deliberacao: BrazilianDate | None
     objetivo_plano: str | None
     limite_prazo_aquisicao: str | None
-    quantidade_total_ordinarias_adquiridas: Decimal | None
-    quantidade_total_preferenciais_adquiridas: Decimal | None
+    quantidade_total_ordinarias_adquiridas: CanonicalDecimal | None
+    quantidade_total_preferenciais_adquiridas: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFrePlanosRecompraResposta(BaseModel):
@@ -1131,19 +941,20 @@ class FrePlanoRecompraClasseAcaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     id_plano_recompra: int
-    tipo_classe_acao_preferencial: str
-    quantidade_acoes_adquiridas: Decimal | None
+    especie_acao: str | None
+    tipo_classe_acao_preferencial: str | None
+    quantidade_acoes_adquiridas: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFrePlanoRecompraClassesAcoesResposta(BaseModel):
@@ -1156,20 +967,20 @@ class FreValorMobiliarioTesourariaMovimentacaoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     classe_valor_mobiliario: str
-    data_movimentacao: date
-    quantidade_movimentada: Decimal | None
+    data_movimentacao: BrazilianDate
+    quantidade_movimentada: CanonicalDecimal | None
     natureza_movimentacao: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreValoresMobiliariosTesourariaMovimentacoesResposta(BaseModel):
@@ -1182,19 +993,19 @@ class FreValorMobiliarioTesourariaUltimoExercicioResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
     classe_valor_mobiliario: str
     historico_exercicio: str
-    quantidade_acoes_tesouraria: Decimal | None
+    quantidade_acoes_tesouraria: CanonicalDecimal | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreValoresMobiliariosTesourariaUltimosExerciciosResposta(BaseModel):
@@ -1207,7 +1018,7 @@ class FreAdministradorDeclaracaoGeneroResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -1221,9 +1032,9 @@ class FreAdministradorDeclaracaoGeneroResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreAdministradorDeclaracaoRacaResposta(BaseModel):
@@ -1231,7 +1042,7 @@ class FreAdministradorDeclaracaoRacaResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -1247,9 +1058,9 @@ class FreAdministradorDeclaracaoRacaResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FreAdministradorPcdResposta(BaseModel):
@@ -1257,7 +1068,7 @@ class FreAdministradorPcdResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_companhia: str | None
@@ -1269,9 +1080,9 @@ class FreAdministradorPcdResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFreAdministradoresDeclaracaoGeneroResposta(BaseModel):

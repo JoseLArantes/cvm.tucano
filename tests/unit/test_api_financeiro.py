@@ -190,8 +190,11 @@ def test_endpoint_dfp_demonstracao_filtra_por_conta_periodo_versao(client: TestC
     payload = resposta.json()
     assert payload["paginacao"]["total"] == 1
     assert payload["dados"][0]["codigo_conta"] == "3.01"
-    assert payload["dados"][0]["valor_conta"] == 123.45
-    assert payload["dados"][0]["valor_conta_reportado"] == 123.45
+    assert payload["dados"][0]["data_referencia"] == "31/12/2025"
+    assert payload["dados"][0]["data_inicio_exercicio"] == "01/01/2025"
+    assert payload["dados"][0]["data_fim_exercicio"] == "31/12/2025"
+    assert payload["dados"][0]["valor_conta"] == "123.45"
+    assert payload["dados"][0]["valor_conta_reportado"] == "123.45"
     assert payload["dados"][0]["fator_escala_moeda"] == 1
 
 
@@ -208,8 +211,8 @@ def test_endpoint_dfp_demonstracao_returns_adjusted_values_and_sorts_by_adjusted
     payload = resposta.json()
     assert payload["paginacao"]["total"] == 2
     assert payload["dados"][0]["codigo_conta"] == "3.02"
-    assert payload["dados"][0]["valor_conta"] == 740500000.0
-    assert payload["dados"][0]["valor_conta_reportado"] == 740500.0
+    assert payload["dados"][0]["valor_conta"] == "740500000"
+    assert payload["dados"][0]["valor_conta_reportado"] == "740500"
     assert payload["dados"][0]["fator_escala_moeda"] == 1000
     assert payload["dados"][1]["codigo_conta"] == "3.01"
 

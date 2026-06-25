@@ -5,131 +5,94 @@ sidebar_position: 2
 
 # Cadastro de Companhias Abertas
 
-## Visão Geral
+## O que é o cadastro
 
-Fonte primária de identificação dos emissores. Todas as outras fontes dependem da resolução de identidade vinculada a esta base.
+O cadastro é a base de identificação das companhias acompanhadas pelo projeto. Ele reúne os dados cadastrais publicados pela CVM para companhias abertas e, na malha de ingestão, também considera o cadastro de emissores estrangeiros quando ele é necessário para resolver documentos vinculados a esse universo.
 
-## Metadados Técnicos
+Essa fonte não descreve demonstrações, eventos ou práticas de governança. Ela informa quem é a companhia, qual é o seu código CVM, qual CNPJ a identifica, qual é sua situação de registro e quais dados institucionais estavam vigentes na última publicação oficial.
+
+## Por que esse conjunto existe
+
+As demais fontes da CVM referenciam companhias por identificadores como `CNPJ_CIA`, `CD_CVM` ou campos equivalentes. Antes de interpretar um documento financeiro, um formulário cadastral, um informe eventual ou um relatório de governança, o sistema precisa resolver a identidade da companhia de forma consistente.
+
+Por isso, o cadastro funciona como a raiz de identidade do domínio. Ele permite que documentos de anos diferentes, fontes diferentes e formatos diferentes sejam associados à mesma companhia quando os identificadores oficiais apontam para ela.
+
+## Metadados técnicos
 
 | Campo | Valor |
 |-------|-------|
-| **Fonte CVM** | `cadastro` |
-| **Arquivo ZIP** | `cadastral_companhias_abertas.zip` |
-| **Membros CSV** | `cadastro.csv` |
-| **Periodicidade** | Diária (oficial) / Sincronização configurável |
-| **Tabela Alvo** | `companhias` |
-| **Chaves Naturais** | `cnpj_companhia`, `codigo_cvm` |
+| Fonte no sistema | `cadastro` |
+| Distribuição CVM | CSV único |
+| Arquivo principal | `cad_cia_aberta.csv` |
+| Arquivo complementar no catálogo | `cad_cia_estrang.csv` |
+| Tabela promovida | `companhias` |
+| Chaves de referência | `cnpj_companhia`, `codigo_cvm` |
+| Periodicidade | Retrato corrente publicado pela CVM |
+| Dependências | Nenhuma |
 
-## Estrutura de Arquivo
+## O que entra no cadastro
 
-```
-cadastro.csv
-├── CNPJ_COMPANHIA (14 dígitos, sem máscara)
-├── COD_CVM (inteiro)
-├── DENOM_SOCIAL (razão social)
-├── DENOM_COMERC (nome fantasia, se houver)
-├── SIT_REG (ATIVO, SUSPENSO, CANCELADO)
-├── SIT_REG_DESC (descrição textual da situação)
-├── DT_REG (data de registro na CVM)
-├── DT_CONST (data de constituição jurídica)
-├── DT_CANC (data de cancelamento, se aplicável)
-├── MOTIVO_REG (motivo da situação)
-├── SIT_EMITOR (emissor autorizado, autorizado não listado, etc.)
-├── CATEG_REG (categoria de registro)
-├── CONTROLE_ACIONARIO
-├── DT_INICIO_SIT
-├── DT_FIM_SIT
-├── TIPO_MERCADO (Novo Mercado, Nível 2, Tradicional, etc.)
-├── SETOR_ATIVIDADE
-├── CNPJ_RESPONSAVEL
-├── NOME_RESPONSAVEL
-├── EMAIL_RESPONSAVEL
-├── TELEFONE_RESPONSAVEL
-├── LOGRADOURO_RESPONSAVEL
-├── NUMERO_RESPONSAVEL
-├── COMPLEMENTO_RESPONSAVEL
-├── BAIRRO_RESPONSAVEL
-├── CIDADE_RESPONSAVEL
-├── UF_RESPONSAVEL
-├── CEP_RESPONSAVEL
-├── PAIS_RESPONSAVEL
-```
+O arquivo principal contém um registro por companhia aberta presente no cadastro publicado pela CVM. A normalização preserva a identidade oficial e organiza campos institucionais que aparecem em formatos variados no arquivo de origem.
 
-## Mapeamento para Modelo
+Entre os dados tratados estão:
 
-| Campo CVM | Tabela | Campo | Tipo | Transformação |
-|-----------|--------|-------|------|---------------|
-| `CNPJ_COMPANHIA` | `companhias` | `cnpj_companhia` | String | Remove máscara, valida 14 dígitos |
-| `COD_CVM` | `companhias` | `codigo_cvm` | Integer | Cast direto |
-| `DENOM_SOCIAL` | `companhias` | `denominacao_social` | String | Trim + UTF-8 sanitization |
-| `SIT_REG` | `companhias` | `situacao_registro` | String | Mapeamento para enum interno |
-| `DT_REG` | `companhias` | `data_registro` | Date | `YYYY-MM-DD` |
-| `TIPO_MERCADO` | `companhias` | `tipo_mercado` | String | Normalização de case |
-| `SETOR_ATIVIDADE` | `companhias` | `setor_atividade` | String | Mantido como informado |
-| `*RESPONSAVEL` | `companhias` | `responsavel` | JSON | Agrupado em objeto estruturado |
-| `LOGRADOURO_*` a `PAIS_*` | `companhias` | `endereco` | JSON | Agrupado em objeto estruturado |
+- CNPJ da companhia
+- código CVM
+- denominação social
+- denominação comercial
+- situação de registro
+- data de registro
+- data de constituição
+- data de cancelamento, quando houver
+- motivo de cancelamento, quando houver
+- setor de atividade
+- tipo de mercado
+- categoria de registro
+- situação do emissor
+- controle acionário
+- endereço
+- responsável cadastral
+- auditor e CNPJ do auditor, quando informados
 
-## Endpoints Principais
+## Estrutura no Tucano CVM
 
-### Listar Companhias
+O cadastro é promovido para a tabela `companhias`. Cada registro mantém os campos normalizados e os metadados de origem necessários para auditoria operacional.
+
+| Campo de saída | Origem conceitual | Observação |
+|----------------|-------------------|------------|
+| `cnpj_companhia` | CNPJ da companhia | Normalizado sem máscara. |
+| `codigo_cvm` | Código CVM | Identificador numérico usado em várias fontes. |
+| `denominacao_social` | Denominação social | Texto oficial informado no cadastro. |
+| `denominacao_comercial` | Denominação comercial | Pode estar ausente. |
+| `situacao_registro` | Situação de registro | Mantém a descrição normalizada a partir da fonte. |
+| `data_registro` | Data de registro | Data oficial de registro na CVM. |
+| `data_cancelamento` | Data de cancelamento | Preenchida quando aplicável. |
+| `setor_atividade` | Setor de atividade | Mantido conforme a classificação informada. |
+| `tipo_mercado` | Tipo de mercado | Segmento ou mercado informado pela CVM. |
+| `endereco` | Campos de endereço | Agrupado como estrutura. |
+| `responsavel` | Campos do responsável | Agrupado como estrutura. |
+| `arquivo_origem`, `linha_origem`, `hash_origem` | Metadados de ingestão | Usados para rastreabilidade. |
+
+## Como a ingestão trata a fonte
+
+A ingestão do cadastro é sensível porque alterações nessa base afetam a resolução das demais fontes. O processo calcula o hash do arquivo, registra a execução, normaliza linha a linha e separa registros inválidos em quarentena.
+
+Quando uma companhia já existe, o sistema compara campos de negócio antes de atualizar o registro. `sincronizado_em` indica que a linha foi reprocessada em uma execução recente; `alterado_em` muda apenas quando algum campo material foi modificado. Alterações relevantes são registradas em histórico de campos.
+
+Registros duplicados dentro do mesmo arquivo, linhas sem identificadores essenciais ou dados que não passam pela normalização não são promovidos silenciosamente. Eles ficam vinculados à execução para inspeção operacional.
+
+## Endpoints principais
+
 ```bash
-GET /companhias?pagina=1&tamanho_pagina=100&situacao_registro=ATIVO
-```
-
-### Buscar por Código CVM
-```bash
+GET /companhias?pagina=1&tamanho_pagina=100
+GET /companhias?nome=petrobras
+GET /companhias?situacao_registro=ATIVO
 GET /companhias/codigo-cvm/{codigo_cvm}
+GET /companhias/{cnpj_companhia}
 ```
 
-### Buscar por CNPJ
-```bash
-GET /companhias/{cnpj}
-```
+## Como ler os dados
 
-### Filtros Avançados
-```bash
-GET /companhias?nome=Petrobras&ordenar=ativa_nome&setor_atividade=Energia
-```
+O cadastro representa o estado cadastral conhecido na última sincronização, não uma série histórica completa de todos os estados passados da companhia. Para entender mudanças observadas pelo pipeline, use os metadados de sincronização e o histórico de alterações registrado pela ingestão.
 
-## Regras de Negócio e Tratamento
-
-1. **Deduplicação**: Se múltiplos registros compartilham CNPJ, prevalece o mais recente por `DT_REG`
-2. **Status Registros**: Mapeamento automático:
-   - `ATIVO` → `ativo: true`
-   - `SUSPENSO(A) - DECISAO ADM` → `ativo: false`, `motivo: suspensao_admin`
-   - `CANCELADO` → `ativo: false`, `motivo: cancelamento`
-3. **Identificadores Históricos**: CNPJs antigos são preservados em `companhia_identificadores` para resolução retroativa
-4. **Sincronização**: Atualiza `sincronizado_em` mesmo sem alteração material; `alterado_em` só muda se houver mudança em campos de negócio
-
-## Exemplo de Consulta
-
-```bash
-curl -X GET "http://localhost:8007/companhias/codigo-cvm/25224" \
-  -H "Authorization: Bearer seu-token"
-```
-
-**Resposta:**
-```json
-{
-  "id": "f4f6a9d8-...",
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "denominacao_social": "2W ECOBANK S.A. - EM RECUPERACAO JUDICIAL",
-  "denominacao_comercial": "2W ECOBANK S.A.",
-  "situacao_registro": "SUSPENSO(A) - DECISAO ADM",
-  "data_registro": "2020-10-29",
-  "setor_atividade": "Energia Eletrica",
-  "tipo_mercado": "Novo Mercado",
-  "endereco": { ... },
-  "responsavel": { ... },
-  "criado_em": "2026-05-30T14:30:00Z",
-  "sincronizado_em": "2026-06-15T08:00:00Z",
-  "alterado_em": "2026-05-30T14:30:00Z"
-}
-```
-
-## Notas para Auditores
-
-- O campo `situacao_registro` reflete o status oficial no momento da última sincronização
-- Para auditoria histórica, consulte `companhia_identificadores` e `historico_alteracoes_campos`
-- CNPJs extintos são mantidos com `ativo=false` para preservar vínculos com DFP/ITR históricos
+O CNPJ e o código CVM devem ser lidos como identificadores oficiais complementares. Em integrações com DFP, ITR, FRE, FCA, IPE, VLMO e CGVN, o código CVM costuma ser o elo mais frequente para consultas, enquanto o CNPJ é importante para consolidação cadastral e rastreabilidade.

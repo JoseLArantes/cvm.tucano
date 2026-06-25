@@ -587,15 +587,34 @@ Resultados da validacao:
 Na arquitetura simplificada, `schema_inesperado` e tratado como falha em nivel de membro.
 O pipeline atualiza contadores e status do membro, mas nao cria automaticamente um item de quarentena por linha.
 
-### Tolerancia a Formatos na Normalizacao
+### Contrato Numerico para Dados CVM Estruturados
 
-O normalizador foi robustecido para tolerar formatos comuns em dados publicos brasileiros:
+Para arquivos estruturados da CVM ingeridos por este projeto, o contrato numerico passa a ser explicitamente separado em tres camadas:
 
-- Simbolos monetarios (ex: `R$`)
-- Percentuais (ex: `%`)
-- Formatacao decimal mista (brasileira `1.234,56` e americana `1,234.56`)
+- Ingestao CVM: o parser trata `.` como separador decimal de maquina e nao aceita separadores de milhares em campos numericos estruturados.
+- Escala monetaria: fatores como `UNIDADE`, `MIL` e `MILHAO` sao aplicados apenas a partir da coluna `ESCALA_MOEDA` ou metadado equivalente, nunca inferidos da pontuacao.
+- API e exportacao: valores decimais saem como strings decimais canonicas, sem separadores de milhares, sem arredondamento e sem localizacao pt-BR.
+
+Implicacoes operacionais:
+
+- `1.230` em dado estruturado CVM significa `1.230`, nao `1230`.
+- `1230` significa mil duzentos e trinta.
+- `1.000,00` e rejeitado em DFP/ITR estruturado porque mistura separador de milhares com separador decimal localizado.
+- Valores como `205431960490.5200000000` sao normalizados para a representacao canonica `205431960490.52` na saida da API, sem perda de precisao.
+- Registros com `ESCALA_MOEDA` ausente ou desconhecida sao rejeitados/quarentenados em vez de assumir fator `1`.
+
+No endpoint de exportacao em lote `/exportacoes/{fonte}/{dataset}`:
+
+- `formato=json` retorna um array de objetos por streaming com datas em `DD/MM/AAAA`, datetimes em `DD/MM/AAAA HH:MM:SS` e decimais como string decimal canonica.
+- `formato=csv` retorna o mesmo contrato semantico em texto CSV, preservando os mesmos valores normalizados.
+- O endpoint limita a resposta a 100.000 registros por chamada.
+- `ano_inicio` e `ano_fim` formam um intervalo inclusivo; chamadas com `ano_inicio > ano_fim` sao rejeitadas com `422`.
+
+Continuam aceitos durante a normalizacao generica, quando aplicavel fora do contrato estruturado DFP/ITR:
+
 - Representacoes textuais de nulos (ex: `N/A`, `N.D.`, `-`)
-- Campos de texto livre em colunas originalmente esperadas como numericas (ex: taxas de juros como `TJLP + 1,72% a.a.` ou `100% do CDI`), com fallback para tipo `Text` no banco
+- Alguns simbolos monetarios e percentuais em campos nao estruturados ou historicos
+- Campos de texto livre em colunas originalmente esperadas como numericas, com fallback para tipo `Text` quando o dataset assim exigir
 
 ### Construcao de Chave Natural
 

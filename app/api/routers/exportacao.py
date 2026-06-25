@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Generator
 from datetime import date, datetime
 from decimal import Decimal
+from http import HTTPStatus
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Query
@@ -55,9 +56,24 @@ from app.services.ingestion.source_registry import (
     listar_fontes,
     obter_fonte,
 )
-from app.services.normalizacao import normalizar_cnpj
+from app.services.normalizacao import (
+    data_para_string_br,
+    datetime_para_string_br,
+    decimal_para_canonical_string,
+    normalizar_cnpj,
+)
 
 router = APIRouter()
+
+_FRE_DATASETS_PUBLICAMENTE_DESCONTINUADOS = {
+    "capital_social_aumento",
+    "capital_social_aumento_classe_acao",
+    "capital_social_desdobramento",
+    "capital_social_desdobramento_classe_acao",
+    "capital_social_reducao",
+    "capital_social_reducao_classe_acao",
+    "direito_acao",
+}
 
 # Define the static model mapping for supported datasets
 MAP_MODELOS: dict[tuple[str, str], tuple[type[Any], dict[str, Any]]] = {
@@ -126,6 +142,16 @@ def obter_modelo_e_filtros(fonte: str, dataset: str) -> tuple[type[Any], dict[st
     # Resolve aliases
     dataset_resolvido = ALIASES.get(dataset.lower(), dataset.lower())
 
+    if fonte == "fre" and dataset_resolvido in _FRE_DATASETS_PUBLICAMENTE_DESCONTINUADOS:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Dataset '{dataset}' da fonte 'fre' foi descontinuado publicamente pela CVM a partir de 2024 "
+                "e nao e mais exportado por esta API. Consulte os datasets ativos `capital_social`, "
+                "`capital_social_classe_acao` e `distribuicao_capital`."
+            ),
+        )
+
     if (fonte, dataset_resolvido) in MAP_MODELOS:
         return MAP_MODELOS[(fonte, dataset_resolvido)]
 
@@ -154,10 +180,12 @@ class CustomEncoder(json.JSONEncoder):
     def default(self, obj: Any) -> Any:
         if isinstance(obj, uuid.UUID):
             return str(obj)
-        if isinstance(obj, (datetime, date)):
-            return obj.isoformat()
+        if isinstance(obj, datetime):
+            return datetime_para_string_br(obj)
+        if isinstance(obj, date):
+            return data_para_string_br(obj)
         if isinstance(obj, Decimal):
-            return float(obj)
+            return decimal_para_canonical_string(obj)
         return super().default(obj)
 
 
@@ -175,10 +203,12 @@ def generate_json(
             val = row_dict.get(c)
             if isinstance(val, uuid.UUID):
                 serializable[c] = str(val)
-            elif isinstance(val, (datetime, date)):
-                serializable[c] = val.isoformat()
+            elif isinstance(val, datetime):
+                serializable[c] = datetime_para_string_br(val)
+            elif isinstance(val, date):
+                serializable[c] = data_para_string_br(val)
             elif isinstance(val, Decimal):
-                serializable[c] = float(val)
+                serializable[c] = decimal_para_canonical_string(val)
             else:
                 serializable[c] = val
 
@@ -211,10 +241,12 @@ def generate_csv(db: DbSession, query: Select[Any], Model: type[Any], columns: l
                 vals.append("")
             elif isinstance(val, uuid.UUID):
                 vals.append(str(val))
-            elif isinstance(val, (datetime, date)):
-                vals.append(val.isoformat())
+            elif isinstance(val, datetime):
+                vals.append(datetime_para_string_br(val) or "")
+            elif isinstance(val, date):
+                vals.append(data_para_string_br(val) or "")
             elif isinstance(val, Decimal):
-                vals.append(str(val))
+                vals.append(decimal_para_canonical_string(val) or "")
             elif isinstance(val, (dict, list)):
                 vals.append(json.dumps(val, cls=CustomEncoder))
             else:
@@ -278,6 +310,11 @@ def listar_datasets_api(
     fonte_item = obter_fonte(fonte.lower())
     if not fonte_item:
         raise HTTPException(status_code=404, detail=f"Fonte '{fonte}' nao encontrada.")
+    datasets_publicos = [
+        d
+        for d in listar_datasets(fonte.lower())
+        if not (fonte.lower() == "fre" and d.dataset in _FRE_DATASETS_PUBLICAMENTE_DESCONTINUADOS)
+    ]
     return [
         DatasetResposta(
             dataset=d.dataset,
@@ -288,7 +325,7 @@ def listar_datasets_api(
                 fonte.lower() in ("dfp", "itr") and d.dataset.lower().startswith("demonstracao_")
             ),
         )
-        for d in listar_datasets(fonte.lower())
+        for d in datasets_publicos
     ]
 
 
@@ -301,11 +338,68 @@ def listar_datasets_api(
         "Suporta resolução automática de aliases curtos de demonstrações financeiras (ex: 'bpa_ind' -> "
         "'demonstracao_balanco_patrimonial_ativo_individual'). "
         "Permite aplicar filtros flexíveis de período (ano_inicio/ano_fim) e companhia (cnpj_companhia/codigo_cvm). "
+        "Todos os campos decimais são exportados como strings decimais canônicas, sem separadores de milhares e sem localização. "
         "Nos datasets de demonstrações DFP/ITR, `valor_conta` é exportado já ajustado por `ESCALA_MOEDA`, "
         "enquanto `valor_conta_reportado` preserva o número bruto informado pela CVM e `fator_escala_moeda` "
         "explica a multiplicação aplicada. "
+        "Datas são serializadas em `DD/MM/AAAA` e datetimes em `DD/MM/AAAA HH:MM:SS`. "
+        "Datasets FRE explicitamente descontinuados pela CVM deixam de ser exportáveis publicamente e retornam 404 "
+        "com orientação para os quadros ativos de substituição. "
         "Para proteção do serviço, a consulta é limitada a um teto máximo de 100.000 registros por chamada."
     ),
+    responses={
+        HTTPStatus.OK: {
+            "description": (
+                "Exportação gerada com sucesso. O conteúdo retornado depende de `formato`: "
+                "`application/json` para array de objetos ou `text/csv` para planilha delimitada por vírgula."
+            ),
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "array",
+                        "items": {"type": "object", "additionalProperties": True},
+                    },
+                    "examples": {
+                        "documento_principal": {
+                            "summary": "Exportação JSON de documento financeiro",
+                            "value": [
+                                {
+                                    "id_documento": 111,
+                                    "cnpj_companhia": "00000000000191",
+                                    "data_referencia": "31/12/2025",
+                                    "criado_em": "30/05/2026 14:30:00",
+                                }
+                            ],
+                        }
+                    },
+                },
+                "text/csv": {
+                    "schema": {
+                        "type": "string",
+                        "description": "Conteúdo CSV completo retornado por streaming.",
+                    },
+                    "examples": {
+                        "documento_principal": {
+                            "summary": "Exportação CSV de documento financeiro",
+                            "value": (
+                                "id_documento,cnpj_companhia,data_referencia,criado_em\n"
+                                "111,00000000000191,31/12/2025,30/05/2026 14:30:00\n"
+                            ),
+                        }
+                    },
+                },
+            },
+        },
+        HTTPStatus.NOT_FOUND: {
+            "description": (
+                "Fonte ou dataset não encontrado no catálogo suportado, incluindo datasets FRE "
+                "publicamente descontinuados pela CVM."
+            ),
+        },
+        HTTPStatus.UNPROCESSABLE_ENTITY: {
+            "description": "Parâmetros inválidos, como formato não suportado ou intervalo de anos inconsistente.",
+        },
+    },
 )
 def exportar_dataset(
     fonte: Annotated[
@@ -321,9 +415,9 @@ def exportar_dataset(
         str,
         Path(
             description=(
-                "Nome do dataset de interesse ou seu alias curto correspondente (ex: 'responsaveis', 'bpa_ind')."
+                "Nome do dataset de interesse ou seu alias curto correspondente (ex: 'responsavel', 'bpa_ind')."
             ),
-            examples=["responsaveis"],
+            examples=["responsavel"],
         ),
     ],
     db: DbSession,
@@ -358,6 +452,9 @@ def exportar_dataset(
     ] = "json",
 ) -> StreamingResponse:
     """Exporta o dataset solicitado aplicando filtros de ano e companhia, limitado a 100.000 registros."""
+    if ano_inicio is not None and ano_fim is not None and ano_inicio > ano_fim:
+        raise HTTPException(status_code=422, detail="Intervalo de anos invalido: ano_inicio nao pode ser maior que ano_fim.")
+
     fonte_item = obter_fonte(fonte.lower())
     if not fonte_item:
         raise HTTPException(status_code=404, detail=f"Fonte '{fonte}' nao encontrada.")

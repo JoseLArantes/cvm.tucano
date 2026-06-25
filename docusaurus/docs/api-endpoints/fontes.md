@@ -211,6 +211,7 @@ curl -X GET "http://localhost:8007/fontes/fre/datasets" \
 - Executa consulta dinâmica e transmite por streaming em formato estruturado (JSON ou CSV)
 - Suporta aliases curtos (ex: `bpa_ind` → `demonstracao_balanco_patrimonial_ativo_individual`)
 - Nos datasets financeiros, `valor_conta` já é ajustado por `ESCALA_MOEDA`
+- Datasets FRE explicitamente descontinuados pela CVM não aparecem no catálogo público e retornam `404` quando solicitados por exportação
 - **Limite:** 100.000 registros por chamada
 
 ### Path Parameters
@@ -256,6 +257,15 @@ curl -X GET "http://localhost:8007/exportacoes/fre/posicao_acionaria?codigo_cvm=
   -H "Authorization: Bearer <token>" \
   -o posicao_acionaria.json
 ```
+
+#### Dataset FRE descontinuado pela CVM
+
+```bash
+curl -X GET "http://localhost:8007/exportacoes/fre/capital_social_aumento?formato=json" \
+  -H "Authorization: Bearer <token>"
+```
+
+Resposta esperada: `404`, com orientação para consultar `capital_social`, `capital_social_classe_acao` e `distribuicao_capital`.
 
 ### Response 200
 
