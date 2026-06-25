@@ -21,6 +21,8 @@ A materialização canônica usa uma fila dedicada, campanhas agregadas, process
 | `POST` | `/analise/materializacoes/controle/resume` | Retorno ao modo automático do gate |
 | `POST` | `/analise/materializacoes/recuperar-stale` | Recuperação imediata de chunks stale |
 | `POST` | `/analise/materializacoes/campanhas/{campanha_id}/recuperar` | Recuperação imediata de chunks stale de uma campanha |
+| `POST` | `/analise/materializacoes/campanhas/{campanha_id}/reativar` | Reativação delegada de campanha presa ou com chunk stale |
+| `POST` | `/analise/materializacoes/recuperacao/trigger` | Sweep delegado e limitado de campanhas pendentes recuperáveis |
 | `GET` | `/analise/materializacoes/{execucao_id}` | Detalhe de uma execução de materialização |
 | `GET` | `/analise/companhias/{codigo_cvm}` | Manifesto analítico da companhia |
 | `GET` | `/analise/companhias/{codigo_cvm}/series` | Séries normalizadas por métrica e período |
@@ -95,6 +97,8 @@ Retorna um snapshot operacional das filas e campanhas de materialização, combi
 - estado atual do gate de admissão da materialização;
 - quantidade de campanhas pendentes e em andamento;
 - quantidade de campanhas em recuperação por chunk stale;
+- quantidade de campanhas pendentes recuperáveis por self-healing;
+- quantidade de campanhas pendentes especificamente presas por ausência de despacho inicial;
 - quantidade de campanhas pendentes especificamente porque o gate está fechado;
 - quantidade de itens pendentes, em andamento, com sucesso, falha e skipped;
 - quantidade de chunks `queued`, `running` e `stale`;
@@ -130,11 +134,17 @@ Campos operacionais principais do gate:
 - `gate.blockers`: preview das execuções/runs que estão bloqueando novos chunks
 - `waiting_for_gate_campaigns`: campanhas pendentes especificamente por bloqueio do gate
 - `recovering_campaigns`: campanhas pendentes aguardando recuperação de chunk stale
+- `recoverable_pending_campaigns`: campanhas pendentes que já podem ser reativadas pelo fluxo de self-healing
+- `undispatched_stuck_campaigns`: campanhas pendentes sem chunk, sem execução ativa e sem bloqueio operacional explícito
+- `oldest_undispatched_campaign_created_at`, `oldest_undispatched_campaign_elapsed_seconds`: idade da campanha presa mais antiga
+- `recoverable_campaign_ids`: preview dos identificadores reativáveis
+- `last_pending_recovery_sweep_at`, `last_pending_recovery_sweep_summary`: último sweep automático persistido
 - `running_full_executions`, `running_incremental_executions`: divisão das execuções correntes por modo
 - `lowest_running_invalidated_from`: menor cutoff incremental observado entre as execuções correntes
 - `queued_chunks`, `running_chunks`, `stale_chunks`: contadores globais por estado do chunk
 - `stale_item_count`: itens ainda associados a chunks marcados como `stale`
 - `stale_chunk_preview`: preview dos chunks já identificados como `stale`
+- `pending_recovery_active_tasks`: tasks ativas do sweep automático de campanhas pendentes
 - `stalled_incremental_execution_ids`: subset stalled apenas do modo incremental
 - `running_execution_previews`: previews das execuções correntes com `materialization_mode`, `invalidated_from` e progresso
 
@@ -143,6 +153,7 @@ Comportamento operacional importante:
 - o gate vermelho impede progresso material da campanha;
 - o orquestrador não fica mais em polling contínuo por campanha enquanto o gate está fechado;
 - novas campanhas pendentes são retomadas por um dispatcher específico quando a ingestão termina ou quando o controle volta ao modo liberado.
+- campanhas pendentes sem chunk inicial agora podem ser detectadas e reativadas por sweep automático ou por chamada explícita de operador.
 
 ## `GET /analise/materializacoes/controle`
 
@@ -181,6 +192,69 @@ Retorna:
 ## `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
 
 Executa a mesma recuperação, mas limitada a uma campanha específica.
+
+## `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+
+Endpoint operacional delegado para reativar uma campanha específica sem exigir acesso administrativo amplo.
+
+Autenticação:
+
+- requer bearer token dedicado de operação de materialização
+- o token operacional não substitui o token geral da API para outros endpoints protegidos
+
+Estados tratados:
+
+- `STALE_CHUNK`: executa recuperação de chunks stale e reenfileira a campanha
+- `PENDING_UNDISPATCHED`: reenfileira a campanha quando ela está pendente, com itens pendentes, sem chunk ativo, sem execução ativa e sem bloqueio operacional
+- `WAITING_FOR_GATE`: devolve `noop`; não força bypass de gate vermelho
+- `WAITING_FOR_SLOT`: devolve `noop`; não força bypass do limite de campanhas simultâneas
+- `CHUNK_IN_PROGRESS`: devolve `noop`; não interfere em chunk vivo
+- `NO_PENDING_ITEMS`: devolve `noop`
+
+Contrato de resposta:
+
+- `status`: `triggered`, `recovered`, `noop` ou `rejected`
+- `reason_code`: classificação objetiva do estado encontrado
+- `affected_campaigns`
+- `requeued_campaigns`
+- `recovered_chunks`
+- `recovered_items`
+- `dispatcher_enqueued`
+- `triggered_at`
+
+Semântica importante:
+
+- a operação é limitada à campanha informada
+- a operação é idempotente do ponto de vista operacional: se nada estiver recuperável, a resposta será `noop`
+- a operação não modifica o gate e não altera limites de concorrência
+
+## `POST /analise/materializacoes/recuperacao/trigger`
+
+Executa um sweep limitado sobre campanhas pendentes para self-healing operacional delegado.
+
+Autenticação:
+
+- requer o mesmo bearer token dedicado de operação de materialização
+
+Comportamento:
+
+- inspeciona somente campanhas `pending`
+- respeita `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS`
+- respeita `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_REQUEUES`
+- considera a idade mínima `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MIN_AGE_SECONDS` para o caso `PENDING_UNDISPATCHED`
+- pode recuperar `STALE_CHUNK`
+- pode reenfileirar `PENDING_UNDISPATCHED`
+- não força progresso quando o motivo real é `WAITING_FOR_GATE`, `WAITING_FOR_SLOT` ou `CHUNK_IN_PROGRESS`
+
+Campos adicionais da resposta:
+
+- `scanned_campaigns`: quantidade de campanhas pendentes inspecionadas
+- `recoverable_campaigns`: quantidade de campanhas efetivamente classificadas como recuperáveis no sweep
+
+Semântica importante:
+
+- este endpoint dispara uma varredura limitada, não um requeue irrestrito de todas as campanhas
+- o resultado também alimenta `last_pending_recovery_sweep_at` e `last_pending_recovery_sweep_summary` no monitoramento
 
 ## `GET /analise/materializacoes/{execucao_id}`
 

@@ -5,7 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import case, func, select
 
-from app.api.auth import exigir_admin_api
+from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
 from app.api.deps import DbSession, PaginacaoQuery
 from app.core.config import get_settings
 from app.models.analise import (
@@ -38,6 +38,8 @@ from app.schemas.analise import (
     AnaliseMaterializacaoIngestionBlocker,
     AnaliseMaterializacaoMonitoramentoResposta,
     AnaliseMaterializacaoProgress,
+    AnaliseMaterializacaoReativacaoResposta,
+    AnaliseMaterializacaoReativacaoSweepResposta,
     AnaliseMaterializacaoRecuperacaoResposta,
     AnaliseMetricasCatalogoResposta,
     AnalisePeriodicidade,
@@ -52,6 +54,8 @@ from app.services.analise import (
     contar_chunks_stale_campanha,
     listar_metricas,
     obter_brief,
+    obter_chunk_ativo_campanha,
+    obter_chunks_stale_ativos,
     obter_comparacoes,
     obter_controle_materializacao,
     obter_estado_gate_materializacao,
@@ -64,7 +68,9 @@ from app.services.analise import (
     obter_series,
     obter_sinais,
     pausar_controle_materializacao,
+    reativar_materializacao_campanha,
     recuperar_chunks_materializacao_stale,
+    recuperar_materializacao_pendente,
     retomar_controle_materializacao,
 )
 from app.worker.celery_app import celery_app
@@ -74,6 +80,7 @@ _MATERIALIZACAO_TASK_NAME = "app.worker.tasks.materializar_analise_companhia_tas
 _MATERIALIZACAO_CAMPANHA_TASK_NAME = "app.worker.tasks.materializar_analise_campanha_task"
 _MATERIALIZACAO_CHUNK_TASK_NAME = "app.worker.tasks.materializar_analise_chunk_task"
 _MATERIALIZACAO_RECOVERY_TASK_NAME = "app.worker.tasks.reconciliar_materializacao_stale_task"
+_MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME = "app.worker.tasks.recuperar_materializacao_pendente_task"
 _STALL_THRESHOLD_SECONDS = 300
 _settings = get_settings()
 
@@ -119,7 +126,11 @@ def _progress_from_summary(summary: dict[str, Any] | None) -> AnaliseMaterializa
 def _elapsed_seconds(started_at: datetime | None, finished_at: datetime | None) -> int | None:
     if started_at is None:
         return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
     ended_at = finished_at or datetime.now(UTC)
+    if ended_at.tzinfo is None:
+        ended_at = ended_at.replace(tzinfo=UTC)
     return max(0, int((ended_at - started_at).total_seconds()))
 
 
@@ -276,6 +287,10 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
         active_chunk_lease_expires_at=active_chunk.lease_expires_at if active_chunk is not None else None,
         stale_chunks=stale_chunks,
         wait_reason=(campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None,
+        recovery_state=(campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None,
+        last_recovery_check_at=(campanha.summary or {}).get("last_recovery_check_at") if isinstance(campanha.summary, dict) else None,
+        last_recovery_action=(campanha.summary or {}).get("last_recovery_action") if isinstance(campanha.summary, dict) else None,
+        last_recovery_reason_code=(campanha.summary or {}).get("last_recovery_reason_code") if isinstance(campanha.summary, dict) else None,
     )
 
 
@@ -342,7 +357,9 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
         "incluindo contagem de tasks orquestradoras, tasks de chunk, profundidade de fila dedicada e previews "
         "dos itens pendentes/em andamento. Campanhas automáticas não incluem companhias com "
         "`situacao_registro=CANCELADA`; canceladas só aparecem se uma execução pontual tiver sido disparada com "
-        "override explícito."
+        "override explícito. O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
+        "recuperáveis, campanhas presas sem despacho inicial, último sweep automático persistido e tasks ativas do "
+        "fluxo de recuperação de pendências."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="monitorarMaterializacoesAnaliticas",
@@ -381,6 +398,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     )
     oldest_started_at = running[0].started_at if running else None
     longest_elapsed = _elapsed_seconds(oldest_started_at, None) if oldest_started_at else None
+    controle = obter_controle_materializacao(db)
     campanhas = list(
         db.scalars(
             select(AnaliseMaterializacaoCampanha)
@@ -432,6 +450,48 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         ).all()
         if isinstance(summary, dict) and summary.get("wait_reason") in {"STALE_CHUNK_RECOVERED", "STALE_CHUNK_DETECTED"}
     )
+    pending_campaign_rows = list(
+        db.scalars(
+            select(AnaliseMaterializacaoCampanha)
+            .where(AnaliseMaterializacaoCampanha.status == "pending")
+            .order_by(AnaliseMaterializacaoCampanha.created_at.asc())
+        ).all()
+    )
+    recoverable_campaign_ids: list[str] = []
+    undispatched_campaigns: list[AnaliseMaterializacaoCampanha] = []
+    for campanha in pending_campaign_rows:
+        active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
+        stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id)) + contar_chunks_stale_campanha(db, campanha.id)
+        wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
+        running_execucoes = int(
+            db.scalar(
+                select(func.count(AnaliseMaterializacaoExecucao.id)).where(
+                    AnaliseMaterializacaoExecucao.campanha_id == campanha.id,
+                    AnaliseMaterializacaoExecucao.status == "running",
+                )
+            )
+            or 0
+        )
+        age_seconds = _elapsed_seconds(campanha.created_at, None)
+        if stale_chunk_count > 0:
+            recoverable_campaign_ids.append(str(campanha.id))
+        elif (
+            campanha.pending_items > 0
+            and active_chunk is None
+            and running_execucoes == 0
+            and campanha.running_items == 0
+            and wait_reason not in {"INGESTION_ACTIVE", "MANUAL_PAUSE", "MAX_ACTIVE_CAMPAIGNS_REACHED"}
+            and age_seconds is not None
+            and age_seconds >= _settings.analise_materializacao_pending_recovery_min_age_seconds
+        ):
+            recoverable_campaign_ids.append(str(campanha.id))
+            undispatched_campaigns.append(campanha)
+    oldest_undispatched_campaign = undispatched_campaigns[0] if undispatched_campaigns else None
+    last_pending_recovery = (
+        ((controle.summary or {}).get("pending_recovery", {}))
+        if isinstance(controle.summary, dict)
+        else {}
+    )
     stale_item_count = int(
         db.scalar(
             select(func.count(AnaliseMaterializacaoCampanhaItem.id)).where(
@@ -480,6 +540,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CAMPANHA_TASK_NAME,
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
                 },
             ),
             materialization_reserved_tasks=_materializacao_task_count(
@@ -489,6 +550,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CAMPANHA_TASK_NAME,
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
                 },
             ),
             materialization_scheduled_tasks=_materializacao_task_count(
@@ -499,13 +561,14 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CAMPANHA_TASK_NAME,
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
                 },
             ),
             materialization_orchestrator_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CAMPANHA_TASK_NAME}),
             materialization_chunk_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CHUNK_TASK_NAME}),
             materialization_queue_depth=_queue_depth(),
         ),
-        gate=_serializar_gate(db),
+        gate=_serializar_gate(db, controle),
         running_executions=len(running),
         running_full_executions=running_full_executions,
         running_incremental_executions=running_incremental_executions,
@@ -514,6 +577,13 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         running_campaigns=int(running_campaigns or 0),
         waiting_for_gate_campaigns=int(waiting_for_gate_campaigns or 0),
         recovering_campaigns=int(recovering_campaigns or 0),
+        recoverable_pending_campaigns=len(recoverable_campaign_ids),
+        undispatched_stuck_campaigns=len(undispatched_campaigns),
+        oldest_undispatched_campaign_created_at=oldest_undispatched_campaign.created_at if oldest_undispatched_campaign is not None else None,
+        oldest_undispatched_campaign_elapsed_seconds=_elapsed_seconds(oldest_undispatched_campaign.created_at, None) if oldest_undispatched_campaign is not None else None,
+        recoverable_campaign_ids=recoverable_campaign_ids[:10],
+        last_pending_recovery_sweep_at=last_pending_recovery.get("triggered_at"),
+        last_pending_recovery_sweep_summary=last_pending_recovery if isinstance(last_pending_recovery, dict) else {},
         pending_items=int(pending_items or 0),
         running_items=int(running_items or 0),
         success_items=int(success_items or 0),
@@ -528,6 +598,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
         stalled_execution_ids=stalled_ids,
         stalled_incremental_execution_ids=stalled_incremental_ids,
+        pending_recovery_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME}),
         running_execution_previews=[_serializar_materializacao_execucao(item) for item in running[:10]],
         campaigns=campanhas_resumo,
         stale_chunk_preview=[AnaliseMaterializacaoChunkExecucaoPreview(**_serializar_chunk(chunk).model_dump()) for chunk in stale_chunk_preview],
@@ -637,6 +708,81 @@ def recuperar_materializacao_campanha_analitica(
         recovered_items=resultado.recovered_items,
         affected_campaigns=list(resultado.affected_campaigns),
         chunk_ids=list(resultado.chunk_ids),
+    )
+
+
+@router.post(
+    "/materializacoes/campanhas/{campanha_id}/reativar",
+    response_model=AnaliseMaterializacaoReativacaoResposta,
+    summary="Reativar Campanha de Materializacao",
+    description=(
+        "Classifica uma campanha pendente da materialização analítica e executa reativação operacional limitada. "
+        "A operação pode reenfileirar uma campanha presa sem chunk inicial ou recuperar chunks stale já detectados, "
+        "mas não ignora gate vermelho nem saturação de slots. A resposta sempre traz `status`, `reason_code`, "
+        "`affected_campaigns`, `requeued_campaigns`, `recovered_chunks`, `recovered_items`, "
+        "`dispatcher_enqueued` e `triggered_at`, permitindo que o cliente diferencie retry efetivo de `noop` "
+        "operacional."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="reativarMaterializacaoCampanha",
+)
+def reativar_materializacao_campanha_analitica(
+    campanha_id: str,
+    db: DbSession,
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoReativacaoResposta:
+    try:
+        campanha_uuid = UUID(campanha_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="campanha_id invalido.") from exc
+    resultado = reativar_materializacao_campanha(db, campanha_uuid)
+    from app.worker.tasks import materializar_analise_campanha_task
+    for c_id in resultado.requeued_campaigns:
+        materializar_analise_campanha_task.delay(c_id)
+    return AnaliseMaterializacaoReativacaoResposta(
+        status=cast(Any, resultado.status),
+        reason_code=cast(Any, resultado.reason_code),
+        affected_campaigns=list(resultado.affected_campaigns),
+        requeued_campaigns=list(resultado.requeued_campaigns),
+        recovered_chunks=resultado.recovered_chunks,
+        recovered_items=resultado.recovered_items,
+        dispatcher_enqueued=resultado.dispatcher_enqueued,
+        triggered_at=resultado.triggered_at,
+    )
+
+
+@router.post(
+    "/materializacoes/recuperacao/trigger",
+    response_model=AnaliseMaterializacaoReativacaoSweepResposta,
+    summary="Disparar Sweep de Recuperacao de Materializacao",
+    description=(
+        "Executa uma varredura operacional limitada sobre campanhas pendentes da materialização analítica, "
+        "reativando apenas campanhas elegíveis para self-healing e respeitando os limites configurados de batch. "
+        "O sweep não força bypass de gate nem de concorrência; ele apenas recupera `STALE_CHUNK` e reenfileira "
+        "`PENDING_UNDISPATCHED` maduros o suficiente para reativação automática."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="triggerMaterializacaoRecoverySweep",
+)
+def trigger_recuperacao_materializacao_analitica(
+    db: DbSession,
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoReativacaoSweepResposta:
+    resultado = recuperar_materializacao_pendente(db)
+    from app.worker.tasks import materializar_analise_campanha_task
+    for campanha_id in resultado.requeued_campaigns:
+        materializar_analise_campanha_task.delay(campanha_id)
+    return AnaliseMaterializacaoReativacaoSweepResposta(
+        status=cast(Any, resultado.status),
+        reason_code=cast(Any, resultado.reason_code),
+        affected_campaigns=list(resultado.affected_campaigns),
+        requeued_campaigns=list(resultado.requeued_campaigns),
+        recovered_chunks=resultado.recovered_chunks,
+        recovered_items=resultado.recovered_items,
+        dispatcher_enqueued=resultado.dispatcher_enqueued,
+        triggered_at=resultado.triggered_at,
+        scanned_campaigns=resultado.scanned_campaigns,
+        recoverable_campaigns=resultado.recoverable_campaigns,
     )
 
 

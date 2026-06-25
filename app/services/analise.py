@@ -136,6 +136,42 @@ class MaterializacaoRecuperacaoResultado:
     chunk_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class MaterializacaoReativacaoClassificacao:
+    reason_code: str
+    recoverable: bool
+    active_chunk_id: str | None
+    stale_chunk_count: int
+    running_execution_count: int
+    age_seconds: int | None
+
+
+@dataclass(frozen=True)
+class MaterializacaoReativacaoResultado:
+    status: str
+    reason_code: str
+    affected_campaigns: tuple[str, ...]
+    requeued_campaigns: tuple[str, ...]
+    recovered_chunks: int
+    recovered_items: int
+    dispatcher_enqueued: bool
+    triggered_at: datetime
+
+
+@dataclass(frozen=True)
+class MaterializacaoReativacaoSweepResultado:
+    status: str
+    reason_code: str
+    affected_campaigns: tuple[str, ...]
+    requeued_campaigns: tuple[str, ...]
+    recovered_chunks: int
+    recovered_items: int
+    dispatcher_enqueued: bool
+    triggered_at: datetime
+    scanned_campaigns: int
+    recoverable_campaigns: int
+
+
 @dataclass
 class ResolvedFact:
     metric_id: str
@@ -3064,6 +3100,368 @@ def retomar_controle_materializacao(db: Session) -> AnaliseMaterializacaoControl
     return controle
 
 
+def _registrar_recovery_state_campanha(
+    campanha: AnaliseMaterializacaoCampanha,
+    *,
+    recovery_state: str,
+    reason_code: str,
+    action: str,
+    checked_at: datetime,
+) -> None:
+    campanha.summary = {
+        **(campanha.summary or {}),
+        "recovery_state": recovery_state,
+        "last_recovery_check_at": checked_at.isoformat(),
+        "last_recovery_action": action,
+        "last_recovery_reason_code": reason_code,
+    }
+    campanha.updated_at = checked_at
+
+
+def _persistir_summary_recuperacao_pendente_controle(
+    db: Session,
+    *,
+    summary: dict[str, Any],
+    reference_time: datetime,
+) -> None:
+    controle = obter_controle_materializacao(db)
+    controle.summary = {
+        **(controle.summary or {}),
+        "pending_recovery": {
+            **summary,
+            "triggered_at": reference_time.isoformat(),
+        },
+    }
+    controle.updated_at = reference_time
+    db.commit()
+
+
+def classificar_recuperacao_materializacao_campanha(
+    db: Session,
+    campanha: AnaliseMaterializacaoCampanha,
+    *,
+    now: datetime | None = None,
+) -> MaterializacaoReativacaoClassificacao:
+    reference_time = now or datetime.now(UTC)
+    active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
+    stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id)) + contar_chunks_stale_campanha(db, campanha.id)
+    running_execution_count = int(
+        db.scalar(
+            select(func.count(AnaliseMaterializacaoExecucao.id)).where(
+                AnaliseMaterializacaoExecucao.campanha_id == campanha.id,
+                AnaliseMaterializacaoExecucao.status == "running",
+            )
+        )
+        or 0
+    )
+    created_at = _coerce_utc_datetime(campanha.created_at)
+    age_seconds = max(0, int((reference_time - created_at).total_seconds())) if created_at else None
+    wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
+
+    if campanha.pending_items <= 0:
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="NO_PENDING_ITEMS",
+            recoverable=False,
+            active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+    if stale_chunk_count > 0:
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="STALE_CHUNK",
+            recoverable=True,
+            active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+    if campanha.status != "pending":
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="NOT_PENDING",
+            recoverable=False,
+            active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+    if active_chunk is not None or campanha.running_items > 0 or running_execution_count > 0:
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="CHUNK_IN_PROGRESS",
+            recoverable=False,
+            active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+
+    gate = obter_estado_gate_materializacao(db)
+    if gate.status == "red":
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="WAITING_FOR_GATE",
+            recoverable=False,
+            active_chunk_id=None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+
+    running_campaigns = int(
+        db.scalar(
+            select(func.count(AnaliseMaterializacaoCampanha.id)).where(
+                AnaliseMaterializacaoCampanha.status == "running",
+                AnaliseMaterializacaoCampanha.id != campanha.id,
+            )
+        )
+        or 0
+    )
+    if running_campaigns >= _settings.analise_materializacao_max_active_campaigns or wait_reason == "MAX_ACTIVE_CAMPAIGNS_REACHED":
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="WAITING_FOR_SLOT",
+            recoverable=False,
+            active_chunk_id=None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+
+    if wait_reason in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}:
+        return MaterializacaoReativacaoClassificacao(
+            reason_code="WAITING_FOR_GATE",
+            recoverable=False,
+            active_chunk_id=None,
+            stale_chunk_count=stale_chunk_count,
+            running_execution_count=running_execution_count,
+            age_seconds=age_seconds,
+        )
+
+    return MaterializacaoReativacaoClassificacao(
+        reason_code="PENDING_UNDISPATCHED",
+        recoverable=True,
+        active_chunk_id=None,
+        stale_chunk_count=stale_chunk_count,
+        running_execution_count=running_execution_count,
+        age_seconds=age_seconds,
+    )
+
+
+def reativar_materializacao_campanha(
+    db: Session,
+    campanha_id: uuid.UUID,
+) -> MaterializacaoReativacaoResultado:
+    reference_time = datetime.now(UTC)
+    campanha = db.get(AnaliseMaterializacaoCampanha, campanha_id)
+    if campanha is None:
+        return MaterializacaoReativacaoResultado(
+            status="rejected",
+            reason_code="CAMPAIGN_NOT_FOUND",
+            affected_campaigns=(),
+            requeued_campaigns=(),
+            recovered_chunks=0,
+            recovered_items=0,
+            dispatcher_enqueued=False,
+            triggered_at=reference_time,
+        )
+
+    classificacao = classificar_recuperacao_materializacao_campanha(
+        db,
+        campanha,
+        now=reference_time,
+    )
+
+    if classificacao.reason_code == "STALE_CHUNK":
+        recuperacao = recuperar_chunks_materializacao_stale(db, campanha_id=campanha.id)
+        campanha = db.get(AnaliseMaterializacaoCampanha, campanha.id)
+        if campanha is not None:
+            _registrar_recovery_state_campanha(
+                campanha,
+                recovery_state="recoverable",
+                reason_code="STALE_CHUNK",
+                action="recovered_and_requeued",
+                checked_at=reference_time,
+            )
+            db.commit()
+        return MaterializacaoReativacaoResultado(
+            status="recovered",
+            reason_code="STALE_CHUNK",
+            affected_campaigns=recuperacao.affected_campaigns,
+            requeued_campaigns=recuperacao.affected_campaigns,
+            recovered_chunks=recuperacao.recovered_chunks,
+            recovered_items=recuperacao.recovered_items,
+            dispatcher_enqueued=bool(recuperacao.affected_campaigns),
+            triggered_at=reference_time,
+        )
+
+    if classificacao.reason_code == "PENDING_UNDISPATCHED":
+        campanha = db.get(AnaliseMaterializacaoCampanha, campanha.id)
+        if campanha is not None:
+            _registrar_recovery_state_campanha(
+                campanha,
+                recovery_state="recoverable",
+                reason_code="PENDING_UNDISPATCHED",
+                action="requeued",
+                checked_at=reference_time,
+            )
+            db.commit()
+        return MaterializacaoReativacaoResultado(
+            status="triggered",
+            reason_code="PENDING_UNDISPATCHED",
+            affected_campaigns=(str(campanha_id),),
+            requeued_campaigns=(str(campanha_id),),
+            recovered_chunks=0,
+            recovered_items=0,
+            dispatcher_enqueued=True,
+            triggered_at=reference_time,
+        )
+
+    campanha = db.get(AnaliseMaterializacaoCampanha, campanha.id)
+    if campanha is not None:
+        _registrar_recovery_state_campanha(
+            campanha,
+            recovery_state="blocked" if classificacao.reason_code in {"WAITING_FOR_GATE", "WAITING_FOR_SLOT", "CHUNK_IN_PROGRESS"} else "noop",
+            reason_code=classificacao.reason_code,
+            action="noop",
+            checked_at=reference_time,
+        )
+        db.commit()
+    return MaterializacaoReativacaoResultado(
+        status="noop",
+        reason_code=classificacao.reason_code,
+        affected_campaigns=(str(campanha_id),),
+        requeued_campaigns=(),
+        recovered_chunks=0,
+        recovered_items=0,
+        dispatcher_enqueued=False,
+        triggered_at=reference_time,
+    )
+
+
+def recuperar_materializacao_pendente(
+    db: Session,
+    *,
+    max_campaigns: int | None = None,
+    max_requeues: int | None = None,
+    min_age_seconds: int | None = None,
+) -> MaterializacaoReativacaoSweepResultado:
+    reference_time = datetime.now(UTC)
+    if not _settings.analise_materializacao_pending_recovery_enabled:
+        summary = {
+            "status": "noop",
+            "reason_code": "PENDING_RECOVERY_DISABLED",
+            "affected_campaigns": [],
+            "requeued_campaigns": [],
+            "recovered_chunks": 0,
+            "recovered_items": 0,
+            "dispatcher_enqueued": False,
+            "scanned_campaigns": 0,
+            "recoverable_campaigns": 0,
+        }
+        _persistir_summary_recuperacao_pendente_controle(db, summary=summary, reference_time=reference_time)
+        return MaterializacaoReativacaoSweepResultado(
+            status="noop",
+            reason_code="PENDING_RECOVERY_DISABLED",
+            affected_campaigns=(),
+            requeued_campaigns=(),
+            recovered_chunks=0,
+            recovered_items=0,
+            dispatcher_enqueued=False,
+            triggered_at=reference_time,
+            scanned_campaigns=0,
+            recoverable_campaigns=0,
+        )
+
+    limit = max_campaigns or _settings.analise_materializacao_pending_recovery_max_campaigns
+    requeue_limit = max_requeues or _settings.analise_materializacao_pending_recovery_max_requeues
+    threshold = (
+        _settings.analise_materializacao_pending_recovery_min_age_seconds
+        if min_age_seconds is None
+        else min_age_seconds
+    )
+    pending_campaigns = list(
+        db.scalars(
+            select(AnaliseMaterializacaoCampanha)
+            .where(AnaliseMaterializacaoCampanha.status == "pending")
+            .order_by(AnaliseMaterializacaoCampanha.created_at.asc())
+            .limit(limit)
+        ).all()
+    )
+    affected_campaigns: list[str] = []
+    requeued_campaigns: list[str] = []
+    recovered_chunks = 0
+    recovered_items = 0
+    recoverable_campaigns = 0
+
+    for campanha in pending_campaigns:
+        if len(requeued_campaigns) >= requeue_limit:
+            break
+        classificacao = classificar_recuperacao_materializacao_campanha(
+            db,
+            campanha,
+            now=reference_time,
+        )
+        if classificacao.reason_code == "STALE_CHUNK" or (
+            classificacao.reason_code == "PENDING_UNDISPATCHED"
+            and (classificacao.age_seconds or 0) >= threshold
+        ):
+            recoverable_campaigns += 1
+        if classificacao.reason_code == "PENDING_UNDISPATCHED" and (classificacao.age_seconds or 0) < threshold:
+            _registrar_recovery_state_campanha(
+                campanha,
+                recovery_state="pending_threshold",
+                reason_code="PENDING_UNDISPATCHED",
+                action="sweep_threshold_skip",
+                checked_at=reference_time,
+            )
+            continue
+        if classificacao.reason_code not in {"PENDING_UNDISPATCHED", "STALE_CHUNK"}:
+            _registrar_recovery_state_campanha(
+                campanha,
+                recovery_state="blocked" if classificacao.reason_code in {"WAITING_FOR_GATE", "WAITING_FOR_SLOT", "CHUNK_IN_PROGRESS"} else "noop",
+                reason_code=classificacao.reason_code,
+                action="sweep_noop",
+                checked_at=reference_time,
+            )
+            continue
+        resultado = reativar_materializacao_campanha(
+            db,
+            campanha.id,
+        )
+        affected_campaigns.extend(resultado.affected_campaigns)
+        requeued_campaigns.extend(resultado.requeued_campaigns)
+        recovered_chunks += resultado.recovered_chunks
+        recovered_items += resultado.recovered_items
+
+    db.commit()
+    affected_unique = tuple(sorted(set(affected_campaigns)))
+    requeued_unique = tuple(sorted(set(requeued_campaigns)))
+    status = "recovered" if recovered_chunks > 0 else ("triggered" if requeued_unique else "noop")
+    reason_code = "STALE_CHUNK" if recovered_chunks > 0 else ("PENDING_UNDISPATCHED" if requeued_unique else "NO_PENDING_ITEMS")
+    summary = {
+        "status": status,
+        "reason_code": reason_code,
+        "affected_campaigns": list(affected_unique),
+        "requeued_campaigns": list(requeued_unique),
+        "recovered_chunks": recovered_chunks,
+        "recovered_items": recovered_items,
+        "dispatcher_enqueued": bool(requeued_unique),
+        "scanned_campaigns": len(pending_campaigns),
+        "recoverable_campaigns": recoverable_campaigns,
+    }
+    _persistir_summary_recuperacao_pendente_controle(db, summary=summary, reference_time=reference_time)
+    return MaterializacaoReativacaoSweepResultado(
+        status=status,
+        reason_code=reason_code,
+        affected_campaigns=affected_unique,
+        requeued_campaigns=requeued_unique,
+        recovered_chunks=recovered_chunks,
+        recovered_items=recovered_items,
+        dispatcher_enqueued=bool(requeued_unique),
+        triggered_at=reference_time,
+        scanned_campaigns=len(pending_campaigns),
+        recoverable_campaigns=recoverable_campaigns,
+    )
+
+
 def obter_estado_gate_materializacao(db: Session) -> MaterializacaoGateState:
     controle = obter_controle_materializacao(db)
     if not _settings.analise_materializacao_gate_enabled:
@@ -3165,6 +3563,12 @@ def _lease_expires_at_from(now: datetime) -> datetime:
 def _stale_cutoff(now: datetime | None = None) -> datetime:
     reference = now or datetime.now(UTC)
     return reference - timedelta(seconds=_settings.analise_materializacao_stale_grace_seconds)
+
+
+def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def listar_chunks_campanha(

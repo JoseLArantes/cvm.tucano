@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     )
     access_token_ttl_minutes: int = Field(default=480, gt=0, alias="ACCESS_TOKEN_TTL_MINUTES")
     admin_token: str = Field(default="trocar-token", alias="ADMIN_TOKEN")
+    materializacao_operations_token: str = Field(
+        default="trocar-token-materializacao",
+        alias="MATERIALIZACAO_OPERATIONS_TOKEN",
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     ambiente: str = Field(default="desenvolvimento", alias="AMBIENTE")
     enable_prometheus_metrics: bool = Field(default=False, alias="ENABLE_PROMETHEUS_METRICS")
@@ -110,6 +114,30 @@ class Settings(BaseSettings):
         default=60,
         ge=0,
         alias="ANALISE_MATERIALIZACAO_STALE_GRACE_SECONDS",
+    )
+    analise_materializacao_pending_recovery_enabled: bool = Field(
+        default=True,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_ENABLED",
+    )
+    analise_materializacao_pending_recovery_sweep_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_SWEEP_SECONDS",
+    )
+    analise_materializacao_pending_recovery_max_campaigns: int = Field(
+        default=25,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS",
+    )
+    analise_materializacao_pending_recovery_max_requeues: int = Field(
+        default=10,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_REQUEUES",
+    )
+    analise_materializacao_pending_recovery_min_age_seconds: int = Field(
+        default=120,
+        ge=0,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MIN_AGE_SECONDS",
     )
     analise_materializacao_blocking_sync_statuses: str = Field(
         default="em_execucao,agendada",

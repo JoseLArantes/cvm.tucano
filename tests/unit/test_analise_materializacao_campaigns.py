@@ -17,10 +17,13 @@ from app.models.ingestion import IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.analise import (
     claim_materializacao_campanha_chunk,
+    classificar_recuperacao_materializacao_campanha,
     criar_materializacao_campanha,
     obter_estado_gate_materializacao,
     pausar_controle_materializacao,
+    reativar_materializacao_campanha,
     recuperar_chunks_materializacao_stale,
+    recuperar_materializacao_pendente,
 )
 from app.worker import tasks as worker_tasks
 
@@ -669,4 +672,132 @@ def test_reconciliar_materializacao_stale_task_reagenda_campanha(
     assert resultado["recovered_chunks"] == 1
     assert captured["args"] == (str(campanha.id),)
     assert captured["countdown"] == 60
+    assert captured["queue"] == "analise_materializacao"
+
+
+def test_classificar_recuperacao_materializacao_campanha_detecta_pending_undispatched(db_session: Session) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+
+    classificacao = classificar_recuperacao_materializacao_campanha(
+        db_session,
+        campanha,
+    )
+
+    assert classificacao.reason_code == "PENDING_UNDISPATCHED"
+    assert classificacao.recoverable is True
+
+
+def test_reativar_materializacao_campanha_recupera_stale_e_reenfileira(db_session: Session) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+    chunk.lease_expires_at = datetime.now(UTC) - timedelta(seconds=120)
+    db_session.commit()
+
+    resultado = reativar_materializacao_campanha(db_session, campanha.id)
+
+    assert resultado.status == "recovered"
+    assert resultado.reason_code == "STALE_CHUNK"
+    assert resultado.recovered_chunks == 1
+    assert str(campanha.id) in resultado.requeued_campaigns
+
+
+def test_recuperar_materializacao_pendente_reenfileira_apenas_pending_undispatched(
+    db_session: Session,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha_recuperavel = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    campanha_bloqueada = AnaliseMaterializacaoCampanha(
+        source="post_ingestion",
+        status="pending",
+        chunk_size=25,
+        total_items=1,
+        pending_items=1,
+        running_items=0,
+        success_items=0,
+        failed_items=0,
+        skipped_items=0,
+        summary={"wait_reason": "INGESTION_ACTIVE"},
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(campanha_bloqueada)
+    db_session.flush()
+    db_session.add(
+        AnaliseMaterializacaoCampanhaItem(
+            campanha_id=campanha_bloqueada.id,
+            codigo_cvm=cia.codigo_cvm,
+            companhia_id=cia.id,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+            attempts=0,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    resultado = recuperar_materializacao_pendente(
+        db_session,
+        max_campaigns=10,
+        max_requeues=10,
+        min_age_seconds=0,
+    )
+
+    assert resultado.status == "triggered"
+    assert resultado.reason_code == "PENDING_UNDISPATCHED"
+    assert list(resultado.requeued_campaigns) == [str(campanha_recuperavel.id)]
+    assert str(campanha_bloqueada.id) not in resultado.requeued_campaigns
+
+
+def test_recuperar_materializacao_pendente_task_reenfileira_campanhas(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.recuperar_materializacao_pendente_task.run()
+
+    assert resultado["status"] == "triggered"
+    assert resultado["reason_code"] == "PENDING_UNDISPATCHED"
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
     assert captured["queue"] == "analise_materializacao"

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from secrets import compare_digest, token_urlsafe
 from typing import Annotated, Any
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -120,6 +120,8 @@ def autenticar_requisicao(
     token = credenciais.credentials
     if compare_digest(token, obter_token_api()):
         return AutenticacaoApi(usuario=None, token_sistema=True)
+    if compare_digest(token, get_settings().materializacao_operations_token):
+        return AutenticacaoApi(usuario=None, token_sistema=True)
 
     usuario_id = _decodificar_token_usuario(token)
     if usuario_id is None:
@@ -133,7 +135,18 @@ def autenticar_requisicao(
 
 def validar_token_api(
     autenticacao: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    request: Request,
 ) -> None:
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+        if compare_digest(token, get_settings().materializacao_operations_token):
+            if request.url.path == "/analise/materializacoes/recuperacao/trigger" or (
+                request.url.path.startswith("/analise/materializacoes/campanhas/")
+                and request.url.path.endswith("/reativar")
+            ):
+                return
+            raise HTTPException(status_code=403, detail="Token de operacao de materializacao nao permite este endpoint.")
     _ = autenticacao
 
 
@@ -152,3 +165,12 @@ def exigir_admin_api(
         return
     if autenticacao.usuario is None or not autenticacao.usuario.is_admin:
         raise HTTPException(status_code=403, detail="Permissao administrativa requerida.")
+
+
+def exigir_operador_materializacao_api(
+    credenciais: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer_scheme)] = None,
+) -> None:
+    if credenciais is None or credenciais.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Token de acesso invalido.")
+    if not compare_digest(credenciais.credentials, get_settings().materializacao_operations_token):
+        raise HTTPException(status_code=403, detail="Permissao de operacao de materializacao requerida.")

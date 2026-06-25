@@ -1,5 +1,66 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-25 - Self-healing delegado para materializacao presa
+
+### Endpoints novos
+
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+- `POST /analise/materializacoes/recuperacao/trigger`
+
+### Modelo de autenticacao
+
+- os endpoints acima usam bearer token dedicado de operacao de materializacao
+- esse token operacional nao substitui o token geral da API para os demais endpoints protegidos
+
+### Campos novos em `/analise/materializacoes/monitoramento`
+
+- `recoverable_pending_campaigns`
+- `undispatched_stuck_campaigns`
+- `oldest_undispatched_campaign_created_at`
+- `oldest_undispatched_campaign_elapsed_seconds`
+- `recoverable_campaign_ids`
+- `last_pending_recovery_sweep_at`
+- `last_pending_recovery_sweep_summary`
+- `pending_recovery_active_tasks`
+
+### Campos novos em `campaigns[]`
+
+- `recovery_state`
+- `last_recovery_check_at`
+- `last_recovery_action`
+- `last_recovery_reason_code`
+
+### Contrato de resposta dos endpoints delegados
+
+- `status`: `triggered`, `recovered`, `noop` ou `rejected`
+- `reason_code`: um entre `PENDING_UNDISPATCHED`, `STALE_CHUNK`, `WAITING_FOR_GATE`, `WAITING_FOR_SLOT`, `CHUNK_IN_PROGRESS`, `NO_PENDING_ITEMS`, `CAMPAIGN_NOT_FOUND`, `NOT_PENDING`, `PENDING_RECOVERY_DISABLED`
+- `affected_campaigns`
+- `requeued_campaigns`
+- `recovered_chunks`
+- `recovered_items`
+- `dispatcher_enqueued`
+- `triggered_at`
+
+Campos adicionais do sweep global:
+
+- `scanned_campaigns`
+- `recoverable_campaigns`
+
+### Semantica operacional atual
+
+- `PENDING_UNDISPATCHED` representa campanha pendente com itens pendentes, sem chunk ativo, sem execucao canônica `running` e sem bloqueio operacional explícito
+- `STALE_CHUNK` continua significando campanha com chunk stale ou recuperável
+- a reativacao delegada nao ignora gate vermelho, nao ignora saturacao de slots e nao interrompe chunk vivo
+- o trigger global executa apenas uma varredura limitada, respeitando os limites configurados de sweep e reenfileiramento
+- o backend agora persiste o resumo do ultimo sweep automatico, usado pelo monitoramento
+
+### Impacto esperado no frontend
+
+- paineis operacionais podem oferecer acao de retry sem exigir acesso administrativo amplo
+- campanhas pendentes agora podem ser distinguidas entre bloqueadas, recuperaveis e efetivamente presas
+- a UI deve tratar `noop` como resposta operacional válida, nao como erro tecnico
+- `recoverable_campaign_ids` e `campaigns[].recovery_state` passam a ser os sinais recomendados para habilitar botao de reativacao
+
 ## 2026-06-24 - Exclusao padrao de companhias canceladas na materializacao
 
 ### Superficie impactada

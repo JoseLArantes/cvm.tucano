@@ -9,6 +9,7 @@ from sqlalchemy.pool import StaticPool
 
 os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
 os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
+os.environ["MATERIALIZACAO_OPERATIONS_TOKEN"] = "token-materializacao-teste"
 
 from app.db.base import Base
 from app.db.session import get_db

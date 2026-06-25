@@ -53,6 +53,14 @@ def _disparar_dispatcher_materializacao(*, countdown: int | None = None) -> None
     )
 
 
+def _enfileirar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> None:
+    materializar_analise_campanha_task.apply_async(
+        args=(campanha_id,),
+        countdown=0 if countdown is None else countdown,
+        queue=_settings.analise_materializacao_queue_name,
+    )
+
+
 @celery_app.task(bind=True, name="app.worker.tasks.materializar_analise_companhia_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def materializar_analise_companhia_task(
     self: Any,
@@ -461,6 +469,31 @@ def reconciliar_materializacao_stale_task(self: Any, campanha_id: str | None = N
             "recovered_items": resultado.recovered_items,
             "affected_campaigns": list(resultado.affected_campaigns),
             "chunk_ids": list(resultado.chunk_ids),
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.recuperar_materializacao_pendente_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def recuperar_materializacao_pendente_task(self: Any) -> dict[str, Any]:
+    from app.services.analise import recuperar_materializacao_pendente
+
+    db = SessionLocal()
+    try:
+        resultado = recuperar_materializacao_pendente(db)
+        for campanha_id in resultado.requeued_campaigns:
+            _enfileirar_campanha_materializacao(campanha_id)
+        return {
+            "status": resultado.status,
+            "reason_code": resultado.reason_code,
+            "affected_campaigns": list(resultado.affected_campaigns),
+            "requeued_campaigns": list(resultado.requeued_campaigns),
+            "recovered_chunks": resultado.recovered_chunks,
+            "recovered_items": resultado.recovered_items,
+            "dispatcher_enqueued": resultado.dispatcher_enqueued,
+            "scanned_campaigns": resultado.scanned_campaigns,
+            "recoverable_campaigns": resultado.recoverable_campaigns,
+            "triggered_at": resultado.triggered_at.isoformat(),
         }
     finally:
         db.close()

@@ -96,6 +96,7 @@ O fluxo atual é:
 9. Cada item executa a materialização canônica da companhia.
 10. Se o gate fechar no meio do chunk, os itens ainda não iniciados voltam para `pending`.
 11. O resultado alimenta as tabelas de revisões de contexto e de fatos.
+12. Um sweep automático e limitado pode reativar campanhas pendentes que nunca chegaram a formar chunk inicial.
 
 Enquanto o gate está vermelho, a campanha pode continuar visível como pendente no monitoramento, mas não deve consumir polling contínuo por auto-reagendamento do próprio orquestrador.
 
@@ -111,6 +112,29 @@ Execução pontual de companhia cancelada:
 - o comportamento padrão continua sendo não processar `CANCELADA`
 - uma execução individual só pode incluir canceladas quando o operador informa override explícito
 - sem override, a execução pode ser registrada apenas como skip observável, sem gerar revisões
+
+## Self-healing de campanhas pendentes
+
+O backend agora separa dois grupos de campanhas pendentes:
+
+- pendência operacional legítima, causada por gate vermelho, saturação de slots ou chunk ainda vivo
+- pendência presa, quando a campanha continua `pending` apesar de já ter trabalho disponível e nenhum progresso possível ter sido iniciado
+
+Classificações operacionais principais:
+
+- `STALE_CHUNK`
+- `PENDING_UNDISPATCHED`
+- `WAITING_FOR_GATE`
+- `WAITING_FOR_SLOT`
+- `CHUNK_IN_PROGRESS`
+- `NO_PENDING_ITEMS`
+
+Essas classificações alimentam:
+
+- os endpoints delegados de reativação
+- o sweep automático periódico
+- os novos sinais de monitoramento
+- o `summary` operacional persistido da campanha
 
 ## Materialização Canônica
 
@@ -177,6 +201,8 @@ Campos principais:
 - quantos chunks existem em `queued`, `running` e `stale`;
 - quais campanhas estão em andamento;
 - quais campanhas aguardam recuperação de chunk stale;
+- quais campanhas pendentes já são recuperáveis;
+- quais campanhas pendentes estão presas por ausência de despacho inicial;
 - quais itens estão rodando agora e quais seguem pendentes;
 - quais chunks stale merecem atenção operacional;
 - quais execuções correntes estão incrementais, qual cutoff elas usam e quais parecem stalled;
@@ -195,6 +221,13 @@ Campos adicionais importantes:
 | `running_campaigns` | integer | Quantidade de campanhas em andamento |
 | `waiting_for_gate_campaigns` | integer | Campanhas pendentes especificamente por gate vermelho |
 | `recovering_campaigns` | integer | Campanhas pendentes aguardando recuperação de chunk stale |
+| `recoverable_pending_campaigns` | integer | Campanhas pendentes elegíveis para self-healing |
+| `undispatched_stuck_campaigns` | integer | Campanhas pendentes presas sem chunk inicial e sem bloqueio operacional explícito |
+| `oldest_undispatched_campaign_created_at` | string | Data de criação da campanha presa mais antiga |
+| `oldest_undispatched_campaign_elapsed_seconds` | integer | Tempo decorrido da campanha presa mais antiga |
+| `recoverable_campaign_ids` | array | Preview das campanhas recuperáveis |
+| `last_pending_recovery_sweep_at` | string | Momento do último sweep automático de recuperação |
+| `last_pending_recovery_sweep_summary` | object | Resumo persistido do último sweep automático |
 | `pending_items` | integer | Quantidade de itens pendentes |
 | `running_items` | integer | Quantidade de itens em processamento |
 | `success_items` | integer | Quantidade de itens concluídos com sucesso |
@@ -205,6 +238,7 @@ Campos adicionais importantes:
 | `stale_chunks` | integer | Quantidade de chunks marcados como stale |
 | `stale_item_count` | integer | Quantidade de itens ainda vinculados a chunks stale |
 | `stalled_incremental_execution_ids` | array | Subconjunto stalled apenas do modo incremental |
+| `pending_recovery_active_tasks` | integer | Tasks ativas específicas do sweep automático de campanhas pendentes |
 | `running_execution_previews` | array | Preview das execuções correntes |
 | `campaigns` | array | Resumo das campanhas relevantes no snapshot |
 | `stale_chunk_preview` | array | Preview dos chunks stale mais recentes |
@@ -276,6 +310,10 @@ Além dos totais gerais de tasks, o snapshot atual expõe:
 | `active_chunk_lease_expires_at` | string | Expiração do lease do chunk ativo |
 | `stale_chunks` | integer | Quantidade de chunks stale ligados à campanha |
 | `wait_reason` | string | Motivo operacional da espera atual, quando houver |
+| `recovery_state` | string | Classificação persistida mais recente da campanha para fins de self-healing |
+| `last_recovery_check_at` | string | Último momento em que a campanha foi classificada pelo fluxo de recuperação |
+| `last_recovery_action` | string | Última ação executada pelo fluxo de recuperação |
+| `last_recovery_reason_code` | string | Último reason code emitido para a campanha |
 
 ### `AnaliseMaterializacaoCampanhaItemPreview`
 
@@ -306,6 +344,30 @@ Além dos totais gerais de tasks, o snapshot atual expõe:
 | `started_at` | string | Início efetivo do chunk |
 | `finished_at` | string | Fim do chunk, quando houver |
 | `updated_at` | string | Última atualização persistida |
+
+## Respostas de reativação operacional
+
+### `AnaliseMaterializacaoReativacaoResposta`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `status` | string | `triggered`, `recovered`, `noop` ou `rejected` |
+| `reason_code` | string | Código objetivo do estado encontrado |
+| `affected_campaigns` | array | Campanhas avaliadas ou afetadas |
+| `requeued_campaigns` | array | Campanhas efetivamente reenfileiradas |
+| `recovered_chunks` | integer | Quantidade de chunks stale recuperados |
+| `recovered_items` | integer | Quantidade de itens devolvidos para `pending` |
+| `dispatcher_enqueued` | boolean | Indica se houve reenfileiramento efetivo |
+| `triggered_at` | string | Momento da operação |
+
+### `AnaliseMaterializacaoReativacaoSweepResposta`
+
+Além do envelope acima, o sweep global expõe:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `scanned_campaigns` | integer | Quantidade de campanhas pendentes inspecionadas no sweep |
+| `recoverable_campaigns` | integer | Quantidade de campanhas efetivamente classificadas como recuperáveis dentro do sweep |
 
 ## Catálogo de Métricas
 

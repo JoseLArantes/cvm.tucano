@@ -28,6 +28,18 @@ AnaliseMaterializacaoGateStatus = Literal["green", "red"]
 AnaliseMaterializacaoControlMode = Literal["auto", "paused"]
 AnaliseMaterializacaoChunkStatus = Literal["queued", "running", "success", "failed", "stale", "cancelled"]
 AnaliseMaterializacaoMode = Literal["full", "incremental"]
+AnaliseMaterializacaoRecoveryStatus = Literal["triggered", "recovered", "noop", "rejected"]
+AnaliseMaterializacaoRecoveryReasonCode = Literal[
+    "PENDING_UNDISPATCHED",
+    "STALE_CHUNK",
+    "WAITING_FOR_GATE",
+    "WAITING_FOR_SLOT",
+    "CHUNK_IN_PROGRESS",
+    "NO_PENDING_ITEMS",
+    "CAMPAIGN_NOT_FOUND",
+    "NOT_PENDING",
+    "PENDING_RECOVERY_DISABLED",
+]
 
 
 class AnaliseLinkSet(BaseModel):
@@ -202,6 +214,10 @@ class AnaliseMaterializacaoCampanhaResumo(BaseModel):
     active_chunk_lease_expires_at: datetime | None = Field(default=None, description="Momento de expiração do lease do chunk ativo, quando houver.")
     stale_chunks: int = Field(default=0, description="Quantidade de chunks stale associados à campanha.")
     wait_reason: str | None = Field(default=None, description="Motivo atual de espera, quando a campanha não está progredindo.")
+    recovery_state: str | None = Field(default=None, description="Classificação operacional de recuperabilidade atualmente conhecida para a campanha.")
+    last_recovery_check_at: datetime | None = Field(default=None, description="Último momento em que a campanha foi classificada pelo fluxo de recuperação.")
+    last_recovery_action: str | None = Field(default=None, description="Última ação operacional executada pelo fluxo de recuperação para a campanha.")
+    last_recovery_reason_code: str | None = Field(default=None, description="Último reason code produzido pelo fluxo de recuperação para a campanha.")
 
 
 class AnaliseMaterializacaoCampanhaItemPreview(BaseModel):
@@ -241,6 +257,22 @@ class AnaliseMaterializacaoRecuperacaoResposta(BaseModel):
     recovered_items: int = Field(description="Quantidade de itens devolvidos para pending.")
     affected_campaigns: list[str] = Field(default_factory=list, description="Campanhas afetadas pela recuperação.")
     chunk_ids: list[str] = Field(default_factory=list, description="Chunks efetivamente recuperados.")
+
+
+class AnaliseMaterializacaoReativacaoResposta(BaseModel):
+    status: AnaliseMaterializacaoRecoveryStatus = Field(description="Resultado da tentativa de reativação.")
+    reason_code: AnaliseMaterializacaoRecoveryReasonCode = Field(description="Classificação objetiva do estado encontrado para a campanha ou sweep.")
+    affected_campaigns: list[str] = Field(default_factory=list, description="Campanhas avaliadas ou afetadas pela operação.")
+    requeued_campaigns: list[str] = Field(default_factory=list, description="Campanhas efetivamente reenfileiradas para orquestração.")
+    recovered_chunks: int = Field(default=0, description="Quantidade de chunks stale recuperados na operação.")
+    recovered_items: int = Field(default=0, description="Quantidade de itens devolvidos para pending na operação.")
+    dispatcher_enqueued: bool = Field(description="Indica se houve reenfileiramento efetivo de orquestração.")
+    triggered_at: datetime = Field(description="Momento em que a operação foi acionada.")
+
+
+class AnaliseMaterializacaoReativacaoSweepResposta(AnaliseMaterializacaoReativacaoResposta):
+    scanned_campaigns: int = Field(default=0, description="Quantidade de campanhas pendentes inspecionadas no sweep.")
+    recoverable_campaigns: int = Field(default=0, description="Quantidade de campanhas classificadas como recuperáveis dentro do sweep.")
 
 
 class AnaliseMaterializacaoIngestionBlocker(BaseModel):
@@ -285,6 +317,13 @@ class AnaliseMaterializacaoMonitoramentoResposta(BaseModel):
     running_campaigns: int = Field(description="Quantidade de campanhas em andamento.")
     waiting_for_gate_campaigns: int = Field(description="Quantidade de campanhas pendentes especificamente por bloqueio do gate.")
     recovering_campaigns: int = Field(description="Quantidade de campanhas aguardando recuperação de chunk stale.")
+    recoverable_pending_campaigns: int = Field(description="Quantidade de campanhas pendentes que podem ser reativadas pelo fluxo de self-healing.")
+    undispatched_stuck_campaigns: int = Field(description="Quantidade de campanhas pendentes classificadas como presas por ausência de despacho inicial.")
+    oldest_undispatched_campaign_created_at: datetime | None = Field(default=None, description="Momento de criação da campanha presa mais antiga ainda sem despacho.")
+    oldest_undispatched_campaign_elapsed_seconds: int | None = Field(default=None, description="Tempo decorrido da campanha presa mais antiga ainda sem despacho.")
+    recoverable_campaign_ids: list[str] = Field(default_factory=list, description="Preview dos identificadores de campanhas recuperáveis no momento do snapshot.")
+    last_pending_recovery_sweep_at: datetime | None = Field(default=None, description="Momento da última varredura automática de recuperação de campanhas pendentes.")
+    last_pending_recovery_sweep_summary: dict[str, object] = Field(default_factory=dict, description="Resumo bruto persistido da última varredura automática de recuperação.")
     pending_items: int = Field(description="Quantidade de itens pendentes em campanhas.")
     running_items: int = Field(description="Quantidade de itens em andamento em campanhas.")
     success_items: int = Field(description="Quantidade de itens concluídos com sucesso em campanhas.")
@@ -299,6 +338,7 @@ class AnaliseMaterializacaoMonitoramentoResposta(BaseModel):
     stalled_threshold_seconds: int = Field(description="Janela usada para considerar uma execução potencialmente sem heartbeat.")
     stalled_execution_ids: list[str] = Field(default_factory=list, description="Execuções em andamento cujo `updated_at` ficou mais antigo que o threshold configurado.")
     stalled_incremental_execution_ids: list[str] = Field(default_factory=list, description="Subset das execuções stalled que estavam em modo incremental.")
+    pending_recovery_active_tasks: int = Field(description="Quantidade de tasks ativas específicas da recuperação de campanhas pendentes.")
     running_execution_previews: list[AnaliseMaterializacaoExecucaoResumo] = Field(default_factory=list, description="Preview das execuções atualmente em andamento.")
     campaigns: list[AnaliseMaterializacaoCampanhaResumo] = Field(default_factory=list, description="Resumo das campanhas mais relevantes no momento do snapshot.")
     stale_chunk_preview: list[AnaliseMaterializacaoChunkExecucaoPreview] = Field(default_factory=list, description="Preview dos chunks stale que aguardam recuperação.")

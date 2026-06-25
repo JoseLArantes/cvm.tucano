@@ -32,6 +32,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.materializar_analise_chunk_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.despachar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.reconciliar_materializacao_stale_task": {"queue": settings.analise_materializacao_queue_name},
+    "app.worker.tasks.recuperar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
 }
 
 
@@ -42,6 +43,11 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
             "schedule": timedelta(seconds=settings.analise_materializacao_recovery_sweep_seconds),
         }
     }
+    if settings.analise_materializacao_pending_recovery_enabled:
+        beat_schedule["analise-materializacao-pending-recovery"] = {
+            "task": "app.worker.tasks.recuperar_materializacao_pendente_task",
+            "schedule": timedelta(seconds=settings.analise_materializacao_pending_recovery_sweep_seconds),
+        }
     
     if settings.auto_trigger_updates:
         beat_schedule["sincronizar-cadastro-diario"] = {
