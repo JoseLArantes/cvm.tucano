@@ -148,6 +148,18 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
         if stale_chunks > 0:
             recuperacao = recuperar_chunks_materializacao_stale(db, campanha_id=campanha_uuid)
             if recuperacao.recovered_chunks > 0:
+                campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
+                if campanha is not None:
+                    now = datetime.now(UTC)
+                    campanha.summary = {
+                        **(campanha.summary or {}),
+                        "recovery_state": "requeued",
+                        "last_recovery_check_at": now.isoformat(),
+                        "last_recovery_action": "worker_recovered_and_requeued",
+                        "last_recovery_reason_code": "STALE_CHUNK",
+                    }
+                    campanha.updated_at = now
+                    db.commit()
                 _reagendar_campanha_materializacao(campanha_id, countdown=0)
                 return {
                     "status": "recovered_stale_and_requeued",

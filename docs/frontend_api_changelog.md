@@ -89,6 +89,7 @@ Campos adicionais do sweep global:
 - `PENDING_UNDISPATCHED` representa campanha pendente com itens pendentes, sem chunk ativo, sem execucao canônica `running` e sem bloqueio operacional explícito
 - `STALE_CHUNK` continua significando campanha com chunk stale ou recuperável
 - quando o worker de campanha encontra chunks stale ativos, ele tenta recuperar e reenfileirar inline antes de permanecer em espera operacional
+- quando uma campanha e efetivamente reativada ou reenfileirada, o backend a registra temporariamente como `requeued`; durante essa janela curta ela sai de `recoverable_pending_campaigns` e de `recoverable_campaign_ids`
 - a reativacao delegada nao ignora gate vermelho, nao ignora saturacao de slots e nao interrompe chunk vivo
 - o trigger global executa apenas uma varredura limitada, respeitando os limites configurados de sweep e reenfileiramento
 - o backend agora persiste o resumo do ultimo sweep automatico, usado pelo monitoramento
@@ -99,6 +100,18 @@ Campos adicionais do sweep global:
 - campanhas pendentes agora podem ser distinguidas entre bloqueadas, recuperaveis e efetivamente presas
 - a UI deve tratar `noop` como resposta operacional válida, nao como erro tecnico
 - `recoverable_campaign_ids` e `campaigns[].recovery_state` passam a ser os sinais recomendados para habilitar botao de reativacao
+- campanhas marcadas como `requeued` nao devem continuar sendo exibidas pela UI como "ainda recuperaveis agora"; elas ja estao em janela de retry em transito
+
+### Guia rapido de uso dos endpoints
+
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+  - retry operacional suportado para uma campanha conhecida
+- `POST /analise/materializacoes/recuperacao/trigger`
+  - sweep limitado para encontrar e recuperar campanhas pendentes elegiveis
+- `POST /analise/materializacoes/recuperar-stale`
+  - operacao administrativa de baixo nivel para recuperar stale em lote
+- `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+  - operacao administrativa de baixo nivel para recuperar stale em uma campanha especifica
 
 ## 2026-06-24 - Exclusao padrao de companhias canceladas na materializacao
 

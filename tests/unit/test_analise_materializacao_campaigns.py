@@ -16,6 +16,7 @@ from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro
 from app.models.ingestion import IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.analise import (
+    campanha_tem_requeue_em_transito,
     claim_materializacao_campanha_chunk,
     classificar_recuperacao_materializacao_campanha,
     criar_materializacao_campanha,
@@ -768,6 +769,11 @@ def test_reativar_materializacao_campanha_recupera_stale_e_reenfileira(db_sessio
     assert resultado.reason_code == "STALE_CHUNK"
     assert resultado.recovered_chunks == 1
     assert str(campanha.id) in resultado.requeued_campaigns
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["recovery_state"] == "requeued"
+    assert campanha_tem_requeue_em_transito(campanha_atualizada) is True
 
 
 def test_recuperar_materializacao_pendente_reenfileira_apenas_pending_undispatched(

@@ -42,7 +42,9 @@ Se o foco for uso funcional da API, os atalhos mais importantes sao:
 - **[Financeiro](./api-endpoints/financeiro.md)** para DFP e ITR;
 - **[FRE](./api-endpoints/fre.md)** para estrutura acionaria, administracao e remuneracao;
 - **[IPE](./api-endpoints/ipe.md)** para eventos e documentos periodicos/eventuais;
-- **[Analise](./api-endpoints/analise.md)** para visoes consolidadas e metricas derivadas.
+- **[Analise](./api-endpoints/analise.md)** para entender a divisao entre consumo analitico e operacao interna;
+- **[Analise por Companhia](./api-endpoints/analise-companhias.md)** para metricas, series, comparacoes, qualidade, sinais, eventos e briefs;
+- **[Materializacoes Analiticas](./api-endpoints/analise-materializacoes.md)** para campanhas, monitoramento, retries e self-healing operacional.
 
 Se o foco for operacao da plataforma, va direto para:
 
@@ -69,7 +71,7 @@ As fontes documentadas incluem cadastro de companhias, demonstracoes financeiras
 - **Primeiros Passos**: instalacao, autenticacao e uso inicial.
 - **Conceitos**: pipeline, modelo de dados, identidade e quarentena.
 - **Fontes de Dados**: detalhes de cada conjunto publico da CVM suportado.
-- **API Endpoints**: referencia funcional da API.
+- **API Endpoints**: referencia funcional da API, separando dados de negocio e superficies operacionais.
 - **Administracao da Ingestao**: operacao do pipeline.
 - **Schemas**: contratos de request/response e modelos principais.
 - **Referencia**: glossario, changelog e solucao de problemas.

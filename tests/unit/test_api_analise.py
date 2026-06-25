@@ -1309,6 +1309,49 @@ def test_analise_materializacoes_controle_pause_resume(client: TestClient, db_se
     assert resume_payload["gate"]["reason_code"] in {"NO_BLOCKERS", "INGESTION_ACTIVE"}
 
 
+def test_monitoramento_nao_conta_campanha_recem_reativada_como_recoverable(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(
+        status="pending",
+        total_items=1,
+        pending_items=1,
+        summary={
+            "recovery_state": "requeued",
+            "last_recovery_action": "requeued",
+            "last_recovery_reason_code": "PENDING_UNDISPATCHED",
+            "last_recovery_check_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db_session.add(campanha)
+    db_session.flush()
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.add(_materializacao_campanha_item(campanha, cia, escopo="consolidated", status="pending", ordem=1))
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, dict[str, str]]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    resp = client.get("/analise/materializacoes/monitoramento")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["recoverable_pending_campaigns"] == 0
+    assert str(campanha.id) not in payload["recoverable_campaign_ids"]
+
+
 def test_analise_materializacoes_recuperar_stale_endpoints(client: TestClient, db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)

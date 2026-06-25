@@ -51,10 +51,12 @@ from app.schemas.analise import (
 )
 from app.schemas.comum import Paginacao
 from app.services.analise import (
+    campanha_tem_requeue_em_transito,
     contar_chunks_stale_campanha,
     listar_metricas,
     obter_brief,
     obter_chunk_ativo_campanha,
+    obter_chunks_stale_ativos,
     obter_comparacoes,
     obter_controle_materializacao,
     obter_estado_gate_materializacao,
@@ -107,6 +109,53 @@ _RESPOSTAS_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
         },
     },
 }
+
+_RESPOSTAS_ADMIN_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    401: {
+        "description": "Token ausente ou invalido.",
+        "content": {"application/json": {"example": {"detail": "Token de acesso invalido."}}},
+    },
+    403: {
+        "description": "Permissao administrativa requerida.",
+        "content": {"application/json": {"example": {"detail": "Permissao administrativa requerida."}}},
+    },
+}
+
+_DESCRICAO_RECUPERAR_STALE_GERAL = (
+    "Executa a recuperacao administrativa imediata de chunks stale em toda a fila de materializacao. "
+    "Use este endpoint quando o operador administrativo precisar forcar a limpeza tecnica de chunks com lease "
+    "expirado sem depender da classificacao por campanha. A operacao devolve itens inacabados para `pending`, "
+    "marca as execucoes de chunk recuperadas como `stale` e reenfileira as campanhas afetadas. "
+    "Este endpoint e de baixo nivel e existe para operacao administrativa; para usuarios delegados e fluxos de UI, "
+    "prefira `POST /analise/materializacoes/recuperacao/trigger` ou "
+    "`POST /analise/materializacoes/campanhas/{campanha_id}/reativar`."
+)
+
+_DESCRICAO_RECUPERAR_STALE_CAMPANHA = (
+    "Executa a mesma recuperacao administrativa de chunks stale, mas limitada a uma campanha especifica. "
+    "Use quando o operador administrativo ja sabe qual campanha esta afetada e precisa limpar apenas esse escopo. "
+    "O endpoint nao reclassifica o estado logico da campanha alem da recuperacao tecnica do chunk. "
+    "Para o fluxo operacional suportado para API users, prefira `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`."
+)
+
+_DESCRICAO_REATIVAR_CAMPANHA = (
+    "Classifica uma campanha pendente da materializacao analitica e executa a reativacao operacional suportada "
+    "para API users. Use este endpoint quando a UI ja conhece a `campanha_id` e quer tentar destravar apenas uma "
+    "campanha especifica. O endpoint e idempotente do ponto de vista operacional: ele pode recuperar chunks stale "
+    "ativos, reenfileirar uma campanha `PENDING_UNDISPATCHED` ou devolver `noop` com motivo objetivo quando a "
+    "campanha estiver bloqueada por gate, slot, chunk vivo ou ausencia real de trabalho pendente. "
+    "Quando a reativacao gera reenfileiramento, o backend registra a campanha como `requeued` e o monitoramento "
+    "deixa de contabiliza-la em `recoverable_pending_campaigns` durante a janela curta de propagacao do retry."
+)
+
+_DESCRICAO_TRIGGER_RECUPERACAO = (
+    "Executa um sweep operacional limitado sobre campanhas pendentes para self-healing delegado. Use este "
+    "endpoint quando a UI nao sabe qual campanha esta presa, ou quando o operador quer pedir ao backend para "
+    "varrer um lote limitado de campanhas `pending` e recuperar apenas as elegiveis naquele instante. "
+    "O sweep respeita gate, concorrencia e limites configurados de batch; ele nao faz bypass de protecoes nem "
+    "requeue irrestrito. O resultado traz contadores agregados e a lista das campanhas afetadas para auditoria."
+)
 
 
 def _obter_companhia_por_codigo_cvm_or_404(db: DbSession, codigo_cvm: int) -> Companhia:
@@ -474,7 +523,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     undispatched_campaigns: list[AnaliseMaterializacaoCampanha] = []
     for campanha in pending_campaign_rows:
         active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
-        stale_chunk_count = contar_chunks_stale_campanha(db, campanha.id)
+        stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id))
         wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
         running_execucoes = int(
             db.scalar(
@@ -486,6 +535,8 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
             or 0
         )
         age_seconds = _elapsed_seconds(campanha.created_at, None)
+        if campanha_tem_requeue_em_transito(campanha, now=now):
+            continue
         if stale_chunk_count > 0:
             recoverable_campaign_ids.append(str(campanha.id))
         elif (
@@ -675,8 +726,8 @@ def retomar_controle_materializacao_analitica(db: DbSession) -> AnaliseMateriali
     "/materializacoes/recuperar-stale",
     response_model=AnaliseMaterializacaoRecuperacaoResposta,
     summary="Recuperar Chunks Stale de Materializacao",
-    description="Executa recuperação imediata de chunks stale de materialização e devolve itens inacabados para pending.",
-    responses=_RESPOSTAS_PADRAO,
+    description=_DESCRICAO_RECUPERAR_STALE_GERAL,
+    responses=_RESPOSTAS_ADMIN_OPERACAO_MATERIALIZACAO,
     operation_id="recuperarMaterializacaoStale",
 )
 def recuperar_materializacao_stale_analitica(
@@ -699,8 +750,8 @@ def recuperar_materializacao_stale_analitica(
     "/materializacoes/campanhas/{campanha_id}/recuperar",
     response_model=AnaliseMaterializacaoRecuperacaoResposta,
     summary="Recuperar Chunks Stale de uma Campanha",
-    description="Executa recuperação imediata dos chunks stale associados a uma campanha específica.",
-    responses=_RESPOSTAS_PADRAO,
+    description=_DESCRICAO_RECUPERAR_STALE_CAMPANHA,
+    responses=_RESPOSTAS_ADMIN_OPERACAO_MATERIALIZACAO,
     operation_id="recuperarMaterializacaoCampanha",
 )
 def recuperar_materializacao_campanha_analitica(
@@ -729,13 +780,11 @@ def recuperar_materializacao_campanha_analitica(
     response_model=AnaliseMaterializacaoReativacaoResposta,
     summary="Reativar Campanha de Materializacao",
     description=(
-        "Classifica uma campanha pendente da materialização analítica e executa reativação operacional limitada. "
+        f"{_DESCRICAO_REATIVAR_CAMPANHA} "
         "A chamada exige token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`. "
-        "A operação pode reenfileirar uma campanha presa sem chunk inicial ou recuperar chunks stale já detectados, "
-        "mas não ignora gate vermelho nem saturação de slots. A resposta sempre traz `status`, `reason_code`, "
-        "`affected_campaigns`, `requeued_campaigns`, `recovered_chunks`, `recovered_items`, "
-        "`dispatcher_enqueued` e `triggered_at`, permitindo que o cliente diferencie retry efetivo de `noop` "
-        "operacional."
+        "A resposta sempre traz `status`, `reason_code`, `affected_campaigns`, `requeued_campaigns`, "
+        "`recovered_chunks`, `recovered_items`, `dispatcher_enqueued` e `triggered_at`, permitindo que o cliente "
+        "diferencie retry efetivo de `noop` operacional."
     ),
     responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
     operation_id="reativarMaterializacaoCampanha",
@@ -770,11 +819,10 @@ def reativar_materializacao_campanha_analitica(
     response_model=AnaliseMaterializacaoReativacaoSweepResposta,
     summary="Disparar Sweep de Recuperacao de Materializacao",
     description=(
-        "Executa uma varredura operacional limitada sobre campanhas pendentes da materialização analítica, "
-        "exigindo token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`. "
-        "reativando apenas campanhas elegíveis para self-healing e respeitando os limites configurados de batch. "
-        "O sweep não força bypass de gate nem de concorrência; ele apenas recupera `STALE_CHUNK` e reenfileira "
-        "`PENDING_UNDISPATCHED` maduros o suficiente para reativação automática."
+        f"{_DESCRICAO_TRIGGER_RECUPERACAO} "
+        "A chamada exige token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`. "
+        "O sweep recupera apenas `STALE_CHUNK` ativos e reenfileira apenas `PENDING_UNDISPATCHED` maduros o "
+        "suficiente para reativacao automatica."
     ),
     responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
     operation_id="triggerMaterializacaoRecoverySweep",

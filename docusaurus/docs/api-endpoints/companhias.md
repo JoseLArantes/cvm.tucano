@@ -368,7 +368,8 @@ if idade_horas > 48:
 
 ---
 
-## Próximos Passos
+## Proximos Passos
 
-- [Fontes](./fontes.md) - Catálogo de fontes e datasets
-- [Análise](./analise.md) - Endpoints estratégicos de análise
+- [Fontes](./fontes.md) - Catalogo de fontes e datasets
+- [Analise](./analise.md) - Visao geral da superficie analitica
+- [Analise por Companhia](./analise-companhias.md) - Endpoints estrategicos de analise

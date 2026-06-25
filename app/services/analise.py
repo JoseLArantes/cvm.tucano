@@ -3118,6 +3118,42 @@ def _registrar_recovery_state_campanha(
     campanha.updated_at = checked_at
 
 
+def _timestamp_iso_em_summary(summary: dict[str, Any] | None, key: str) -> datetime | None:
+    if not isinstance(summary, dict):
+        return None
+    raw_value = summary.get(key)
+    if not isinstance(raw_value, str):
+        return None
+    try:
+        return _coerce_utc_datetime(datetime.fromisoformat(raw_value))
+    except ValueError:
+        return None
+
+
+def campanha_tem_requeue_em_transito(
+    campanha: AnaliseMaterializacaoCampanha,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    summary = campanha.summary if isinstance(campanha.summary, dict) else None
+    if not isinstance(summary, dict):
+        return False
+    if summary.get("recovery_state") != "requeued":
+        return False
+    action = summary.get("last_recovery_action")
+    if action not in {"requeued", "recovered_and_requeued", "worker_recovered_and_requeued"}:
+        return False
+    checked_at = _timestamp_iso_em_summary(summary, "last_recovery_check_at")
+    if checked_at is None:
+        return False
+    reference_time = now or datetime.now(UTC)
+    grace_seconds = max(
+        _settings.analise_materializacao_pending_recovery_min_age_seconds,
+        _settings.analise_materializacao_recovery_sweep_seconds,
+    )
+    return (reference_time - checked_at).total_seconds() < grace_seconds
+
+
 def _persistir_summary_recuperacao_pendente_controle(
     db: Session,
     *,
@@ -3275,7 +3311,7 @@ def reativar_materializacao_campanha(
         if campanha is not None:
             _registrar_recovery_state_campanha(
                 campanha,
-                recovery_state="recoverable",
+                recovery_state="requeued",
                 reason_code="STALE_CHUNK",
                 action="recovered_and_requeued",
                 checked_at=reference_time,
@@ -3297,7 +3333,7 @@ def reativar_materializacao_campanha(
         if campanha is not None:
             _registrar_recovery_state_campanha(
                 campanha,
-                recovery_state="recoverable",
+                recovery_state="requeued",
                 reason_code="PENDING_UNDISPATCHED",
                 action="requeued",
                 checked_at=reference_time,
