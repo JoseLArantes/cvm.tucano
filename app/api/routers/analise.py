@@ -55,7 +55,6 @@ from app.services.analise import (
     listar_metricas,
     obter_brief,
     obter_chunk_ativo_campanha,
-    obter_chunks_stale_ativos,
     obter_comparacoes,
     obter_controle_materializacao,
     obter_estado_gate_materializacao,
@@ -475,7 +474,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     undispatched_campaigns: list[AnaliseMaterializacaoCampanha] = []
     for campanha in pending_campaign_rows:
         active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
-        stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id)) + contar_chunks_stale_campanha(db, campanha.id)
+        stale_chunk_count = contar_chunks_stale_campanha(db, campanha.id)
         wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
         running_execucoes = int(
             db.scalar(

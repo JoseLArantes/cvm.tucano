@@ -144,7 +144,7 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
                 "campanha_id": campanha_id,
                 "chunk_execucao_id": str(active_chunk.id),
             }
-        stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha_uuid)) + contar_chunks_stale_campanha(db, campanha_uuid)
+        stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha_uuid))
         if stale_chunks > 0:
             campanha.status = "pending"
             campanha.summary = {

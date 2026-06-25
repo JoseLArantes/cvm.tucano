@@ -3022,7 +3022,7 @@ def _recalcular_materializacao_campanha(db: Session, campanha: AnaliseMaterializ
     }
     queued_chunks = int(chunk_counts.get("queued", 0))
     active_chunks = queued_chunks + int(chunk_counts.get("running", 0))
-    stale_chunks = int(chunk_counts.get("stale", 0))
+    stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id))
     processed_items = campanha.success_items + campanha.failed_items + campanha.skipped_items
     progress_ratio = (processed_items / campanha.total_items) if campanha.total_items > 0 else None
     campanha.summary = {
@@ -3144,7 +3144,7 @@ def classificar_recuperacao_materializacao_campanha(
 ) -> MaterializacaoReativacaoClassificacao:
     reference_time = now or datetime.now(UTC)
     active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
-    stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id)) + contar_chunks_stale_campanha(db, campanha.id)
+    stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id))
     running_execution_count = int(
         db.scalar(
             select(func.count(AnaliseMaterializacaoExecucao.id)).where(
@@ -3617,6 +3617,7 @@ def contar_chunks_stale_campanha(db: Session, campanha_id: uuid.UUID) -> int:
         )
         or 0
     )
+
 
 
 def obter_chunks_stale_ativos(
