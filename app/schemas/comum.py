@@ -1,4 +1,85 @@
-from pydantic import BaseModel, Field, model_validator
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Annotated
+
+from pydantic import BaseModel, BeforeValidator, Field, PlainSerializer, WithJsonSchema, model_validator
+
+from app.services.normalizacao import (
+    data_para_string_br,
+    datetime_para_string_br,
+    decimal_para_canonical_string,
+)
+
+CanonicalDecimal = Annotated[
+    Decimal,
+    PlainSerializer(decimal_para_canonical_string, return_type=str, when_used="json"),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "pattern": r"^(?!^[-+.]*$)[+-]?\d+(?:\.\d+)?$",
+        }
+    ),
+]
+
+
+def _parse_brazilian_date(value: object) -> object:
+    if value is None or isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        texto = value.strip()
+        if not texto:
+            return None
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(texto, fmt).date()
+            except ValueError:
+                continue
+    return value
+
+
+def _parse_brazilian_datetime(value: object) -> object:
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        texto = value.strip()
+        if not texto:
+            return None
+        for fmt in ("%d/%m/%Y %H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(texto, fmt)
+            except ValueError:
+                continue
+        try:
+            return datetime.fromisoformat(texto)
+        except ValueError:
+            return value
+    return value
+
+BrazilianDate = Annotated[
+    date,
+    BeforeValidator(_parse_brazilian_date),
+    PlainSerializer(data_para_string_br, return_type=str, when_used="json"),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "pattern": r"^\d{2}/\d{2}/\d{4}$",
+            "examples": ["21/06/2026"],
+        }
+    ),
+]
+
+BrazilianDateTime = Annotated[
+    datetime,
+    BeforeValidator(_parse_brazilian_datetime),
+    PlainSerializer(datetime_para_string_br, return_type=str, when_used="json"),
+    WithJsonSchema(
+        {
+            "type": "string",
+            "pattern": r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}:\d{2}$",
+            "examples": ["21/06/2026 14:30:00"],
+        }
+    ),
+]
 
 
 class Paginacao(BaseModel):
@@ -49,4 +130,3 @@ class PeriodicModel(BaseModel):
                     self.periodo_tipo = "TRIMESTRAL"
                     self.periodo_label = f"{self.ano}-{self.trimestre}T"
         return self
-

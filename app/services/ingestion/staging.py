@@ -8,7 +8,7 @@ import uuid
 import zipfile
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 from sqlalchemy import delete, insert, select
 from sqlalchemy.orm import Session, load_only
@@ -28,6 +28,7 @@ from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
 DEFAULT_CSV_DELIMITER = ";"
 DEFAULT_ROW_VALIDATION_STATUS = "pending"
 DEFAULT_MEMBER_SCHEMA_STATUS = "ok"
+_ROW_KINDS_WITH_LINE_FALLBACK = {"fre_relacao_familiar"}
 
 
 def _agora() -> datetime:
@@ -36,6 +37,44 @@ def _agora() -> datetime:
 
 def _sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _strip_balancing_quotes(value: str) -> str:
+    return value.strip('"')
+
+
+def _read_csv_line(
+    line: str,
+    *,
+    delimiter: str,
+    quoting: Literal[0, 1, 2, 3, 4, 5] = csv.QUOTE_MINIMAL,
+) -> list[str]:
+    return next(csv.reader([line], delimiter=delimiter, quoting=quoting))
+
+
+def _read_csv_rows_with_fallback(
+    text: str,
+    *,
+    delimiter: str,
+    row_kind: str | None = None,
+) -> tuple[list[str], list[tuple[int, dict[str, str]]]]:
+    lines = text.splitlines()
+    if not lines:
+        return [], []
+    header = _read_csv_line(lines[0], delimiter=delimiter)
+    rows: list[tuple[int, dict[str, str]]] = []
+    for line_number, line in enumerate(lines[1:], start=2):
+        parsed = _read_csv_line(line, delimiter=delimiter)
+        if row_kind in _ROW_KINDS_WITH_LINE_FALLBACK and (
+            len(parsed) != len(header) or line.count('"') % 2 == 1
+        ):
+            parsed = [
+                _strip_balancing_quotes(value)
+                for value in _read_csv_line(line, delimiter=delimiter, quoting=csv.QUOTE_NONE)
+            ]
+        row_dict = cast(dict[str, str], dict(zip(header, parsed, strict=False)))
+        rows.append((line_number, row_dict))
+    return header, rows
 
 
 def decode_csv_payload(payload: bytes) -> tuple[str, str]:
@@ -51,8 +90,12 @@ def read_staged_csv_rows(
     payload: bytes,
     *,
     delimiter: str = DEFAULT_CSV_DELIMITER,
+    row_kind: str | None = None,
 ) -> tuple[list[str], list[tuple[int, dict[str, str]]], str]:
     text, encoding = decode_csv_payload(payload)
+    if row_kind in _ROW_KINDS_WITH_LINE_FALLBACK:
+        header, rows = _read_csv_rows_with_fallback(text, delimiter=delimiter, row_kind=row_kind)
+        return header, rows, encoding
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     header = list(reader.fieldnames or [])
     rows = [(line_number, row) for line_number, row in enumerate(reader, start=2)]
@@ -63,8 +106,16 @@ def iter_csv_rows(
     payload: bytes,
     *,
     delimiter: str = DEFAULT_CSV_DELIMITER,
+    row_kind: str | None = None,
 ) -> tuple[list[str], Iterator[tuple[int, dict[str, str]]], str]:
     text, encoding = decode_csv_payload(payload)
+    if row_kind in _ROW_KINDS_WITH_LINE_FALLBACK:
+        header, rows = _read_csv_rows_with_fallback(text, delimiter=delimiter, row_kind=row_kind)
+
+        def _iter_fallback() -> Iterator[tuple[int, dict[str, str]]]:
+            yield from rows
+
+        return header, _iter_fallback(), encoding
     reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
     header = list(reader.fieldnames or [])
 
@@ -561,7 +612,7 @@ def stage_csv_payload(
     row_kind: str,
     delimiter: str = DEFAULT_CSV_DELIMITER,
 ) -> tuple[IngestionFileMember, list[IngestionRow]]:
-    header, rows, encoding = read_staged_csv_rows(payload, delimiter=delimiter)
+    header, rows, encoding = read_staged_csv_rows(payload, delimiter=delimiter, row_kind=row_kind)
     member = register_member(
         db,
         ingestion_file=ingestion_file,
@@ -599,7 +650,7 @@ def stage_csv_payload_streaming(
     chunk_size: int = 5_000,
     use_copy: bool | None = None,
 ) -> IngestionFileMember:
-    header, row_iter, encoding = iter_csv_rows(payload, delimiter=delimiter)
+    header, row_iter, encoding = iter_csv_rows(payload, delimiter=delimiter, row_kind=row_kind)
     member = register_member(
         db,
         ingestion_file=ingestion_file,

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -14,6 +14,7 @@ from app.models import financeiro, fre, identidade, ingestion, sincronizacao, us
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.identidade import CompanhiaIdentificador
+from app.models.ingestion import QuarantineItem
 from app.models.sincronizacao import RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
 from app.services.ingestion.cadastro import (
@@ -191,6 +192,36 @@ def test_normalizar_financeiro_row_reuses_v1_mapping() -> None:
     assert dados["id_documento"] == 123
 
 
+def test_sincronizar_itr_creates_provisional_company_when_financial_header_is_missing_from_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    monkeypatch.setattr("app.services.ingestion.financeiro.ensure_identity_graph_ready", lambda _db: None)
+    companhia = _companhia()
+    session.add(companhia)
+    session.flush()
+    _add_identifiers(session, companhia)
+    session.commit()
+    payload = _zip_financeiro(
+        "itr",
+        2021,
+        valor_conta="1000",
+        cnpj="33.066.408/0001-15",
+        codigo_cvm="000003",
+    )
+
+    resultado = sincronizar_itr(session, 2021, downloader=lambda _: payload)
+
+    assert resultado["status"] == "sucesso"
+    quarentena = list(
+        session.execute(select(QuarantineItem).where(QuarantineItem.motivo_codigo == "companhia_nao_encontrada")).scalars()
+    )
+    assert not quarentena
+    companhia_provisoria = session.scalar(select(Companhia).where(Companhia.codigo_cvm == 3))
+    assert companhia_provisoria is not None
+    assert companhia_provisoria.tipo_emissor == "provisorio"
+
+
 def test_normalizar_financeiro_row_accepts_live_dot_decimal_shape() -> None:
     row_kind, dados = normalizar_financeiro_row(
         prefixo="dfp",
@@ -222,6 +253,64 @@ def test_normalizar_financeiro_row_accepts_live_dot_decimal_shape() -> None:
     assert dados["valor_conta"] == Decimal("293379482.0000000000")
 
 
+def test_normalizar_financeiro_row_rejeita_decimal_localizado_em_dado_estruturado() -> None:
+    with pytest.raises(ValueError, match="Separador decimal invalido"):
+        normalizar_financeiro_row(
+            prefixo="dfp",
+            tipo_formulario="DFP",
+            arquivo_origem="dfp_cia_aberta_DRE_ind_2025.csv",
+            ano_origem=2025,
+            linha_origem=2,
+            linha={
+                "CNPJ_CIA": "00.000.000/0001-91",
+                "DT_REFER": "2025-12-31",
+                "VERSAO": "1",
+                "DENOM_CIA": "BCO BRASIL S.A.",
+                "CD_CVM": "001023",
+                "GRUPO_DFP": "DF Individual - Demonstração do Resultado",
+                "MOEDA": "REAL",
+                "ESCALA_MOEDA": "MIL",
+                "ORDEM_EXERC": "ÚLTIMO",
+                "DT_INI_EXERC": "2025-01-01",
+                "DT_FIM_EXERC": "2025-12-31",
+                "CD_CONTA": "3.01",
+                "DS_CONTA": "Receitas de Intermediação Financeira",
+                "VL_CONTA": "1.000,00",
+                "ST_CONTA_FIXA": "S",
+                "COLUNA_DF": "",
+            },
+        )
+
+
+def test_normalizar_financeiro_row_rejeita_escala_moeda_desconhecida() -> None:
+    with pytest.raises(ValueError, match="escala_moeda_desconhecida"):
+        normalizar_financeiro_row(
+            prefixo="dfp",
+            tipo_formulario="DFP",
+            arquivo_origem="dfp_cia_aberta_DRE_ind_2025.csv",
+            ano_origem=2025,
+            linha_origem=2,
+            linha={
+                "CNPJ_CIA": "00.000.000/0001-91",
+                "DT_REFER": "2025-12-31",
+                "VERSAO": "1",
+                "DENOM_CIA": "BCO BRASIL S.A.",
+                "CD_CVM": "001023",
+                "GRUPO_DFP": "DF Individual - Demonstração do Resultado",
+                "MOEDA": "REAL",
+                "ESCALA_MOEDA": "BILHAO",
+                "ORDEM_EXERC": "ÚLTIMO",
+                "DT_INI_EXERC": "2025-01-01",
+                "DT_FIM_EXERC": "2025-12-31",
+                "CD_CONTA": "3.01",
+                "DS_CONTA": "Receitas de Intermediação Financeira",
+                "VL_CONTA": "293379482.0000000000",
+                "ST_CONTA_FIXA": "S",
+                "COLUNA_DF": "",
+            },
+        )
+
+
 def test_sincronizar_financeiro_inserts_same_counts_as_v1_for_dfp_and_itr() -> None:
     for prefixo, fn in (("dfp", sincronizar_dfp), ("itr", sincronizar_itr)):
         session = _session()
@@ -233,7 +322,7 @@ def test_sincronizar_financeiro_inserts_same_counts_as_v1_for_dfp_and_itr() -> N
             session.commit()
 
             payload = _zip_financeiro(
-                prefixo, 2025, valor_conta="1.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224"
+                prefixo, 2025, valor_conta="1000.00", cnpj="08.773.135/0001-00", codigo_cvm="25224"
             )
             resultado = fn(
                 session,
@@ -264,13 +353,13 @@ def test_sincronizar_financeiro_accepts_large_valor_conta() -> None:
         payload = _zip_financeiro(
             "dfp",
             2025,
-            valor_conta="44.109.150.000.000.000,00",
+            valor_conta="44109150000000000.00",
             cnpj="08.773.135/0001-00",
             codigo_cvm="25224",
             demonstracao_member_rows={
                 "dfp_cia_aberta_DRE_con_2025.csv": [
                     "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;MIL;ULTIMO;2025-01-01;2025-12-31;"
-                    "3.02;Custo dos Bens e/ou Serviços Vendidos;-44.109.150.000.000.000,00;S;\n"
+                    "3.02;Custo dos Bens e/ou Serviços Vendidos;-44109150000000000.00;S;\n"
                 ]
             },
         )
@@ -352,7 +441,7 @@ def test_sincronizar_financeiro_resolves_foreign_issuer_without_quarantine() -> 
             payload = _zip_financeiro(
                 prefixo,
                 2025,
-                valor_conta="1.000,00",
+                valor_conta="1000.00",
                 cnpj="07.857.093/0001-14",
                 codigo_cvm="80187",
             )
@@ -376,7 +465,7 @@ def test_sincronizar_financeiro_idempotencia_e_alteracao() -> None:
         _add_identifiers(session, companhia)
         session.commit()
 
-        payload_1 = _zip_financeiro("dfp", 2025, valor_conta="1.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        payload_1 = _zip_financeiro("dfp", 2025, valor_conta="1000.00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
         resultado_1 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_1)
         assert resultado_1["status"] == "sucesso"
 
@@ -389,7 +478,7 @@ def test_sincronizar_financeiro_idempotencia_e_alteracao() -> None:
         demonstracao_alterado_em = demonstracao.alterado_em
         session.commit()
 
-        payload_2 = _zip_financeiro("dfp", 2025, valor_conta="1000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        payload_2 = _zip_financeiro("dfp", 2025, valor_conta="1000.00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
         resultado_2 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_2)
         assert resultado_2["status"] == "sucesso"
         assert resultado_2["total_inalterados"] >= 19
@@ -400,7 +489,7 @@ def test_sincronizar_financeiro_idempotencia_e_alteracao() -> None:
         assert documento_igual.alterado_em == documento_alterado_em
         assert demonstracao_igual.alterado_em == demonstracao_alterado_em
 
-        payload_3 = _zip_financeiro("dfp", 2025, valor_conta="2.000,00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        payload_3 = _zip_financeiro("dfp", 2025, valor_conta="2000.00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
         resultado_3 = sincronizar_dfp(session, 2025, downloader=lambda _: payload_3)
         assert resultado_3["status"] == "sucesso"
         assert resultado_3["total_atualizados"] >= 1
@@ -424,7 +513,7 @@ def test_sincronizar_dfp_succeeds_when_dfc_md_members_have_only_header() -> None
         payload = _zip_financeiro(
             "dfp",
             2026,
-            valor_conta="1.000,00",
+            valor_conta="1000.00",
             cnpj="08.773.135/0001-00",
             codigo_cvm="25224",
             empty_members={
@@ -463,7 +552,7 @@ def test_sincronizar_dfp_does_not_run_reconcile_on_first_load(monkeypatch: pytes
         payload = _zip_financeiro(
             "dfp",
             2025,
-            valor_conta="1.000,00",
+            valor_conta="1000.00",
             cnpj="08.773.135/0001-00",
             codigo_cvm="25224",
         )
@@ -487,13 +576,13 @@ def test_sincronizar_dfp_dmpl_rows_with_distinct_coluna_df_are_not_rejected() ->
         payload = _zip_financeiro(
             "dfp",
             2025,
-            valor_conta="1.000,00",
+            valor_conta="1000.00",
             cnpj="08.773.135/0001-00",
             codigo_cvm="25224",
             demonstracao_member_rows={
                 "dfp_cia_aberta_DMPL_con_2025.csv": [
-                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;1.000,00;S;Reservas de Lucro\n",
-                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;2.000,00;S;Lucros ou Prejuizos Acumulados\n",
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;1000.00;S;Reservas de Lucro\n",
+                    "08.773.135/0001-00;2025-12-31;1;EMPRESA A;25224;GRUPO;REAL;UNIDADE;ULTIMO;2025-01-01;2025-12-31;1.01;Caixa;2000.00;S;Lucros ou Prejuizos Acumulados\n",
                 ]
             },
         )

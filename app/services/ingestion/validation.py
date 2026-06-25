@@ -222,7 +222,7 @@ _REQUIRED_COLUMNS_BY_ROW_KIND: dict[str, set[str]] = {
         "Versao",
         "ID_Documento",
         "ID_Plano_Recompra",
-        "Tipo_Classe_Acao_Preferencial",
+        "Especie_Acao",
     },
     "fre_valor_mobiliario_tesouraria_movimentacao": {
         "CNPJ_Companhia",
@@ -1087,6 +1087,7 @@ def _natural_key_fre_plano_recompra_classe_acao(dados: dict[str, Any]) -> dict[s
         "data_referencia": dados.get("data_referencia"),
         "cnpj_companhia": dados.get("cnpj_companhia"),
         "id_plano_recompra": dados.get("id_plano_recompra"),
+        "especie_acao": dados.get("especie_acao"),
         "tipo_classe_acao_preferencial": dados.get("tipo_classe_acao_preferencial"),
     }
 

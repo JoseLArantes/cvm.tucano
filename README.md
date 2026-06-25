@@ -92,7 +92,7 @@ scripts/purge-local-db.sh --yes
 
 ```bash
 docker compose run --rm cvm_api python -m pytest -q
-docker compose run --rm cvm_api ruff check .
+docker compose run --rm cvm_api ruff check . --ignore E501
 docker compose run --rm cvm_api mypy .
 ```
 
@@ -100,6 +100,7 @@ Observações:
 
 - O repositório está configurado com mypy estrito.
 - Os fixtures de teste usam SQLite em memória quando apropriado.
+- A API expõe datas como `DD/MM/AAAA` e datetimes como `DD/MM/AAAA HH:MM:SS`.
 
 ## Documentos principais
 

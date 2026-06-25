@@ -198,6 +198,7 @@ def test_agendar_sincronizacoes_iniciais_pula_execucoes_validas_existentes(
 
 def test_construir_beat_schedule_inclui_fontes_configuradas(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trigger_updates", True)
     monkeypatch.setattr(settings, "anos_iniciais_dfp", "2024,2025")
     monkeypatch.setattr(settings, "anos_iniciais_itr", "2026")
     monkeypatch.setattr(settings, "anos_iniciais_fre", "2027")
@@ -217,3 +218,14 @@ def test_construir_beat_schedule_inclui_fontes_configuradas(monkeypatch: pytest.
     assert schedule["sincronizar-ipe-2029-diario"]["args"] == (2029,)
     assert schedule["sincronizar-vlmo-2030-diario"]["args"] == (2030,)
     assert schedule["sincronizar-cgvn-2031-diario"]["args"] == (2031,)
+
+
+def test_construir_beat_schedule_updates_modo(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trigger_updates", False)
+
+    schedule = construir_beat_schedule()
+
+    assert "sincronizar-cadastro-diario" not in schedule
+    assert "cvm-updates-scanner" in schedule
+    assert "cvm-updates-temp-cleanup" in schedule

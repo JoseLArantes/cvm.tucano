@@ -19,6 +19,8 @@ def normalizar_cnpj_opcional(valor: Any) -> str | None:
     texto = "".join(char for char in str(valor or "") if char.isdigit())
     if not texto:
         return None
+    if set(texto) == {"0"}:
+        return None
     return normalizar_cnpj(texto)
 
 

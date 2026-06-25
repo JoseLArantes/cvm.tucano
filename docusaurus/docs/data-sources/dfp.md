@@ -5,106 +5,95 @@ sidebar_position: 3
 
 # Demonstrações Financeiras Padronizadas (DFP)
 
-## Visão Geral
+## O que é DFP
 
-Demonstrações financeiras anuais padronizadas, equivalentes às demonstrações contábeis auditadas exigidas pela Lei 6.404/76 e resoluções CVM.
+DFP é o conjunto anual de demonstrações financeiras padronizadas entregue por companhias abertas à CVM. Ele reúne o cabeçalho documental, as demonstrações contábeis, a composição do capital e os pareceres relacionados ao exercício social.
 
-## Metadados Técnicos
+No Tucano CVM, DFP é tratada como uma fonte financeira anual. Os dados são promovidos para tabelas comuns de documentos, demonstrações, composição de capital e pareceres, compartilhando a mesma estrutura usada por ITR quando os conceitos são equivalentes.
+
+## Por que esse conjunto existe
+
+A DFP organiza a visão anual das informações financeiras reportadas pelas companhias. Ela permite acompanhar balanço patrimonial, resultado, caixa, mutações do patrimônio líquido, valor adicionado e resultado abrangente com a granularidade das contas publicadas pela CVM.
+
+Como os arquivos podem ser reapresentados, a versão do documento é parte importante da leitura. A ingestão mantém a relação entre documento, versão, data de referência, escopo e arquivo de origem.
+
+## Metadados técnicos
 
 | Campo | Valor |
 |-------|-------|
-| **Fonte CVM** | `dfp` |
-| **Arquivo ZIP** | `dfp_companhias_abertas_{ano}.zip` |
-| **Periodicidade** | Anual (publicação) / Sincronização Semanal |
-| **Desde** | 2010 |
-| **Tabelas Alvo** | `documentos_financeiros`, `demonstracoes_financeiras`, `composicoes_capital`, `pareceres_financeiros` |
-| **Chaves Naturais** | `(tipo_formulario, id_documento, versao, data_referencia)` |
+| Fonte no sistema | `dfp` |
+| Distribuição CVM | ZIP anual |
+| Arquivo principal | `dfp_cia_aberta_{ano}.zip` |
+| Primeiro ano no registro da fonte | 2010 |
+| Dependência | `cadastro` |
+| Tabelas promovidas | `documentos_financeiros`, `demonstracoes_financeiras`, `composicoes_capital`, `pareceres_financeiros` |
+| Chaves de referência | `cnpj_companhia`, `codigo_cvm`, `id_documento`, `versao`, `data_referencia` |
 
-## Estrutura de Arquivos
+## Arquivos do pacote anual
 
-Cada ano gera múltiplos membros CSV:
+Cada ZIP anual contém um arquivo principal e arquivos especializados por quadro contábil. O prefixo `con` indica demonstração consolidada; `ind` indica demonstração individual.
 
-```
-dfp_cia_aberta_{ano}.csv              # Header documental
-dfp_cia_aberta_BPA_con_{ano}.csv      # Balanço Patrimonial Ativo - Consolidado
-dfp_cia_aberta_BPA_ind_{ano}.csv      # Balanço Patrimonial Ativo - Individual
-dfp_cia_aberta_BPP_con_{ano}.csv      # Balanço Patrimonial Passivo - Consolidado
-dfp_cia_aberta_BPP_ind_{ano}.csv      # Balanço Patrimonial Passivo - Individual
-dfp_cia_aberta_DRE_con_{ano}.csv      # Demonstração do Resultado - Consolidado
-dfp_cia_aberta_DRE_ind_{ano}.csv      # Demonstração do Resultado - Individual
-dfp_cia_aberta_DFC_MI_con_{ano}.csv   # Fluxo de Caixa (Método Indireto) - Consolidado
-dfp_cia_aberta_DFC_DI_con_{ano}.csv   # Fluxo de Caixa (Método Direto) - Consolidado
-dfp_cia_aberta_DMPL_con_{ano}.csv     # Mutações do Patrimônio Líquido - Consolidado
-dfp_cia_aberta_DRA_con_{ano}.csv      # Resultado Abrangente - Consolidado
-dfp_cia_aberta_DVA_con_{ano}.csv      # Valor Adicionado - Consolidado
+```text
+dfp_cia_aberta_{ano}.csv
+dfp_cia_aberta_BPA_con_{ano}.csv
+dfp_cia_aberta_BPA_ind_{ano}.csv
+dfp_cia_aberta_BPP_con_{ano}.csv
+dfp_cia_aberta_BPP_ind_{ano}.csv
+dfp_cia_aberta_DFC_MD_con_{ano}.csv
+dfp_cia_aberta_DFC_MD_ind_{ano}.csv
+dfp_cia_aberta_DFC_MI_con_{ano}.csv
+dfp_cia_aberta_DFC_MI_ind_{ano}.csv
+dfp_cia_aberta_DMPL_con_{ano}.csv
+dfp_cia_aberta_DMPL_ind_{ano}.csv
+dfp_cia_aberta_DRA_con_{ano}.csv
+dfp_cia_aberta_DRA_ind_{ano}.csv
+dfp_cia_aberta_DRE_con_{ano}.csv
+dfp_cia_aberta_DRE_ind_{ano}.csv
+dfp_cia_aberta_DVA_con_{ano}.csv
+dfp_cia_aberta_DVA_ind_{ano}.csv
 dfp_cia_aberta_composicao_capital_{ano}.csv
 dfp_cia_aberta_parecer_{ano}.csv
 ```
 
-## Mapeamento de Campos (Demonstrações)
+## Estrutura no Tucano CVM
 
-| Campo CVM | Tabela | Campo | Observação |
-|-----------|--------|-------|------------|
-| `COD_CVM` | `demonstracoes_financeiras` | `codigo_cvm` | Resolvido via grafo |
-| `DT_REF` | `demonstracoes_financeiras` | `data_referencia` | `YYYY-MM-DD` |
-| `MOEDA` | `demonstracoes_financeiras` | `moeda` | Ex: `REAL` |
-| `ESCALA_MOEDA` | `demonstracoes_financeiras` | `escala_moeda` | `UNIDADE`, `MIL`, `MILHAO` |
-| `CD_CONTA` | `demonstracoes_financeiras` | `codigo_conta` | Ex: `1.01`, `3.03` |
-| `DS_CONTA` | `demonstracoes_financeiras` | `descricao_conta` | Mantido original |
-| `VL_CONTA` | `demonstracoes_financeiras` | `valor_conta_reportado` | Bruto da CVM |
-| `FATOR_ESCALA` | (calculado) | `fator_escala_moeda` | 1, 1000, 1000000 |
-| (calculado) | `demonstracoes_financeiras` | `valor_conta` | `valor_conta_reportado * fator` |
+| Área | Tabela | Conteúdo |
+|------|--------|----------|
+| Documento | `documentos_financeiros` | Cabeçalho do formulário, companhia, versão, datas e situação documental. |
+| Demonstrações | `demonstracoes_financeiras` | Linhas de contas contábeis, escopo, moeda, escala e valores reportados. |
+| Capital | `composicoes_capital` | Composição de ações ou quotas declarada no formulário. |
+| Pareceres | `pareceres_financeiros` | Informações de parecer, auditoria e declarações vinculadas ao documento. |
 
-## Endpoints Principais
+Nas demonstrações, a leitura principal passa por:
 
-### Listar Documentos
+- `tipo_demonstracao`, como balanço patrimonial ativo, passivo ou demonstração do resultado
+- `escopo`, com valores como `consolidado` ou `individual`
+- `codigo_conta` e `descricao_conta`
+- `valor_conta_reportado`
+- `moeda` e `escala_moeda`
+- `valor_conta`, quando a normalização aplica o fator de escala
+- `ordem_exercicio`, preservando a posição do exercício no arquivo da CVM
+
+## Endpoints principais
+
 ```bash
 GET /dfp/documentos?codigo_cvm=25224&ano_inicio=2020
-```
-
-### Balanço Patrimonial (Ativo/Passivo)
-```bash
-GET /dfp/balanco-patrimonial-ativo/{escopo}?codigo_cvm=25224&ano_inicio=2023
-# escopo: consolidado ou individual
-```
-
-### Demonstração de Resultado
-```bash
-GET /dfp/demonstracao-resultado/{escopo}?codigo_cvm=25224&ano_inicio=2023
-```
-
-### Composição do Capital
-```bash
+GET /dfp/balanco-patrimonial-ativo/consolidado?codigo_cvm=25224&ano_inicio=2023
+GET /dfp/balanco-patrimonial-passivo/individual?codigo_cvm=25224&ano_inicio=2023
+GET /dfp/demonstracao-resultado/consolidado?codigo_cvm=25224&ano_inicio=2023
+GET /dfp/fluxo-caixa-metodo-indireto/consolidado?codigo_cvm=25224&ano_inicio=2023
 GET /dfp/composicao-capital?codigo_cvm=25224&ano_inicio=2020
-```
-
-### Pareceres de Auditoria
-```bash
 GET /dfp/pareceres?codigo_cvm=25224&ano_inicio=2020
 ```
 
-## Regras de Processamento
+## Como a ingestão trata a fonte
 
-1. **Reapresentações**: A CVM republica arquivos anuais com nova `versao`. O pipeline mantém todas as versões, mas expõe a mais recente por padrão
-2. **Escopo de Moeda**: Valores são normalizados automaticamente. Sempre use `valor_conta` para análises comparativas
-3. **Contas Fixas**: Campo `conta_fixa` indica se a conta é obrigatória ou discricionária
-4. **Ordem de Exercício**: `ÚLTIMO`, `PENÚLTIMO`, etc. são preservados para análises YoY
+O arquivo principal é processado antes dos membros dependentes porque ele ancora o documento financeiro e sua versão. As linhas das demonstrações, composição de capital e pareceres são vinculadas a esse cabeçalho por identificadores do próprio pacote.
 
-## Exemplo: Série Histórica YoY
+O processo preserva metadados de origem, como arquivo, ano, linha e hash. Quando o pacote anual é substituído pela CVM, a ingestão usa o pacote como unidade de reconciliação para manter o estado promovido compatível com a entrega mais recente processada.
 
-```bash
-GET /dfp/demonstracao-resultado/consolidado?codigo_cvm=25224&codigo_conta=3.03&ano_inicio=2020
-```
+## Como ler os dados
 
-**Lógica de Cálculo (cliente):**
-```python
-def yoy_atual(valores):
-    return [(valores[i]/valores[i-1])-1 for i in range(1, len(valores))]
-```
+A DFP é anual e deve ser comparada por `data_referencia`, `tipo_demonstracao`, `escopo`, `codigo_conta` e `versao`. Para análises entre companhias, a escala monetária precisa ser observada; quando disponível, use o valor já normalizado em vez do valor textual ou reportado no arquivo.
 
-## Notas para Analistas
-
-- DFP reflete o exercício social encerrado em 31/12
-- Use `data_referencia` para alinhar com calendários fiscais
-- Reapresentações são comuns nos primeiros trimestres do ano seguinte
-- Para auditoria, sempre compare `versao` e `hash_origem`
+Reapresentações fazem parte do ciclo regulatório. Em leituras históricas, a versão e os metadados documentais devem acompanhar qualquer conclusão baseada nos números.

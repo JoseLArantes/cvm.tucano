@@ -17,13 +17,14 @@ A entidade `companhia` é a **raiz do domínio** do Tucano CVM. Todos os dados f
 | `GET` | `/companhias/codigo-cvm/{codigo_cvm}` | Obter companhia por código CVM |
 | `GET` | `/companhias/{cnpj_companhia}` | Obter companhia por CNPJ |
 | `GET` | `/companhias/mestre` | Consulta agregada (master endpoint) |
-| `GET` | `/companhias/{codigo_cvm}/analise/*` | Endpoints de análise estratégica |
 
 ---
 
 ## `GET /companhias`
 
 Lista paginada de companhias abertas normalizadas.
+
+Cada companhia também pode incluir `logo_url`, montada em tempo de consulta a partir do ticker mais recente encontrado em `FCA > Valor mobiliário`. Esse campo não é persistido no banco.
 
 ### Query Parameters
 
@@ -101,6 +102,7 @@ curl -X GET "http://localhost:8007/companhias?situacao_registro=ATIVO&ordenar=at
       },
       "auditor": "GRANT THORNTON AUDITORES INDEPENDENTES LTDA.",
       "cnpj_auditor": "10830108000165",
+      "logo_url": "https://pub-04fd7aefad4846c98bccc4719b2eaed1.r2.dev/png/P/PETR4.png",
       "criado_em": "2026-05-30T14:30:00Z",
       "sincronizado_em": "2026-05-30T14:30:00Z",
       "alterado_em": "2026-05-30T14:30:00Z"
@@ -138,6 +140,7 @@ curl -X GET "http://localhost:8007/companhias?situacao_registro=ATIVO&ordenar=at
 | `responsavel` | object | Responsável cadastral |
 | `auditor` | string | Nome do auditor independente |
 | `cnpj_auditor` | string | CNPJ do auditor |
+| `logo_url` | string | URL derivada do ticker da companhia, quando houver ticker elegível no FCA |
 | `criado_em` | datetime | Timestamp da primeira inserção |
 | `sincronizado_em` | datetime | Última vez que foi reencontrado na fonte |
 | `alterado_em` | datetime | Última alteração real de negócio |
@@ -189,7 +192,7 @@ Retorna uma companhia específica a partir do CNPJ.
 
 | Parâmetro | Tipo | Descrição |
 |-----------|------|-----------|
-| `cnpj_companhia` | string | CNPJ com ou sem pontuação (regex: `^[0-9./-]+$`) |
+| `cnpj_companhia` | string | CNPJ com ou sem pontuação |
 
 ### Exemplos
 
@@ -212,7 +215,7 @@ curl -X GET "http://localhost:8007/companhias/08773135000100" \
 | Status | Descrição |
 |--------|-----------|
 | `404` | Companhia não encontrada |
-| `422` | Parâmetro inválido (CNPJ malformado) |
+| `404` | Companhia não encontrada ou identificador incompatível com um CNPJ válido |
 
 ---
 

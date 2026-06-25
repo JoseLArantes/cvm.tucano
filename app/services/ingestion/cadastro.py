@@ -296,9 +296,17 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
             sincronizado_em=agora,
             alterado_em=agora,
         )
-        db.add(companhia)
-        db.flush()
-        return companhia
+        from sqlalchemy.exc import IntegrityError
+        try:
+            with db.begin_nested():
+                db.add(companhia)
+                db.flush()
+            return companhia
+        except IntegrityError:
+            companhia_existente = _buscar_companhia_existente(db, registro_canonico)
+            if companhia_existente is None:
+                raise
+            companhia = companhia_existente
 
     companhia.codigo_cvm = companhia.codigo_cvm or registro_canonico.get("codigo_cvm")
     companhia.denominacao_social = registro_canonico.get("denominacao_social")

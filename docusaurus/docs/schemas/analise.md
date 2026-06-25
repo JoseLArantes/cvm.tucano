@@ -1,428 +1,530 @@
 ---
-title: Schemas de Análise Estratégica
+title: Schemas de Analise
 sidebar_position: 5
 ---
 
-# Schemas de Análise Estratégica
-
-## `OverviewAnaliseResposta`
-
-Visão geral da companhia: cobertura, frescor e alertas.
-
-### Schema
-
-```python
-class OverviewAnaliseResposta(BaseModel):
-    cnpj_companhia: str
-    codigo_cvm: int
-    denominacao_social: str
-    situacao_registro: str
-    status_ativo: bool
-    data_freshness: Optional[datetime]
-    cobertura: Dict[str, List[str]]
-    periodos_disponiveis: Dict[str, List[str]]
-    alertas: List[AlertaOverview]
-    anos_comparacao_disponiveis: List[int]
-```
-
-### Exemplo JSON
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "denominacao_social": "2W ECOBANK S.A. - EM RECUPERACAO JUDICIAL",
-  "situacao_registro": "SUSPENSO(A) - DECISAO ADM",
-  "status_ativo": false,
-  "data_freshness": "2026-06-15T08:00:00Z",
-  "cobertura": {
-    "2024": ["DFP", "FRE", "FCA", "IPE"],
-    "2023": ["DFP", "ITR", "FRE", "FCA", "IPE"]
-  },
-  "periodos_disponiveis": {
-    "DFP": ["2024-12-31", "2023-12-31"],
-    "ITR": ["2024-09-30", "2024-06-30"]
-  },
-  "alertas": [
-    {
-      "tipo": "SITUACAO_REGISTRO",
-      "descricao": "Companhia com registro suspenso",
-      "severidade": "WARNING"
-    }
-  ],
-  "anos_comparacao_disponiveis": [2024, 2023, 2022]
-}
-```
-
----
-
-## `AlertaOverview`
-
-Schema de alerta individual.
-
-### Schema
-
-```python
-class AlertaOverview(BaseModel):
-    tipo: str = Field(description="Tipo do alerta (ex: SITUACAO_REGISTRO, ATRASO_FILING)")
-    descricao: str = Field(description="Descrição amigável do alerta")
-    severidade: str = Field(description="Nível de severidade: INFO, WARNING, CRITICAL")
-```
-
-### Tipos de Alerta
-
-| Tipo | Descrição | Severidade Típica |
-|------|-----------|-------------------|
-| `SITUACAO_REGISTRO` | Problema com registro na CVM | WARNING/CRITICAL |
-| `ATRASO_FILING` | Entrega após prazo regulatório | INFO/WARNING |
-| `REAPRESENTACAO` | Documento reapresentado | INFO |
-| `AUDITOR_RESSALVA` | Parecer com ressalvas | WARNING |
-
----
-
-## `FinanceiroAnaliseResposta`
-
-Métricas financeiras com cálculos YoY/QoQ/CAGR e proveniência.
-
-### Schema
-
-```python
-class FinanceiroAnaliseResposta(BaseModel):
-    cnpj_companhia: str
-    codigo_cvm: int
-    dados: List[PeriodoFinanceiro]
-```
-
-### `PeriodoFinanceiro`
-
-```python
-class PeriodoFinanceiro(BaseModel):
-    periodo_label: str  # "2024" ou "2024-3T"
-    ano: int
-    trimestre: int  # 0 para anual, 1-4 para trimestral
-    periodo_tipo: str  # "ANUAL" ou "TRIMESTRAL"
-    metrics: Dict[str, MetricaFinanceira]
-```
-
-### `MetricaFinanceira`
-
-```python
-class MetricaFinanceira(BaseModel):
-    valor_normalizado: Optional[float]  # Valor absoluto em reais
-    valor_original: Optional[str]  # Valor como reportado
-    yoy: Optional[float]  # Variação ano contra ano (%)
-    qoq: Optional[float]  # Variação trimestre contra trimestre (%)
-    cagr: Optional[float]  # Taxa de crescimento anual composta (%)
-    proveniencia: Optional[ReferenciaProveniencia]
-```
-
-### `ReferenciaProveniencia`
-
-```python
-class ReferenciaProveniencia(BaseModel):
-    fonte: str = Field(default="CVM")
-    dataset: str
-    documento_id: Optional[int]
-    linha_id: Optional[str]  # UUID da linha original
-    data_referencia: Optional[date]
-    data_entrega: Optional[date]
-    link_download: Optional[str]
-```
-
-### Exemplo JSON
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "dados": [
-    {
-      "periodo_label": "2024",
-      "ano": 2024,
-      "trimestre": 0,
-      "periodo_tipo": "ANUAL",
-      "metrics": {
-        "receita_liquida": {
-          "valor_normalizado": 740500000.0,
-          "valor_original": "740500",
-          "yoy": 15.5,
-          "qoq": null,
-          "cagr": 12.3,
-          "proveniencia": {
-            "fonte": "CVM",
-            "dataset": "demonstracao_resultado",
-            "documento_id": 123456,
-            "linha_id": "bbf228f5-5627-4fc5-a490-318b8ba31e43",
-            "data_referencia": "2024-12-31",
-            "data_entrega": "2025-03-15",
-            "link_download": "https://dados.cvm.gov.br/..."
-          }
-        },
-        "lucro_liquido": {
-          "valor_normalizado": 85000000.0,
-          "valor_original": "85000",
-          "yoy": 8.2,
-          "cagr": 6.5
-        }
-      }
-    }
-  ]
-}
-```
-
-### Métricas Disponíveis
-
-- `receita_liquida`
-- `lucro_liquido`
-- `ativo_total`
-- `patrimonio_liquido`
-- `divida_liquida`
-- `ebitda`
-- `margem_liquida`
-- `roe`
-- `roa`
-
----
-
-## `ComparativoAnaliseResposta`
-
-Comparação entre dois anos específicos.
-
-### Schema
-
-```python
-class ComparativoAnaliseResposta(BaseModel):
-    ano_base: int
-    ano_comparacao: int
-    financeiro: Dict[str, DeltaComparativo]
-    capital: Dict[str, DeltaComparativo]
-    governanca: Dict[str, DeltaComparativo]
-    pessoas: Dict[str, DeltaComparativo]
-    mercado: Dict[str, DeltaComparativo]
-    eventos_ipe: Optional[DeltaComparativo]
-```
-
-### `DeltaComparativo`
-
-```python
-class DeltaComparativo(BaseModel):
-    valor_base: Optional[float]
-    valor_comparacao: Optional[float]
-    delta_absoluto: Optional[float]  # Base - Comparação
-    delta_percentual: Optional[float]
-```
-
-### Exemplo JSON
-
-```json
-{
-  "ano_base": 2024,
-  "ano_comparacao": 2023,
-  "financeiro": {
-    "receita_liquida": {
-      "valor_base": 740500000.0,
-      "valor_comparacao": 641000000.0,
-      "delta_absoluto": 99500000.0,
-      "delta_percentual": 15.5
-    }
-  },
-  "capital": {
-    "quantidade_total_acoes": {
-      "valor_base": 1000000000,
-      "valor_comparacao": 1000000000,
-      "delta_absoluto": 0,
-      "delta_percentual": 0.0
-    }
-  }
-}
-```
-
----
-
-## `EventoLinhaTempo`
-
-Evento na timeline unificada.
-
-### Schema
-
-```python
-class EventoLinhaTempo(BaseModel):
-    data_evento: date
-    familia_evento: str  # IPE, FRE, VLMO, CGVN, FCA, FINANCEIRO
-    tipo_evento: str
-    severidade: str  # INFO, WARNING, CRITICAL
-    titulo: str
-    explicacao: str
-    link_documento: Optional[str]
-    periodo_afetado: Optional[str]  # "2024" ou "2024-3T"
-```
-
-### Exemplo JSON
-
-```json
-{
-  "data_evento": "2026-05-15",
-  "familia_evento": "IPE",
-  "tipo_evento": "Fato Relevante",
-  "severidade": "INFO",
-  "titulo": "Resultado do 1T26",
-  "explicacao": "Divulgação dos resultados do primeiro trimestre de 2026",
-  "link_documento": "https://dados.cvm.gov.br/...",
-  "periodo_afetado": "2026-1T"
-}
-```
-
----
-
-## `PessoasRemuneracaoResposta`
-
-Estatísticas anuais de remuneração e diversidade.
-
-### Schema
-
-```python
-class PessoasRemuneracaoResposta(BaseModel):
-    cnpj_companhia: str
-    codigo_cvm: int
-    dados: List[PessoasRemuneracaoAno]
-```
-
-### `PessoasRemuneracaoAno`
-
-```python
-class PessoasRemuneracaoAno(BaseModel):
-    ano: int
-    total_remuneracao_conselho: Optional[float]
-    membros_conselho: Optional[int]
-    remuneracao_media_conselho: Optional[float]
-    total_remuneracao_diretoria: Optional[float]
-    membros_diretoria: Optional[int]
-    remuneracao_media_diretoria: Optional[float]
-    yoy_remuneracao_total: Optional[float]
-    proporcao_feminino_conselho: Optional[float]
-    proporcao_feminino_diretoria: Optional[float]
-    relacoes_familiares_total: int = 0
-```
-
-### Exemplo JSON
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "dados": [
-    {
-      "ano": 2024,
-      "total_remuneracao_conselho": 2500000.0,
-      "membros_conselho": 7,
-      "remuneracao_media_conselho": 357142.86,
-      "total_remuneracao_diretoria": 8000000.0,
-      "membros_diretoria": 5,
-      "remuneracao_media_diretoria": 1600000.0,
-      "yoy_remuneracao_total": 12.5,
-      "proporcao_feminino_conselho": 0.286,
-      "proporcao_feminino_diretoria": 0.2,
-      "relacoes_familiares_total": 2
-    }
-  ]
-}
-```
-
----
-
-## `MercadoInsidersResposta`
-
-Movimentações de insiders, tesouraria e governança.
-
-### Schema
-
-```python
-class MercadoInsidersResposta(BaseModel):
-    cnpj_companhia: str
-    codigo_cvm: int
-    movimentacoes: List[Dict[str, Any]]
-    concentracao_cargo: Dict[str, float]
-    tesouraria: List[Dict[str, Any]]
-    capital_alteracoes: List[Dict[str, Any]]
-    governanca_resumo: Dict[str, int]
-```
-
-### Exemplo JSON
-
-```json
-{
-  "cnpj_companhia": "08773135000100",
-  "codigo_cvm": 25224,
-  "movimentacoes": [
-    {
-      "ano_mes": "2026-05",
-      "total_compras": 1500000.0,
-      "total_vendas": 800000.0,
-      "volume_liquido": 700000.0,
-      "quantidade_operacoes": 12
-    }
-  ],
-  "concentracao_cargo": {
-    "Diretor": 0.45,
-    "Conselheiro": 0.35,
-    "Acionista Controlador": 0.20
-  },
-  "tesouraria": [
-    {
-      "data": "2026-05-31",
-      "quantidade_acoes": 5000000,
-      "percentual_capital": 0.5
-    }
-  ],
-  "capital_alteracoes": [
-    {
-      "data": "2026-04-15",
-      "tipo": "Aumento",
-      "valor": 100000000.0,
-      "descricao": "Aumento de capital por subscrição pública"
-    }
-  ],
-  "governanca_resumo": {
-    "Adotada": 45,
-    "Nao Adotada": 12,
-    "Parcialmente": 8,
-    "Nao se Aplica": 5
-  }
-}
-```
-
----
-
-## `AnaliseConsolidadaResposta`
-
-Endpoint estratégico que agrega todos os blocos de análise.
-
-### Schema
-
-```python
-class AnaliseConsolidadaResposta(BaseModel):
-    companhia: Dict[str, Any]
-    periodos_disponiveis: Dict[str, List[str]]
-    cobertura: Dict[str, List[str]]
-    financeiro: List[PeriodoFinanceiro]
-    eventos: List[EventoLinhaTempo]
-    governanca: Dict[str, Any]
-    pessoas_remuneracao: List[PessoasRemuneracaoAno]
-    mercado_insiders: Dict[str, Any]
-    proveniencia: Dict[str, Any]
-```
-
-### Exemplo de Uso
-
-```bash
-GET /companhias/{codigo_cvm}/analise?horizonte=5a&ano_base=2024&ano_comparacao=2023
-```
-
-### Parâmetros
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `horizonte` | string | `5a` | Horizonte temporal: `5a`, `10a`, `todos` |
-| `periodicidade` | string | `anual` | Periodicidade: `anual`, `trimestral`, `todos` |
-| `ano_base` | integer | `2025` | Ano base para comparação |
-| `ano_comparacao` | integer | `2024` | Ano de comparação |
+# Schemas de Analise
+
+Os contratos analíticos atuais são fechados e orientados a períodos, métricas, comparabilidade, qualidade e evidências.
+
+## Manifesto
+
+`AnaliseManifestoResposta` descreve a companhia, o contexto padrão, os períodos disponíveis, o resumo de qualidade e os links para os demais blocos analíticos.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `companhia` | object | Resumo cadastral da companhia |
+| `contexto_padrao.periodo_id` | string | Período padrão sugerido |
+| `periodos_disponiveis` | array | Lista de períodos canônicos disponíveis |
+| `qualidade` | object | Resumo de completude, comparabilidade e consistência |
+| `calculation_version` | string | Versão do motor analítico |
+| `resolution` | object | Origem efetiva do payload (`canonical` ou `runtime_fallback`) |
+| `links` | object | URLs relativas dos blocos analíticos |
+
+Os links atuais incluem `series`, `comparacoes`, `qualidade`, `sinais`, `eventos`, `restatements`, `governanca`, `pessoas` e `brief`.
+
+## Resolution
+
+`AnaliseResolutionMetadata` aparece em manifesto, séries, comparações, qualidade e sinais.
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `mode` | string | `canonical` ou `runtime_fallback` |
+| `materialization_execution_id` | string | UUID da execução canônica usada, quando houver |
+| `materialized_at` | string | Timestamp ISO 8601 da conclusão da materialização |
+| `as_of` | string | Data de corte informacional aplicada |
+
+## O que a materialização faz
+
+A análise pode ser resolvida de dois modos:
+
+- `runtime_fallback`: o backend lê os fatos CVM brutos e calcula a resposta no momento da requisição;
+- `canonical`: o backend lê uma camada analítica já materializada e persistida.
+
+A materialização existe para transformar cálculos analíticos caros e repetitivos em artefatos persistidos, prontos para consulta. Isso reduz custo de CPU por request, melhora latência, torna o comportamento mais previsível e permite responder corretamente a perguntas do tipo `as_of`, isto é, “o que era conhecido naquela data”.
+
+Na prática, materializar significa:
+
+- percorrer as datas de conhecimento relevantes de uma companhia;
+- reconstruir, para cada data, o contexto analítico que o mercado teria naquele momento;
+- recalcular períodos disponíveis, qualidade, observações e indisponibilidades;
+- comparar cada snapshot com o anterior;
+- persistir apenas as revisões de contexto e de fatos, em vez de copiar snapshots completos sem mudança.
+
+Isso faz com que a camada canônica funcione como um histórico versionado de análise, não apenas como um cache simples.
+
+## Lease, heartbeat e recuperação automática
+
+O backend trata o chunk como a unidade autoritativa de liveness operacional.
+
+Cada chunk persistido possui:
+
+- `status`: `queued`, `running`, `success`, `failed`, `stale` ou `cancelled`;
+- `lease_owner`: identidade lógica da task Celery que possui o chunk;
+- `lease_expires_at`: prazo atual do lease;
+- `heartbeat_at`: último heartbeat persistido;
+- contadores de progresso do próprio chunk.
+
+O fluxo operacional atual é:
+
+1. a campanha reivindica um conjunto de itens `pending`;
+2. o backend cria um registro de chunk e vincula os itens a esse chunk;
+3. a task do chunk renova lease e heartbeat no início, antes de cada item e após cada item;
+4. se o worker morrer ou perder o lease, o chunk deixa de ser considerado vivo após a expiração;
+5. uma varredura periódica recupera chunks stale, devolve os itens inacabados para `pending` e reagenda a campanha.
+
+Com isso:
+
+- `running_items` continua útil como contador resumido, mas não define sozinho se existe trabalho vivo;
+- a recuperação é automática e observável pela API;
+- limpeza manual fica restrita a endpoints administrativos, não a mutação direta em banco.
+
+## Como a materialização funciona
+
+O fluxo atual é:
+
+1. A ingestão financeira identifica quais companhias foram afetadas.
+2. O backend cria uma campanha de materialização.
+3. A campanha elimina por padrão companhias com `situacao_registro=CANCELADA`.
+4. A campanha é dividida em itens por `codigo_cvm` e `escopo`.
+5. Antes de cada novo chunk, o backend consulta um gate de admissão.
+6. Se houver ingestão ativa ou pausa manual, a campanha permanece pendente.
+7. Quando o gate está verde, um dispatcher volta a entregar campanhas pendentes ao orquestrador.
+8. O orquestrador enfileira apenas um chunk por ciclo.
+9. Cada item executa a materialização canônica da companhia.
+10. Se o gate fechar no meio do chunk, os itens ainda não iniciados voltam para `pending`.
+11. O resultado alimenta as tabelas de revisões de contexto e de fatos.
+
+Enquanto o gate está vermelho, a campanha pode continuar visível como pendente no monitoramento, mas não deve consumir polling contínuo por auto-reagendamento do próprio orquestrador.
+
+Com isso, a API pode:
+
+- servir respostas canônicas com `resolution.mode=canonical`;
+- expor progresso operacional por campanha, item e execução;
+- evitar recalcular a mesma história analítica inteira a cada request;
+- dar prioridade operacional total para ingestão e atualizações.
+
+Execução pontual de companhia cancelada:
+
+- o comportamento padrão continua sendo não processar `CANCELADA`
+- uma execução individual só pode incluir canceladas quando o operador informa override explícito
+- sem override, a execução pode ser registrada apenas como skip observável, sem gerar revisões
+
+## Materialização Canônica
+
+`AnaliseMaterializacaoExecucaoResumo` expõe o estado operacional da geração da camada canônica.
+
+O backend agora distingue:
+
+- `full`: recompõe toda a linha do tempo canônica da companhia/escopo
+- `incremental`: recompõe apenas a janela a partir de `invalidated_from`
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `id` | string | ID da execução |
+| `codigo_cvm` | integer | Companhia materializada |
+| `escopo` | string | `consolidated` ou `individual` |
+| `status` | string | `running`, `success` ou `failed` |
+| `coverage_complete` | boolean | Indica cobertura canônica concluída |
+| `source` | string | Origem do disparo |
+| `materialization_mode` | string | `full` ou `incremental` |
+| `invalidated_from` | string | Primeira data de conhecimento recomposta, quando incremental |
+| `started_at` | string | Início da execução |
+| `finished_at` | string | Fim da execução, quando houver |
+| `updated_at` | string | Último heartbeat persistido |
+| `elapsed_seconds` | integer | Tempo decorrido em segundos |
+| `estimated_remaining_seconds` | integer | Estimativa de tempo restante, quando houver progresso parcial |
+| `estimated_finish_at` | string | Momento estimado de conclusão |
+| `campanha_id` | string | Campanha de materialização associada, quando houver |
+| `campanha_item_id` | string | Item da campanha associado, quando houver |
+| `chunk_execucao_id` | string | Chunk operacional associado, quando houver |
+| `queue_name` | string | Fila Celery usada para a execução |
+| `position_in_chunk` | integer | Posição do item no chunk processado |
+| `window_total_knowledge_dates` | integer | Total de datas no recorte efetivamente processado |
+| `window_processed_knowledge_dates` | integer | Quantidade já processada nesse recorte |
+| `inserted_context_revisions` | integer | Revisões de contexto inseridas nesta execução |
+| `inserted_fact_revisions` | integer | Revisões de fatos inseridas nesta execução |
+| `closed_context_revisions` | integer | Revisões antigas de contexto encerradas |
+| `closed_fact_revisions` | integer | Revisões antigas de fatos encerradas |
+| `deleted_future_context_revisions` | integer | Revisões futuras de contexto removidas por substituição |
+| `deleted_future_fact_revisions` | integer | Revisões futuras de fatos removidas por substituição |
+| `progress` | object | Progresso estruturado da execução |
+
+### `AnaliseMaterializacaoProgress`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `total_knowledge_dates` | integer | Total de datas de conhecimento previstas |
+| `processed_knowledge_dates` | integer | Quantidade já processada |
+| `current_known_from` | string | Data de conhecimento atual |
+| `progress_ratio` | number | Progresso estimado entre 0 e 1 |
+| `context_revisions` | integer | Revisões de contexto já acumuladas |
+| `fact_revisions` | integer | Revisões de fatos já acumuladas |
+
+### Monitoramento da fila
+
+`AnaliseMaterializacaoMonitoramentoResposta` combina banco e Celery para responder:
+
+- quantas execuções estão em `running`;
+- quantas execuções `running` são `full` versus `incremental`;
+- se a materialização está liberada ou bloqueada pelo gate;
+- quantas tasks da materialização estão ativas, reservadas ou agendadas;
+- quantas campanhas e itens existem por estado;
+- quantos chunks existem em `queued`, `running` e `stale`;
+- quais campanhas estão em andamento;
+- quais campanhas aguardam recuperação de chunk stale;
+- quais itens estão rodando agora e quais seguem pendentes;
+- quais chunks stale merecem atenção operacional;
+- quais execuções correntes estão incrementais, qual cutoff elas usam e quais parecem stalled;
+- qual a execução em andamento mais antiga;
+- quais execuções parecem sem heartbeat recente.
+
+Campos adicionais importantes:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `gate` | object | Snapshot consolidado do gate de admissão |
+| `running_full_executions` | integer | Execuções full em andamento |
+| `running_incremental_executions` | integer | Execuções incrementais em andamento |
+| `lowest_running_invalidated_from` | string | Menor cutoff incremental entre as execuções correntes |
+| `pending_campaigns` | integer | Quantidade de campanhas pendentes |
+| `running_campaigns` | integer | Quantidade de campanhas em andamento |
+| `waiting_for_gate_campaigns` | integer | Campanhas pendentes especificamente por gate vermelho |
+| `recovering_campaigns` | integer | Campanhas pendentes aguardando recuperação de chunk stale |
+| `pending_items` | integer | Quantidade de itens pendentes |
+| `running_items` | integer | Quantidade de itens em processamento |
+| `success_items` | integer | Quantidade de itens concluídos com sucesso |
+| `failed_items` | integer | Quantidade de itens com falha |
+| `skipped_items` | integer | Quantidade de itens deduplicados/skipped |
+| `queued_chunks` | integer | Quantidade de chunks aguardando início |
+| `running_chunks` | integer | Quantidade de chunks com lease ativo |
+| `stale_chunks` | integer | Quantidade de chunks marcados como stale |
+| `stale_item_count` | integer | Quantidade de itens ainda vinculados a chunks stale |
+| `stalled_incremental_execution_ids` | array | Subconjunto stalled apenas do modo incremental |
+| `running_execution_previews` | array | Preview das execuções correntes |
+| `campaigns` | array | Resumo das campanhas relevantes no snapshot |
+| `stale_chunk_preview` | array | Preview dos chunks stale mais recentes |
+| `running_items_preview` | array | Preview dos itens atualmente em execução |
+| `pending_items_preview` | array | Preview dos próximos itens pendentes |
+
+### `running_items_preview` e `pending_items_preview`
+
+Os previews de item agora também carregam:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `materialization_mode` | string | Modo planejado para o item (`full` ou `incremental`) |
+| `invalidated_from` | string | Cutoff incremental do item, quando houver |
+
+### `AnaliseMaterializacaoFilaSnapshot`
+
+Além dos totais gerais de tasks, o snapshot atual expõe:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `materialization_orchestrator_active_tasks` | integer | Tasks orquestradoras de campanha ativas |
+| `materialization_chunk_active_tasks` | integer | Tasks de chunk ativas |
+| `materialization_queue_depth` | integer | Profundidade observada da fila dedicada, quando disponível |
+
+### `AnaliseMaterializacaoGateSnapshot`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `status` | string | `green` ou `red` |
+| `reason_code` | string | Motivo objetivo do estado atual |
+| `gate_enabled` | boolean | Indica se o gate automático está habilitado |
+| `manual_control` | string | `auto` ou `paused` |
+| `manual_reason` | string | Motivo textual da pausa manual, quando houver |
+| `blocking_ingestions` | integer | Quantidade de execuções/runs bloqueadoras |
+| `pending_ingestions` | integer | Quantidade de execuções em `aguardando_ingestao` |
+| `next_check_at` | string | Próxima rechecagem recomendada enquanto o gate estiver vermelho |
+| `blockers` | array | Preview dos bloqueadores operacionais |
+
+### `AnaliseMaterializacaoIngestionBlocker`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `source_type` | string | Fonte de ingestão bloqueadora |
+| `execution_id` | string | ID da execução de sincronização, quando houver |
+| `run_id` | string | ID da run de ingestão, quando houver |
+| `year` | integer | Ano da carga, quando aplicável |
+| `status` | string | Status operacional bloqueador |
+| `phase` | string | Fase da run, quando houver |
+| `started_at` | string | Momento em que o bloqueador começou |
+
+### `AnaliseMaterializacaoCampanhaResumo`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `campanha_id` | string | Identificador da campanha |
+| `source` | string | Origem do disparo |
+| `status` | string | `pending`, `running`, `success`, `failed` ou `partial` |
+| `chunk_size` | integer | Tamanho do chunk |
+| `total_items` | integer | Total de itens na campanha |
+| `processed_items` | integer | Itens concluídos, incluindo skipped |
+| `pending_items` | integer | Itens pendentes |
+| `running_items` | integer | Itens em andamento |
+| `failed_items` | integer | Itens com falha |
+| `skipped_items` | integer | Itens deduplicados/skipped |
+| `progress_ratio` | number | Progresso estimado entre 0 e 1 |
+| `estimated_remaining_seconds` | integer | Tempo restante estimado |
+| `active_chunk_id` | string | Chunk ativo atual da campanha, quando houver |
+| `active_chunk_lease_expires_at` | string | Expiração do lease do chunk ativo |
+| `stale_chunks` | integer | Quantidade de chunks stale ligados à campanha |
+| `wait_reason` | string | Motivo operacional da espera atual, quando houver |
+
+### `AnaliseMaterializacaoCampanhaItemPreview`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `item_id` | string | Identificador do item |
+| `codigo_cvm` | integer | Companhia alvo |
+| `escopo` | string | `consolidated` ou `individual` |
+| `campanha_id` | string | Campanha de origem |
+| `chunk_execucao_id` | string | Chunk associado, quando houver |
+| `status` | string | Estado atual do item |
+| `started_at` | string | Início efetivo do item, quando houver |
+
+### `AnaliseMaterializacaoChunkExecucaoResumo`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `chunk_execucao_id` | string | Identificador do chunk |
+| `campanha_id` | string | Campanha dona do chunk |
+| `status` | string | `queued`, `running`, `success`, `failed`, `stale` ou `cancelled` |
+| `lease_owner` | string | Identidade da task/worker que possui o lease |
+| `lease_expires_at` | string | Momento atual de expiração do lease |
+| `heartbeat_at` | string | Último heartbeat persistido |
+| `item_count` | integer | Quantidade total de itens no chunk |
+| `processed_items` | integer | Quantidade processada no chunk |
+| `success_items` | integer | Quantidade bem-sucedida no chunk |
+| `failed_items` | integer | Quantidade com falha no chunk |
+| `started_at` | string | Início efetivo do chunk |
+| `finished_at` | string | Fim do chunk, quando houver |
+| `updated_at` | string | Última atualização persistida |
+
+## Catálogo de Métricas
+
+`AnaliseMetricasCatalogoResposta` retorna uma lista de `AnaliseMetricaCatalogoItem`.
+
+Campos principais por métrica:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `id` | string | Identificador estável |
+| `nome` | string | Nome profissional |
+| `type` | string | `stock`, `flow`, `ratio` ou `count` |
+| `unit` | string | Unidade oficial |
+| `formula` | string | Fórmula declarada quando derivada |
+| `contas_cvm_candidatas` | array | Contas CVM candidatas |
+| `estrategia_resolucao` | string | Estratégia aplicada pelo backend |
+| `disponibilidades` | array | Bases temporais suportadas |
+| `limitations` | array | Limitações metodológicas |
+
+## Série
+
+`AnaliseSeriesResposta` traz `resolution`, observações disponíveis e indisponibilidades explícitas.
+
+Campos adicionais do envelope:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `horizonte_anos` | integer | Horizonte anual efetivamente aplicado em consultas FY históricas |
+
+### `AnaliseSeriesObservation`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `metric_id` | string | Métrica resolvida |
+| `period_id` | string | Período canônico |
+| `fiscal_year` | integer | Ano fiscal |
+| `quarter` | integer | Trimestre fiscal quando aplicável |
+| `period_nature` | string | `instant` ou `duration` |
+| `period_basis` | string | `fy`, `quarter` ou `ytd` |
+| `start_date` | string | Data inicial em ISO 8601 |
+| `end_date` | string | Data final em ISO 8601 |
+| `value` | string | Valor decimal canônico |
+| `unit` | string | Unidade explícita |
+| `scope` | string | `consolidated` ou `individual` |
+| `form` | string | `DFP`, `ITR` ou `DERIVED` |
+| `version` | integer | Versão documental usada |
+| `restated` | boolean | Indica reapresentação |
+| `value_source` | string | `reported`, `derived_from_ytd_delta`, `derived_from_dfp_minus_ytd` ou `derived_from_formula` |
+| `comparables` | object | Referência para YoY e QoQ |
+| `provenance` | array | Evidência documental completa |
+
+### `AnaliseSeriesUnavailable`
+
+Quando a série não puder ser produzida para uma métrica/período, a resposta inclui um item com:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `metric_id` | string | Métrica indisponível |
+| `period_id` | string | Período avaliado |
+| `status` | string | Sempre `unavailable` |
+| `reason_code` | string | Motivo estável |
+| `message` | string | Explicação objetiva |
+| `missing` | array | Componentes ou fatos ausentes |
+
+## Comparações
+
+`AnaliseComparacoesResposta` retorna uma lista de `AnaliseComparacaoItem`.
+
+O envelope também inclui `resolution`, `metricas`, `periodicidade`, `base_periodo`, `escopo` e `issues`.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `comparison_kind` | string | `YoY`, `QoQ`, `CAGR`, `VERTICAL` ou `BASE100` |
+| `status` | string | `available` ou `unavailable` |
+| `metric_unit` | string | Unidade dos valores atual e comparável |
+| `comparison_unit` | string | Unidade do resultado comparativo |
+| `current_value` | string | Valor atual |
+| `comparable_period_id` | string | Período comparável |
+| `comparable_metric_id` | string | Métrica base ou denominadora |
+| `absolute_change` | string | Variação absoluta |
+| `relative_change` | string | Variação relativa em decimal |
+| `percentage_point_change` | string | Variação em pontos percentuais para métricas do tipo ratio |
+| `base100_value` | string | Índice base 100 |
+| `evidence` | array | Evidências explicativas |
+
+Em `BASE100`, `metric_unit` preserva a unidade econômica da observação, como `BRL`, e `comparison_unit` assume `index`.
+
+## Qualidade
+
+`AnaliseQualidadeResumo` retorna dimensões auditáveis sem score único.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `completude` | string | `complete`, `partial` ou `missing` |
+| `comparabilidade` | string | `complete`, `partial` ou `missing` |
+| `consistencia` | string | `complete`, `partial` ou `missing` |
+| `restatements` | integer | Quantidade de reapresentações no contexto |
+| `issues` | array | Regras disparadas e problemas detectados |
+| `checked_at` | string | Timestamp ISO 8601 da avaliação |
+| `ruleset_version` | string | Versão do ruleset |
+
+## Sinais
+
+`AnaliseSinaisResposta` retorna uma lista de `AnaliseSignal`.
+
+O envelope também inclui `resolution` para declarar a origem das séries usadas no cálculo.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `rule_id` | string | Identificador da regra |
+| `rule_version` | string | Versão da regra |
+| `severity` | string | `info`, `watch`, `warning` ou `critical` |
+| `period_id` | string | Período principal do sinal |
+| `title` | string | Título curto |
+| `explanation` | string | Explicação objetiva |
+| `threshold` | string | Threshold usado |
+| `observed` | string | Valor observado |
+| `unit` | string | Unidade do threshold/observado |
+| `evidence` | array | Evidências do disparo |
+
+## Eventos
+
+`AnaliseEventosResposta` retorna `companhia` e `eventos`.
+
+Cada `AnaliseEvento` traz:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `event_id` | string | Identificador estável do evento |
+| `occurred_at` | string | Data do evento em ISO 8601 |
+| `family` | string | Família documental |
+| `event_type` | string | Tipo do evento |
+| `severity` | string | Severidade informativa |
+| `title` | string | Título curto |
+| `explanation` | string | Explicação objetiva |
+| `period_id` | string | Período afetado quando houver |
+| `link_documento` | string | Link oficial do documento |
+
+## Governança Temporal
+
+`AnaliseGovernancaResposta` retorna observações anuais auditáveis de governança, com suporte a `as_of` e `horizonte_anos`.
+
+Cada `AnaliseTemporalObservation` inclui:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `metric_id` | string | Métrica temporal |
+| `period_id` | string | Período canônico anual |
+| `fiscal_year` | integer | Ano fiscal |
+| `start_date` | string | Data inicial do exercício |
+| `end_date` | string | Data final do exercício |
+| `value` | string | Valor decimal canônico |
+| `unit` | string | Unidade explícita |
+| `source_dataset` | string | Dataset CVM de origem |
+| `document_id` | integer | Documento usado |
+| `version` | integer | Versão documental |
+| `restated` | boolean | Indica reapresentação |
+| `details` | object | Dimensões auxiliares da observação |
+
+Métricas temporais atualmente publicadas:
+
+- `governanca_praticas_adotadas_ratio`
+- `governanca_praticas_com_explicacao`
+
+## Pessoas Temporais
+
+`AnalisePessoasResposta` reutiliza `AnaliseTemporalObservation` para publicar séries anuais de pessoas e remuneração.
+
+Métricas temporais atualmente publicadas:
+
+- `pessoas_remuneracao_total_orgao`
+- `pessoas_empregados_total`
+
+## Brief Analítico
+
+`AnaliseBriefResposta` agrega:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `periodos_referencia` | object | Referências `quarter_current`, `quarter_previous`, `quarter_yoy`, `fy_current` e `fy_previous` |
+| `metricas` | array | Observações selecionadas para os períodos de referência |
+| `comparacoes` | array | Comparações selecionadas para os períodos de referência |
+| `sinais` | array | Sinais determinísticos relevantes |
+| `qualidade` | object | Resumo de qualidade do contexto |
+| `eventos` | array | Eventos recentes |
+| `issues` | array | Problemas agregados do brief |
+
+## Reapresentações
+
+`AnaliseRestatementsResposta` retorna uma lista de `AnaliseRestatementItem`.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `form` | string | `DFP` ou `ITR` |
+| `period_id` | string | Período afetado |
+| `previous_version` | integer | Versão anterior |
+| `current_version` | integer | Versão atual |
+| `restated_at` | string | Data da reapresentação |
+| `document_link` | string | Link oficial do documento |
+| `changed_accounts` | array | Contas alteradas entre versões |
+
+Cada conta alterada inclui:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `account_code` | string | Código de conta CVM |
+| `statement_type` | string | Tipo da demonstração |
+| `order` | string | Valor de `ordem_exercicio` |
+| `start_date` | string | Data inicial da observação |
+| `end_date` | string | Data final da observação |
+| `before_value` | string | Valor anterior |
+| `after_value` | string | Valor reapresentado |
+| `absolute_change` | string | Diferença absoluta |
+| `relative_change` | string | Variação relativa |

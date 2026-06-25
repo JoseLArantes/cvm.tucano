@@ -7,7 +7,7 @@ sidebar_position: 9
 
 ## Visão Geral
 
-O **Formulário de Referência (FRE)** é o documento mais rico em informações societárias, de governança e de recursos humanos. A API expõe **48 datasets** do FRE, organizados em grupos temáticos.
+O **Formulário de Referência (FRE)** é o documento mais rico em informações societárias, de governança e de recursos humanos. A API expõe os **quadros públicos ativos** do FRE organizados em grupos temáticos.
 
 ## Endpoints Disponíveis
 
@@ -26,17 +26,30 @@ O **Formulário de Referência (FRE)** é o documento mais rico em informações
 | `GET` | `/fre/capital-social` | Capital social |
 | `GET` | `/fre/capital-social-classes-acoes` | Classes de ações do capital |
 | `GET` | `/fre/capital-social-titulos-conversiveis` | Títulos conversíveis |
-| `GET` | `/fre/capital-social/aumentos` | Aumentos de capital |
-| `GET` | `/fre/capital-social/aumentos-classes-acoes` | Classes em aumentos |
-| `GET` | `/fre/capital-social/desdobramentos` | Desdobramentos (splits) |
-| `GET` | `/fre/capital-social/desdobramentos-classes-acoes` | Classes em desdobramentos |
-| `GET` | `/fre/capital-social/reducoes` | Reduções de capital |
-| `GET` | `/fre/capital-social/reducoes-classes-acoes` | Classes em reduções |
 | `GET` | `/fre/distribuicao-capital` | Distribuição de capital |
 | `GET` | `/fre/distribuicao-capital-classes-acoes` | Classes na distribuição |
 | `GET` | `/fre/posicao-acionaria` | Posição acionária |
 | `GET` | `/fre/posicoes-acionarias-classes-acoes` | Classes na posição acionária |
-| `GET` | `/fre/direitos-acoes` | Direitos das ações |
+
+### Endpoints removidos por descontinuação explícita da CVM
+
+Os endpoints abaixo foram removidos da API porque a própria CVM descontinuou esses detalhamentos no FRE e orienta a consulta dos quadros ativos de capital social e distribuição:
+
+- `/fre/capital-social/aumentos`
+- `/fre/capital-social/aumentos-classes-acoes`
+- `/fre/capital-social/desdobramentos`
+- `/fre/capital-social/desdobramentos-classes-acoes`
+- `/fre/capital-social/reducoes`
+- `/fre/capital-social/reducoes-classes-acoes`
+- `/fre/direitos-acoes`
+
+Para exercícios a partir de 2024, use principalmente:
+
+- `/fre/capital-social`
+- `/fre/capital-social-classes-acoes`
+- `/fre/distribuicao-capital`
+- `/fre/distribuicao-capital-classes-acoes`
+- `/fre/posicao-acionaria`
 
 ### Remuneração
 
@@ -89,6 +102,15 @@ O **Formulário de Referência (FRE)** é o documento mais rico em informações
 | `GET` | `/fre/plano-recompra` | Planos de recompra |
 | `GET` | `/fre/plano-recompra-classes-acoes` | Classes em planos de recompra |
 
+### Observação de layout para `/fre/plano-recompra-classes-acoes`
+
+O campo `tipo_classe_acao_preferencial` pode vir vazio no dado oficial da CVM. O contrato atual expõe:
+
+- `especie_acao`: espécie da ação no plano de recompra;
+- `tipo_classe_acao_preferencial`: subtipo da preferencial, quando informado pela fonte.
+
+Na prática, o backend não rejeita mais a linha apenas porque `tipo_classe_acao_preferencial` veio vazio.
+
 ### Participações e Estrutura
 
 | Método | Rota | Descrição |
@@ -119,19 +141,19 @@ curl -X GET "http://localhost:8007/fre/documentos?codigo_cvm=25224&ano_inicio=20
       "id": "...",
       "cnpj_companhia": "08773135000100",
       "codigo_cvm": 25224,
-      "data_referencia": "2025-12-31",
+      "data_referencia": "31/12/2025",
       "versao": 1,
       "denominacao_companhia": "EMPRESA A",
       "categoria_documento": "FRE",
       "id_documento": 12345,
-      "data_recebimento": "2026-04-30",
+      "data_recebimento": "30/04/2026",
       "link_documento": "http://exemplo",
       "arquivo_origem": "fre_cia_aberta_2025.csv",
       "ano_origem": 2025,
       "linha_origem": 100,
-      "criado_em": "2026-05-30T14:30:00Z",
-      "sincronizado_em": "2026-05-30T14:30:00Z",
-      "alterado_em": "2026-05-30T14:30:00Z"
+      "criado_em": "30/05/2026 14:30:00",
+      "sincronizado_em": "30/05/2026 14:30:00",
+      "alterado_em": "30/05/2026 14:30:00"
     }
   ],
   "paginacao": { "pagina": 1, "tamanho_pagina": 100, "total": 1 }
@@ -161,7 +183,7 @@ curl -X GET "http://localhost:8007/fre/posicao-acionaria?codigo_cvm=25224&ano_in
     {
       "id": "...",
       "cnpj_companhia": "08773135000100",
-      "data_referencia": "2025-12-31",
+      "data_referencia": "31/12/2025",
       "versao": 1,
       "id_documento": 12345,
       "nome_companhia": "EMPRESA A",
@@ -183,9 +205,9 @@ curl -X GET "http://localhost:8007/fre/posicao-acionaria?codigo_cvm=25224&ano_in
       "arquivo_origem": "fre_cia_aberta_posicao_acionaria_2025.csv",
       "ano_origem": 2025,
       "linha_origem": 50,
-      "criado_em": "2026-05-30T14:30:00Z",
-      "sincronizado_em": "2026-05-30T14:30:00Z",
-      "alterado_em": "2026-05-30T14:30:00Z"
+      "criado_em": "30/05/2026 14:30:00",
+      "sincronizado_em": "30/05/2026 14:30:00",
+      "alterado_em": "30/05/2026 14:30:00"
     }
   ],
   "paginacao": { "pagina": 1, "tamanho_pagina": 100, "total": 1 }

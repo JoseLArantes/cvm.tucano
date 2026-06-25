@@ -1,10 +1,9 @@
-from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDateTime, Paginacao
 
 
 class RespostaAgendamentoSincronizacao(BaseModel):
@@ -46,8 +45,10 @@ class ExecucaoSincronizacaoResumo(BaseModel):
             '"cancelada" (execução abortada manualmente).'
         )
     )
-    iniciada_em: datetime = Field(description="Timestamp de início da execução.")
-    finalizada_em: datetime | None = Field(description="Timestamp de finalização da execução.")
+    iniciada_em: BrazilianDateTime = Field(description="Data e hora de início da execução, em `DD/MM/AAAA HH:MM:SS`.")
+    finalizada_em: BrazilianDateTime | None = Field(
+        description="Data e hora de finalização da execução, em `DD/MM/AAAA HH:MM:SS`."
+    )
     total_linhas_lidas: int = Field(description="Total de linhas lidas.")
     total_inseridos: int = Field(description="Total de registros inseridos.")
     total_atualizados: int = Field(description="Total de registros atualizados.")
@@ -111,8 +112,8 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
             '"cancelada" (execução abortada manualmente).'
         )
     )
-    iniciada_em: datetime = Field(description="Timestamp de início.")
-    finalizada_em: datetime | None = Field(description="Timestamp de fim.")
+    iniciada_em: BrazilianDateTime = Field(description="Data e hora de início, em `DD/MM/AAAA HH:MM:SS`.")
+    finalizada_em: BrazilianDateTime | None = Field(description="Data e hora de fim, em `DD/MM/AAAA HH:MM:SS`.")
     total_linhas_lidas: int = Field(description="Total de linhas lidas.")
     total_inseridos: int = Field(description="Total de inserções.")
     total_atualizados: int = Field(description="Total de atualizações.")
@@ -259,7 +260,9 @@ class RegistroQuarentenaResposta(BaseModel):
     linha_origem: int | None = Field(description="Numero da linha de origem no CSV.")
     motivo: str = Field(description="Motivo da rejeicao.")
     dados_originais: dict[str, Any] = Field(description="Payload bruto da linha rejeitada.")
-    criado_em: datetime = Field(description="Timestamp de criacao do registro de quarentena.")
+    criado_em: BrazilianDateTime = Field(
+        description="Data e hora de criacao do registro de quarentena, em `DD/MM/AAAA HH:MM:SS`."
+    )
 
 
 class ListaRegistrosQuarentena(BaseModel):
@@ -275,7 +278,9 @@ class HistoricoAlteracaoCampoResposta(BaseModel):
     campo: str = Field(description="Campo alterado.")
     valor_anterior: str | None = Field(description="Valor anterior normalizado.")
     valor_novo: str | None = Field(description="Valor novo normalizado.")
-    alterado_em: datetime = Field(description="Timestamp da alteracao registrada.")
+    alterado_em: BrazilianDateTime = Field(
+        description="Data e hora da alteracao registrada, em `DD/MM/AAAA HH:MM:SS`."
+    )
     execucao_sincronizacao_id: str = Field(description="Execucao que originou a alteracao.")
     arquivo_origem: str = Field(description="Arquivo de origem da alteracao.")
     ano_origem: int | None = Field(description="Ano de origem do arquivo.")
@@ -314,7 +319,7 @@ class IngestionRunResumo(BaseModel):
                     "resource_etag": "\"abc123\"",
                     "resource_last_modified": "Mon, 09 Jun 2026 08:03:41 GMT",
                     "resource_content_length": "10485760",
-                    "package_metadata_modified": "2026-06-09T02:10:00.000000",
+                    "package_metadata_modified": "09/06/2026 02:10:00",
                     "decision": "changed",
                     "decision_reason": "metadata_changed:resource_last_modified",
                 },
@@ -593,6 +598,9 @@ class QuarentenaResumoResposta(BaseModel):
         json_schema_extra={
             "example": {
                 "total": 3,
+                "total_pendentes": 2,
+                "total_resolvidos": 1,
+                "total_historico": 3,
                 "por_status": {
                     "pendente": 2,
                     "resolvido_auto": 1
@@ -618,6 +626,9 @@ class QuarentenaResumoResposta(BaseModel):
     por_erro: list[ErroQuantidade] = Field(description="Ranking de erros ordenado decrescentemente pela quantidade de registros afetados por cada tipo de falha.")
     por_arquivo: list[ArquivoQuantidade] = Field(description="Ranking de arquivos fonte ordenado decrescentemente pela quantidade de erros neles contidos.")
     por_arquivo_e_erro: list[ArquivoErroQuantidade] = Field(description="Detalhamento cruzado da quantidade de erros agrupados simultaneamente por arquivo e tipo de erro.")
+    total_pendentes: int = Field(default=0, description="Total de itens pendentes.")
+    total_resolvidos: int = Field(default=0, description="Total de itens resolvidos (auto ou manual).")
+    total_historico: int = Field(default=0, description="Total histórico de itens que passaram pela quarentena.")
 
 
 

@@ -160,8 +160,8 @@ Centralizar todas as comunicações obrigatórias das companhias abertas ao merc
   - **Categoria**: Categoria do documento (ex: Fato Relevante, Aviso aos Acionistas, Estatuto Social, etc.)
   - **CNPJ_Companhia**: CNPJ da companhia emissora
   - **Codigo_CVM**: Código CVM da companhia
-  - **Data_Entrega**: Data de entrega/recebimento do documento (AAAA-MM-DD)
-  - **Data_Referencia**: Data de referência do documento (AAAA-MM-DD)
+  - **Data_Entrega**: Data de entrega/recebimento do documento no CSV de origem da CVM (tipicamente `AAAA-MM-DD`). Na API normalizada, este campo sai como `DD/MM/AAAA`.
+  - **Data_Referencia**: Data de referência do documento no CSV de origem da CVM (tipicamente `AAAA-MM-DD`). Na API normalizada, este campo sai como `DD/MM/AAAA`.
   - **Especie**: Espécie do documento
   - **Link_Download**: Endereço URL para download do documento original
   - **Nome_Companhia**: Nome da companhia emissora
@@ -385,6 +385,12 @@ Servir como instrumento abrangente de divulgação de informações sobre a comp
   
 - **Importância**: Base para análise de estrutura de capital
 - **Uso Principal**: Valuation, análise financeira, estudos de alavancagem
+
+Observação operacional importante:
+
+- Até 2023, a CVM também publicava membros FRE complementares como `capital_social_aumento`, `capital_social_reducao`, `capital_social_desdobramento` e `direito_acao`.
+- Nos pacotes oficiais de 2024 em diante, esses membros deixaram de ser publicados.
+- Por isso, esses datasets não devem permanecer expostos na superfície pública da API. Para 2024 em diante, a consulta deve ser direcionada aos quadros ativos de `capital_social`, `capital_social_classe_acao` e `distribuicao_capital`.
 
 #### `fre_cia_aberta_capital_social_classe_acao_2026.csv`
 - **Descrição**: Capital social detalhado por classe de ação (Item 17.1 do Anexo 24 da ICVM 480) [[39]]
@@ -1028,7 +1034,7 @@ Divulgar as demonstrações financeiras anuais auditadas, fornecendo a visão co
 
 > [!NOTE]
 > **Semântica de API e correção operacional:**
-> Nos endpoints financeiros do projeto, `valor_conta` deve representar o montante monetário absoluto após aplicação da `ESCALA_MOEDA`, enquanto o valor bruto reportado pela CVM permanece disponível separadamente como referência de auditoria. Registros DFP/ITR ingeridos antes da correção do parser de decimais precisam ser reparados por replay/ressincronização a partir dos payloads brutos retidos.
+> Nos endpoints financeiros do projeto, `valor_conta` representa o montante monetário absoluto após aplicação da `ESCALA_MOEDA`, enquanto `valor_conta_reportado` preserva o número bruto informado pela CVM. Ambos são expostos como strings decimais canônicas, sem separadores de milhares e sem arredondamento. Em dados estruturados CVM, `.` é o separador decimal de máquina; a interpretação em milhões, milhares ou unidades depende exclusivamente do metadado `ESCALA_MOEDA` ou do cabeçalho oficial do relatório, nunca da pontuação do número. Registros DFP/ITR ingeridos antes da correção do parser de decimais precisam ser reparados por replay/ressincronização a partir dos payloads brutos retidos.
 
 ---
 

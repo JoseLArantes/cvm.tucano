@@ -233,9 +233,23 @@ def test_list_fontes_and_datasets(client: TestClient) -> None:
     assert staged_only is not None
     assert staged_only["exportavel"] is False
 
+    response = client.get("/fontes/fre/datasets")
+    assert response.status_code == 200
+    fre_datasets = response.json()
+    assert next((d for d in fre_datasets if d["dataset"] == "capital_social_aumento"), None) is None
+    assert next((d for d in fre_datasets if d["dataset"] == "capital_social_desdobramento"), None) is None
+    assert next((d for d in fre_datasets if d["dataset"] == "capital_social_reducao"), None) is None
+    assert next((d for d in fre_datasets if d["dataset"] == "direito_acao"), None) is None
+
     # Test GET /fontes/invalid/datasets -> 404
     response = client.get("/fontes/invalid/datasets")
     assert response.status_code == 404
+
+
+def test_bulk_export_rejects_publicly_discontinued_fre_datasets(client: TestClient) -> None:
+    response = client.get("/exportacoes/fre/capital_social_aumento?formato=json")
+    assert response.status_code == 404
+    assert "descontinuado publicamente pela CVM" in response.json()["detail"]
 
 
 def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> None:
@@ -270,7 +284,10 @@ def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> No
     data = response.json()
     assert len(data) == 1
     assert data[0]["descricao_conta"] == "Ativo Total"
-    assert data[0]["valor_conta"] == 1500000.00
+    assert data[0]["data_referencia"] == "31/12/2025"
+    assert data[0]["data_inicio_exercicio"] == "01/01/2025"
+    assert data[0]["data_fim_exercicio"] == "31/12/2025"
+    assert data[0]["valor_conta"] == "1500000"
 
     # 4. Test dynamic resolution with prefix: /exportacoes/dfp/demonstracao_bpa_con
     response = client.get("/exportacoes/dfp/demonstracao_bpa_con?formato=json")
@@ -278,7 +295,7 @@ def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> No
     data = response.json()
     assert len(data) == 1
     assert data[0]["descricao_conta"] == "Ativo Total Consolidado"
-    assert data[0]["valor_conta"] == 3000000.00
+    assert data[0]["valor_conta"] == "3000000"
 
     response = client.get("/exportacoes/dfp/dfc_mi_con?formato=json")
     assert response.status_code == 200
@@ -288,8 +305,8 @@ def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> No
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 1
-    assert data[0]["valor_conta"] == 740500000.0
-    assert data[0]["valor_conta_reportado"] == 740500.0
+    assert data[0]["valor_conta"] == "740500000"
+    assert data[0]["valor_conta_reportado"] == "740500"
     assert data[0]["fator_escala_moeda"] == 1000
 
     response = client.get("/exportacoes/dfp/dre_ind?formato=csv")
@@ -334,3 +351,24 @@ def test_bulk_export_json_and_csv(client: TestClient, db_session: Session) -> No
     # 7. Test invalid format -> 422
     response = client.get("/exportacoes/dfp/documento_principal?formato=invalid")
     assert response.status_code == 422
+
+    response = client.get("/exportacoes/dfp/documento_principal?ano_inicio=2026&ano_fim=2025&formato=json")
+    assert response.status_code == 422
+    assert "ano_inicio" in response.json()["detail"]
+
+
+def test_export_endpoint_openapi_contract(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+
+    route = response.json()["paths"]["/exportacoes/{fonte}/{dataset}"]["get"]
+
+    assert "DD/MM/AAAA" in route["description"]
+    assert "DD/MM/AAAA HH:MM:SS" in route["description"]
+    assert route["parameters"][-1]["name"] == "formato"
+
+    content = route["responses"]["200"]["content"]
+    assert "application/json" in content
+    assert "text/csv" in content
+    assert content["application/json"]["schema"]["type"] == "array"
+    assert content["text/csv"]["schema"]["type"] == "string"

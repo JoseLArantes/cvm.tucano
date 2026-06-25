@@ -321,7 +321,7 @@ _NEW_FRE_REQUIRED_HEADERS: dict[str, set[str]] = {
     },
     "fre_plano_recompra_classe_acao": {
         "CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento",
-        "ID_Plano_Recompra", "Tipo_Classe_Acao_Preferencial",
+        "ID_Plano_Recompra", "Especie_Acao",
     },
     "fre_valor_mobiliario_tesouraria_movimentacao": {
         "CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento",

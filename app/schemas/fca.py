@@ -1,9 +1,8 @@
 import uuid
-from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao, PeriodicModel
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, Paginacao, PeriodicModel
 
 
 class FcaDocumentoResposta(PeriodicModel):
@@ -12,19 +11,19 @@ class FcaDocumentoResposta(PeriodicModel):
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
     codigo_cvm: int | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     denominacao_companhia: str | None
     categoria_documento: str | None
     id_documento: int
-    data_recebimento: date | None
+    data_recebimento: BrazilianDate | None
     link_documento: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaGeralResposta(PeriodicModel):
@@ -33,36 +32,36 @@ class FcaGeralResposta(PeriodicModel):
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
     codigo_cvm: int | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
-    data_nome_empresarial: date | None
+    data_nome_empresarial: BrazilianDate | None
     nome_empresarial_anterior: str | None
-    data_constituicao: date | None
-    data_registro_cvm: date | None
+    data_constituicao: BrazilianDate | None
+    data_registro_cvm: BrazilianDate | None
     categoria_registro_cvm: str | None
-    data_categoria_registro_cvm: date | None
+    data_categoria_registro_cvm: BrazilianDate | None
     situacao_registro_cvm: str | None
-    data_situacao_registro_cvm: date | None
+    data_situacao_registro_cvm: BrazilianDate | None
     pais_origem: str | None
     pais_custodia_valores_mobiliarios: str | None
     setor_atividade: str | None
     descricao_atividade: str | None
     situacao_emissor: str | None
-    data_situacao_emissor: date | None
+    data_situacao_emissor: BrazilianDate | None
     especie_controle_acionario: str | None
-    data_especie_controle_acionario: date | None
+    data_especie_controle_acionario: BrazilianDate | None
     dia_encerramento_exercicio_social: int | None
     mes_encerramento_exercicio_social: int | None
-    data_alteracao_exercicio_social: date | None
+    data_alteracao_exercicio_social: BrazilianDate | None
     pagina_web: str | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaEnderecoResposta(BaseModel):
@@ -70,7 +69,7 @@ class FcaEnderecoResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
@@ -93,9 +92,9 @@ class FcaEnderecoResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaDriResposta(BaseModel):
@@ -103,7 +102,7 @@ class FcaDriResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
@@ -126,14 +125,14 @@ class FcaDriResposta(BaseModel):
     ddd_fax: str | None
     fax: str | None
     email_dri: str | None
-    data_inicio_atuacao: date | None
-    data_fim_atuacao: date | None
+    data_inicio_atuacao: BrazilianDate | None
+    data_fim_atuacao: BrazilianDate | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaAuditorResposta(BaseModel):
@@ -141,7 +140,7 @@ class FcaAuditorResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
@@ -149,18 +148,18 @@ class FcaAuditorResposta(BaseModel):
     cpf_cnpj_auditor: str | None
     codigo_cvm_auditor: str | None
     origem_auditor: str | None
-    data_inicio_atuacao_auditor: date | None
-    data_fim_atuacao_auditor: date | None
+    data_inicio_atuacao_auditor: BrazilianDate | None
+    data_fim_atuacao_auditor: BrazilianDate | None
     responsavel_tecnico: str | None
     cpf_responsavel_tecnico: str | None
-    data_inicio_atuacao_responsavel_tecnico: date | None
-    data_fim_atuacao_responsavel_tecnico: date | None
+    data_inicio_atuacao_responsavel_tecnico: BrazilianDate | None
+    data_fim_atuacao_responsavel_tecnico: BrazilianDate | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaValorMobiliarioResposta(BaseModel):
@@ -168,7 +167,7 @@ class FcaValorMobiliarioResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
@@ -180,17 +179,17 @@ class FcaValorMobiliarioResposta(BaseModel):
     mercado: str | None
     sigla_entidade_administradora: str | None
     entidade_administradora: str | None
-    data_inicio_negociacao: date | None
-    data_fim_negociacao: date | None
+    data_inicio_negociacao: BrazilianDate | None
+    data_fim_negociacao: BrazilianDate | None
     segmento: str | None
-    data_inicio_listagem: date | None
-    data_fim_listagem: date | None
+    data_inicio_listagem: BrazilianDate | None
+    data_fim_listagem: BrazilianDate | None
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class FcaDepartamentoAcionistasResposta(BaseModel):
@@ -198,13 +197,13 @@ class FcaDepartamentoAcionistasResposta(BaseModel):
     id: uuid.UUID
     companhia_id: uuid.UUID | None
     cnpj_companhia: str
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     id_documento: int
     nome_empresarial: str | None
     contato: str | None
-    data_inicio_contato: date | None
-    data_fim_contato: date | None
+    data_inicio_contato: BrazilianDate | None
+    data_fim_contato: BrazilianDate | None
     tipo_endereco: str | None
     logradouro: str | None
     complemento: str | None
@@ -223,9 +222,9 @@ class FcaDepartamentoAcionistasResposta(BaseModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaFcaDocumentosResposta(BaseModel):

@@ -1172,12 +1172,12 @@ class FreRelacaoFamiliar(Base):
     versao: Mapped[int] = mapped_column(Integer, index=True)
     id_documento: Mapped[int] = mapped_column(Integer, index=True)
     nome_companhia: Mapped[str | None] = mapped_column(Text)
-    nome_administrador: Mapped[str] = mapped_column(Text, index=True)
+    nome_administrador: Mapped[str | None] = mapped_column(Text, index=True)
     cpf_administrador: Mapped[str | None] = mapped_column(String(20))
     nome_emissor: Mapped[str | None] = mapped_column(Text)
     cnpj_emissor: Mapped[str | None] = mapped_column(String(14))
     cargo_administrador: Mapped[str | None] = mapped_column(Text)
-    nome_pessoa_relacionada: Mapped[str] = mapped_column(Text, index=True)
+    nome_pessoa_relacionada: Mapped[str | None] = mapped_column(Text, index=True)
     cpf_pessoa_relacionada: Mapped[str | None] = mapped_column(String(20))
     nome_emissor_pessoa_relacionada: Mapped[str | None] = mapped_column(Text)
     cnpj_emissor_pessoa_relacionada: Mapped[str | None] = mapped_column(String(14))
@@ -1788,6 +1788,7 @@ class FrePlanoRecompraClasseAcao(Base):
             "data_referencia",
             "cnpj_companhia",
             "id_plano_recompra",
+            "especie_acao",
             "tipo_classe_acao_preferencial",
             name="uq_fre_plano_recompra_classes_chave_natural",
         ),
@@ -1801,7 +1802,8 @@ class FrePlanoRecompraClasseAcao(Base):
     id_documento: Mapped[int] = mapped_column(Integer, index=True)
     nome_companhia: Mapped[str | None] = mapped_column(Text)
     id_plano_recompra: Mapped[int] = mapped_column(Integer, index=True)
-    tipo_classe_acao_preferencial: Mapped[str] = mapped_column(Text, index=True)
+    especie_acao: Mapped[str | None] = mapped_column(Text, index=True)
+    tipo_classe_acao_preferencial: Mapped[str | None] = mapped_column(Text, index=True)
     quantidade_acoes_adquiridas: Mapped[Decimal | None] = mapped_column(Numeric(38, 10))
 
     arquivo_origem: Mapped[str] = mapped_column(Text)

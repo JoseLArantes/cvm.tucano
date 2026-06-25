@@ -101,9 +101,9 @@ def test_sincronizacao_dfp_idempotencia_e_alteracao(db_session: Session, monkeyp
     db_session.commit()
 
     respostas = [
-        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="1.000,00")),
-        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="1.000,00")),
-        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="2.000,00")),
+        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="1000.00")),
+        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="1000.00")),
+        FakeResponse(_zip_financeiro("dfp", 2025, valor_conta="2000.00")),
     ]
 
     def fake_get(*_: Any, **__: Any) -> FakeResponse:
@@ -147,7 +147,7 @@ def test_sincronizacao_dfp_idempotencia_e_alteracao(db_session: Session, monkeyp
 def test_sincronizacao_itr_exige_cadastro(db_session: Session, monkeypatch: Any) -> None:
     monkeypatch.setattr(
         "app.services.sincronizacao_financeiro.httpx.get",
-        lambda *args, **kwargs: FakeResponse(_zip_financeiro("itr", 2025, valor_conta="1.000,00")),
+        lambda *args, **kwargs: FakeResponse(_zip_financeiro("itr", 2025, valor_conta="1000.00")),
     )
     with pytest.raises(ValueError, match="cadastro_companhias_nao_ingestado"):
         sincronizar_itr(db_session, 2025)
@@ -159,7 +159,7 @@ def test_sincronizacao_dfp_envia_para_quarentena_quando_sem_companhia(db_session
     monkeypatch.setattr(
         "app.services.sincronizacao_financeiro.httpx.get",
         lambda *args, **kwargs: FakeResponse(
-            _zip_financeiro("dfp", 2025, valor_conta="1.000,00", cnpj="11.111.111/1111-11")
+            _zip_financeiro("dfp", 2025, valor_conta="1000.00", cnpj="11.111.111/1111-11")
         ),
     )
     resultado = sincronizar_dfp(db_session, 2025)

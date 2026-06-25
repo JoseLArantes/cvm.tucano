@@ -1,10 +1,9 @@
 import uuid
-from datetime import date, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, Paginacao
 
 
 class CompanhiaResposta(BaseModel):
@@ -18,17 +17,17 @@ class CompanhiaResposta(BaseModel):
                 "denominacao_social": "2W ECOBANK S.A. - EM RECUPERACAO JUDICIAL",
                 "denominacao_comercial": "2W ECOBANK S.A.",
                 "situacao_registro": "SUSPENSO(A) - DECISAO ADM",
-                "data_registro": "2020-10-29",
-                "data_constituicao": "2007-03-23",
+                "data_registro": "29/10/2020",
+                "data_constituicao": "23/03/2007",
                 "data_cancelamento": None,
                 "motivo_cancelamento": None,
-                "data_inicio_situacao": "2026-05-19",
+                "data_inicio_situacao": "19/05/2026",
                 "setor_atividade": "Energia Eletrica",
                 "tipo_mercado": None,
                 "categoria_registro": "Categoria A",
-                "data_inicio_categoria": "2020-10-29",
+                "data_inicio_categoria": "29/10/2020",
                 "situacao_emissor": "EM RECUPERACAO JUDICIAL OU EQUIVALENTE",
-                "data_inicio_situacao_emissor": "2025-04-23",
+                "data_inicio_situacao_emissor": "23/04/2025",
                 "controle_acionario": "PRIVADO",
                 "endereco": {
                     "tipo_endereco": "SEDE",
@@ -48,7 +47,7 @@ class CompanhiaResposta(BaseModel):
                 "responsavel": {
                     "tipo_responsavel": "DIRETOR DE RELACOES COM INVESTIDORES",
                     "nome_responsavel": "FERNANDO GUEDES VIEIRA",
-                    "data_inicio_responsavel": "2026-04-22",
+                    "data_inicio_responsavel": "22/04/2026",
                     "logradouro": "AV DR. CHUCRI ZAIDAN, 1550",
                     "complemento": "8 AND-CONJ815-SL1",
                     "bairro": "CHACARA STO. ANTONIO",
@@ -64,9 +63,10 @@ class CompanhiaResposta(BaseModel):
                 },
                 "auditor": "GRANT THORNTON AUDITORES INDEPENDENTES LTDA.",
                 "cnpj_auditor": "10830108000165",
-                "criado_em": "2026-05-30T14:30:00Z",
-                "sincronizado_em": "2026-05-30T14:30:00Z",
-                "alterado_em": "2026-05-30T14:30:00Z",
+                "logo_url": "https://pub-04fd7aefad4846c98bccc4719b2eaed1.r2.dev/png/P/PETR4.png",
+                "criado_em": "30/05/2026 14:30:00",
+                "sincronizado_em": "30/05/2026 14:30:00",
+                "alterado_em": "30/05/2026 14:30:00",
             }
         },
     )
@@ -77,28 +77,37 @@ class CompanhiaResposta(BaseModel):
     denominacao_social: str | None = Field(description="Razao social cadastrada na CVM.")
     denominacao_comercial: str | None = Field(description="Nome comercial cadastrado na CVM.")
     situacao_registro: str | None = Field(description="Situacao do registro da companhia na CVM.")
-    data_registro: date | None = Field(description="Data de registro da companhia na CVM.")
-    data_constituicao: date | None = Field(description="Data de constituicao da companhia.")
-    data_cancelamento: date | None = Field(description="Data de cancelamento do registro, quando houver.")
+    data_registro: BrazilianDate | None = Field(description="Data de registro da companhia na CVM.")
+    data_constituicao: BrazilianDate | None = Field(description="Data de constituicao da companhia.")
+    data_cancelamento: BrazilianDate | None = Field(description="Data de cancelamento do registro, quando houver.")
     motivo_cancelamento: str | None = Field(description="Motivo de cancelamento do registro, quando informado.")
-    data_inicio_situacao: date | None = Field(description="Data de inicio da situacao atual do registro.")
+    data_inicio_situacao: BrazilianDate | None = Field(description="Data de inicio da situacao atual do registro.")
     setor_atividade: str | None = Field(description="Setor de atividade informado pela CVM.")
     tipo_mercado: str | None = Field(description="Classificacao de mercado (ex.: Novo Mercado).")
     categoria_registro: str | None = Field(description="Categoria de registro do emissor.")
-    data_inicio_categoria: date | None = Field(description="Data de inicio da categoria de registro atual.")
+    data_inicio_categoria: BrazilianDate | None = Field(description="Data de inicio da categoria de registro atual.")
     situacao_emissor: str | None = Field(description="Situacao do emissor informada pela CVM.")
-    data_inicio_situacao_emissor: date | None = Field(description="Data de inicio da situacao do emissor atual.")
+    data_inicio_situacao_emissor: BrazilianDate | None = Field(description="Data de inicio da situacao do emissor atual.")
     controle_acionario: str | None = Field(description="Tipo de controle acionario informado pela CVM.")
     endereco: dict[str, Any] = Field(description="Bloco estruturado com endereco da companhia.")
     responsavel: dict[str, Any] = Field(description="Bloco estruturado com dados do responsavel cadastral.")
     auditor: str | None = Field(description="Nome do auditor cadastral informado na base.")
     cnpj_auditor: str | None = Field(description="CNPJ do auditor com 14 digitos, quando informado.")
-    criado_em: datetime = Field(description="Timestamp da primeira insercao do registro no sistema.")
-    sincronizado_em: datetime = Field(
-        description="Timestamp da ultima sincronizacao em que o registro foi encontrado na fonte."
+    logo_url: str | None = Field(
+        default=None,
+        description=(
+            "URL montada em tempo de consulta para o logo da companhia a partir do ticker mais recente "
+            "disponivel em `fca_valor_mobiliario`. Nao e persistida no banco."
+        ),
     )
-    alterado_em: datetime = Field(
-        description="Timestamp da ultima alteracao real de campos de negocio apos normalizacao."
+    criado_em: BrazilianDateTime = Field(
+        description="Data e hora da primeira insercao do registro no sistema, em `DD/MM/AAAA HH:MM:SS`."
+    )
+    sincronizado_em: BrazilianDateTime = Field(
+        description="Data e hora da ultima sincronizacao em que o registro foi encontrado na fonte, em `DD/MM/AAAA HH:MM:SS`."
+    )
+    alterado_em: BrazilianDateTime = Field(
+        description="Data e hora da ultima alteracao real de campos de negocio apos normalizacao, em `DD/MM/AAAA HH:MM:SS`."
     )
 
 

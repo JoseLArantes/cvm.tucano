@@ -52,7 +52,21 @@ const config = {
     ],
   ],
   
-  themes: ['@docusaurus/theme-mermaid', '@docusaurus/theme-live-codeblock'],
+  themes: [
+    '@docusaurus/theme-mermaid',
+    '@docusaurus/theme-live-codeblock',
+    [
+      require.resolve('@easyops-cn/docusaurus-search-local'),
+      {
+        hashed: true,
+        indexDocs: true,
+        indexBlog: false,
+        indexPages: true,
+        searchResultLimits: 8,
+        searchResultContextMaxLength: 80,
+      },
+    ],
+  ],
   markdown:  {
     mermaid: true,
     hooks: {
@@ -138,7 +152,7 @@ const config = {
       colorMode: {
         defaultMode: 'light',
         disableSwitch: false,
-        respectPrefersColorScheme: true,
+        respectPrefersColorScheme: false,
       },
       mermaid: {
         theme: { light: 'default', dark: 'dark' },

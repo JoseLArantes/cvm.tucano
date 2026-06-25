@@ -1,7 +1,23 @@
+import csv
+import sys
 from functools import lru_cache
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Aumentar o limite de tamanho do campo do parser de CSV para lidar com os longos campos de texto da CVM (ex: FRE)
+def _setup_csv_limit() -> None:
+    max_int = sys.maxsize
+    while True:
+        try:
+            csv.field_size_limit(max_int)
+            break
+        except OverflowError:
+            max_int = int(max_int / 10)
+
+
+_setup_csv_limit()
 
 
 class Settings(BaseSettings):
@@ -52,9 +68,61 @@ class Settings(BaseSettings):
         ge=1,
         alias="CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB",
     )
+    analise_materializacao_chunk_size: int = Field(
+        default=25,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_CHUNK_SIZE",
+    )
+    analise_materializacao_max_active_campaigns: int = Field(
+        default=1,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS",
+    )
+    analise_materializacao_queue_name: str = Field(
+        default="analise_materializacao",
+        alias="ANALISE_MATERIALIZACAO_QUEUE_NAME",
+    )
+    analise_materializacao_dedup_window_seconds: int = Field(
+        default=0,
+        ge=0,
+        alias="ANALISE_MATERIALIZACAO_DEDUP_WINDOW_SECONDS",
+    )
+    analise_materializacao_gate_enabled: bool = Field(
+        default=True,
+        alias="ANALISE_MATERIALIZACAO_GATE_ENABLED",
+    )
+    analise_materializacao_gate_poll_seconds: int = Field(
+        default=30,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_GATE_POLL_SECONDS",
+    )
+    analise_materializacao_chunk_lease_seconds: int = Field(
+        default=300,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_CHUNK_LEASE_SECONDS",
+    )
+    analise_materializacao_recovery_sweep_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_RECOVERY_SWEEP_SECONDS",
+    )
+    analise_materializacao_stale_grace_seconds: int = Field(
+        default=60,
+        ge=0,
+        alias="ANALISE_MATERIALIZACAO_STALE_GRACE_SECONDS",
+    )
+    analise_materializacao_blocking_sync_statuses: str = Field(
+        default="em_execucao,agendada",
+        alias="ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES",
+    )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
     storage_dir: str = Field(default="data/storage", alias="STORAGE_DIR")
+    updates_service_enabled: bool = Field(default=True, alias="UPDATES_SERVICE_ENABLED")
+    auto_trigger_updates: bool = Field(default=False, alias="AUTO_TRIGGER_UPDATES")
+    auto_analyze_on_detect: bool = Field(default=True, alias="AUTO_ANALYZE_ON_DETECT")
+    session_timeout_hours: int = Field(default=24, alias="SESSION_TIMEOUT_HOURS")
+    temp_dir: str = Field(default="data/temp_updates", alias="TEMP_DIR")
 
     @field_validator("database_url", mode="before")
     @classmethod
@@ -68,6 +136,12 @@ class Settings(BaseSettings):
         if not valor.strip():
             return []
         return [int(parte.strip()) for parte in valor.split(",") if parte.strip()]
+
+    @staticmethod
+    def parse_csv_set(valor: str) -> set[str]:
+        if not valor.strip():
+            return set()
+        return {parte.strip() for parte in valor.split(",") if parte.strip()}
 
 
 @lru_cache

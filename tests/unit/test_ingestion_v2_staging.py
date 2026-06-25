@@ -54,6 +54,36 @@ def test_read_staged_csv_rows_tracks_header_and_line_numbers() -> None:
     assert rows == [(2, {"col_a": "1", "col_b": "2"}), (3, {"col_a": "3", "col_b": "4"})]
 
 
+def test_read_staged_csv_rows_relacao_familiar_falls_back_for_unbalanced_quotes() -> None:
+    payload = (
+        "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Nome_Administrador;"
+        "CPF_Administrador;Nome_Emissor;CNPJ_Emissor;Cargo_Administrador;Nome_Pessoa_Relacionada;"
+        "CPF_Pessoa_Relacionada;Nome_Emissor_Pessoa_Relacionada;CNPJ_Emissor_Pessoa_Relacionada;"
+        "Cargo_Pessoa_Relacionada;Tipo_Parentesco;Observacao\n"
+        '01.938.783/0001-11;2021-01-01;5;114730;CIA PARTICIPACOES ALIANCA DA BAHIA;'
+        'JOSÉ RENATO DE ALMEIDA GONÇALVES TOURINHO;173.334.608-27;'
+        'Companhia de Participações Aliança da Bahia;01.938.783/0001-11;Diretor Presidente;'
+        'ESPÓLIO - PAULO SÉRGIO FREIRE DE CARVALHO GONÇALVES TOURINHO;000.764.655-00;'
+        'Companhia de Participações Aliança da Bahia;01.938.783/0001-11;'
+        '"O Sr. José Renato de Almeida Gonçalves Tourinho ocupou, no exercício de 2020, os cargos de Presidente'
+        ' do Conselho de Administração da Sociedade Anônima Hospital Aliança até o mês de junho, de Diretor'
+        ' Superintendente da Agropastoril Vila Real S.A., controladas da Companhia e, portanto, controladas'
+        ' indiretamente pelo Espólio de Paulo Sérgio Freire de Carvalho Tourinho (do qual é herdeiro).;'
+        'Pai ou Mãe (1º grau por consangüinidade);Tendo em vista o falecimento do Sr Paulo Sérgio Freire'
+        ' de Carvalho Gonçalves Tourinho, o Sr José Renato é herdeiro do seu Espólio\n'
+    ).encode("latin1")
+
+    header, rows, encoding = read_staged_csv_rows(payload, row_kind="fre_relacao_familiar")
+
+    assert encoding == "latin1"
+    assert len(header) == 17
+    assert len(rows) == 1
+    assert rows[0][1]["Cargo_Pessoa_Relacionada"].startswith("O Sr. José Renato")
+    assert rows[0][1]["Tipo_Parentesco"] == "Pai ou Mãe (1º grau por consangüinidade)"
+    assert rows[0][1]["Observacao"].startswith("Tendo em vista o falecimento")
+    assert None not in rows[0][1]
+
+
 def test_stage_csv_payload_persists_member_and_rows() -> None:
     session = _session()
     try:

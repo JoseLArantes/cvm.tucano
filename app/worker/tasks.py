@@ -1,8 +1,11 @@
+import logging
 import uuid
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal, cast
 
 import httpx
 import sqlalchemy.exc
+from sqlalchemy import select
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal
@@ -11,6 +14,7 @@ from app.services.ingestion.retry import DependencyNotReady, RetryableHttpStatus
 from app.worker.celery_app import celery_app
 
 _settings = get_settings()
+_logger = logging.getLogger(__name__)
 _RETRY_KWARGS = {
     "autoretry_for": (
         httpx.TimeoutException,
@@ -34,11 +38,474 @@ def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
     return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
 
 
+def _reagendar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> None:
+    materializar_analise_campanha_task.apply_async(
+        args=(campanha_id,),
+        countdown=_settings.analise_materializacao_gate_poll_seconds if countdown is None else countdown,
+        queue=_settings.analise_materializacao_queue_name,
+    )
+
+
+def _disparar_dispatcher_materializacao(*, countdown: int | None = None) -> None:
+    despachar_materializacao_pendente_task.apply_async(
+        countdown=0 if countdown is None else countdown,
+        queue=_settings.analise_materializacao_queue_name,
+    )
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.materializar_analise_companhia_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def materializar_analise_companhia_task(
+    self: Any,
+    codigo_cvm: int,
+    escopo: str = "consolidated",
+    source: str = "post_ingestion",
+    invalidated_from: str | None = None,
+    incluir_canceladas: bool = False,
+    campanha_id: str | None = None,
+    campanha_item_id: str | None = None,
+    chunk_execucao_id: str | None = None,
+    position_in_chunk: int | None = None,
+) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.models.companhia import Companhia
+    from app.services.analise import materializar_analise_companhia
+
+    db = SessionLocal()
+    try:
+        companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
+        if companhia is None:
+            return {"status": "missing_company", "codigo_cvm": codigo_cvm, "escopo": escopo}
+        execucao = materializar_analise_companhia(
+            db,
+            companhia,
+            scope=cast(Literal["consolidated", "individual"], escopo),
+            source=source,
+            invalidated_from=datetime.fromisoformat(invalidated_from).date() if invalidated_from else None,
+            incluir_canceladas=incluir_canceladas,
+            campanha_id=uuid.UUID(campanha_id) if campanha_id else None,
+            campanha_item_id=uuid.UUID(campanha_item_id) if campanha_item_id else None,
+            chunk_execucao_id=uuid.UUID(chunk_execucao_id) if chunk_execucao_id else None,
+            queue_name=_settings.analise_materializacao_queue_name,
+            position_in_chunk=position_in_chunk,
+        )
+        return {
+            "status": execucao.status,
+            "codigo_cvm": codigo_cvm,
+            "escopo": escopo,
+            "materializacao_execucao_id": str(execucao.id),
+            "coverage_complete": execucao.coverage_complete,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.materializar_analise_campanha_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
+    from app.models.analise import AnaliseMaterializacaoCampanha
+    from app.services.analise import (
+        _recalcular_materializacao_campanha,
+        claim_materializacao_campanha_chunk,
+        contar_chunks_stale_campanha,
+        obter_chunk_ativo_campanha,
+        obter_chunks_stale_ativos,
+        obter_estado_gate_materializacao,
+    )
+
+    db = SessionLocal()
+    try:
+        campanha_uuid = uuid.UUID(campanha_id)
+        campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
+        if campanha is None:
+            return {"status": "missing_campaign", "campanha_id": campanha_id}
+        if campanha.status in {"success", "failed", "partial"}:
+            return {"status": "finished_campaign", "campanha_id": campanha_id, "campanha_status": campanha.status}
+
+        active_chunk = obter_chunk_ativo_campanha(db, campanha_uuid)
+        if active_chunk is not None:
+            campanha.summary = {
+                **(campanha.summary or {}),
+                "wait_reason": "CHUNK_IN_PROGRESS",
+            }
+            campanha.updated_at = datetime.now(UTC)
+            db.commit()
+            return {
+                "status": "chunk_in_progress",
+                "campanha_id": campanha_id,
+                "chunk_execucao_id": str(active_chunk.id),
+            }
+        stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha_uuid)) + contar_chunks_stale_campanha(db, campanha_uuid)
+        if stale_chunks > 0:
+            campanha.status = "pending"
+            campanha.summary = {
+                **(campanha.summary or {}),
+                "wait_reason": "STALE_CHUNK_DETECTED",
+                "wait_retry_scheduled_in_seconds": _settings.analise_materializacao_recovery_sweep_seconds,
+                "stale_chunks": stale_chunks,
+            }
+            campanha.updated_at = datetime.now(UTC)
+            db.commit()
+            _reagendar_campanha_materializacao(
+                campanha_id,
+                countdown=_settings.analise_materializacao_recovery_sweep_seconds,
+            )
+            return {
+                "status": "waiting_for_stale_recovery",
+                "campanha_id": campanha_id,
+                "stale_chunks": stale_chunks,
+            }
+
+        gate = obter_estado_gate_materializacao(db)
+        if gate.status == "red":
+            campanha.status = "pending"
+            campanha.summary = {
+                **(campanha.summary or {}),
+                "wait_reason": gate.reason_code,
+                "wait_retry_scheduled_in_seconds": _settings.analise_materializacao_gate_poll_seconds,
+                "gate_blocking_ingestions": gate.blocking_ingestions,
+            }
+            campanha.updated_at = datetime.now(UTC)
+            db.commit()
+            return {
+                "status": "waiting_for_gate",
+                "campanha_id": campanha_id,
+                "reason_code": gate.reason_code,
+                "blocking_ingestions": gate.blocking_ingestions,
+            }
+
+        running_campaigns = int(
+            db.scalar(
+                select(func.count(AnaliseMaterializacaoCampanha.id)).where(
+                    AnaliseMaterializacaoCampanha.status == "running",
+                    AnaliseMaterializacaoCampanha.id != campanha_uuid,
+                )
+            )
+            or 0
+        )
+        if running_campaigns >= _settings.analise_materializacao_max_active_campaigns:
+            campanha.status = "pending"
+            campanha.summary = {
+                **(campanha.summary or {}),
+                "wait_reason": "MAX_ACTIVE_CAMPAIGNS_REACHED",
+                "wait_retry_scheduled_in_seconds": 30,
+            }
+            campanha.updated_at = datetime.now(UTC)
+            db.commit()
+            _reagendar_campanha_materializacao(campanha_id, countdown=30)
+            return {
+                "status": "waiting_for_slot",
+                "campanha_id": campanha_id,
+                "running_campaigns": running_campaigns,
+                "max_active_campaigns": _settings.analise_materializacao_max_active_campaigns,
+            }
+
+        claimed = claim_materializacao_campanha_chunk(db, campanha_uuid, chunk_size=campanha.chunk_size)
+        if claimed is None:
+            campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
+            if campanha is not None:
+                _recalcular_materializacao_campanha(db, campanha)
+                db.commit()
+            return {
+                "status": "no_pending_items",
+                "campanha_id": campanha_id,
+            }
+        chunk, items = claimed
+        materializar_analise_chunk_task.delay(campanha_id, str(chunk.id))
+
+        return {
+            "status": "enqueued",
+            "campanha_id": campanha_id,
+            "chunk_count": 1,
+            "claimed_items": len(items),
+            "chunk_execucao_id": str(chunk.id),
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.despachar_materializacao_pendente_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def despachar_materializacao_pendente_task(self: Any) -> dict[str, Any]:
+    from sqlalchemy import func, select
+
+    from app.models.analise import AnaliseMaterializacaoCampanha
+    from app.services.analise import obter_estado_gate_materializacao
+
+    db = SessionLocal()
+    try:
+        gate = obter_estado_gate_materializacao(db)
+        if gate.status == "red":
+            return {
+                "status": "waiting_for_gate",
+                "reason_code": gate.reason_code,
+                "blocking_ingestions": gate.blocking_ingestions,
+            }
+
+        running_campaigns = int(
+            db.scalar(select(func.count(AnaliseMaterializacaoCampanha.id)).where(AnaliseMaterializacaoCampanha.status == "running"))
+            or 0
+        )
+        available_slots = max(0, _settings.analise_materializacao_max_active_campaigns - running_campaigns)
+        if available_slots <= 0:
+            return {
+                "status": "waiting_for_slot",
+                "running_campaigns": running_campaigns,
+                "max_active_campaigns": _settings.analise_materializacao_max_active_campaigns,
+            }
+
+        campanhas = list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanha)
+                .where(AnaliseMaterializacaoCampanha.status == "pending")
+                .order_by(AnaliseMaterializacaoCampanha.created_at.asc())
+                .limit(available_slots)
+            ).all()
+        )
+        for campanha in campanhas:
+            materializar_analise_campanha_task.delay(str(campanha.id))
+
+        return {
+            "status": "dispatched",
+            "dispatched_campaigns": [str(campanha.id) for campanha in campanhas],
+            "available_slots": available_slots,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.materializar_analise_chunk_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_id: str) -> dict[str, Any]:
+    from app.models.analise import AnaliseMaterializacaoCampanhaItem, AnaliseMaterializacaoChunkExecucao
+    from app.models.companhia import Companhia
+    from app.services.analise import (
+        finalizar_chunk_execucao,
+        iniciar_chunk_execucao,
+        materializar_analise_companhia,
+        obter_estado_gate_materializacao,
+        registrar_progresso_chunk_execucao,
+        registrar_resultado_materializacao_campanha_item,
+        renovar_chunk_execucao_lease,
+        reverter_itens_materializacao_para_pending,
+    )
+
+    db = SessionLocal()
+    try:
+        chunk_uuid = uuid.UUID(chunk_execucao_id)
+        chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+        if chunk is None:
+            return {"status": "missing_chunk", "campanha_id": campanha_id, "chunk_execucao_id": chunk_execucao_id}
+        if chunk.status in {"stale", "cancelled", "success", "failed"}:
+            return {
+                "status": "ignored_chunk",
+                "campanha_id": campanha_id,
+                "chunk_execucao_id": chunk_execucao_id,
+                "chunk_status": chunk.status,
+            }
+
+        lease_owner = str(self.request.id)
+        iniciar_chunk_execucao(db, chunk, lease_owner=lease_owner)
+        item_ids = [
+            str(item_id)
+            for item_id in db.scalars(
+                select(AnaliseMaterializacaoCampanhaItem.id)
+                .where(AnaliseMaterializacaoCampanhaItem.chunk_execucao_id == chunk_uuid)
+                .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
+            ).all()
+        ]
+        processed = 0
+        success_items = 0
+        failed_items = 0
+        for position, item_id in enumerate(item_ids, start=1):
+            chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+            if chunk is None or chunk.status in {"stale", "cancelled"}:
+                return {
+                    "status": "aborted_chunk",
+                    "campanha_id": campanha_id,
+                    "chunk_execucao_id": chunk_execucao_id,
+                }
+            renovar_chunk_execucao_lease(db, chunk, lease_owner=lease_owner)
+            db.commit()
+            gate = obter_estado_gate_materializacao(db)
+            if gate.status == "red":
+                remaining_ids = [uuid.UUID(remaining_id) for remaining_id in item_ids[position - 1:]]
+                reverter_itens_materializacao_para_pending(db, remaining_ids, reason=gate.reason_code)
+                chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+                if chunk is not None:
+                    finalizar_chunk_execucao(
+                        db,
+                        chunk,
+                        status="cancelled",
+                        processed_items=processed,
+                        success_items=success_items,
+                        failed_items=failed_items,
+                        summary={"reason": gate.reason_code, "requeued_items": len(remaining_ids)},
+                    )
+                _reagendar_campanha_materializacao(campanha_id)
+                return {
+                    "status": "paused_by_gate",
+                    "campanha_id": campanha_id,
+                    "chunk_execucao_id": chunk_execucao_id,
+                    "reason_code": gate.reason_code,
+                    "requeued_items": len(remaining_ids),
+                    "processed_items": processed,
+                }
+            item = db.get(AnaliseMaterializacaoCampanhaItem, uuid.UUID(item_id))
+            if item is None:
+                continue
+            item.started_at = item.started_at or datetime.now(UTC)
+            item.updated_at = datetime.now(UTC)
+            item.attempts += 1
+            db.commit()
+
+            companhia = None
+            if item.companhia_id is not None:
+                companhia = db.get(Companhia, item.companhia_id)
+            if companhia is None:
+                companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == item.codigo_cvm))
+            if companhia is None:
+                registrar_resultado_materializacao_campanha_item(
+                    db,
+                    item,
+                    status="failed",
+                    last_error=f"Companhia nao encontrada para codigo_cvm={item.codigo_cvm}.",
+                )
+                failed_items += 1
+                processed += 1
+                continue
+
+            try:
+                execucao = materializar_analise_companhia(
+                    db,
+                    companhia,
+                    scope=cast(Literal["consolidated", "individual"], item.escopo),
+                    source="post_ingestion",
+                    invalidated_from=item.invalidated_from,
+                    incluir_canceladas=False,
+                    campanha_id=uuid.UUID(campanha_id),
+                    campanha_item_id=item.id,
+                    chunk_execucao_id=chunk_uuid,
+                    queue_name=_settings.analise_materializacao_queue_name,
+                    position_in_chunk=position,
+                )
+                registrar_resultado_materializacao_campanha_item(
+                    db,
+                    item,
+                    status="success" if execucao.status == "success" else "failed",
+                    materializacao_execucao_id=execucao.id,
+                    last_error=None if execucao.status == "success" else "materialization_failed",
+                )
+                if execucao.status == "success":
+                    success_items += 1
+                else:
+                    failed_items += 1
+            except Exception as exc:
+                registrar_resultado_materializacao_campanha_item(
+                    db,
+                    item,
+                    status="failed",
+                    last_error=str(exc),
+                )
+                failed_items += 1
+            processed += 1
+            chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+            if chunk is not None:
+                registrar_progresso_chunk_execucao(
+                    db,
+                    chunk,
+                    lease_owner=lease_owner,
+                    processed_items=processed,
+                    success_items=success_items,
+                    failed_items=failed_items,
+                )
+
+        chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+        if chunk is not None:
+            finalizar_chunk_execucao(
+                db,
+                chunk,
+                status="failed" if failed_items > 0 else "success",
+                processed_items=processed,
+                success_items=success_items,
+                failed_items=failed_items,
+            )
+        _reagendar_campanha_materializacao(campanha_id, countdown=0)
+        return {
+            "status": "processed",
+            "campanha_id": campanha_id,
+            "chunk_execucao_id": chunk_execucao_id,
+            "processed_items": processed,
+            "success_items": success_items,
+            "failed_items": failed_items,
+        }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.reconciliar_materializacao_stale_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def reconciliar_materializacao_stale_task(self: Any, campanha_id: str | None = None) -> dict[str, Any]:
+    from app.services.analise import recuperar_chunks_materializacao_stale
+
+    db = SessionLocal()
+    try:
+        campanha_uuid = uuid.UUID(campanha_id) if campanha_id else None
+        resultado = recuperar_chunks_materializacao_stale(db, campanha_id=campanha_uuid)
+        for campanha_afetada in resultado.affected_campaigns:
+            _reagendar_campanha_materializacao(
+                campanha_afetada,
+                countdown=_settings.analise_materializacao_recovery_sweep_seconds,
+            )
+        return {
+            "status": "recovered" if resultado.recovered_chunks > 0 else "noop",
+            "recovered_chunks": resultado.recovered_chunks,
+            "recovered_items": resultado.recovered_items,
+            "affected_campaigns": list(resultado.affected_campaigns),
+            "chunk_ids": list(resultado.chunk_ids),
+        }
+    finally:
+        db.close()
+
+
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cadastro_companhias_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_cadastro_companhias_task(self: Any, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_cadastro_companhias_task(
+    self: Any,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
+    import uuid
+
+    from sqlalchemy import select
+
+    from app.models.ingestion import IngestionRun
+    from app.updates.models import PendingUpdate
+
     db = SessionLocal()
     try:
         resultado = sincronizar_cadastro_companhias(db, task_id=str(self.request.id), force_reimport=force_reimport)
+        status_res = resultado.get("status")
+        execucao_id = resultado.get("execucao_id")
+
+        if status_res in ("sucesso", "sem_alteracao", "skipped"):
+            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
+            if not p_id:
+                stmt_p = select(PendingUpdate).where(
+                    PendingUpdate.fonte == "cadastro",
+                    PendingUpdate.ano.is_(None),
+                    PendingUpdate.status == "triggered"
+                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
+                pending = db.scalar(stmt_p)
+            else:
+                pending = db.get(PendingUpdate, p_id)
+
+            if pending is not None:
+                if execucao_id:
+                    stmt_run = select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == uuid.UUID(execucao_id))
+                    run = db.scalar(stmt_run)
+                    if run:
+                        pending.last_successful_run_id = run.id
+                db.commit()
+
         return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
     finally:
         db.close()
@@ -136,6 +603,8 @@ def pre_processar_sincronizacao_zip(
     ano: int,
     task_id: str | None = None,
     force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     from datetime import UTC, datetime
     from pathlib import Path
@@ -248,7 +717,18 @@ def pre_processar_sincronizacao_zip(
 
         faltando = sorted(required_members - staged_names)
         if faltando:
-            raise ValueError(f"arquivo_nao_esperado_ausente: {','.join(faltando)}")
+            aviso_membros_ausentes = (
+                "membros_ausentes_ignorados: "
+                f"{','.join(faltando)}. O ZIP sera ingerido com os membros disponiveis."
+            )
+            execucao.mensagem_erro = aviso_membros_ausentes
+            run.message = aviso_membros_ausentes
+            _logger.warning(
+                "ZIP %s/%s sem membros esperados; seguindo com os disponiveis: %s",
+                tipo_fonte,
+                ano,
+                ",".join(faltando),
+            )
 
         extracted_dir = zip_dir / "extracted"
 
@@ -432,6 +912,7 @@ def pre_processar_sincronizacao_zip(
 def ingerir_sincronizacao_zip(
     execucao_id: uuid.UUID,
     force_reimport: bool = False,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     from datetime import UTC, datetime
 
@@ -514,6 +995,7 @@ def ingerir_sincronizacao_zip(
             dispatch_dependents = disparar_dependentes_task.si(
                 parent_execucao_id=str(execucao.id),
                 force_reimport=force_reimport,
+                pending_update_id=pending_update_id,
             )
             workflow = chain(header_task, dispatch_dependents)
             workflow.delay()
@@ -521,6 +1003,7 @@ def ingerir_sincronizacao_zip(
             disparar_dependentes_task.delay(
                 parent_execucao_id=str(execucao.id),
                 force_reimport=force_reimport,
+                pending_update_id=pending_update_id,
             )
 
         return {
@@ -556,8 +1039,14 @@ def _coordenar_sincronizacao_zip(
     ano: int,
     task_id: str | None = None,
     force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     import uuid
+
+    from sqlalchemy import select
+
+    from app.db.session import SessionLocal
 
     # 1. Run Phase 1
     phase1_res = pre_processar_sincronizacao_zip(
@@ -565,14 +1054,42 @@ def _coordenar_sincronizacao_zip(
         ano=ano,
         task_id=task_id,
         force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     if phase1_res["status"] == "skipped":
+        db = SessionLocal()
+        try:
+            from app.models.ingestion import IngestionRun
+            from app.updates.models import PendingUpdate
+            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
+            if not p_id:
+                stmt_p = select(PendingUpdate).where(
+                    PendingUpdate.fonte == tipo_fonte,
+                    PendingUpdate.ano == ano,
+                    PendingUpdate.status == "triggered"
+                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
+                pending = db.scalar(stmt_p)
+            else:
+                pending = db.get(PendingUpdate, p_id)
+
+            if pending is not None:
+                stmt_run = select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == uuid.UUID(phase1_res["execucao_id"]))
+                run = db.scalar(stmt_run)
+                if run:
+                    pending.last_successful_run_id = run.id
+                db.commit()
+        except Exception:
+            pass
+        finally:
+            db.close()
         return phase1_res
 
     # 2. Run Phase 2
     return ingerir_sincronizacao_zip(
         execucao_id=uuid.UUID(phase1_res["execucao_id"]),
         force_reimport=force_reimport,
+        pending_update_id=pending_update_id,
     )
 
 
@@ -921,6 +1438,7 @@ def disparar_dependentes_task(
     self: Any,
     parent_execucao_id: str,
     force_reimport: bool = False,
+    pending_update_id: str | None = None,
 ) -> dict[str, str]:
     import uuid
 
@@ -980,11 +1498,17 @@ def disparar_dependentes_task(
         if dep_signatures:
             workflow = chord(
                 group(dep_signatures),
-                finalizar_sincronizacao_zip_task.si(parent_execucao_id=parent_execucao_id),
+                finalizar_sincronizacao_zip_task.si(
+                    parent_execucao_id=parent_execucao_id,
+                    pending_update_id=pending_update_id,
+                ),
             )
             workflow.delay()
         else:
-            finalizar_sincronizacao_zip_task.delay(parent_execucao_id=parent_execucao_id)
+            finalizar_sincronizacao_zip_task.delay(
+                parent_execucao_id=parent_execucao_id,
+                pending_update_id=pending_update_id,
+            )
 
         return {"status": "dispatched", "parent_execucao_id": parent_execucao_id}
     finally:
@@ -995,6 +1519,7 @@ def disparar_dependentes_task(
 def finalizar_sincronizacao_zip_task(
     self: Any,
     parent_execucao_id: str,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     import uuid
     from datetime import UTC, datetime
@@ -1003,6 +1528,7 @@ def finalizar_sincronizacao_zip_task(
     from sqlalchemy import select
 
     from app.db.session import SessionLocal
+    from app.models.financeiro import DemonstracaoFinanceira
     from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.staging import purge_member_success_rows, update_run_state
@@ -1070,6 +1596,25 @@ def finalizar_sincronizacao_zip_task(
                 finished_at=datetime.now(UTC),
             )
 
+        if parent_status == "sucesso":
+            from app.updates.models import PendingUpdate
+
+            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
+            if not p_id:
+                stmt_p = select(PendingUpdate).where(
+                    PendingUpdate.fonte == execucao.tipo_fonte,
+                    PendingUpdate.ano == execucao.ano,
+                    PendingUpdate.status == "triggered"
+                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
+                pending = db.scalar(stmt_p)
+            else:
+                pending = db.get(PendingUpdate, p_id)
+
+            if pending is not None:
+                if run is not None:
+                    pending.last_successful_run_id = run.id
+                db.commit()
+
         from app.models.ingestion import IngestionFileMember
 
         parent_run = db.scalar(
@@ -1088,6 +1633,28 @@ def finalizar_sincronizacao_zip_task(
                     purge_member_success_rows(db, ingestion_file_member_id=member.id)
 
         db.commit()
+
+        if parent_status == "sucesso" and execucao.tipo_fonte in {"dfp", "itr"}:
+            codigos_cvm = db.scalars(
+                select(DemonstracaoFinanceira.codigo_cvm)
+                .where(
+                    DemonstracaoFinanceira.tipo_formulario == execucao.tipo_fonte.upper(),
+                    DemonstracaoFinanceira.ano_origem == execucao.ano,
+                    DemonstracaoFinanceira.codigo_cvm.is_not(None),
+                )
+                .distinct()
+            ).all()
+            codigos_validos = sorted({codigo_cvm for codigo_cvm in codigos_cvm if codigo_cvm is not None})
+            if codigos_validos:
+                from app.services.analise import criar_materializacao_campanha
+
+                criar_materializacao_campanha(
+                    db,
+                    codigos_cvm=codigos_validos,
+                    source="post_ingestion",
+                    source_execucao_id=str(execucao.id),
+                )
+                _disparar_dispatcher_materializacao()
 
         zip_dir = Path(_settings.storage_dir) / str(execucao.id)
         import shutil
@@ -1110,57 +1677,134 @@ def finalizar_sincronizacao_zip_task(
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_dfp_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_dfp_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_dfp_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="dfp", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="dfp",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_itr_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_itr_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_itr_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="itr", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="itr",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fre_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_fre_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_fre_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="fre", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="fre",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fca_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_fca_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_fca_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="fca", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="fca",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_ipe_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_ipe_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_ipe_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="ipe", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="ipe",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_vlmo_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_vlmo_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_vlmo_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="vlmo", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="vlmo",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cgvn_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
-def sincronizar_cgvn_task(self: Any, ano: int, force_reimport: bool = False) -> dict[str, str]:
+def sincronizar_cgvn_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    skip_probe: bool = False,
+    pending_update_id: str | None = None,
+) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="cgvn", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport
+        tipo_fonte="cgvn",
+        ano=ano,
+        task_id=str(self.request.id),
+        force_reimport=force_reimport,
+        skip_probe=skip_probe,
+        pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 

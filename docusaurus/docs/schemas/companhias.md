@@ -35,6 +35,7 @@ class CompanhiaResposta(BaseModel):
     responsavel: Dict[str, Any]
     auditor: Optional[str]
     cnpj_auditor: Optional[str]
+    logo_url: Optional[str]
     criado_em: datetime
     sincronizado_em: datetime
     alterado_em: datetime
@@ -93,6 +94,7 @@ class CompanhiaResposta(BaseModel):
   },
   "auditor": "GRANT THORNTON AUDITORES INDEPENDENTES LTDA.",
   "cnpj_auditor": "10830108000165",
+  "logo_url": "https://pub-04fd7aefad4846c98bccc4719b2eaed1.r2.dev/png/P/PETR4.png",
   "criado_em": "2026-05-30T14:30:00Z",
   "sincronizado_em": "2026-05-30T14:30:00Z",
   "alterado_em": "2026-05-30T14:30:00Z"
@@ -118,6 +120,7 @@ class CompanhiaResposta(BaseModel):
 | `responsavel` | object | Responsável cadastral |
 | `auditor` | string \| null | Nome do auditor independente |
 | `cnpj_auditor` | string \| null | CNPJ do auditor |
+| `logo_url` | string \| null | URL do logo derivada do ticker mais recente elegível em `fca_valor_mobiliario`; calculada em tempo de resposta |
 
 ### Campos de Rastreabilidade
 

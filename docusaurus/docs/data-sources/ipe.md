@@ -5,58 +5,73 @@ sidebar_position: 7
 
 # Informações Periódicas e Eventuais (IPE)
 
-## Visão Geral
+## O que é IPE
 
-Comunicações obrigatórias de fatos relevantes, assembleias, alterações estatutárias, acordos de acionistas e outros eventos corporativos.
+IPE é a fonte de Informações Periódicas e Eventuais das companhias abertas. Ela reúne metadados de documentos divulgados ao mercado, como comunicados, fatos relevantes, avisos, atas, assembleias, estatutos e outros eventos corporativos classificados pela CVM.
 
-## Metadados Técnicos
+No Tucano CVM, IPE é promovida principalmente como catálogo documental. A fonte não transforma o conteúdo integral dos anexos em campos analíticos; ela organiza os metadados necessários para localizar, filtrar e acompanhar os documentos publicados.
+
+## Por que esse conjunto existe
+
+Enquanto DFP e ITR descrevem demonstrações financeiras e FRE/FCA descrevem formulários estruturados, IPE registra comunicações associadas a eventos corporativos. A fonte ajuda a acompanhar quando a companhia divulgou algo, qual categoria foi usada, qual assunto foi informado e onde está o documento original.
+
+Essa fonte é relevante para montar uma linha do tempo de publicações e cruzar eventos com dados cadastrais, financeiros ou societários.
+
+## Metadados técnicos
 
 | Campo | Valor |
 |-------|-------|
-| **Fonte CVM** | `ipe` |
-| **Arquivo ZIP** | `ipe_companhias_abertas_{ano}.zip` |
-| **Periodicidade** | Contínua/Eventual |
-| **Desde** | 2003 |
-| **Tabelas Alvo** | `ipe_documentos` |
+| Fonte no sistema | `ipe` |
+| Distribuição CVM | ZIP anual |
+| Arquivo principal | `ipe_cia_aberta_{ano}.zip` |
+| Membro promovido | `ipe_cia_aberta_{ano}.csv` |
+| Primeiro ano no registro da fonte | 2003 |
+| Dependência | `cadastro` |
+| Tabela promovida | `ipe_documentos` |
+| Chaves de referência | `cnpj_companhia`, `codigo_cvm`, `protocolo_entrega` |
 
-## Endpoints Principais
+## O que entra na fonte
+
+O pacote anual possui um membro principal com os metadados dos documentos. Entre os campos tratados pela API estão:
+
+- companhia e código CVM
+- categoria do documento
+- tipo
+- espécie
+- assunto
+- data de referência
+- data de entrega
+- protocolo de entrega
+- versão
+- situação ou status do documento
+- link de download, quando informado pela origem
+
+## Estrutura no Tucano CVM
+
+| Tabela | Conteúdo |
+|--------|----------|
+| `ipe_documentos` | Registros documentais com classificação, datas, protocolo, versão e vínculo com a companhia. |
+
+Os dados são mantidos como documentos porque a semântica principal da fonte está na publicação e na classificação do evento, não em quadros financeiros ou societários tabulares.
+
+## Endpoints principais
 
 ```bash
 GET /ipe/documentos?codigo_cvm=25224
 GET /ipe/documentos?categoria=Fato%20Relevante
 GET /ipe/documentos?assunto=Assembleia
 GET /ipe/documentos?data_referencia_inicio=2025-01-01&data_referencia_fim=2025-06-30
+GET /ipe/documentos/agregados?codigo_cvm=25224
 ```
 
-## Campos Principais
+## Como a ingestão trata a fonte
 
-| Campo | Descrição |
-|-------|-----------|
-| `categoria` | Fato Relevante, Aviso aos Acionistas, Estatuto, etc. |
-| `tipo` | Subclassificação regulatória |
-| `assunto` | Descrição resumida do evento |
-| `data_referencia` | Data do fato |
-| `data_entrega` | Data de protocolo na CVM |
-| `link_download` | URL para PDF original |
-| `status` | Publicado, Cancelado, Retificado |
+A ingestão processa o pacote anual, valida o membro principal, normaliza datas, identificadores e textos, e promove os registros para `ipe_documentos`. Cada linha mantém a referência ao arquivo, ano, linha e hash de origem.
 
-## Regras de Processamento
+Como o IPE pode conter retificações, cancelamentos ou versões diferentes de uma mesma comunicação, a leitura deve preservar protocolo, versão e status sempre que essas dimensões forem relevantes.
 
-1. **Granularidade**: IPE não possui subarquivos CSV estruturados; é tratado como documento metadata
-2. **Categorização**: Baseada em taxonomia CVM oficial
-3. **Link Direto**: `link_download` aponta para sistema oficial de download da CVM
-4. **Histórico Completo**: Preserva todas as versões e retificações
+## Como ler os dados
 
-## Exemplo: Monitoramento de Fatos Relevantes
+`data_referencia` indica a data associada ao fato ou documento. `data_entrega` indica quando a informação foi entregue à CVM. A diferença entre essas datas pode ser relevante para análises de tempestividade.
 
-```bash
-curl -X GET "http://localhost:8007/ipe/documentos?codigo_cvm=25224&categoria=Fato%20Relevante&ordenar_por=-data_entrega&tamanho_pagina=50" \
-  -H "Authorization: Bearer seu-token"
-```
-
-## Notas para Compliance
-
-- IPE é a principal fonte para monitoramento de eventos corporativos
-- Use filtros por `categoria` para alertas automatizados
-- `data_entrega` vs `data_referencia` ajuda a identificar atrasos de divulgação
-- Links expiram? Não, são mantidos no portal CVM, mas consulte periodicamente
+Use categoria, tipo e assunto como filtros complementares. A taxonomia da CVM pode variar conforme o tipo de documento e o período, por isso comparações muito rígidas por texto devem considerar normalização ou agrupamentos próprios.

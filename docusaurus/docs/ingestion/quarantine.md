@@ -15,6 +15,8 @@ Endpoints para gerenciar a fila de reparo da quarentena e reprocessar itens reje
 
 Lista paginada da fila de reparo da quarentena.
 
+Quando `status` não é informado, o endpoint retorna apenas itens `pendente`. Para consultar histórico completo, envie `status=all`.
+
 ### Query Parameters
 
 | Parâmetro | Tipo | Padrão | Descrição |
@@ -23,7 +25,7 @@ Lista paginada da fila de reparo da quarentena.
 | `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |
 | `motivo_codigo` | string | - | Filtrar por código do motivo |
 | `arquivo_origem` | string | - | Filtrar por arquivo de origem |
-| `status` | string | - | Filtrar por status |
+| `status` | string | `pendente` implícito | Filtrar por status. Use `all` para não aplicar filtro |
 | `ano_origem` | integer | - | Filtrar por ano de origem |
 
 ### Códigos de Motivo (`motivo_codigo`)
@@ -88,6 +90,8 @@ curl -X GET "http://localhost:8007/ingestion/quarentena?motivo_codigo=companhia_
 
 Retorna métricas agregadas e consolidadas de erros na quarentena.
 
+Quando `status` não é informado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` refletem apenas a fila aberta (`pendente`). Os campos `total_pendentes`, `total_resolvidos` e `total_historico` continuam expondo a visão operacional completa.
+
 ### Query Parameters
 
 | Parâmetro | Tipo | Descrição |
@@ -110,6 +114,9 @@ curl -X GET "http://localhost:8007/ingestion/quarentena/resumo" \
 ```json
 {
   "total": 42,
+  "total_pendentes": 42,
+  "total_resolvidos": 18,
+  "total_historico": 60,
   "por_status": {
     "pendente": 35,
     "resolvido_auto": 5,
@@ -324,6 +331,14 @@ resumo = monitorar_quarentena("http://localhost:8007", "seu-token")
 ### Para Compliance
 
 - Monitore `normalizacao_invalida` para detectar bugs
+
+Alguns padrões reais da CVM tratados atualmente de forma tolerante pelo backend:
+
+- `fre_relacao_subordinacao`: `Nome_Pessoa_Relacionada` pode vir vazio sem invalidar a linha;
+- `fre_relacao_subordinacao`: `Nome_Administrador` também pode vir vazio quando a linha ainda identifica a pessoa relacionada e mantém conteúdo material suficiente;
+- `fre_relacao_familiar`: quando a CVM publica `Cargo_Pessoa_Relacionada` com aspas desbalanceadas, o staging faz fallback por linha física para preservar as 17 colunas esperadas;
+- `fre_participacao_sociedade`: `CNPJ` zerado (`0000000000000`) é tratado como ausente;
+- `DFP` e `ITR`: quando a linha documental traz identidade suficiente mas a companhia não existe no cadastro local, o backend pode criar companhia provisória em vez de quarentenar a linha.
 - Valide `companhia_nao_encontrada` após sincronização de cadastro
 - Documente todos os replays para rastreabilidade
 

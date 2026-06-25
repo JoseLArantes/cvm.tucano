@@ -1,10 +1,8 @@
 import uuid
-from datetime import date, datetime
-from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import Paginacao, PeriodicModel
+from app.schemas.comum import BrazilianDate, BrazilianDateTime, CanonicalDecimal, Paginacao, PeriodicModel
 
 
 class VlmoDocumentoResposta(PeriodicModel):
@@ -15,10 +13,10 @@ class VlmoDocumentoResposta(PeriodicModel):
     cnpj_companhia: str | None
     codigo_cvm: int | None
     nome_companhia: str | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     categoria: str | None
     tipo: str | None
-    data_entrega: date
+    data_entrega: BrazilianDate
     tipo_apresentacao: str | None
     motivo_reapresentacao: str | None
     protocolo_entrega: str | None
@@ -27,9 +25,9 @@ class VlmoDocumentoResposta(PeriodicModel):
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaVlmoDocumentosResposta(BaseModel):
@@ -44,7 +42,7 @@ class VlmoConsolidadoResposta(PeriodicModel):
     companhia_id: uuid.UUID | None
     cnpj_companhia: str | None
     nome_companhia: str | None
-    data_referencia: date
+    data_referencia: BrazilianDate
     versao: int
     tipo_empresa: str | None
     empresa: str | None
@@ -55,17 +53,17 @@ class VlmoConsolidadoResposta(PeriodicModel):
     tipo_ativo: str | None
     caracteristica_valor_mobiliario: str | None
     intermediario: str | None
-    data_movimentacao: date | None
+    data_movimentacao: BrazilianDate | None
     quantidade: int | None
-    preco_unitario: Decimal | None
-    volume: Decimal | None
+    preco_unitario: CanonicalDecimal | None
+    volume: CanonicalDecimal | None
     indice_ocorrencia: int
     arquivo_origem: str
     ano_origem: int | None
     linha_origem: int | None
-    criado_em: datetime
-    sincronizado_em: datetime
-    alterado_em: datetime
+    criado_em: BrazilianDateTime
+    sincronizado_em: BrazilianDateTime
+    alterado_em: BrazilianDateTime
 
 
 class ListaVlmoConsolidadoResposta(BaseModel):

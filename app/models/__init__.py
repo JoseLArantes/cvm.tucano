@@ -1,3 +1,12 @@
+from app.models.analise import (
+    AnaliseContextoRevision,
+    AnaliseFatoRevision,
+    AnaliseMaterializacaoCampanha,
+    AnaliseMaterializacaoCampanhaItem,
+    AnaliseMaterializacaoChunkExecucao,
+    AnaliseMaterializacaoControle,
+    AnaliseMaterializacaoExecucao,
+)
 from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
 from app.models.fca import (
@@ -79,8 +88,16 @@ from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
 from app.models.vlmo import VlmoConsolidado, VlmoDocumento
+from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateSession, UpdateSessionItem
 
 __all__ = [
+    "AnaliseContextoRevision",
+    "AnaliseFatoRevision",
+    "AnaliseMaterializacaoCampanha",
+    "AnaliseMaterializacaoCampanhaItem",
+    "AnaliseMaterializacaoChunkExecucao",
+    "AnaliseMaterializacaoControle",
+    "AnaliseMaterializacaoExecucao",
     "CgvnDocumento",
     "CgvnPratica",
     "Companhia",
@@ -166,4 +183,8 @@ __all__ = [
     "Usuario",
     "VlmoConsolidado",
     "VlmoDocumento",
+    "PendingUpdate",
+    "PendingUpdateMember",
+    "UpdateSession",
+    "UpdateSessionItem",
 ]

@@ -1,0 +1,604 @@
+# Changelog de Contrato da API para Clientes
+
+## 2026-06-24 - Exclusao padrao de companhias canceladas na materializacao
+
+### Superficie impactada
+
+- comportamento operacional de campanhas de materializacao
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+
+### Semantica operacional atual
+
+- campanhas automaticas e fluxos padrao de materializacao nao incluem companhias com `situacao_registro=CANCELADA`
+- a materializacao pontual de uma companhia cancelada continua possivel apenas com override explicito no disparo operacional
+- quando uma companhia cancelada for disparada sem esse override, o backend pode registrar uma execucao concluida sem revisoes, usando sinalizacao de skip operacional no `summary`
+
+### Impacto esperado no frontend
+
+- paineis operacionais passam a observar menos itens/campanhas originados de companhias canceladas
+- detalhamento de execucao deve tolerar `summary.skipped_reason=COMPANHIA_CANCELADA` sem tratar isso como falha tecnica
+- contagens e previsoes de backlog de materializacao deixam de considerar canceladas por padrao
+
+## 2026-06-24 - Materializacao incremental com observabilidade expandida
+
+### Endpoints afetados
+
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+
+### Novos campos em execucoes de materializacao
+
+- `materialization_mode`: `full` ou `incremental`
+- `invalidated_from`: primeira data de conhecimento recomposta quando a execucao e incremental
+- `window_total_knowledge_dates`
+- `window_processed_knowledge_dates`
+- `inserted_context_revisions`
+- `inserted_fact_revisions`
+- `closed_context_revisions`
+- `closed_fact_revisions`
+- `deleted_future_context_revisions`
+- `deleted_future_fact_revisions`
+
+### Novos campos em `/analise/materializacoes/monitoramento`
+
+- `running_full_executions`
+- `running_incremental_executions`
+- `lowest_running_invalidated_from`
+- `stalled_incremental_execution_ids`
+- `running_execution_previews`
+
+### Novos campos em previews de item
+
+- `materialization_mode` em:
+  - `running_items_preview`
+  - `pending_items_preview`
+- `invalidated_from` em:
+  - `running_items_preview`
+  - `pending_items_preview`
+
+### Semantica operacional atual
+
+- A primeira materializacao de uma companhia/escopo continua podendo ser `full`.
+- Materializacoes recorrentes podem ser `incremental`, recomponto apenas o sufixo a partir de `invalidated_from`.
+- `progress.total_knowledge_dates` e `progress.processed_knowledge_dates` passam a representar a janela efetivamente processada pela execucao, nao necessariamente toda a historia da companhia.
+- O frontend deve usar `materialization_mode`, `invalidated_from` e os contadores de revisao para distinguir refresh historico completo de recomposicao incremental.
+- `running_execution_previews` e `stalled_incremental_execution_ids` sao os sinais recomendados para painel operacional e diagnostico de execucoes presas.
+
+## 2026-06-24 - Quarentena aberta por padrão e métricas separadas de histórico
+
+### Ajustes de contrato em `GET /ingestion/quarentena`
+
+- quando `status` não é enviado, a listagem retorna apenas itens `pendente`
+- para consultar histórico completo, o frontend deve enviar `status=all`
+
+### Ajustes de contrato em `GET /ingestion/quarentena/resumo`
+
+- quando `status` não é enviado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` passam a refletir apenas a fila aberta (`pendente`)
+- novos campos:
+  - `total_pendentes`
+  - `total_resolvidos`
+  - `total_historico`
+- `por_status` continua trazendo a distribuição histórica sob os filtros contextuais aplicados
+
+### Impacto esperado
+
+- telas de “Fila de Reparos” deixam de exibir itens já resolvidos por padrão
+- contadores de “arquivos com erros” deixam de misturar pendências abertas com histórico resolvido
+- o frontend passa a ter uma forma explícita de mostrar fila aberta e histórico sem inferência local
+
+## 2026-06-23 - FRE de plano de recompra por classe sem obrigatoriedade de tipo preferencial
+
+### Ajustes de contrato em `GET /fre/plano-recompra-classes-acoes`
+
+- `tipo_classe_acao_preferencial` passa a aceitar `null`
+- novo campo `especie_acao`
+
+### Semântica atual
+
+- o backend não trata mais `Tipo_Classe_Acao_Preferencial` como obrigatório para `fre_cia_aberta_plano_recompra_classe_acao`
+- quando esse campo vier vazio, a linha continua elegível para ingestão desde que a espécie da ação esteja presente
+- a identidade lógica dessa linha passa a considerar `especie_acao` junto do identificador do plano
+
+## 2026-06-24 - Tolerância ampliada para diagnósticos reais de quarentena em FRE e ITR
+
+### Ajustes de comportamento
+
+- `fre_relacao_subordinacao` não exige mais `Nome_Pessoa_Relacionada` para aceitar a linha
+- `fre_relacao_subordinacao` passa a aceitar `nome_administrador = null` quando a linha traz a pessoa relacionada e demais sinais materiais válidos
+- `fre_relacao_familiar` passa a tolerar linhas da CVM com aspas desbalanceadas em `Cargo_Pessoa_Relacionada`, preservando `tipo_parentesco` e `observacao` nas colunas corretas
+- `fre_participacao_sociedade` passa a tratar `CNPJ=0000000000000` como ausente
+- o fluxo financeiro (`DFP` e `ITR`) passa a permitir companhia provisória quando a linha tem identidade suficiente, mas a companhia não está no cadastro local
+
+### Impacto esperado
+
+- menos falsos positivos de `normalizacao_invalida: campo_obrigatorio_ausente` em FRE
+- `GET /fre/relacoes-subordinacao` pode retornar `nome_administrador: null` para refletir fielmente linhas válidas publicadas pela CVM
+- redução de quarentena causada por `ProgramLimitExceeded` quando uma linha de `fre_relacao_familiar` vinha deslocada por aspas malformadas na origem CVM
+- eliminação de quarentena para CNPJ zerado usado como placeholder em participações societárias
+- redução de `companhia_nao_encontrada` em documentos financeiros válidos da CVM
+
+## 2026-06-23 - Recuperacao automatica de chunks stale na materializacao
+
+### Novos endpoints operacionais
+
+- `POST /analise/materializacoes/recuperar-stale`
+- `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+
+### Campos novos em execucoes e previews
+
+- `chunk_execucao_id` em:
+  - `GET /analise/materializacoes`
+  - `GET /analise/materializacoes/{execucao_id}`
+  - `running_items_preview`
+  - `pending_items_preview`
+
+### Campos novos em `/analise/materializacoes/monitoramento`
+
+- `recovering_campaigns`
+- `queued_chunks`
+- `running_chunks`
+- `stale_chunks`
+- `stale_item_count`
+- `stale_chunk_preview`
+
+### Campos novos em resumo de campanha
+
+- `active_chunk_id`
+- `active_chunk_lease_expires_at`
+- `stale_chunks`
+- `wait_reason`
+
+### Semântica operacional atual
+
+- Liveness de chunk não deve mais ser inferido apenas por `running_items`.
+- Cada chunk possui lease e heartbeat persistidos.
+- Chunks `queued` ou `running` com lease expirado entram no fluxo de recuperação.
+- A recuperação devolve itens inacabados para `pending` e preserva itens já concluídos.
+- Campanhas em `pending` por gate vermelho não ficam mais se auto-reagendando continuamente.
+- A retomada do processamento pendente acontece por dispatcher explícito quando o sistema volta a verde.
+- O frontend pode distinguir:
+  - campanha progredindo;
+  - campanha aguardando gate vermelho;
+  - campanha aguardando recuperação de chunk stale.
+
+## 2026-06-23 - Gate de admissao e controle operacional da materializacao
+
+### Novos endpoints operacionais
+
+- `GET /analise/materializacoes/controle`
+- `POST /analise/materializacoes/controle/pause`
+- `POST /analise/materializacoes/controle/resume`
+
+### Campos novos em `/analise/materializacoes/monitoramento`
+
+- `gate`
+- `waiting_for_gate_campaigns`
+
+### Campos principais de `gate`
+
+- `status`: `green` ou `red`
+- `reason_code`: `NO_BLOCKERS`, `INGESTION_ACTIVE`, `MANUAL_PAUSE` ou `GATE_DISABLED`
+- `gate_enabled`: indica se o gate automático está ativo
+- `manual_control`: `auto` ou `paused`
+- `manual_reason`: motivo textual da pausa manual, quando houver
+- `blocking_ingestions`: quantidade de execuções/runs bloqueadoras
+- `pending_ingestions`: quantidade de execuções em `aguardando_ingestao`
+- `next_check_at`: próxima rechecagem recomendada enquanto o gate estiver vermelho
+- `blockers`: preview dos bloqueadores operacionais
+
+### Ajustes de comportamento que impactam telas operacionais
+
+- A campanha não enfileira mais todos os chunks de uma vez.
+- O orquestrador enfileira um único chunk por ciclo.
+- Se a ingestão estiver ativa, a campanha fica `pending` com `wait_reason=INGESTION_ACTIVE`.
+- Se houver pausa manual, a campanha fica `pending` com `wait_reason=MANUAL_PAUSE`.
+- O chunk em execução termina a companhia atual antes de respeitar o gate vermelho.
+- Itens ainda não iniciados voltam para `pending` quando o gate fecha durante um chunk.
+
+## 2026-06-23 - Campanhas e chunks de materializacao analitica
+
+### Mudancas de orquestracao operacional
+
+- O pos-ingestao financeiro nao dispara mais uma task Celery por companhia/escopo.
+- O backend agora cria uma campanha de materializacao e a divide em chunks.
+- A execucao canônica por companhia continua existindo, mas agora pode ser vinculada a:
+  - `campanha_id`
+  - `campanha_item_id`
+  - `queue_name`
+  - `position_in_chunk`
+- O frontend administrativo pode mostrar progresso por campanha e por item sem inferencia local.
+
+### Filtros e campos novos
+
+- `GET /analise/materializacoes` aceita `campanha_id`
+- `GET /analise/materializacoes` e `GET /analise/materializacoes/{execucao_id}` agora podem retornar:
+  - `campanha_id`
+  - `campanha_item_id`
+  - `queue_name`
+  - `position_in_chunk`
+
+### Campos novos em `/analise/materializacoes/monitoramento`
+
+- `fila.materialization_orchestrator_active_tasks`
+- `fila.materialization_chunk_active_tasks`
+- `fila.materialization_queue_depth`
+- `pending_campaigns`
+- `running_campaigns`
+- `pending_items`
+- `running_items`
+- `success_items`
+- `failed_items`
+- `skipped_items`
+- `campaigns`
+- `running_items_preview`
+- `pending_items_preview`
+
+## 2026-06-22 - Consolidacao da API analitica em `/analise/companhias`
+
+### Superficie oficial atual
+
+- `GET /analise/metricas`
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/companhias/{codigo_cvm}/comparacoes`
+- `GET /analise/companhias/{codigo_cvm}/qualidade`
+- `GET /analise/companhias/{codigo_cvm}/sinais`
+- `GET /analise/companhias/{codigo_cvm}/eventos`
+- `GET /analise/companhias/{codigo_cvm}/restatements`
+- `GET /analise/companhias/{codigo_cvm}/governanca`
+- `GET /analise/companhias/{codigo_cvm}/pessoas`
+- `GET /analise/companhias/{codigo_cvm}/brief`
+
+### Remapeamento obrigatorio de rotas
+
+- `/companhias/{codigo_cvm}/analise/v2` -> `/analise/companhias/{codigo_cvm}`
+- `/companhias/{codigo_cvm}/analise/v2/series` -> `/analise/companhias/{codigo_cvm}/series`
+- `/companhias/{codigo_cvm}/analise/v2/comparacoes` -> `/analise/companhias/{codigo_cvm}/comparacoes`
+- `/companhias/{codigo_cvm}/analise/v2/qualidade` -> `/analise/companhias/{codigo_cvm}/qualidade`
+- `/companhias/{codigo_cvm}/analise/v2/sinais` -> `/analise/companhias/{codigo_cvm}/sinais`
+- `/companhias/{codigo_cvm}/analise/v2/eventos` -> `/analise/companhias/{codigo_cvm}/eventos`
+- `/companhias/{codigo_cvm}/analise/v2/restatements` -> `/analise/companhias/{codigo_cvm}/restatements`
+
+### Rotas removidas sem compatibilidade
+
+- `/companhias/{codigo_cvm}/analise`
+- `/companhias/{codigo_cvm}/analise/overview`
+- `/companhias/{codigo_cvm}/analise/financeiro`
+- `/companhias/{codigo_cvm}/analise/comparativo`
+- `/companhias/{codigo_cvm}/analise/eventos`
+- `/companhias/{codigo_cvm}/analise/pessoas-remuneracao`
+- `/companhias/{codigo_cvm}/analise/mercado-insiders`
+
+Todas as rotas acima agora devem ser consideradas inexistentes. O cliente deve esperar `404 Not Found`, não `410`.
+
+### Convencoes obrigatorias de cliente
+
+- Datas e datetimes usam ISO 8601.
+- Valores decimais continuam sendo strings decimais canonicas.
+- Razoes usam valor decimal e `unit=ratio`.
+- Variacoes em pontos percentuais usam `unit=percentage_point`.
+- O cliente nao deve inferir percentual a partir de qualquer campo sem olhar `unit`.
+- O cliente nao deve derivar trimestre isolado a partir de acumulados quando consultar `base_periodo=quarter`, pois o backend ja faz isso.
+
+### Parametros e valores permitidos
+
+- `periodicidade`: `annual` ou `quarterly`
+- `base_periodo`: `fy`, `quarter` ou `ytd`
+- `escopo`: `consolidated` ou `individual`
+- `metricas`: lista CSV de ids estaveis do catalogo
+- `as_of`: data de corte em `AAAA-MM-DD`
+- `horizonte_anos`: horizonte anual maximo retornado em consultas historicas de FY
+
+### Campos importantes do contrato
+
+- `resolution.mode`: `canonical` ou `runtime_fallback`
+- `resolution.materialization_execution_id`: id da execucao canônica usada pela resposta
+- `resolution.materialized_at`: timestamp de conclusao da materializacao canônica
+- `resolution.as_of`: data de corte efetivamente considerada
+- `period_id`: id canonico do periodo (`FY2025`, `2025-Q3`, `2025-YTDQ3`)
+- `period_nature`: `instant` ou `duration`
+- `period_basis`: `fy`, `quarter` ou `ytd`
+- `form`: `DFP`, `ITR` ou `DERIVED`
+- `version`: versao documental utilizada
+- `restated`: indica se a observacao depende de reapresentacao
+- `value_source`: `reported`, `derived_from_ytd_delta`, `derived_from_dfp_minus_ytd` ou `derived_from_formula`
+- `comparables`: referencia explicita de `yoy_period_id` e `qoq_period_id`
+- `provenance`: lista completa de evidencias documentais
+- `issues`: problemas contextuais detectados
+- `indisponibilidades`: itens nao calculados com `reason_code`
+- `horizonte_anos`: ecoa o horizonte anual efetivamente aplicado em `/series` e `/comparacoes`
+- `metric_unit`: unidade dos valores atual e comparavel em `/comparacoes`
+- `comparison_unit`: unidade do resultado comparativo em `/comparacoes`
+- `event_id`: identificador estavel de cada evento em `/eventos`
+
+### Expansoes analiticas anuais e temporais
+
+- `/series` com `periodicidade=annual&base_periodo=fy&horizonte_anos=5` devolve ate cinco FY historicos por metrica.
+- `/comparacoes` preserva a unidade economica da metrica em `metric_unit` e usa `comparison_unit` para o resultado comparativo. Em `BASE100`, por exemplo, os valores continuam em `BRL` e o indice usa `index`.
+- `/eventos` agora expoe `event_id`, adequado para chave estavel de lista, deduplicacao e deep link.
+- `/governanca` retorna observacoes temporais anuais com suporte a `as_of` e `horizonte_anos`.
+- `/pessoas` retorna observacoes temporais anuais de remuneracao e empregados com suporte a `as_of` e `horizonte_anos`.
+- `/brief` consolida trimestre atual, trimestre anterior, comparavel anual, FY atual e FY anterior no mesmo payload.
+
+### Novas metricas oficiais
+
+- `depreciacao_amortizacao`
+- `capex`
+- `divida_bruta`
+- `ebitda`
+- `caixa_livre`
+- `divida_liquida`
+- `alavancagem`
+- `conversao_lucro_caixa`
+
+### Monitoramento da materializacao canônica
+
+Novos endpoints operacionais:
+
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/{execucao_id}`
+
+Campos principais para monitoramento:
+
+- `status`: `running`, `success` ou `failed`
+- `started_at`: inicio da execucao
+- `finished_at`: conclusao da execucao, quando houver
+- `updated_at`: ultimo heartbeat persistido
+- `elapsed_seconds`: tempo decorrido
+- `estimated_remaining_seconds`: tempo restante estimado, quando houver progresso parcial suficiente
+- `estimated_finish_at`: horario estimado de conclusao
+- `progress.total_knowledge_dates`: total previsto de datas de conhecimento
+- `progress.processed_knowledge_dates`: quantidade ja processada
+- `progress.current_known_from`: data de conhecimento atualmente em processamento
+- `progress.progress_ratio`: progresso estimado de `0` a `1`
+- `progress.context_revisions`: revisoes de contexto acumuladas
+- `progress.fact_revisions`: revisoes de fatos acumuladas
+- `summary`: payload bruto persistido para auditoria operacional no endpoint de detalhe
+- `campanha_id`: campanha associada a execucao, quando houver
+- `campanha_item_id`: item da campanha associado, quando houver
+- `queue_name`: fila Celery usada pela execucao
+- `position_in_chunk`: posicao do item dentro do chunk processado
+
+Campos do snapshot de fila:
+
+- `fila.workers_reporting`: quantidade de workers que responderam ao inspect
+- `fila.materialization_active_tasks`: tasks de materializacao ativas
+- `fila.materialization_reserved_tasks`: tasks de materializacao reservadas
+- `fila.materialization_scheduled_tasks`: tasks de materializacao agendadas
+- `fila.materialization_orchestrator_active_tasks`: tasks orquestradoras de campanha ativas
+- `fila.materialization_chunk_active_tasks`: tasks de chunk ativas
+- `fila.materialization_queue_depth`: profundidade observada da fila dedicada, quando disponivel
+- `running_executions`: execucoes `running` persistidas no banco
+- `pending_campaigns`: campanhas pendentes
+- `running_campaigns`: campanhas em andamento
+- `pending_items`: itens pendentes nas campanhas
+- `running_items`: itens em andamento nas campanhas
+- `success_items`: itens concluidos com sucesso nas campanhas
+- `failed_items`: itens com falha nas campanhas
+- `skipped_items`: itens deduplicados/skipped
+- `oldest_running_started_at`: inicio da execucao mais antiga em andamento
+- `longest_running_elapsed_seconds`: tempo da execucao mais antiga em andamento
+- `stalled_threshold_seconds`: janela usada para detectar heartbeat ausente
+- `stalled_execution_ids`: execucoes `running` com `updated_at` mais antigo que o threshold
+- `campaigns`: resumo das campanhas relevantes
+- `running_items_preview`: preview dos itens atualmente em execucao
+- `pending_items_preview`: preview dos proximos itens pendentes
+
+### Mudanca de orquestracao operacional
+
+- O pos-ingestao financeiro nao dispara mais uma task Celery por companhia/escopo.
+- O backend agora cria uma campanha de materializacao e a divide em chunks.
+- A execucao canônica por companhia continua existindo, mas agora pode ser vinculada a:
+  - `campanha_id`
+  - `campanha_item_id`
+  - `queue_name`
+  - `position_in_chunk`
+- O frontend administrativo pode mostrar progresso por campanha e por item sem inferencia local.
+
+### Mapeamento pratico de consultas do frontend
+
+- Painel operacional da materializacao: usar `/analise/materializacoes`
+- Banner ou widget de saturacao dos workers: usar `/analise/materializacoes/monitoramento`
+- Drill-down de uma execucao especifica: usar `/analise/materializacoes/{execucao_id}`
+- Tela de resumo analitico da companhia: usar `/analise/companhias/{codigo_cvm}`
+- Graficos historicos: usar `/analise/companhias/{codigo_cvm}/series`
+- Cartoes de YoY, QoQ, CAGR, vertical e base 100: usar `/analise/companhias/{codigo_cvm}/comparacoes`
+- Avisos de consistencia e cobertura: usar `/analise/companhias/{codigo_cvm}/qualidade`
+- Badges e alertas deterministas: usar `/analise/companhias/{codigo_cvm}/sinais`
+- Timeline de eventos: usar `/analise/companhias/{codigo_cvm}/eventos`
+- Detalhe de reapresentacoes: usar `/analise/companhias/{codigo_cvm}/restatements`
+- Timeline temporal de governanca: usar `/analise/companhias/{codigo_cvm}/governanca`
+- Timeline temporal de pessoas e remuneracao: usar `/analise/companhias/{codigo_cvm}/pessoas`
+- Brief analitico de leitura rapida: usar `/analise/companhias/{codigo_cvm}/brief`
+
+### Renomeacoes recomendadas no frontend
+
+- Renomear hooks, clients, query keys e types que contenham `V2` para nomes sem versão.
+- Remover qualquer tratamento específico para `ANALISE_V1_REMOVED`.
+- Ajustar builders de URL para usar o prefixo canônico `/analise/companhias`.
+
+### Calculos de frontend que devem ser removidos
+
+- Conversao cega de razao para percentual sem olhar `unit`
+- Derivacao manual de `2T`, `3T` e `4T` a partir de acumulados
+- Inferencia manual de periodo comparavel para YoY ou QoQ
+- Regras deterministicas hoje cobertas por `/sinais`
+
+### Exemplo de serie trimestral isolada
+
+```json
+{
+  "resolution": {
+    "mode": "canonical",
+    "materialization_execution_id": "4f7b0ed0-f2c4-4d7a-90b4-c0b2a0e2db78",
+    "materialized_at": "2026-06-22T12:00:00Z",
+    "as_of": "2025-11-08"
+  },
+  "observacoes": [
+    {
+      "metric_id": "receita_liquida",
+      "period_id": "2025-Q3",
+      "fiscal_year": 2025,
+      "quarter": 3,
+      "period_nature": "duration",
+      "period_basis": "quarter",
+      "start_date": "2025-07-01",
+      "end_date": "2025-09-30",
+      "value": "127906000000",
+      "unit": "BRL",
+      "scope": "consolidated",
+      "form": "ITR",
+      "version": 1,
+      "restated": false,
+      "value_source": "reported",
+      "comparables": {
+        "yoy_period_id": "2024-Q3",
+        "qoq_period_id": "2025-Q2"
+      },
+      "provenance": [
+        {
+          "source": "CVM",
+          "dataset": "demonstracoes_financeiras",
+          "form": "ITR",
+          "document_id": 9103,
+          "version": 1,
+          "account_code": "3.01"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### Exemplo de comparacao indisponivel
+
+```json
+{
+  "resolution": {
+    "mode": "canonical",
+    "materialization_execution_id": "4f7b0ed0-f2c4-4d7a-90b4-c0b2a0e2db78",
+    "materialized_at": "2026-06-22T12:00:00Z",
+    "as_of": "2025-11-08"
+  },
+  "comparacoes": [
+    {
+      "metric_id": "receita_liquida",
+      "period_id": "2025-YTDQ3",
+      "comparison_kind": "QoQ",
+      "status": "unavailable",
+      "reason_code": "QOQ_NOT_SUPPORTED_FOR_YTD_FLOW",
+      "metric_unit": "BRL",
+      "comparison_unit": "ratio"
+    }
+  ]
+}
+```
+
+### Sugerestao de contratos TypeScript
+
+```ts
+type AnalisePeriodicidade = "annual" | "quarterly";
+type AnaliseBasePeriodo = "fy" | "quarter" | "ytd";
+type AnaliseEscopo = "consolidated" | "individual";
+type AnaliseUnit = "BRL" | "ratio" | "percentage_point" | "count" | "shares" | "index";
+type AnaliseResolutionMode = "canonical" | "runtime_fallback";
+
+type AnaliseResolutionMetadata = {
+  mode: AnaliseResolutionMode;
+  materialization_execution_id: string | null;
+  materialized_at: string | null;
+  as_of: string | null;
+};
+
+type AnaliseMaterializacaoStatus = "running" | "success" | "failed";
+
+type AnaliseMaterializacaoProgress = {
+  total_knowledge_dates: number | null;
+  processed_knowledge_dates: number | null;
+  current_known_from: string | null;
+  progress_ratio: number | null;
+  context_revisions: number | null;
+  fact_revisions: number | null;
+};
+
+type AnaliseMaterializacaoExecucaoResumo = {
+  id: string;
+  codigo_cvm: number;
+  escopo: AnaliseEscopo;
+  calculation_version: string;
+  status: AnaliseMaterializacaoStatus;
+  coverage_complete: boolean;
+  source: string;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+  elapsed_seconds: number | null;
+  estimated_remaining_seconds: number | null;
+  estimated_finish_at: string | null;
+  progress: AnaliseMaterializacaoProgress;
+};
+
+type AnaliseMaterializacaoMonitoramento = {
+  as_of: string;
+  fila: {
+    workers_reporting: number;
+    materialization_active_tasks: number;
+    materialization_reserved_tasks: number;
+    materialization_scheduled_tasks: number;
+  };
+  running_executions: number;
+  oldest_running_started_at: string | null;
+  longest_running_elapsed_seconds: number | null;
+  stalled_threshold_seconds: number;
+  stalled_execution_ids: string[];
+};
+
+type AnaliseSeriesObservation = {
+  metric_id: string;
+  period_id: string;
+  fiscal_year: number;
+  quarter: number | null;
+  period_nature: "instant" | "duration";
+  period_basis: AnaliseBasePeriodo;
+  start_date: string | null;
+  end_date: string;
+  value: string;
+  unit: AnaliseUnit;
+  scope: AnaliseEscopo;
+  form: "DFP" | "ITR" | "DERIVED";
+  version: number | null;
+  restated: boolean;
+  value_source: "reported" | "derived_from_ytd_delta" | "derived_from_dfp_minus_ytd" | "derived_from_formula";
+  comparables: {
+    yoy_period_id: string | null;
+    qoq_period_id: string | null;
+  };
+  provenance: Array<{
+    source: string;
+    dataset: string;
+    form: "DFP" | "ITR" | "DERIVED";
+    document_id: number | null;
+    version: number | null;
+    account_code: string | null;
+  }>;
+};
+```
+
+### Checklist de migracao de frontend
+
+- Remapear todas as chamadas antigas para os endpoints sem versão
+- Trocar parsing de datas analiticas para ISO 8601
+- Passar a respeitar `unit` antes de formatar qualquer valor
+- Remover calculos locais de QoQ, YoY comparavel e trimestre isolado
+- Consumir `issues` e `indisponibilidades` em vez de assumir ausencia silenciosa
+- Tratar `404` das rotas analiticas antigas como contrato removido
+- Consumir `/analise/metricas` para ids, nomes e unidades oficiais
+- Expor `resolution` para inspeção operacional e troubleshooting de dados `as_of`
+- Se houver tela operacional ou admin, consumir `/analise/materializacoes` e `/analise/materializacoes/monitoramento`

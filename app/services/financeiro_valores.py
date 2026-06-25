@@ -20,18 +20,28 @@ def normalizar_decimal_financeiro(valor: Any) -> Decimal | None:
     texto = normalizar_texto(valor)
     if texto is None:
         return None
-    if "," in texto and "." in texto:
-        return Decimal(texto.replace(".", "").replace(",", "."))
+    if texto.upper() in {"-", "N/A", "ND", "N/D", "NI", "NA", "N.A.", "N.A"}:
+        return None
+    texto = texto.strip()
     if "," in texto:
-        return Decimal(texto.replace(",", "."))
+        raise ValueError(f"Separador decimal invalido para dado estruturado CVM: {valor}")
+    if texto.count(".") > 1:
+        raise ValueError(f"Separador de milhares invalido para dado estruturado CVM: {valor}")
     return Decimal(texto)
 
 
-def fator_escala_moeda(escala_moeda: str | None) -> Decimal:
+def validar_escala_moeda(escala_moeda: str | None) -> str:
     escala = normalizar_texto(escala_moeda)
     if escala is None:
-        return Decimal("1")
-    return _ESCALA_FATORES.get(escala.upper(), Decimal("1"))
+        raise ValueError("escala_moeda_ausente")
+    escala_upper = escala.upper()
+    if escala_upper not in _ESCALA_FATORES:
+        raise ValueError(f"escala_moeda_desconhecida: {escala}")
+    return escala_upper
+
+
+def fator_escala_moeda(escala_moeda: str | None) -> Decimal:
+    return _ESCALA_FATORES[validar_escala_moeda(escala_moeda)]
 
 
 def valor_conta_ajustado(valor_conta_reportado: Decimal | None, escala_moeda: str | None) -> Decimal | None:
@@ -45,7 +55,8 @@ def expressao_sql_valor_conta_ajustado() -> Any:
         (DemonstracaoFinanceira.escala_moeda == "MIL", 1000),
         (DemonstracaoFinanceira.escala_moeda == "MILHAO", 1000000),
         (DemonstracaoFinanceira.escala_moeda == "MILHÃO", 1000000),
-        else_=1,
+        (DemonstracaoFinanceira.escala_moeda == "UNIDADE", 1),
+        else_=None,
     )
 
 

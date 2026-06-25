@@ -385,48 +385,72 @@ def _create_provisional_company(db: Session, resolver_input: ResolverInput) -> R
             details={"motivo": "identidade_insuficiente_para_provisorio"},
         )
 
-    companhia = Companhia(
-        cnpj_companhia=cnpj,
-        codigo_cvm=resolver_input.codigo_cvm_normalizado,
-        denominacao_social=normalizar_texto(resolver_input.denominacao_companhia),
-        denominacao_comercial=normalizar_texto(resolver_input.denominacao_companhia),
-        tipo_emissor="provisorio",
-        fonte_identidade_principal="resolver_provisional",
-        qualidade_identidade="baixa",
-        arquivo_origem="resolver_provisional",
-        ano_origem=resolver_input.data_referencia.year if resolver_input.data_referencia is not None else None,
-        linha_origem=None,
-        hash_origem="resolver_provisional",
-    )
-    db.add(companhia)
-    db.flush()
+    from sqlalchemy.exc import IntegrityError
+    try:
+        with db.begin_nested():
+            companhia = Companhia(
+                cnpj_companhia=cnpj,
+                codigo_cvm=resolver_input.codigo_cvm_normalizado,
+                denominacao_social=normalizar_texto(resolver_input.denominacao_companhia),
+                denominacao_comercial=normalizar_texto(resolver_input.denominacao_companhia),
+                tipo_emissor="provisorio",
+                fonte_identidade_principal="resolver_provisional",
+                qualidade_identidade="baixa",
+                arquivo_origem="resolver_provisional",
+                ano_origem=resolver_input.data_referencia.year if resolver_input.data_referencia is not None else None,
+                linha_origem=None,
+                hash_origem="resolver_provisional",
+            )
+            db.add(companhia)
+            db.flush()
 
-    if resolver_input.cnpj_normalizado:
-        db.add(
-            CompanhiaIdentificador(
-                companhia_id=companhia.id,
-                tipo="cnpj",
-                valor=resolver_input.cnpj_normalizado,
-                valor_normalizado=resolver_input.cnpj_normalizado,
-                fonte="resolver_provisional",
-                confianca="baixa",
-                ativo=True,
-            )
+            if resolver_input.cnpj_normalizado:
+                db.add(
+                    CompanhiaIdentificador(
+                        companhia_id=companhia.id,
+                        tipo="cnpj",
+                        valor=resolver_input.cnpj_normalizado,
+                        valor_normalizado=resolver_input.cnpj_normalizado,
+                        fonte="resolver_provisional",
+                        confianca="baixa",
+                        ativo=True,
+                    )
+                )
+            if resolver_input.codigo_cvm_normalizado is not None:
+                codigo_texto = str(resolver_input.codigo_cvm_normalizado)
+                db.add(
+                    CompanhiaIdentificador(
+                        companhia_id=companhia.id,
+                        tipo="codigo_cvm",
+                        valor=codigo_texto,
+                        valor_normalizado=codigo_texto,
+                        fonte="resolver_provisional",
+                        confianca="baixa",
+                        ativo=True,
+                    )
+                )
+            db.flush()
+    except IntegrityError:
+        # Recuperar companhia inserida concorrentemente
+        existing = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
+        if existing is None:
+            raise
+
+        # Atualizar os caches em memória para incluir a companhia existente
+        _ensure_identifiers_loaded(db)
+        _ensure_companhias_loaded(db)
+        if existing.cnpj_companhia:
+            _session_cache(db)._companhia_by_cnpj_cache[existing.cnpj_companhia] = existing
+        if existing.codigo_cvm is not None:
+            _session_cache(db)._companhia_by_codigo_cache[existing.codigo_cvm] = existing
+
+        return ResolverResult(
+            status=STATUS_PROVISIONAL_CREATED,
+            companhia_id=existing.id,
+            resolution_method="provisional_company_baixa",
+            resolution_confidence="baixa",
+            details={"tipo_emissor": "provisorio", "concorrencia": "detectada"},
         )
-    if resolver_input.codigo_cvm_normalizado is not None:
-        codigo_texto = str(resolver_input.codigo_cvm_normalizado)
-        db.add(
-            CompanhiaIdentificador(
-                companhia_id=companhia.id,
-                tipo="codigo_cvm",
-                valor=codigo_texto,
-                valor_normalizado=codigo_texto,
-                fonte="resolver_provisional",
-                confianca="baixa",
-                ativo=True,
-            )
-        )
-    db.flush()
 
     # Update in-memory caches to include the newly created provisional company
     _ensure_identifiers_loaded(db)

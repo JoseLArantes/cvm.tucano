@@ -619,6 +619,7 @@ def _process_financeiro_rows(
                 db,
                 _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
                 header_map=header_map,
+                provisional_enabled=True,
             )
             if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
                 result = invalid_result(
@@ -858,6 +859,7 @@ def _process_financeiro_member(
                 db,
                 _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
                 header_map=header_map,
+                provisional_enabled=True,
             )
             if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
                 result = invalid_result(

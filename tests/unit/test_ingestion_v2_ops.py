@@ -1,11 +1,13 @@
+import io
 import os
 import uuid
+import zipfile
 from collections.abc import Generator
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -15,6 +17,7 @@ os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
 from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.models.ingestion import IngestionAttempt, IngestionRow, IngestionRun, QuarantineItem
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.backfill import build_dark_launch_parity_report, run_backfill_years
 from app.services.ingestion.metrics import RunTimer, get_ingestion_metrics
 from app.services.ingestion.quality import enforce_quality_gate
@@ -24,6 +27,7 @@ from app.services.ingestion.sql_batches import (
     max_rows_for_parameter_budget,
 )
 from app.services.ingestion.summary import build_quality_summary, render_parity_report_markdown
+from app.worker.tasks import pre_processar_sincronizacao_zip
 
 
 @pytest.fixture()
@@ -270,6 +274,99 @@ def test_admin_v2_runs_and_quarantine_endpoints(client: TestClient, db_session: 
     assert resumo["por_arquivo_e_erro"][0]["arquivo_origem"] == "dfp.csv"
     assert resumo["por_arquivo_e_erro"][0]["motivo_codigo"] == "companhia_nao_encontrada"
     assert resumo["por_arquivo_e_erro"][0]["quantidade"] == 1
+    assert resumo["total_pendentes"] == 1
+    assert resumo["total_resolvidos"] == 0
+    assert resumo["total_historico"] == 1
+
+
+def test_admin_quarentena_defaults_to_pending_but_all_exposes_history(
+    client: TestClient, db_session: Session
+) -> None:
+    run = IngestionRun(tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+    db_session.add(run)
+    db_session.flush()
+    row_pendente = IngestionRow(
+        ingestion_run_id=run.id,
+        ingestion_file_member_id=uuid.uuid4(),
+        arquivo_origem="dfp_pendente.csv",
+        ano_origem=2025,
+        linha_origem=2,
+        raw_data={"a": 1},
+        raw_hash="hash-pendente",
+        row_kind="dfp_documento",
+        validation_status="invalid",
+    )
+    row_resolvido = IngestionRow(
+        ingestion_run_id=run.id,
+        ingestion_file_member_id=uuid.uuid4(),
+        arquivo_origem="dfp_resolvido.csv",
+        ano_origem=2025,
+        linha_origem=3,
+        raw_data={"a": 2},
+        raw_hash="hash-resolvido",
+        row_kind="dfp_documento",
+        validation_status="valid",
+    )
+    db_session.add_all([row_pendente, row_resolvido])
+    db_session.flush()
+    db_session.add_all(
+        [
+            QuarantineItem(
+                ingestion_run_id=run.id,
+                ingestion_row_id=row_pendente.id,
+                arquivo_origem="dfp_pendente.csv",
+                ano_origem=2025,
+                linha_origem=2,
+                row_kind="dfp_documento",
+                status="pendente",
+                motivo_codigo="companhia_nao_encontrada",
+                severidade="error",
+                reparavel=True,
+                tentativas_reprocessamento=0,
+            ),
+            QuarantineItem(
+                ingestion_run_id=run.id,
+                ingestion_row_id=row_resolvido.id,
+                arquivo_origem="dfp_resolvido.csv",
+                ano_origem=2025,
+                linha_origem=3,
+                row_kind="dfp_documento",
+                status="resolvido_auto",
+                motivo_codigo="normalizacao_invalida",
+                severidade="error",
+                reparavel=True,
+                tentativas_reprocessamento=1,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resposta_padrao = client.get("/ingestion/quarentena")
+    resposta_all = client.get("/ingestion/quarentena?status=all")
+    resumo_padrao = client.get("/ingestion/quarentena/resumo")
+    resumo_all = client.get("/ingestion/quarentena/resumo?status=all")
+
+    assert resposta_padrao.status_code == 200
+    assert resposta_padrao.json()["paginacao"]["total"] == 1
+    assert resposta_padrao.json()["dados"][0]["status"] == "pendente"
+
+    assert resposta_all.status_code == 200
+    assert resposta_all.json()["paginacao"]["total"] == 2
+
+    assert resumo_padrao.status_code == 200
+    payload_padrao = resumo_padrao.json()
+    assert payload_padrao["total"] == 1
+    assert payload_padrao["total_pendentes"] == 1
+    assert payload_padrao["total_resolvidos"] == 1
+    assert payload_padrao["total_historico"] == 2
+    assert payload_padrao["por_arquivo"][0]["arquivo_origem"] == "dfp_pendente.csv"
+
+    assert resumo_all.status_code == 200
+    payload_all = resumo_all.json()
+    assert payload_all["total"] == 2
+    assert payload_all["total_pendentes"] == 1
+    assert payload_all["total_resolvidos"] == 1
+    assert payload_all["total_historico"] == 2
 
 
 def test_admin_v2_replay_and_identity_rebuild_endpoints(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -307,7 +404,7 @@ def test_worker_tasks_use_single_ingestion_path_and_retry_options(monkeypatch: p
     monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: DummyDb())
     monkeypatch.setattr(
         "app.worker.tasks._coordenar_sincronizacao_zip",
-        lambda tipo_fonte, ano, task_id=None, force_reimport=False: {
+        lambda tipo_fonte, ano, task_id=None, force_reimport=False, *args, **kwargs: {
             "status": "sucesso",
             "execucao_id": "v2" if tipo_fonte == "dfp" else f"{tipo_fonte}-v2",
         },
@@ -327,6 +424,71 @@ def test_worker_tasks_use_single_ingestion_path_and_retry_options(monkeypatch: p
     assert getattr(worker_tasks.sincronizar_dfp_task, "retry_backoff", False) is True
     assert getattr(worker_tasks.sincronizar_ipe_task, "retry_backoff", False) is True
     assert getattr(worker_tasks.sincronizar_vlmo_task, "retry_backoff", False) is True
+
+
+def test_pre_processar_sincronizacao_zip_ignora_membro_ausente_e_segue_com_disponiveis(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(
+            "itr_cia_aberta_2019.csv",
+            (
+                "CNPJ_CIA;CD_CVM;DT_REFER;VERSAO;DENOM_CIA;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC\n"
+                "00000000000191;1023;2019-12-31;1;BANCO DO BRASIL;ITR;111;2020-03-31;http://exemplo\n"
+            ).encode("latin1"),
+        )
+        zip_file.writestr(
+            "itr_cia_aberta_DRE_ind_2019.csv",
+            (
+                "CNPJ_CIA;CD_CVM;DT_REFER;VERSAO;DENOM_CIA;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;"
+                "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA;COLUNA_DF\n"
+                "00000000000191;1023;2019-12-31;1;BANCO DO BRASIL;DF Consolidado;REAL;UNIDADE;ULTIMO;"
+                "2019-01-01;2019-12-31;3.01;Receita;100;S;Atual\n"
+            ).encode("latin1"),
+        )
+    payload = buffer.getvalue()
+
+    def _fake_download(url: str, dest_path: str, timeout: float = 300) -> str:
+        path = os.fspath(dest_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as file_obj:
+            file_obj.write(payload)
+        import hashlib
+
+        return hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr("app.services.ingestion.file_manager.download_file_to_disk", _fake_download)
+
+    resultado = pre_processar_sincronizacao_zip(tipo_fonte="itr", ano=2019, task_id="task-itr-missing-member")
+
+    assert resultado["status"] == "aguardando_ingestao"
+
+    execucao = db_session.get(ExecucaoSincronizacao, uuid.UUID(resultado["execucao_id"]))
+    assert execucao is not None
+    assert execucao.status == "aguardando_ingestao"
+    assert execucao.mensagem_erro is not None
+    assert "membros_ausentes_ignorados" in execucao.mensagem_erro
+    assert "itr_cia_aberta_composicao_capital_2019.csv" in execucao.mensagem_erro
+
+    run = db_session.scalar(select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id))
+    assert run is not None
+    assert run.message is not None
+    assert "itr_cia_aberta_composicao_capital_2019.csv" in run.message
+
+    filhos = db_session.scalars(
+        select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.parent_execucao_id == execucao.id)
+    ).all()
+    arquivos_filhos = {item.arquivo for item in filhos}
+    assert "itr_cia_aberta_2019.csv" in arquivos_filhos
+    assert "itr_cia_aberta_DRE_ind_2019.csv" in arquivos_filhos
+    assert "itr_cia_aberta_composicao_capital_2019.csv" not in arquivos_filhos
 
 
 def test_run_backfill_years_and_dark_launch_report(monkeypatch: pytest.MonkeyPatch, db_session: Session) -> None:
