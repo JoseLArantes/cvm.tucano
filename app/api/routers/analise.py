@@ -288,6 +288,27 @@ def _queue_depth() -> int | None:
         return None
 
 
+def _stale_chunk_monitor_ids_subquery() -> Any:
+    return (
+        select(AnaliseMaterializacaoChunkExecucao.id)
+        .join(
+            AnaliseMaterializacaoCampanhaItem,
+            AnaliseMaterializacaoCampanhaItem.chunk_execucao_id == AnaliseMaterializacaoChunkExecucao.id,
+        )
+        .join(
+            AnaliseMaterializacaoCampanha,
+            AnaliseMaterializacaoCampanha.id == AnaliseMaterializacaoChunkExecucao.campanha_id,
+        )
+        .where(
+            AnaliseMaterializacaoChunkExecucao.status == "stale",
+            AnaliseMaterializacaoCampanha.status.in_(("pending", "running")),
+            AnaliseMaterializacaoCampanhaItem.status.in_(("pending", "running")),
+        )
+        .group_by(AnaliseMaterializacaoChunkExecucao.id)
+        .subquery()
+    )
+
+
 def _campaign_progress_ratio(campanha: AnaliseMaterializacaoCampanha) -> float | None:
     counts = (campanha.summary or {}).get("counts", {}) if isinstance(campanha.summary, dict) else {}
     progress_ratio = counts.get("progress_ratio") if isinstance(counts, dict) else None
@@ -490,11 +511,12 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         failed_items,
         skipped_items,
     ) = campaign_counts
+    stale_chunk_monitor_ids = _stale_chunk_monitor_ids_subquery()
     chunk_counts = db.execute(
         select(
             func.sum(case((AnaliseMaterializacaoChunkExecucao.status == "queued", 1), else_=0)),
             func.sum(case((AnaliseMaterializacaoChunkExecucao.status == "running", 1), else_=0)),
-            func.sum(case((AnaliseMaterializacaoChunkExecucao.status == "stale", 1), else_=0)),
+            select(func.count()).select_from(stale_chunk_monitor_ids).scalar_subquery(),
         )
     ).one()
     queued_chunks, running_chunks, stale_chunks = chunk_counts
@@ -559,11 +581,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     stale_item_count = int(
         db.scalar(
             select(func.count(AnaliseMaterializacaoCampanhaItem.id)).where(
-                AnaliseMaterializacaoCampanhaItem.chunk_execucao_id.in_(
-                    select(AnaliseMaterializacaoChunkExecucao.id).where(
-                        AnaliseMaterializacaoChunkExecucao.status == "stale"
-                    )
-                )
+                AnaliseMaterializacaoCampanhaItem.chunk_execucao_id.in_(select(stale_chunk_monitor_ids.c.id))
             )
         )
         or 0
@@ -571,7 +589,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     stale_chunk_preview = list(
         db.scalars(
             select(AnaliseMaterializacaoChunkExecucao)
-            .where(AnaliseMaterializacaoChunkExecucao.status == "stale")
+            .where(AnaliseMaterializacaoChunkExecucao.id.in_(select(stale_chunk_monitor_ids.c.id)))
             .order_by(AnaliseMaterializacaoChunkExecucao.updated_at.desc(), AnaliseMaterializacaoChunkExecucao.created_at.desc())
             .limit(10)
         ).all()

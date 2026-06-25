@@ -235,13 +235,13 @@ Campos adicionais importantes:
 | `skipped_items` | integer | Quantidade de itens deduplicados/skipped |
 | `queued_chunks` | integer | Quantidade de chunks aguardando início |
 | `running_chunks` | integer | Quantidade de chunks com lease ativo |
-| `stale_chunks` | integer | Quantidade de chunks marcados como stale |
-| `stale_item_count` | integer | Quantidade de itens ainda vinculados a chunks stale |
+| `stale_chunks` | integer | Quantidade de chunks stale ainda acionaveis, com itens nao terminais associados |
+| `stale_item_count` | integer | Quantidade de itens nao terminais ainda vinculados a chunks stale acionaveis |
 | `stalled_incremental_execution_ids` | array | Subconjunto stalled apenas do modo incremental |
 | `pending_recovery_active_tasks` | integer | Tasks ativas específicas do sweep automático de campanhas pendentes |
 | `running_execution_previews` | array | Preview das execuções correntes |
 | `campaigns` | array | Resumo das campanhas relevantes no snapshot |
-| `stale_chunk_preview` | array | Preview dos chunks stale mais recentes |
+| `stale_chunk_preview` | array | Preview dos chunks stale ainda acionaveis no snapshot |
 | `running_items_preview` | array | Preview dos itens atualmente em execução |
 | `pending_items_preview` | array | Preview dos próximos itens pendentes |
 

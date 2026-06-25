@@ -270,6 +270,8 @@ Campos adicionais do sweep global:
 - Cada chunk possui lease e heartbeat persistidos.
 - Chunks `queued` ou `running` com lease expirado entram no fluxo de recuperação.
 - A recuperação devolve itens inacabados para `pending` e preserva itens já concluídos.
+- `stale_chunks`, `stale_item_count` e `stale_chunk_preview` passaram a representar apenas stale ainda acionável no snapshot operacional.
+- Chunks stale históricos de campanhas já concluídas não devem mais ser tratados pelo frontend como itens bloqueados ou pendências de recuperação.
 - Campanhas em `pending` por gate vermelho não ficam mais se auto-reagendando continuamente.
 - A retomada do processamento pendente acontece por dispatcher explícito quando o sistema volta a verde.
 - O frontend pode distinguir:

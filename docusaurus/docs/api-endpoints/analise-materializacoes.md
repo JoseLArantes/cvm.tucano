@@ -128,6 +128,8 @@ Semantica importante:
 
 - `recoverable_pending_campaigns` conta campanhas `pending` realmente elegiveis para retry naquele instante
 - campanhas ja reenfileiradas entram temporariamente em `requeued` e saem desse contador ate o retry ser consumido ou a campanha voltar a ficar presa
+- `stale_chunks`, `stale_item_count` e `stale_chunk_preview` representam apenas stale ainda acionavel no snapshot
+- chunks historicos ja marcados como `stale` em campanhas concluidas nao entram mais nesses contadores nem no preview
 
 ## `GET /analise/materializacoes/controle`
 

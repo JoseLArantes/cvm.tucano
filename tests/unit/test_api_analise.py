@@ -1270,7 +1270,8 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
     assert payload["failed_items"] == 1
     assert payload["queued_chunks"] == 0
     assert payload["running_chunks"] == 1
-    assert payload["stale_chunks"] == 1
+    assert payload["stale_chunks"] == 0
+    assert payload["stale_item_count"] == 0
     assert str(stale.id) in payload["stalled_incremental_execution_ids"]
     assert payload["pending_recovery_active_tasks"] == 1
     execution_previews = {item["id"]: item for item in payload["running_execution_previews"]}
@@ -1285,8 +1286,61 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
     assert payload["running_items_preview"][0]["chunk_execucao_id"] == str(running_chunk.id)
     assert payload["pending_items_preview"][0]["campanha_id"] == str(campanha.id)
     assert payload["pending_items_preview"][0]["invalidated_from"] == "2026-03-10"
-    assert payload["stale_chunk_preview"][0]["chunk_execucao_id"] == str(stale_chunk.id)
+    assert payload["stale_chunk_preview"] == []
     assert str(stale.id) in payload["stalled_execution_ids"]
+
+
+def test_analise_materializacoes_monitoramento_conta_apenas_stale_acionavel(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, running_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    stale_chunk = _materializacao_chunk_execucao(
+        campanha,
+        status="stale",
+        lease_expires_at=datetime.now(UTC) - timedelta(minutes=10),
+        heartbeat_at=datetime.now(UTC) - timedelta(minutes=10),
+        item_count=1,
+        updated_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    db_session.add(stale_chunk)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="running",
+            ordem=1,
+            chunk_execucao_id=stale_chunk.id,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+    )
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, dict[str, str]]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    resp = client.get("/analise/materializacoes/monitoramento")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["stale_chunks"] == 1
+    assert payload["stale_item_count"] == 1
+    assert payload["stale_chunk_preview"][0]["chunk_execucao_id"] == str(stale_chunk.id)
 
 
 def test_analise_materializacoes_controle_pause_resume(client: TestClient, db_session: Session) -> None:

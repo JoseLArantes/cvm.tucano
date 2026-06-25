@@ -261,6 +261,31 @@ Campos mais importantes para frontend:
 - `last_pending_recovery_sweep_at`
 - `last_pending_recovery_sweep_summary`
 - `pending_recovery_active_tasks`
+- `stale_chunks`
+- `stale_item_count`
+- `stale_chunk_preview`
+
+## Como interpretar stale no monitoramento
+
+Os campos:
+
+- `stale_chunks`
+- `stale_item_count`
+- `stale_chunk_preview`
+
+devem ser tratados como sinal de stale ainda acionavel, nao como historico bruto.
+
+Isso significa:
+
+- entram apenas chunks stale que ainda possuem itens nao terminais associados
+- stale historico de campanha ja concluida nao deve acender badge de bloqueio
+- frontend nao deve inferir item travado apenas porque houve chunk stale no passado
+
+Uso recomendado:
+
+- usar `stale_chunks > 0` como sinal de atencao operacional atual
+- usar `stale_chunk_preview` para drill-down do que ainda requer acao
+- nao usar chunks stale historicos como impeditivo para marcar campanha concluida
 
 ## Como interpretar `recoverable_pending_campaigns`
 
