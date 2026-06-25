@@ -1279,7 +1279,9 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
     assert execution_previews[str(stale.id)]["invalidated_from"] == "2026-03-10"
     campaigns_by_id = {item["campanha_id"]: item for item in payload["campaigns"]}
     assert str(campanha.id) in campaigns_by_id
+    assert campaigns_by_id[str(campanha.id)]["active_chunks"] == 1
     assert campaigns_by_id[str(campanha.id)]["active_chunk_id"] == str(running_chunk.id)
+    assert campaigns_by_id[str(campanha.id)]["active_chunk_ids_preview"] == [str(running_chunk.id)]
     assert campaigns_by_id[str(campanha_presa.id)]["recovery_state"] == "recoverable"
     assert payload["running_items_preview"][0]["campanha_id"] == str(campanha.id)
     assert payload["running_items_preview"][0]["materialization_mode"] == "incremental"
@@ -1623,6 +1625,9 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert "stale_chunk_preview" in monitor_schema
     assert "running_execution_previews" in monitor_schema
     assert "campaigns" in monitor_schema
+    campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]
+    assert "active_chunks" in campanha_schema
+    assert "active_chunk_ids_preview" in campanha_schema
     assert "running_items_preview" in monitor_schema
     campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]
     assert "recovery_state" in campanha_schema

@@ -259,8 +259,10 @@ Campos adicionais do sweep global:
 
 ### Campos novos em resumo de campanha
 
+- `active_chunks`
 - `active_chunk_id`
 - `active_chunk_lease_expires_at`
+- `active_chunk_ids_preview`
 - `stale_chunks`
 - `wait_reason`
 
@@ -272,6 +274,10 @@ Campos adicionais do sweep global:
 - A recuperação devolve itens inacabados para `pending` e preserva itens já concluídos.
 - `stale_chunks`, `stale_item_count` e `stale_chunk_preview` passaram a representar apenas stale ainda acionável no snapshot operacional.
 - Chunks stale históricos de campanhas já concluídas não devem mais ser tratados pelo frontend como itens bloqueados ou pendências de recuperação.
+- A materialização agora distingue concorrência entre campanhas e concorrência de chunks dentro da mesma campanha.
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS` limita campanhas simultâneas.
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN` limita chunks simultâneos dentro da mesma campanha.
+- `active_chunks` e `active_chunk_ids_preview` devem ser usados quando a UI precisar refletir paralelismo intra-campanha.
 - Campanhas em `pending` por gate vermelho não ficam mais se auto-reagendando continuamente.
 - A retomada do processamento pendente acontece por dispatcher explícito quando o sistema volta a verde.
 - O frontend pode distinguir:

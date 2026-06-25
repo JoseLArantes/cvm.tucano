@@ -78,6 +78,11 @@ class Settings(BaseSettings):
         ge=1,
         alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS",
     )
+    analise_materializacao_max_active_chunks_per_campaign: int = Field(
+        default=1,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN",
+    )
     analise_materializacao_queue_name: str = Field(
         default="analise_materializacao",
         alias="ANALISE_MATERIALIZACAO_QUEUE_NAME",

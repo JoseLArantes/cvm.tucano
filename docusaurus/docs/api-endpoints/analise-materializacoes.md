@@ -40,6 +40,7 @@ A materializacao canonica usa:
 - fila dedicada
 - campanhas agregadas
 - chunks com lease persistido
+- concorrencia independente por campanha e por chunk
 - dispatcher de campanhas pendentes
 - gate de admissao
 - retries operacionais
@@ -49,6 +50,16 @@ Por padrao:
 
 - campanhas automaticas e fluxos padrao nao incluem companhias com `situacao_registro=CANCELADA`
 - companhias canceladas so entram com override explicito em disparos pontuais
+
+Controles de concorrencia:
+
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS`: limita quantas campanhas distintas podem ficar em `running` ao mesmo tempo
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN`: limita quantos chunks da mesma campanha podem ficar ativos em paralelo
+
+Semantica importante:
+
+- aumentar apenas `MAX_ACTIVE_CAMPAIGNS` nao paraleliza uma campanha unica muito grande
+- para processar varias companhias em paralelo dentro da mesma campanha, e preciso aumentar `MAX_ACTIVE_CHUNKS_PER_CAMPAIGN`
 
 ## `GET /analise/materializacoes`
 
@@ -123,6 +134,8 @@ Campos operacionais principais:
 - `stale_chunks`
 - `stale_item_count`
 - `pending_recovery_active_tasks`
+- `campaigns[].active_chunks`
+- `campaigns[].active_chunk_ids_preview`
 
 Semantica importante:
 
@@ -130,6 +143,8 @@ Semantica importante:
 - campanhas ja reenfileiradas entram temporariamente em `requeued` e saem desse contador ate o retry ser consumido ou a campanha voltar a ficar presa
 - `stale_chunks`, `stale_item_count` e `stale_chunk_preview` representam apenas stale ainda acionavel no snapshot
 - chunks historicos ja marcados como `stale` em campanhas concluidas nao entram mais nesses contadores nem no preview
+- `campaigns[].active_chunk_id` continua existindo como identificador representativo de um dos chunks ativos
+- `campaigns[].active_chunks` e `campaigns[].active_chunk_ids_preview` devem ser usados quando a UI precisar refletir concorrencia intra-campanha
 
 ## `GET /analise/materializacoes/controle`
 

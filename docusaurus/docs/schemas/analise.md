@@ -306,8 +306,10 @@ Além dos totais gerais de tasks, o snapshot atual expõe:
 | `skipped_items` | integer | Itens deduplicados/skipped |
 | `progress_ratio` | number | Progresso estimado entre 0 e 1 |
 | `estimated_remaining_seconds` | integer | Tempo restante estimado |
+| `active_chunks` | integer | Quantidade de chunks ativos atuais da campanha |
 | `active_chunk_id` | string | Chunk ativo atual da campanha, quando houver |
 | `active_chunk_lease_expires_at` | string | Expiração do lease do chunk ativo |
+| `active_chunk_ids_preview` | array | Preview dos identificadores dos chunks ativos atuais |
 | `stale_chunks` | integer | Quantidade de chunks stale ligados à campanha |
 | `wait_reason` | string | Motivo operacional da espera atual, quando houver |
 | `recovery_state` | string | Classificação persistida mais recente da campanha para fins de self-healing |

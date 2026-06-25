@@ -3643,6 +3643,34 @@ def obter_chunk_ativo_campanha(
     )
 
 
+def listar_chunks_ativos_campanha(
+    db: Session,
+    campanha_id: uuid.UUID,
+    *,
+    limit: int | None = None,
+) -> list[AnaliseMaterializacaoChunkExecucao]:
+    now = datetime.now(UTC)
+    stmt = (
+        select(AnaliseMaterializacaoChunkExecucao)
+        .where(
+            AnaliseMaterializacaoChunkExecucao.campanha_id == campanha_id,
+            AnaliseMaterializacaoChunkExecucao.status.in_(("queued", "running")),
+            or_(
+                AnaliseMaterializacaoChunkExecucao.lease_expires_at.is_(None),
+                AnaliseMaterializacaoChunkExecucao.lease_expires_at >= now,
+            ),
+        )
+        .order_by(AnaliseMaterializacaoChunkExecucao.created_at.asc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt).all())
+
+
+def contar_chunks_ativos_campanha(db: Session, campanha_id: uuid.UUID) -> int:
+    return len(listar_chunks_ativos_campanha(db, campanha_id))
+
+
 def contar_chunks_stale_campanha(db: Session, campanha_id: uuid.UUID) -> int:
     return int(
         db.scalar(
@@ -3788,58 +3816,95 @@ def claim_materializacao_campanha_chunk(
     *,
     chunk_size: int,
 ) -> tuple[AnaliseMaterializacaoChunkExecucao, list[AnaliseMaterializacaoCampanhaItem]] | None:
-    now = datetime.now(UTC)
-    item_ids = list(
-        db.scalars(
-            select(AnaliseMaterializacaoCampanhaItem.id)
-            .where(
-                AnaliseMaterializacaoCampanhaItem.campanha_id == campanha_id,
-                AnaliseMaterializacaoCampanhaItem.status == "pending",
-            )
-            .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
-            .limit(chunk_size)
-            .with_for_update(skip_locked=True)
-        ).all()
+    claimed = claim_materializacao_campanha_chunks(
+        db,
+        campanha_id,
+        chunk_size=chunk_size,
+        max_chunks=1,
     )
-    if not item_ids:
+    if not claimed:
         return None
-    items = list(
-        db.scalars(
-            select(AnaliseMaterializacaoCampanhaItem)
-            .where(AnaliseMaterializacaoCampanhaItem.id.in_(item_ids))
-            .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
-        ).all()
+    return claimed[0]
+
+
+def claim_materializacao_campanha_chunks(
+    db: Session,
+    campanha_id: uuid.UUID,
+    *,
+    chunk_size: int,
+    max_chunks: int,
+) -> list[tuple[AnaliseMaterializacaoChunkExecucao, list[AnaliseMaterializacaoCampanhaItem]]]:
+    if max_chunks <= 0:
+        return []
+    now = datetime.now(UTC)
+    campanha = db.scalar(
+        select(AnaliseMaterializacaoCampanha)
+        .where(AnaliseMaterializacaoCampanha.id == campanha_id)
+        .with_for_update()
     )
-    chunk = AnaliseMaterializacaoChunkExecucao(
-        campanha_id=campanha_id,
-        status="queued",
-        lease_expires_at=_lease_expires_at_from(now),
-        heartbeat_at=now,
-        item_count=len(items),
-        processed_items=0,
-        success_items=0,
-        failed_items=0,
-        summary={},
-        updated_at=now,
-    )
-    db.add(chunk)
+    if campanha is None:
+        return []
+    available_chunk_slots = max(0, max_chunks - contar_chunks_ativos_campanha(db, campanha_id))
+    if available_chunk_slots <= 0:
+        return []
+    claimed_chunks: list[tuple[AnaliseMaterializacaoChunkExecucao, list[AnaliseMaterializacaoCampanhaItem]]] = []
+    for _ in range(available_chunk_slots):
+        item_ids = list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanhaItem.id)
+                .where(
+                    AnaliseMaterializacaoCampanhaItem.campanha_id == campanha_id,
+                    AnaliseMaterializacaoCampanhaItem.status == "pending",
+                )
+                .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
+                .limit(chunk_size)
+                .with_for_update(skip_locked=True)
+            ).all()
+        )
+        if not item_ids:
+            break
+        items = list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanhaItem)
+                .where(AnaliseMaterializacaoCampanhaItem.id.in_(item_ids))
+                .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
+            ).all()
+        )
+        chunk = AnaliseMaterializacaoChunkExecucao(
+            campanha_id=campanha_id,
+            status="queued",
+            lease_expires_at=_lease_expires_at_from(now),
+            heartbeat_at=now,
+            item_count=len(items),
+            processed_items=0,
+            success_items=0,
+            failed_items=0,
+            summary={},
+            updated_at=now,
+        )
+        db.add(chunk)
+        db.flush()
+        for item in items:
+            item.status = "running"
+            item.enqueued_at = now
+            item.chunk_execucao_id = chunk.id
+            item.reason = None
+            item.updated_at = now
+        db.flush()
+        claimed_chunks.append((chunk, items))
+
+    if not claimed_chunks:
+        return []
+    campanha.started_at = campanha.started_at or now
+    campanha.updated_at = now
+    campanha.status = "running"
     db.flush()
-    for item in items:
-        item.status = "running"
-        item.enqueued_at = now
-        item.chunk_execucao_id = chunk.id
-        item.reason = None
-        item.updated_at = now
+    _recalcular_materializacao_campanha(db, campanha)
     db.flush()
-    campanha = db.get(AnaliseMaterializacaoCampanha, campanha_id)
-    if campanha is not None:
-        campanha.started_at = campanha.started_at or now
-        campanha.updated_at = now
-        campanha.status = "running"
-        _recalcular_materializacao_campanha(db, campanha)
     db.commit()
-    db.refresh(chunk)
-    return chunk, items
+    for chunk, _items in claimed_chunks:
+        db.refresh(chunk)
+    return claimed_chunks
 
 
 def renovar_chunk_execucao_lease(

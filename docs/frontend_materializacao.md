@@ -250,6 +250,23 @@ Endpoint principal:
 
 - `GET /analise/materializacoes/monitoramento`
 
+## Controles de concorrencia
+
+Existem dois limites distintos no backend:
+
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS`
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN`
+
+Semantica:
+
+- o primeiro limita quantas campanhas diferentes podem ficar em execucao ao mesmo tempo
+- o segundo limita quantos chunks da mesma campanha podem rodar em paralelo
+
+Regra importante para frontend e operacao:
+
+- uma campanha unica muito grande nao passa a paralelizar so porque `MAX_ACTIVE_CAMPAIGNS` foi aumentado
+- a paralelizacao intra-campanha depende de `MAX_ACTIVE_CHUNKS_PER_CAMPAIGN`
+
 Campos mais importantes para frontend:
 
 - `recoverable_pending_campaigns`
@@ -264,6 +281,8 @@ Campos mais importantes para frontend:
 - `stale_chunks`
 - `stale_item_count`
 - `stale_chunk_preview`
+- `campaigns[].active_chunks`
+- `campaigns[].active_chunk_ids_preview`
 
 ## Como interpretar stale no monitoramento
 
@@ -286,6 +305,26 @@ Uso recomendado:
 - usar `stale_chunks > 0` como sinal de atencao operacional atual
 - usar `stale_chunk_preview` para drill-down do que ainda requer acao
 - nao usar chunks stale historicos como impeditivo para marcar campanha concluida
+
+## Como interpretar concorrencia da campanha
+
+Os campos:
+
+- `campaigns[].active_chunks`
+- `campaigns[].active_chunk_id`
+- `campaigns[].active_chunk_ids_preview`
+
+devem ser lidos assim:
+
+- `active_chunks` e a contagem real de chunks ativos da campanha
+- `active_chunk_id` permanece como identificador representativo para compatibilidade
+- `active_chunk_ids_preview` e o campo correto para UI que precisa mostrar mais de um chunk simultaneo
+
+Uso recomendado:
+
+- usar `active_chunks` para badges numericos
+- usar `active_chunk_ids_preview` para detalhe, tooltip ou drawer
+- nao assumir mais que existe somente um chunk ativo por campanha
 
 ## Como interpretar `recoverable_pending_campaigns`
 

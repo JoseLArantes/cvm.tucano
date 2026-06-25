@@ -517,6 +517,82 @@ def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
     assert campanha_atualizada.pending_items == 1
 
 
+def test_materializar_analise_campanha_enfileira_multiplos_chunks_quando_habilitado(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    codigo_cvm_secundario = cia.codigo_cvm + 1
+    _companhia(db_session, codigo_cvm=codigo_cvm_secundario)
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm, codigo_cvm_secundario],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    captured: list[tuple[str, str]] = []
+
+    def _fake_delay(campanha_id: str, chunk_execucao_id: str) -> None:
+        captured.append((campanha_id, chunk_execucao_id))
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        worker_tasks._settings,
+        "analise_materializacao_max_active_chunks_per_campaign",
+        2,
+    )
+    monkeypatch.setattr(worker_tasks.materializar_analise_chunk_task, "delay", _fake_delay)
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "enqueued"
+    assert resultado["chunk_count"] == 2
+    assert resultado["claimed_items"] == 2
+    assert len(resultado["chunk_execucao_ids"]) == 2
+    assert len(captured) == 2
+    assert {campanha_id for campanha_id, _chunk_id in captured} == {str(campanha.id)}
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.running_items == 2
+    assert campanha_atualizada.pending_items == 2
+
+
+def test_materializar_analise_campanha_aguarda_slot_de_chunk_por_campanha(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        worker_tasks._settings,
+        "analise_materializacao_max_active_chunks_per_campaign",
+        1,
+    )
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "waiting_for_chunk_slot"
+    assert resultado["active_chunks"] == 1
+    assert resultado["max_active_chunks_per_campaign"] == 1
+    assert resultado["active_chunk_ids_preview"] == [str(chunk.id)]
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["wait_reason"] == "MAX_ACTIVE_CHUNKS_PER_CAMPAIGN_REACHED"
+
+
 def test_recuperar_chunks_materializacao_stale_devolve_itens_para_pending(db_session: Session) -> None:
     cia = _companhia(db_session)
     assert cia.codigo_cvm is not None

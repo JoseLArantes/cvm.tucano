@@ -115,8 +115,9 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
     from app.models.analise import AnaliseMaterializacaoCampanha
     from app.services.analise import (
         _recalcular_materializacao_campanha,
-        claim_materializacao_campanha_chunk,
-        obter_chunk_ativo_campanha,
+        claim_materializacao_campanha_chunks,
+        contar_chunks_ativos_campanha,
+        listar_chunks_ativos_campanha,
         obter_chunks_stale_ativos,
         obter_estado_gate_materializacao,
         recuperar_chunks_materializacao_stale,
@@ -131,19 +132,6 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
         if campanha.status in {"success", "failed", "partial"}:
             return {"status": "finished_campaign", "campanha_id": campanha_id, "campanha_status": campanha.status}
 
-        active_chunk = obter_chunk_ativo_campanha(db, campanha_uuid)
-        if active_chunk is not None:
-            campanha.summary = {
-                **(campanha.summary or {}),
-                "wait_reason": "CHUNK_IN_PROGRESS",
-            }
-            campanha.updated_at = datetime.now(UTC)
-            db.commit()
-            return {
-                "status": "chunk_in_progress",
-                "campanha_id": campanha_id,
-                "chunk_execucao_id": str(active_chunk.id),
-            }
         stale_chunks = len(obter_chunks_stale_ativos(db, campanha_id=campanha_uuid))
         if stale_chunks > 0:
             recuperacao = recuperar_chunks_materializacao_stale(db, campanha_id=campanha_uuid)
@@ -230,8 +218,35 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
                 "max_active_campaigns": _settings.analise_materializacao_max_active_campaigns,
             }
 
-        claimed = claim_materializacao_campanha_chunk(db, campanha_uuid, chunk_size=campanha.chunk_size)
-        if claimed is None:
+        active_chunks = listar_chunks_ativos_campanha(db, campanha_uuid, limit=5)
+        available_chunk_slots = max(
+            0,
+            _settings.analise_materializacao_max_active_chunks_per_campaign - len(active_chunks),
+        )
+        if available_chunk_slots <= 0:
+            campanha.summary = {
+                **(campanha.summary or {}),
+                "wait_reason": "MAX_ACTIVE_CHUNKS_PER_CAMPAIGN_REACHED",
+                "active_chunks": contar_chunks_ativos_campanha(db, campanha_uuid),
+                "max_active_chunks_per_campaign": _settings.analise_materializacao_max_active_chunks_per_campaign,
+            }
+            campanha.updated_at = datetime.now(UTC)
+            db.commit()
+            return {
+                "status": "waiting_for_chunk_slot",
+                "campanha_id": campanha_id,
+                "active_chunks": len(active_chunks),
+                "max_active_chunks_per_campaign": _settings.analise_materializacao_max_active_chunks_per_campaign,
+                "active_chunk_ids_preview": [str(chunk.id) for chunk in active_chunks],
+            }
+
+        claimed = claim_materializacao_campanha_chunks(
+            db,
+            campanha_uuid,
+            chunk_size=campanha.chunk_size,
+            max_chunks=available_chunk_slots,
+        )
+        if not claimed:
             campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
             if campanha is not None:
                 _recalcular_materializacao_campanha(db, campanha)
@@ -240,15 +255,20 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
                 "status": "no_pending_items",
                 "campanha_id": campanha_id,
             }
-        chunk, items = claimed
-        materializar_analise_chunk_task.delay(campanha_id, str(chunk.id))
+        claimed_item_count = 0
+        chunk_ids: list[str] = []
+        for chunk, items in claimed:
+            materializar_analise_chunk_task.delay(campanha_id, str(chunk.id))
+            claimed_item_count += len(items)
+            chunk_ids.append(str(chunk.id))
 
         return {
             "status": "enqueued",
             "campanha_id": campanha_id,
-            "chunk_count": 1,
-            "claimed_items": len(items),
-            "chunk_execucao_id": str(chunk.id),
+            "chunk_count": len(claimed),
+            "claimed_items": claimed_item_count,
+            "chunk_execucao_id": chunk_ids[0],
+            "chunk_execucao_ids": chunk_ids,
         }
     finally:
         db.close()

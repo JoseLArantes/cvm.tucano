@@ -53,6 +53,7 @@ from app.schemas.comum import Paginacao
 from app.services.analise import (
     campanha_tem_requeue_em_transito,
     contar_chunks_stale_campanha,
+    listar_chunks_ativos_campanha,
     listar_metricas,
     obter_brief,
     obter_chunk_ativo_campanha,
@@ -337,15 +338,8 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
     processed_items = campanha.success_items + campanha.failed_items + campanha.skipped_items
     progress_ratio = _campaign_progress_ratio(campanha)
     remaining = None
-    active_chunk = db.scalar(
-        select(AnaliseMaterializacaoChunkExecucao)
-        .where(
-            AnaliseMaterializacaoChunkExecucao.campanha_id == campanha.id,
-            AnaliseMaterializacaoChunkExecucao.status.in_(("queued", "running")),
-        )
-        .order_by(AnaliseMaterializacaoChunkExecucao.created_at.desc())
-        .limit(1)
-    )
+    active_chunks = listar_chunks_ativos_campanha(db, campanha.id, limit=5)
+    active_chunk = active_chunks[0] if active_chunks else None
     stale_chunks = contar_chunks_stale_campanha(db, campanha.id)
     if progress_ratio is not None and campanha.started_at is not None and 0 < progress_ratio < 1:
         elapsed = _elapsed_seconds(campanha.started_at, None)
@@ -366,8 +360,10 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
         started_at=campanha.started_at,
         updated_at=campanha.updated_at,
         estimated_remaining_seconds=remaining,
+        active_chunks=len(active_chunks),
         active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
         active_chunk_lease_expires_at=active_chunk.lease_expires_at if active_chunk is not None else None,
+        active_chunk_ids_preview=[str(chunk.id) for chunk in active_chunks],
         stale_chunks=stale_chunks,
         wait_reason=(campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None,
         recovery_state=(campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None,

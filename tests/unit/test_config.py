@@ -32,6 +32,7 @@ def test_configura_materializacao_analitica() -> None:
         {
             "ANALISE_MATERIALIZACAO_CHUNK_SIZE": 40,
             "ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS": 3,
+            "ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN": 2,
             "ANALISE_MATERIALIZACAO_QUEUE_NAME": "analise_materializacao",
             "ANALISE_MATERIALIZACAO_DEDUP_WINDOW_SECONDS": 120,
             "ANALISE_MATERIALIZACAO_GATE_ENABLED": False,
@@ -49,6 +50,7 @@ def test_configura_materializacao_analitica() -> None:
     )
     assert settings.analise_materializacao_chunk_size == 40
     assert settings.analise_materializacao_max_active_campaigns == 3
+    assert settings.analise_materializacao_max_active_chunks_per_campaign == 2
     assert settings.analise_materializacao_queue_name == "analise_materializacao"
     assert settings.analise_materializacao_dedup_window_seconds == 120
     assert settings.analise_materializacao_gate_enabled is False
