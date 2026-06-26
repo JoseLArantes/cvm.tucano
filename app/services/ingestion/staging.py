@@ -10,8 +10,8 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import delete, insert, select
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy import and_, delete, insert, or_, select
+from sqlalchemy.orm import Session, aliased, load_only
 
 from app.models.ingestion import (
     IngestionAttempt,
@@ -23,6 +23,7 @@ from app.models.ingestion import (
     IngestionRun,
     QuarantineItem,
 )
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
 
 DEFAULT_CSV_DELIMITER = ";"
@@ -352,22 +353,79 @@ def member_has_successful_match(
     member_sha256: str,
     current_run_id: uuid.UUID,
 ) -> bool:
-    existing_member = db.scalar(
+    return find_reusable_member_match(
+        db,
+        tipo_fonte=tipo_fonte,
+        ano=ano,
+        member_name=member_name,
+        member_sha256=member_sha256,
+        current_run_id=current_run_id,
+    ) is not None
+
+
+def find_reusable_member_match(
+    db: Session,
+    *,
+    tipo_fonte: str,
+    ano: int | None,
+    member_name: str,
+    member_sha256: str,
+    current_run_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    parent_execucao = aliased(ExecucaoSincronizacao)
+    child_execucao = aliased(ExecucaoSincronizacao)
+    existing_member = db.execute(
         select(IngestionFileMember)
+        .add_columns(
+            IngestionRun.status.label("parent_run_status"),
+            parent_execucao.status.label("parent_execucao_status"),
+            child_execucao.id.label("child_execucao_id"),
+            child_execucao.status.label("child_execucao_status"),
+        )
         .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
         .join(IngestionRun, IngestionRun.id == IngestionFile.ingestion_run_id)
+        .outerjoin(parent_execucao, parent_execucao.id == IngestionRun.execucao_sincronizacao_id)
+        .outerjoin(
+            child_execucao,
+            and_(
+                child_execucao.parent_execucao_id == parent_execucao.id,
+                child_execucao.tipo_execucao == "arquivo_membro",
+                child_execucao.arquivo == IngestionFileMember.member_name,
+                child_execucao.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
+            ),
+        )
         .where(
             IngestionRun.tipo_fonte == tipo_fonte,
             IngestionRun.ano == ano,
-            IngestionRun.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
             IngestionRun.id != current_run_id,
             IngestionFileMember.member_name == member_name,
             IngestionFileMember.member_sha256 == member_sha256,
+            or_(
+                IngestionRun.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
+                child_execucao.id.is_not(None),
+            ),
         )
         .order_by(IngestionRun.started_at.desc())
         .limit(1)
+    ).first()
+    if existing_member is None:
+        return None
+
+    member, parent_run_status, parent_execucao_status, child_execucao_id, child_execucao_status = existing_member
+    matched_via = (
+        "parent_run"
+        if parent_run_status in STATUSS_REAPROVEITAVEIS_EXECUCAO
+        else "child_execution"
     )
-    return existing_member is not None
+    return {
+        "member_id": str(member.id),
+        "parent_run_status": parent_run_status,
+        "parent_execucao_status": parent_execucao_status,
+        "child_execucao_id": None if child_execucao_id is None else str(child_execucao_id),
+        "child_execucao_status": child_execucao_status,
+        "matched_via": matched_via,
+        "reused_from_failed_parent": matched_via == "child_execution" and parent_execucao_status == "falha",
+    }
 
 
 def _build_ingestion_row_payload(

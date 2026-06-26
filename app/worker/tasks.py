@@ -696,7 +696,7 @@ def pre_processar_sincronizacao_zip(
     )
     from app.services.ingestion.staging import (
         create_run,
-        member_has_successful_match,
+        find_reusable_member_match,
         register_file,
         register_member,
         save_member_payload,
@@ -860,14 +860,15 @@ def pre_processar_sincronizacao_zip(
                 continue
 
             # Check match
-            if member_has_successful_match(
+            reusable_match = find_reusable_member_match(
                 db,
                 tipo_fonte=tipo_fonte,
                 ano=ano,
                 member_name=member_name,
                 member_sha256=member_hash,
                 current_run_id=run.id,
-            ) and not force_reimport:
+            )
+            if reusable_match is not None and not force_reimport:
                 child_exec = ExecucaoSincronizacao(
                     parent_execucao_id=execucao.id,
                     tipo_execucao="arquivo_membro",
@@ -889,6 +890,12 @@ def pre_processar_sincronizacao_zip(
                     execucao_sincronizacao_id=child_exec.id,
                     status="skipped",
                     phase="complete",
+                    message="member_sha256_reused",
+                    quality_summary={
+                        "skip_reason": "member_sha256_reused",
+                        "matched_via": reusable_match["matched_via"],
+                        "reused_from_failed_parent": reusable_match["reused_from_failed_parent"],
+                    },
                 )
                 run_created.finished_at = datetime.now(UTC)
                 register_member(
@@ -1647,6 +1654,27 @@ def finalizar_sincronizacao_zip_task(
         execucao.status = parent_status
         execucao.finalizada_em = datetime.now(UTC)
 
+        child_run_map = {
+            child_run.execucao_sincronizacao_id: child_run
+            for child_run in db.scalars(
+                select(IngestionRun).where(
+                    IngestionRun.execucao_sincronizacao_id.in_([child.id for child in children])
+                )
+            ).all()
+        }
+        members_reused_from_previous = 0
+        members_reused_from_failed_parent = 0
+        for child in children:
+            child_run = child_run_map.get(child.id)
+            if child_run is None:
+                continue
+            child_quality = child_run.quality_summary or {}
+            if child_quality.get("skip_reason") != "member_sha256_reused":
+                continue
+            members_reused_from_previous += 1
+            if child_quality.get("reused_from_failed_parent") is True:
+                members_reused_from_failed_parent += 1
+
         quality_summary = {
             "row_status_counts": {
                 "valid": total_inseridos + total_atualizados + total_inalterados,
@@ -1655,6 +1683,9 @@ def finalizar_sincronizacao_zip_task(
             "members_total": len(children),
             "members_processados": sum(1 for c in children if c.status != "skipped"),
             "members_skipped": sum(1 for c in children if c.status == "skipped"),
+            "members_reprocessed": sum(1 for c in children if c.status != "skipped"),
+            "members_reused_from_previous": members_reused_from_previous,
+            "members_reused_from_failed_parent": members_reused_from_failed_parent,
         }
 
         run = db.scalar(

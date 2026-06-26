@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.models.ingestion import IngestionFile, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.staging import create_run, register_file
+from app.worker import tasks as worker_tasks
 from app.worker.tasks import sincronizar_member_internal
 
 
@@ -172,3 +173,111 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
     assert execucao_filha_atualizada.status == "sucesso"
     assert run_filha is not None
     assert ingestion_file is not None
+
+
+def test_finalizar_sincronizacao_zip_resume_quality_summary_explicit_reuse(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+
+    run_pai = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_pai.id,
+        status="em_execucao",
+        phase="stage",
+    )
+    register_file(
+        db_session,
+        ingestion_run=run_pai,
+        source_url=execucao_pai.url,
+        source_filename=execucao_pai.arquivo,
+        content_sha256="zip-sha",
+        content_length_bytes=100,
+        is_zip=True,
+    )
+
+    execucao_reused = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_DRE_ind_2025.csv",
+        url=execucao_pai.url,
+        status="skipped",
+        iniciada_em=agora,
+        finalizada_em=agora,
+    )
+    execucao_processed = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_DRA_ind_2025.csv",
+        url=execucao_pai.url,
+        status="sucesso",
+        iniciada_em=agora,
+        finalizada_em=agora,
+        total_linhas_lidas=4,
+        total_inseridos=3,
+        total_inalterados=1,
+    )
+    db_session.add_all([execucao_reused, execucao_processed])
+    db_session.flush()
+
+    reused_run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_reused.id,
+        status="skipped",
+        phase="complete",
+        quality_summary={
+            "skip_reason": "member_sha256_reused",
+            "matched_via": "child_execution",
+            "reused_from_failed_parent": True,
+        },
+    )
+    reused_run.finished_at = agora
+    processed_run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_processed.id,
+        status="sucesso",
+        phase="complete",
+    )
+    processed_run.finished_at = agora
+    db_session.commit()
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", lambda **kwargs: None)
+    monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(Path.cwd() / "tmp-tests-storage"))
+
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao_pai.id))
+
+    run_pai_atual = db_session.get(IngestionRun, run_pai.id)
+    execucao_pai_atual = db_session.get(ExecucaoSincronizacao, execucao_pai.id)
+
+    assert resultado["status"] == "sucesso"
+    assert execucao_pai_atual is not None
+    assert execucao_pai_atual.status == "sucesso"
+    assert run_pai_atual is not None
+    assert run_pai_atual.quality_summary is not None
+    assert run_pai_atual.quality_summary["members_skipped"] == 1
+    assert run_pai_atual.quality_summary["members_processados"] == 1
+    assert run_pai_atual.quality_summary["members_reprocessed"] == 1
+    assert run_pai_atual.quality_summary["members_reused_from_previous"] == 1
+    assert run_pai_atual.quality_summary["members_reused_from_failed_parent"] == 1

@@ -77,20 +77,20 @@ Todos os endpoints de disparo aceitam o parâmetro `?force_reimport=true`:
 
 | Valor | Comportamento |
 |-------|---------------|
-| `false` (padrão) | Usa otimização por hash: se o hash do arquivo já foi processado com sucesso, o reprocessamento é pulado |
-| `true` | Força re-ingestão total: ignora checagem de hash, faz limpeza atômica de dados antigos e re-executa a ingestão |
+| `false` (padrão) | Usa o lifecycle normal: pode encerrar como `sem_alteracao` por probe/SHA do artefato e, em reruns anuais, reaproveita members já promovidos quando o `member_sha256` continua idêntico |
+| `true` | Força re-ingestão total: ignora reaproveitamento por igualdade, desconsidera os short-circuits normais de recovery e reexecuta o caminho completo de processamento |
 
 ### Quando usar `force_reimport=true`
 
 - Após correção de bug no normalizador
 - Após aplicação de novas regras de reparo
 - Quando o pipeline v1 legado precisa ser migrado
-- Para garantir idempotência após falhas parciais
+- Quando o objetivo é invalidar deliberadamente o reuso de members previamente bem-sucedidos
 
 ### Quando NÃO usar
 
 - Sincronizações rotineiras (desperdiça recursos)
-- Quando o hash já indica processamento bem-sucedido
+- Recuperação após falhas parciais em que a maior parte dos members já havia sido promovida com sucesso
 
 ---
 
@@ -104,7 +104,7 @@ Todos os endpoints de disparo aceitam o parâmetro `?force_reimport=true`:
 | `sucesso` | Ingestão finalizada sem erros |
 | `sucesso_com_alerta` | Concluída com alertas (ex: erros de schema) |
 | `sem_alteracao` | Arquivo fonte não mudou |
-| `skipped` | Ignorado por hash idêntico |
+| `skipped` | Skip operacional legado ou decisão administrativa explícita |
 | `falha` | Erro durante processamento |
 | `falha_qualidade` | Violação do quality gate |
 | `cancelada` | Abortada manualmente |
@@ -134,8 +134,9 @@ O pipeline é dividido em duas fases para garantir resiliência:
 1. **Sondagem remota** (CKAN/HEAD) para evitar downloads desnecessários
 2. **Download com SHA-256** on-the-fly
 3. **Extração de membros** do ZIP
-4. **Persistência de payloads** brutos para self-healing
-5. **Change tracking** estrutural
+4. **Comparação por `member_sha256`** para reaproveitar members já bem-sucedidos
+5. **Persistência de payloads** brutos para self-healing
+6. **Change tracking** estrutural
 
 ### Fase 2: Ingestão (`promote` + `reconcile`)
 
@@ -146,6 +147,16 @@ O pipeline é dividido em duas fases para garantir resiliência:
 5. **Reconcile** set-based
 
 > **Self-healing:** Os payloads brutos são persistidos em `IngestionFileMemberPayload`. Se um worker reiniciar entre fases, o CSV pode ser reconstruído do banco sem redownload.
+
+## Rerun anual inteligente
+
+Quando uma sincronização anual precisa ser refeita depois de falha parcial, o pipeline não depende apenas do status final do ZIP pai. Ele observa o histórico de cada member:
+
+- member com `member_sha256` igual e promoção anterior bem-sucedida: reaproveitado;
+- member alterado, ausente, antes falho ou sem evidência de sucesso: reprocessado;
+- member reaproveitado a partir de um pai que terminou `falha`: contabilizado separadamente em `members_reused_from_failed_parent`.
+
+Na prática, isso significa que reruns de DFP/ITR/FRE/FCA/IPE/VLMO/CGVN podem voltar apenas aos CSVs realmente pendentes, em vez de repetir o custo de members já consolidados.
 
 ---
 

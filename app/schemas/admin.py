@@ -357,6 +357,9 @@ class IngestionRunResumo(BaseModel):
                     "members_total": 14,
                     "members_processados": 13,
                     "members_skipped": 1,
+                    "members_reprocessed": 13,
+                    "members_reused_from_previous": 1,
+                    "members_reused_from_failed_parent": 1,
                     "staged_rows_purged": 1197,
                     "reconciled_deleted": 4,
                 },
@@ -390,6 +393,8 @@ class IngestionRunResumo(BaseModel):
                     "artifact_sha": "changed",
                     "members_skipped_by_sha": 1,
                     "members_processed": 13,
+                    "members_reused_from_previous": 1,
+                    "members_reused_from_failed_parent": 1,
                 },
             }
         }
@@ -453,6 +458,17 @@ class IngestionRunResumo(BaseModel):
             "o frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
             "motivos de rejeicao, metodos de resolucao, retries, membros processados/skipped, total real de quarentena, "
             "quantidade de staging purgado com sucesso (`staged_rows_purged`) e remocoes aplicadas no reconcile (`reconciled_deleted`). "
+            "Quando a run representa um rerun de recuperacao, `members_reused_from_previous` informa quantos members foram reaproveitados sem nova promocao, "
+            "e `members_reused_from_failed_parent` destaca o subconjunto desses members cuja ultima execucao anual pai havia terminado em `falha`. "
+            "O contrato esperado para consumo de frontend inclui, quando disponivel: "
+            "`members_total` (quantidade total de members avaliados no ZIP atual), "
+            "`members_processados` (members que entraram no fluxo normal da run atual), "
+            "`members_skipped` (members pulados no fechamento desta run, normalmente por igualdade), "
+            "`members_reprocessed` (members que realmente voltaram para `stage -> promote -> reconcile`), "
+            "`members_reused_from_previous` (members reaproveitados por SHA a partir de resultado anterior) e "
+            "`members_reused_from_failed_parent` (subset reaproveitado cuja execucao anual pai anterior falhou). "
+            "Para cards e resumos operacionais, o frontend deve considerar `members_reprocessed` como trabalho efetivamente executado e "
+            "`members_reused_from_previous` como trabalho economizado pelo mecanismo de recuperacao. "
             "Este objeto e um resumo operacional por contadores; ele nao substitui um ledger duravel de sucesso por linha."
         ),
     )
@@ -470,6 +486,10 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Resumo duravel do inventario de members avaliados na run. "
             "Explicita quantos members foram processados, reaproveitados por `member_sha256`, marcados com schema invalido ou tratados como obrigatorios/opcionais. "
+            "O frontend deve esperar pelo menos `total`, `by_status`, `by_schema_status` e `members`. "
+            "Em `by_status`, valores como `processed` e `member_skipped` permitem separar members realmente executados de members apenas reaproveitados. "
+            "Em `by_schema_status`, `reused` identifica skip por `member_sha256`; `ok` identifica members que passaram pelo fluxo normal; "
+            "outros valores podem sinalizar schema invalido ou warning estrutural. "
             "Ao contrario de `ingestion_rows`, este objeto foi desenhado para permanecer disponivel apos limpeza do staging bem-sucedido."
         ),
     )
@@ -499,7 +519,10 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Resumo de decisao do lifecycle engine. "
             "Explica em formato compacto se o probe remoto levou a download, se o SHA final confirmou alteracao ou igualdade, "
-            "quantos members foram pulados por igualdade e quantos precisaram de `stage -> promote -> reconcile`."
+            "quantos members foram pulados por igualdade e quantos precisaram de `stage -> promote -> reconcile`. "
+            "Em reruns de recuperacao, este bloco tambem resume quantos members foram reaproveitados a partir de resultados anteriores e quantos desses reaproveitamentos vieram de uma execucao anual pai que falhou. "
+            "Chaves relevantes para frontend: `remote_probe`, `artifact_sha`, `members_skipped_by_sha`, `members_processed`, `members_reused_from_previous` e `members_reused_from_failed_parent`. "
+            "Este bloco serve como explicacao compacta da decisao de lifecycle; para inventario detalhado por member, o frontend deve cruzar com `member_snapshot_summary`."
         ),
     )
 

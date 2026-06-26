@@ -3,7 +3,7 @@ title: Pipeline de Ingestão
 sidebar_position: 1
 ---
 
-# Pipeline de Ingestão
+# Pipeline de Ingestão (Importação dos Dados)
 
 ## Visão Geral
 
@@ -11,24 +11,29 @@ O pipeline de ingestão do Tucano CVM é responsável por baixar, validar, norma
 
 O pipeline é dividido em **duas fases estruturadas** para garantir resiliência, permitir reinícios limpos e habilitar self-healing em caso de falhas.
 
+Para fontes anuais em ZIP, o pipeline tambem opera com **rerun orientado a recuperacao**: se uma execucao anual falhou em apenas parte dos CSVs, um novo disparo do mesmo `tipo_fonte + ano` reaproveita members ja promovidos com sucesso quando o `member_sha256` permanece identico. Isso evita reprocessar tudo de novo apenas porque um subconjunto do pacote anterior falhou.
+
 ## Arquitetura em Duas Fases
 
 ```mermaid
 graph TD
     A["Trigger: Beat/Bootstrap/Admin API"] --> B["Fase 1: Pré-processamento"]
-    B --> C{"Arquivo já processado?"}
-    C -->|Sim| D["Status: skipped"]
-    C -->|Não| E["Download + SHA-256"]
-    E --> F["Extração de Membros"]
-    F --> G["Persistência de Payloads"]
-    G --> H["Status: aguardando_ingestao"]
-    H --> I["Fase 2: Ingestão"]
-    I --> J["Stage: CSV → ingestion_rows"]
-    J --> K["Validação de Schema"]
-    K --> L["Normalização + Resolução"]
-    L --> M["Promoção: tabelas de domínio"]
-    M --> N["Reconcile: remove obsoletos"]
-    N --> O["Status: sucesso"]
+    B --> C{"Probe remoto / SHA do artefato mudou?"}
+    C -->|Não| D["Status: sem_alteracao"]
+    C -->|Sim| E["Download + SHA-256"]
+    E --> F["Extração de members"]
+    F --> G{"member_sha256 idêntico e já promovido?"}
+    G -->|Sim| H["Reuso do member + counters de lifecycle"]
+    G -->|Não| I["Persistência de payloads brutos"]
+    H --> J["Status: aguardando_ingestao / complete"]
+    I --> J
+    J --> K["Fase 2: Ingestão"]
+    K --> L["Stage: CSV → ingestion_rows"]
+    L --> M["Validação de schema do member"]
+    M --> N["Normalização + resolução"]
+    N --> O["Promoção: tabelas de domínio"]
+    O --> P["Reconcile: remove obsoletos"]
+    P --> Q["Status: sucesso / sucesso_com_alerta / falha"]
 ```
 
 ## Fase 1: Pré-processamento
@@ -62,8 +67,13 @@ sequenceDiagram
         Worker->>DB: Criar IngestionRun + IngestionFile
         Worker->>Disk: Extrair membros CSV
         loop Para cada membro
-            Worker->>DB: IngestionFileMember + SourceMemberSnapshot
-            Worker->>DB: Persistir payload bruto (self-heal)
+            Worker->>DB: Comparar member_sha256 com members elegíveis
+            alt Member idêntico e já promovido com sucesso
+                Worker->>DB: Marcar reuse/skip do member
+            else Member novo, alterado ou previamente falho
+                Worker->>DB: IngestionFileMember + SourceMemberSnapshot
+                Worker->>DB: Persistir payload bruto (self-heal)
+            end
         end
         Worker->>DB: Change tracking (comparar com run anterior)
         Worker->>DB: Status: aguardando_ingestao
@@ -81,9 +91,33 @@ O sistema evita downloads desnecessários através de três níveis de deduplica
 | **Membro** | SHA-256 do CSV | Reaproveita membros idênticos |
 
 **Resultado típico de uma sincronização:**
-- `sem_alteracao`: Probe remoto forte indicou igualdade
-- `skipped`: Download ocorreu mas SHA é idêntico ao anterior
-- `processado`: Members alterados foram ingeridos; idênticos reaproveitados
+- `sem_alteracao`: Probe remoto forte ou SHA do artefato confirmou igualdade
+- `skipped`: Compatibilidade legada ou skip administrativo explícito
+- `processado`: members alterados foram ingeridos; members idênticos foram reaproveitados por `member_sha256`
+
+## Semântica de rerun anual
+
+Em fontes anuais como DFP, ITR, FRE, FCA, IPE, VLMO e CGVN, a unidade operacional real nao e apenas o ZIP, mas cada member CSV dentro dele. Por isso o rerun anual segue a logica abaixo:
+
+1. o artefato anual passa normalmente por `acquire`, inclusive com probe remoto e eventual download;
+2. o ZIP atual eh aberto e cada member eh comparado por `member_sha256`;
+3. se um member tem o mesmo hash e ja concluiu a promocao em uma execucao anterior elegivel, ele eh reaproveitado;
+4. apenas members alterados, ausentes, interrompidos ou antes marcados como falha entram novamente no hot path;
+5. quando o reaproveitamento acontece a partir de uma execucao pai anual que terminou `falha`, o sistema separa esse caso em counters proprios para indicar recuperacao parcial sobre um pai falho.
+
+Esse mecanismo eh o que torna o rerun pos-incidente mais inteligente: perder scheduler, Redis ou workers nao obriga reingestao total de todos os CSVs grandes se a maior parte deles ja havia sido promovida corretamente.
+
+```mermaid
+graph TD
+    A["Rerun do mesmo tipo_fonte + ano"] --> B["Abrir ZIP atual"]
+    B --> C["Comparar member_sha256 por CSV"]
+    C --> D{"Mesmo hash e member anterior com sucesso?"}
+    D -->|Sim| E{"Pai anterior terminou falha?"}
+    E -->|Sim| F["Reusar member e contar em members_reused_from_failed_parent"]
+    E -->|Não| G["Reusar member e contar em members_reused_from_previous"]
+    D -->|Não| H["Reprocessar member"]
+    H --> I["Promote + reconcile"]
+```
 
 ### Persistência de Payloads
 
@@ -218,7 +252,7 @@ cvm_worker:
 | `sucesso` | Ingestão finalizada sem erros |
 | `sucesso_com_alerta` | Concluída com alertas (ex: erros de schema) |
 | `sem_alteracao` | Arquivo fonte não mudou |
-| `skipped` | Ignorado por hash idêntico |
+| `skipped` | Skip operacional legado ou decisão administrativa explícita |
 | `falha` | Erro durante processamento |
 | `falha_qualidade` | Violação do quality gate |
 | `cancelada` | Abortada manualmente |

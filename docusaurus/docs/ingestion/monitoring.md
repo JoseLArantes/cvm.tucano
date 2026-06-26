@@ -269,6 +269,9 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
     "members_total": 14,
     "members_processados": 13,
     "members_skipped": 1,
+    "members_reprocessed": 2,
+    "members_reused_from_previous": 1,
+    "members_reused_from_failed_parent": 0,
     "row_status_counts": {
       "valid": 1200,
       "invalid": 3
@@ -324,7 +327,9 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
     "remote_probe": "download_required",
     "artifact_sha": "changed",
     "members_processed": 13,
-    "members_skipped_by_sha": 1
+    "members_skipped_by_sha": 1,
+    "members_reused_from_previous": 1,
+    "members_reused_from_failed_parent": 0
   }
 }
 ```
@@ -335,12 +340,21 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
 |-------|-----------|
 | `remote_probe` | Decisão de preflight remoto antes do download |
 | `change_summary` | Drift estrutural entre pacotes |
-| `quality_summary` | Contadores de processamento e quarentena |
+| `quality_summary` | Contadores operacionais do processamento, incluindo members reprocessados e members reaproveitados em reruns |
 | `artifact_snapshot` | Evidência remota/local usada para skip/download |
 | `member_snapshot_summary` | Inventário de members processados/reaproveitados |
 | `delivery_snapshot_summary` | Índice documental capturado |
 | `reconcile_summary` | Remoções feitas no reconcile |
-| `lifecycle_decision` | Resumo da decisão do lifecycle engine |
+| `lifecycle_decision` | Resumo da decisão do lifecycle engine, inclusive reaproveitamento por igualdade de `member_sha256` |
+
+### Leitura recomendada dos counters de lifecycle
+
+- `members_processed`: members que realmente entraram no hot path de `stage -> promote -> reconcile`;
+- `members_skipped_by_sha`: members pulados por igualdade observada durante o lifecycle;
+- `members_reused_from_previous`: subset de reaproveitamento vindo de execucoes anteriores bem-sucedidas;
+- `members_reused_from_failed_parent`: subset de reaproveitamento vindo de execucao pai anual que terminou `falha`, mas tinha children ja consolidados corretamente.
+
+Esses counters existem para o operador e para o frontend distinguirem tres cenarios que antes pareciam iguais: run sem alteracao, rerun anual que reutilizou members bons e run que realmente reprocessou members do zero.
 
 ---
 

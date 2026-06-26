@@ -13,6 +13,9 @@ Este documento registra mudanças significativas na API do Tucano CVM.
 
 ### Alterações recentes
 
+- Ingestion admin e documentacao operacional agora descrevem explicitamente o rerun anual com reaproveitamento por `member_sha256`, inclusive quando a execucao pai anterior terminou com falha parcial.
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}` passam a ser documentados com counters de lifecycle voltados a recuperacao operacional, como `members_reused_from_previous` e `members_reused_from_failed_parent`.
+- A documentacao de pipeline e monitoramento agora distingue `sem_alteracao`, skip administrativo/legado e reuso de members bem-sucedidos dentro de um artefato anual alterado ou rerodado.
 - Removidos do OpenAPI e da superfície pública os endpoints FRE explicitamente descontinuados pela CVM:
   - `GET /fre/capital-social/aumentos`
   - `GET /fre/capital-social/aumentos-classes-acoes`

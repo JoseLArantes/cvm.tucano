@@ -84,6 +84,9 @@ class IngestionRunResumo(BaseModel):
     "members_total": 14,
     "members_processados": 13,
     "members_skipped": 1,
+    "members_reprocessed": 13,
+    "members_reused_from_previous": 1,
+    "members_reused_from_failed_parent": 1,
     "row_status_counts": {"valid": 1200, "invalid": 3},
     "reason_counts": {"companhia_nao_encontrada": 2, "schema_inesperado": 1},
     "quarantine_total": 3,
@@ -207,6 +210,16 @@ Consultas à fila de reparo usam `status=pendente` como padrão implícito. Use 
   }
 }
 ```
+
+### Campos de recuperacao por rerun
+
+Quando uma run anual e executada novamente apos falha parcial:
+
+- `quality_summary.members_reused_from_previous`: quantidade de members reaproveitados por `member_sha256`
+- `quality_summary.members_reused_from_failed_parent`: subconjunto reaproveitado cuja execucao anual pai anterior terminou em `falha`
+- `quality_summary.members_reprocessed`: quantidade de members que efetivamente voltaram para `stage -> promote -> reconcile`
+
+Esses campos deixam explicito que uma run anual de recuperacao nao precisa reprocessar todos os CSVs do ZIP se alguns members ja tinham sido concluídos com sucesso.
 
 ---
 

@@ -17,6 +17,7 @@ This context covers the priority pipeline that acquires, normalizes, stores, and
 - **IngestionRun** means the v2 operational run for one source artifact.
 - **ExecucaoSincronizacao** means the synchronization execution record used as a primary operational state source.
 - **Member** means a CSV file inside a CVM ZIP artifact.
+- **Reusable member result** means a previously successful member execution that can be reused by `member_sha256` in a later rerun, even if the yearly ZIP parent execution that originally contained it ended in failure.
 - **Staging** means loading raw CSV rows into `ingestion_rows` before validation and promotion.
 - **Promotion** means writing normalized rows into domain tables.
 - **Reconcile** means removing or marking rows no longer present in the source scope after successful promotion.

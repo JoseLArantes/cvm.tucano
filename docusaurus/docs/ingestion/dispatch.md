@@ -159,6 +159,8 @@ curl -X POST "http://localhost:8007/ingestion/sincronizacoes/tudo/2025" \
 
 Dispara reprocessamento seletivo por nome de arquivo CVM.
 
+Use este endpoint para recuperacao cirurgica. No fluxo atual, um rerun anual normal da mesma fonte/ano ja tenta reaproveitar automaticamente members bem-sucedidos e inalterados por `member_sha256`, inclusive quando a execucao anual anterior terminou em `falha`. Portanto, o caso comum de "apenas 3 arquivos falharam dentro de 19" deve ser resolvido pelo rerun anual, nao por obrigacao de reprocessamento member a member.
+
 ### Request Body
 
 ```json
@@ -201,6 +203,16 @@ curl -X POST "http://localhost:8007/ingestion/sincronizacoes/reprocessar-arquivo
   "tarefas": [...]
 }
 ```
+
+## Semantica de rerun anual
+
+Nos endpoints anuais (`/ingestion/sincronizacoes/{fonte}/{ano}` e `/ingestion/sincronizacoes/tudo/{ano}`):
+
+- o ZIP anual continua passando por probe remoto e, quando necessario, download
+- se o ZIP mudou ou se a recuperacao exigir nova avaliacao, cada member e comparado por `member_sha256`
+- members ja bem-sucedidos e inalterados sao reaproveitados e aparecem como `member_skipped` no inventario de snapshots
+- members falhados, interrompidos, ausentes ou alterados seguem para processamento
+- `force_reimport=true` desliga esse reaproveitamento e reprocessa tudo
 
 ---
 

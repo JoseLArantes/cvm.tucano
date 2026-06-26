@@ -90,6 +90,8 @@ def _lifecycle_decision_from_run(run: IngestionRun) -> dict[str, Any]:
         "artifact_sha": remote_probe.get("sha_confirmation_result"),
         "members_skipped_by_sha": quality_summary.get("members_skipped", 0),
         "members_processed": quality_summary.get("members_processados"),
+        "members_reused_from_previous": quality_summary.get("members_reused_from_previous", 0),
+        "members_reused_from_failed_parent": quality_summary.get("members_reused_from_failed_parent", 0),
     }
 
 _DESC_SYNC_ANUAL = (
@@ -102,7 +104,8 @@ _DESC_SYNC_ANUAL = (
     "A CVM republica pacotes anuais por substituicao completa, nao por append. "
     "Por isso, uma sincronizacao bem-sucedida pode terminar sem download (`sem_alteracao`), "
     "com download mas reaproveitamento por SHA (`skipped`), "
-    "ou com processamento parcial de members alterados enquanto members idênticos sao reaproveitados por `member_sha256`."
+    "ou com processamento parcial de members alterados enquanto members identicos sao reaproveitados por `member_sha256`. "
+    "Em reruns de recuperacao, um member bem-sucedido continua elegivel para reaproveitamento mesmo se a execucao anual anterior tiver terminado em `falha`, desde que o SHA do member seja igual e `force_reimport` nao esteja ativo."
 )
 
 _RESPOSTA_TOKEN_INVALIDO: dict[int | str, dict[str, Any]] = {
@@ -498,6 +501,7 @@ def disparar_sincronizacao_cgvn(
         "Este endpoint nao usa `ANOS_INICIAIS_*` do ambiente: o ano processado eh exclusivamente o argumento recebido em `/{ano}`. "
         "Cada fonte anual executa o mesmo mecanismo: preflight remoto em `acquire`, possivel skip sem download quando os metadados remotos permanecem inalterados, "
         "download apenas quando necessario, `stage` orientado a headers/row counts/member hashes, promocao apenas dos members alterados e `reconcile` para exclusao de linhas promovidas obsoletas do mesmo member. "
+        "Se uma execucao anual anterior tiver terminado em `falha`, members que ja haviam sido concluidos com sucesso continuam elegiveis para reaproveitamento por `member_sha256` no rerun do mesmo ano, salvo quando `force_reimport=true`. "
         "A resposta lista todas as tasks Celery criadas para acompanhamento posterior por `id_tarefa`."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
@@ -638,7 +642,8 @@ def ingerir_fonte_pre_processada(
         "Dispara reprocessamento seletivo por nome de arquivo CVM. "
         "Aceita arquivos `cad_cia_aberta.csv`, `dfp_cia_aberta_*`, `itr_cia_aberta_*`, "
         "`fre_cia_aberta_*`, `fca_cia_aberta_*`, `ipe_cia_aberta_*`, `vlmo_cia_aberta_*` e `cgvn_cia_aberta_*`. "
-        "Use `force_reimport=true` no payload para ignorar o skip por hash repetido."
+        "Use `force_reimport=true` no payload para ignorar o skip por hash repetido. "
+        "Este endpoint permanece util para recuperacao cirurgica por member/arquivo, mas o fluxo normal de rerun anual agora tenta reaproveitar automaticamente members ja bem-sucedidos por `member_sha256`, inclusive quando a execucao anual anterior terminou em `falha`."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="reprocessarArquivoAdmin",
@@ -1384,8 +1389,10 @@ def dashboard_execucoes(
         "`member_snapshot_summary`, `delivery_snapshot_summary`, `reconcile_summary` e `lifecycle_decision` para cards, grids e alertas. "
         "`remote_probe` descreve a decisao de preflight remoto antes do download; `change_summary` descreve drift estrutural entre o pacote atual e a referencia anterior; "
         "`artifact_snapshot` explica a evidencia remota/local usada para decidir skip ou download; `member_snapshot_summary` descreve o inventario de members processados ou reaproveitados; "
+        "`quality_summary` tambem deixa explicitos members reaproveitados em reruns de recuperacao, inclusive quando vieram de uma execucao anual pai anteriormente falha; "
         "`delivery_snapshot_summary` resume o indice documental capturado (protocolo, versao, id_documento, etc.); "
         "`quality_summary` e a fonte principal de progresso porque linhas staged bem-sucedidas podem ser removidas apos a promocao do member. "
+        "Para UI operacional, interprete `members_reprocessed` como trabalho realmente executado no rerun atual e `members_reused_from_previous` como trabalho economizado por reaproveitamento. "
         "Uma run concluida nao implica permanencia de staging de sucesso: o contrato duravel e o resumo operacional, os itens de quarentena e as linhas promovidas com lineage."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
@@ -1439,7 +1446,8 @@ def listar_ingestion_runs(
         "Retorna uma run especifica do pipeline. "
         "Use este endpoint para telas de detalhe e drill-down operacional, "
         "especialmente quando o frontend precisar ler `remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, `member_snapshot_summary`, `delivery_snapshot_summary` e `reconcile_summary` consolidados antes de buscar quarentena ou acionar replay. "
-        "A resposta descreve o estado agregado da run: decisao de preflight remoto, inventario estrutural do pacote, contadores de processamento, members reaproveitados, indice documental capturado e remocoes feitas no reconcile. "
+        "A resposta descreve o estado agregado da run: decisao de preflight remoto, inventario estrutural do pacote, contadores de processamento, members reaproveitados, inclusive de execucoes anuais pai anteriormente falhas, indice documental capturado e remocoes feitas no reconcile. "
+        "O detalhe da run e o endpoint recomendado para explicar ao operador por que um rerun anual nao executou todos os CSVs novamente: use `quality_summary.members_reused_from_previous`, `quality_summary.members_reused_from_failed_parent`, `member_snapshot_summary.by_status` e `lifecycle_decision.members_skipped_by_sha`. "
         "Ela nao implica que todas as linhas bem-sucedidas ainda existam em staging."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},

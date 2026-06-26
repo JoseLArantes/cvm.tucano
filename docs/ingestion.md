@@ -86,9 +86,9 @@ graph TD
         A["Inicio: Trigger Cadastro"] --> B["Remote Probe: ETag / CKAN"]
         B --> C["Download Cia Aberta & Estrangeira (SHA-256 on-the-fly)"]
         C --> D["Calcular Hash Composto"]
-        D --> E{"Hash ja Processado?"}
-        E -- Sim --> F["Status: skipped / Limpar Disco"]
-        E -- Nao --> G["Criar IngestionRun & IngestionFile"]
+        D --> E{"Hash composto mudou?"}
+        E -- Nao --> F["Status: sem_alteracao / Limpar Disco"]
+        E -- Sim --> G["Criar IngestionRun & IngestionFile"]
         G --> H["Detectar Encodings & Delimiters"]
         H --> I["Persistir Payloads Brutos"]
         I --> J["Status: aguardando_ingestao"]
@@ -431,7 +431,7 @@ de forma integrada.
 2. Download de `cad_cia_aberta.csv` e `cad_cia_estrang.csv` do portal CVM, com SHA-256 computado on-the-fly
 3. Computacao de hash composto
 4. Verificacao de duplicidade via `buscar_execucao_hash_existente`
-5. Se ja processado (hash igual): status = `skipped`, limpeza de disco
+5. Se o hash composto for igual ao baseline anterior: status = `sem_alteracao`, limpeza de disco
 6. Se novo: criacao de `IngestionRun`, `IngestionFile` (2), `IngestionFileMember` (2)
 7. Deteccao de encoding/delimiter, leitura de header e contagem de linhas
 8. Persistencia dos payloads brutos em `IngestionFileMemberPayload`
@@ -463,6 +463,7 @@ Isso produz tres efeitos importantes no pipeline:
 1. O mesmo ZIP anual pode mudar sem trocar o nome do arquivo.
 2. Dentro de um ZIP alterado, alguns members podem permanecer identicos e ser reaproveitados por `member_sha256`.
 3. Um member alterado pode remover linhas antes publicadas; por isso a promocao precisa ser seguida de `reconcile`.
+4. Se uma execucao anual falhar depois que alguns members ja foram promovidos com sucesso, esses members bem-sucedidos continuam sendo baseline valido de reaproveitamento em reruns futuros do mesmo ano, desde que o `member_sha256` permaneça igual.
 
 O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, todas as versoes recebidas da CVM continuam retidas nas tabelas de dominio; o lifecycle corrige apenas o espelho local do member corrente, removendo linhas que desapareceram do artefato atual.
 
@@ -481,6 +482,7 @@ O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, 
    - Se ja foi processado com sucesso antes (`member_has_successful_match`):
      - O member nao entra em `stage -> promote`
      - Registra `SourceMemberSnapshot` com `lifecycle_status=member_skipped`
+     - Em reruns de recuperacao, o reaproveitamento pode vir de um member bem-sucedido pertencente a uma execucao anual pai que terminou em `falha`
    - Se novo:
      - Cria `ExecucaoSincronizacao` filho com `tipo_execucao="arquivo_membro"` e `status=aguardando_ingestao`
      - Cria `IngestionRun` filho
@@ -490,6 +492,17 @@ O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, 
      - Extrai `SourceDeliverySnapshots` quando o member tem papel documental
 8. Change tracking: compara membros atuais com a ultima run de sucesso (adicoes, remocoes, alteracoes de header/schema, mudanca de row_count e drift do delivery index)
 9. Pai atualizado para `aguardando_ingestao`
+
+#### Semantica de rerun parcial
+
+Quando um ZIP anual falha em apenas alguns members, o rerun normal da mesma fonte/ano deve ser entendido como **rerun de recuperacao**:
+
+1. o artefato anual ainda passa por probe remoto e, se necessario, download
+2. cada member do ZIP atual e comparado por `member_sha256` contra resultados anteriores reaproveitaveis
+3. members ja bem-sucedidos e inalterados sao reaproveitados, com `lifecycle_status=member_skipped` e counters especificos de recovery
+4. apenas members falhados, interrompidos, ausentes ou com SHA alterado seguem para `stage -> promote -> reconcile`
+
+O endpoint de reprocessamento seletivo continua existindo para recuperacao cirurgica, mas nao deve ser necessario para o caso comum de "3 arquivos falharam em 19".
 
 #### Fase 2 — Ingestao (`ingerir_sincronizacao_zip`)
 
@@ -558,7 +571,8 @@ self-heal (reconstruir CSV se ausente)
 | `aguardando_ingestao` | Pre-processo concluido, aguardando ingestao |
 | `sucesso` | Processado com sucesso |
 | `sucesso_com_alerta` | Processado com alertas (ex: erros de schema) |
-| `skipped` | Ignorado (arquivo ja processado, hash identico) |
+| `sem_alteracao` | Artefato remoto ou hash final confirmaram igualdade com o baseline anterior |
+| `skipped` | Skip operacional legado ou decisao administrativa explicita |
 | `falha` | Falha no processamento |
 | `falha_qualidade` | Falha no quality gate (ex: muitas companhias nao encontradas) |
 

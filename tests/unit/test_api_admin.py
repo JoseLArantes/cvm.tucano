@@ -595,9 +595,11 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert "quality_summary" in rota_runs["description"]
+    assert "members reaproveitados" in rota_runs["description"]
     assert rota_tudo["summary"] == "Disparar Sincronizacao Completa por Ano"
     assert "cadastro" in rota_tudo["description"]
     assert "ANOS_INICIAIS" in rota_tudo["description"]
+    assert "execucao anual anterior tiver terminado em `falha`" in rota_tudo["description"]
     assert rota_tudo["parameters"][0]["name"] == "ano"
     assert rota_quarantine["summary"] == "Listar Quarentena de Ingestion"
     assert "motivo_codigo" in rota_quarantine["description"]
@@ -629,6 +631,8 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "delivery_snapshot_summary" in esquema_run["properties"]
     assert "reconcile_summary" in esquema_run["properties"]
     assert "lifecycle_decision" in esquema_run["properties"]
+    assert "members_reused_from_failed_parent" in esquema_run["properties"]["quality_summary"]["description"]
+    assert "reaproveitados a partir de resultados anteriores" in esquema_run["properties"]["lifecycle_decision"]["description"]
     assert "tentativas_reprocessamento" in esquema_quarentena["properties"]
     assert "total_pendentes" in esquema_resumo_quarentena["properties"]
     assert "total_resolvidos" in esquema_resumo_quarentena["properties"]

@@ -1,5 +1,162 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-26 - Rerun anual de ingestion reaproveita members bem-sucedidos de execucao pai falhada
+
+### Endpoints com semantica operacional atualizada
+
+- `POST /ingestion/sincronizacoes/dfp/{ano}`
+- `POST /ingestion/sincronizacoes/itr/{ano}`
+- `POST /ingestion/sincronizacoes/fre/{ano}`
+- `POST /ingestion/sincronizacoes/fca/{ano}`
+- `POST /ingestion/sincronizacoes/ipe/{ano}`
+- `POST /ingestion/sincronizacoes/vlmo/{ano}`
+- `POST /ingestion/sincronizacoes/cgvn/{ano}`
+- `POST /ingestion/sincronizacoes/tudo/{ano}`
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+
+### Mudanca de comportamento
+
+- um rerun anual da mesma fonte/ano agora funciona como rerun de recuperacao
+- se a execucao anual anterior falhou, members que ja tinham sido concluídos com sucesso continuam elegiveis para reaproveitamento por `member_sha256`
+- o rerun passa a reprocessar apenas members falhados, ausentes, interrompidos ou com SHA alterado
+- `force_reimport=true` continua sendo o override explicito para reprocessar tudo
+- `/ingestion/sincronizacoes/reprocessar-arquivo` permanece para recuperacao cirurgica, mas nao e mais o caminho normal exigido para falha parcial em ZIP anual
+
+### Leitura recomendada pelo frontend
+
+Para qualquer tela que mostre uma run anual:
+
+1. ler `GET /ingestion/runs` para listagem, cards e badges resumidos
+2. ler `GET /ingestion/runs/{run_id}` para detalhe operacional
+3. tratar `quality_summary` como fonte principal de contadores
+4. tratar `member_snapshot_summary` como inventario duravel por member
+5. tratar `lifecycle_decision` como explicacao compacta da decisao de reaproveitamento
+
+### Campos novos ou agora operacionalmente relevantes
+
+#### Em `quality_summary`
+
+- `members_reused_from_previous`
+- `members_reused_from_failed_parent`
+- `members_reprocessed`
+- `members_processados`
+- `members_skipped`
+
+#### Em `lifecycle_decision`
+
+- `members_skipped_by_sha`
+- `members_processed`
+- `members_reused_from_previous`
+- `members_reused_from_failed_parent`
+
+#### Em `member_snapshot_summary`
+
+- `by_status.processed`
+- `by_status.member_skipped`
+- `by_schema_status.ok`
+- `by_schema_status.reused`
+- `members[]`
+
+### Semantica exata para UI
+
+#### `quality_summary.members_reprocessed`
+
+- representa quantos members realmente voltaram para o fluxo `stage -> promote -> reconcile`
+- este e o numero correto para mostrar como "members executados neste rerun"
+- nao deve ser somado com `members_reused_from_previous` para representar falha; o reaproveitamento e comportamento esperado
+
+#### `quality_summary.members_reused_from_previous`
+
+- representa quantos members foram reaproveitados por igualdade de `member_sha256`
+- este e o numero correto para mostrar como "members reaproveitados" ou "members pulados por igualdade"
+- pode incluir reaproveitamento vindo de uma run anual anterior bem-sucedida ou falha
+
+#### `quality_summary.members_reused_from_failed_parent`
+
+- representa o subconjunto de `members_reused_from_previous` cuja execucao anual pai anterior terminou em `falha`
+- use este campo para explicar o caso operacional que motivou a mudanca: rerun anual apos falha parcial
+- este campo nao substitui `members_reused_from_previous`; ele apenas detalha sua origem
+
+#### `quality_summary.members_processados`
+
+- continua significando members que entraram no fluxo normal da run atual
+- em reruns de recuperacao, tende a acompanhar `members_reprocessed`
+- para frontend novo, prefira exibir `members_reprocessed` como label principal e manter `members_processados` como compatibilidade/apoio
+
+#### `quality_summary.members_skipped`
+
+- continua sendo o total de members encerrados como `skipped` nesta run
+- inclui principalmente skip por igualdade
+- para explicar a causa do skip, o frontend deve cruzar com `lifecycle_decision.members_skipped_by_sha` e `member_snapshot_summary.by_schema_status.reused`
+
+#### `lifecycle_decision.members_skipped_by_sha`
+
+- resumo compacto da decisao de lifecycle
+- serve bem para badges pequenos e listagens
+- para drill-down por member, nao use sozinho; complemente com `member_snapshot_summary`
+
+#### `member_snapshot_summary.by_status.member_skipped`
+
+- inventario duravel por status de member
+- e o melhor campo para tabelas por member e dashboards que precisem mostrar distribuicao por status
+
+#### `member_snapshot_summary.by_schema_status.reused`
+
+- identifica members reaproveitados por `member_sha256`
+- em telas detalhadas, pode ser apresentado como motivo tecnico do skip
+
+### Exemplo de leitura de uma run de recuperacao
+
+Se uma resposta vier com:
+
+- `quality_summary.members_total = 19`
+- `quality_summary.members_reprocessed = 3`
+- `quality_summary.members_reused_from_previous = 16`
+- `quality_summary.members_reused_from_failed_parent = 16`
+
+o frontend deve comunicar algo como:
+
+- "19 members avaliados"
+- "3 members reprocessados neste rerun"
+- "16 members reaproveitados por igualdade"
+- "os 16 reaproveitados vieram de members bem-sucedidos de uma execucao anual anterior que terminou em falha"
+
+### O que muda no comportamento de botoes e fluxos
+
+#### Fluxo recomendado para falha parcial em ZIP anual
+
+- manter o botao normal de rerun anual
+- nao forcar o operador a escolher manualmente os CSVs que falharam
+- apos o rerun, mostrar no detalhe da run quantos members foram reaproveitados e quantos realmente rodaram
+
+#### Fluxo recomendado para `/ingestion/sincronizacoes/reprocessar-arquivo`
+
+- manter como acao especializada
+- usar quando o operador quer agir sobre um member/arquivo especifico
+- nao sugerir esse endpoint como fluxo principal para "3 arquivos falharam em 19", porque o rerun anual agora ja resolve isso de forma inteligente
+
+### Impacto esperado no frontend
+
+- telas operacionais de runs devem diferenciar members reaproveitados de members efetivamente reprocessados
+- badges ou resumos de recuperacao podem usar `members_reused_from_failed_parent` para explicar por que um rerun anual nao rodou todos os CSVs novamente
+- o frontend deve continuar tratando `/ingestion/sincronizacoes/reprocessar-arquivo` como acao especializada, nao como fluxo padrao para recuperar falha parcial em ZIP anual
+- tabelas detalhadas podem mostrar:
+  - status da run
+  - total de members
+  - members reprocessados
+  - members reaproveitados
+  - members reaproveitados de pai falhado
+  - members skipped
+
+### Compatibilidade
+
+- nao houve remocao de endpoint
+- nao houve quebra de rota
+- a mudanca e de semantica operacional e de campos resumidos que agora devem ser priorizados pela UI
+- clientes antigos continuam funcionando, mas nao aproveitam a nova explicacao de recuperacao se ignorarem os novos campos
+
 ## 2026-06-25 - Updates Service usa baseline canônico de members para cadastro e demais fontes
 
 ### Endpoints com semântica corrigida
