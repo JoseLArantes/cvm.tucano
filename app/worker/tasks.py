@@ -1362,77 +1362,61 @@ def sincronizar_member_internal(
                 chunk_size=_settings.ingestion_promote_batch_size,
             )
         elif tipo_fonte == "fca":
-            from app.models.ingestion import IngestionRow
-            from app.services.ingestion.fca import _process_fca_rows
-            rows = list(
-                db.execute(
-                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
-                ).scalars()
-            )
-            _process_fca_rows(
+            from app.services.ingestion.fca import _process_fca_member
+
+            _process_fca_member(
                 db,
                 execucao=execucao,
                 run=run,
                 ano=ano,
-                staged_members=[(member, rows)],
+                member=member,
                 promote_enabled=_settings.ingestion_promote_enabled,
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
                 header_map=header_map,
+                chunk_size=_settings.ingestion_promote_batch_size,
             )
         elif tipo_fonte == "ipe":
-            from app.models.ingestion import IngestionRow
-            from app.services.ingestion.ipe import _process_ipe_rows
-            rows = list(
-                db.execute(
-                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
-                ).scalars()
-            )
-            _process_ipe_rows(
+            from app.services.ingestion.ipe import _process_ipe_member
+
+            _process_ipe_member(
                 db,
                 execucao=execucao,
                 run=run,
                 ano=ano,
-                staged_members=[(member, rows)],
+                member=member,
                 promote_enabled=_settings.ingestion_promote_enabled,
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
+                chunk_size=_settings.ingestion_promote_batch_size,
             )
         elif tipo_fonte == "vlmo":
-            from app.models.ingestion import IngestionRow
-            from app.services.ingestion.vlmo import _process_vlmo_rows
-            rows = list(
-                db.execute(
-                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
-                ).scalars()
-            )
-            _process_vlmo_rows(
+            from app.services.ingestion.vlmo import _process_vlmo_member
+
+            _process_vlmo_member(
                 db,
                 execucao=execucao,
                 run=run,
                 ano=ano,
-                staged_members=[(member, rows)],
+                member=member,
                 promote_enabled=_settings.ingestion_promote_enabled,
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
+                chunk_size=_settings.ingestion_promote_batch_size,
             )
         elif tipo_fonte == "cgvn":
-            from app.models.ingestion import IngestionRow
-            from app.services.ingestion.cgvn import _process_cgvn_rows
-            rows = list(
-                db.execute(
-                    select(IngestionRow).where(IngestionRow.ingestion_file_member_id == member.id)
-                ).scalars()
-            )
-            _process_cgvn_rows(
+            from app.services.ingestion.cgvn import _process_cgvn_member
+
+            _process_cgvn_member(
                 db,
                 execucao=execucao,
                 run=run,
                 ano=ano,
-                staged_members=[(member, rows)],
+                member=member,
                 promote_enabled=_settings.ingestion_promote_enabled,
                 contadores=contadores,
                 seen_by_row_kind=seen_by_row_kind,
+                chunk_size=_settings.ingestion_promote_batch_size,
             )
 
         from app.services.ingestion.quality import enforce_quality_gate

@@ -3,10 +3,11 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Sequence
+from itertools import chain
 from typing import Any
 
 import httpx
-from sqlalchemy import and_, insert, or_, select
+from sqlalchemy import insert, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -59,6 +60,7 @@ from app.services.ingestion.source_registry import listar_datasets
 from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
+    iter_staged_member_chunks,
     iter_zip_csv_members,
     member_has_successful_match,
     purge_member_success_rows,
@@ -597,12 +599,9 @@ def _key_tuple(dados: dict[str, Any], campos_chave: tuple[str, ...]) -> tuple[An
 
 
 def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: Sequence[tuple[Any, ...]]) -> Any:
-    return or_(
-        *[
-            and_(*[getattr(model, campo) == valor for campo, valor in zip(campos_chave, chave, strict=False)])
-            for chave in chaves
-        ]
-    )
+    if len(campos_chave) == 1:
+        return getattr(model, campos_chave[0]).in_([chave[0] for chave in chaves])
+    return tuple_(*[getattr(model, campo) for campo in campos_chave]).in_(list(chaves))
 
 
 def _prepare_promocao(dados: dict[str, Any]) -> dict[str, Any]:
@@ -762,18 +761,58 @@ def _process_fca_rows(
         key=lambda item: (0 if item[0].member_name == f"fca_cia_aberta_{ano}.csv" else 1, item[0].member_name),
     )
     for member, rows in ordered_members:
-        current_hashes_by_model: dict[type[Any], set[str]] = {}
-        schema_result = validate_member_header(rows[0].row_kind if rows else "desconhecido", member.header)
-        update_member_schema_validation(member, result=schema_result)
-        if schema_result.status == "invalid":
-            contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
-            contadores["lidas"] += member.row_count
-            contadores["rejeitados"] += member.row_count
-            continue
+        _process_fca_member(
+            db,
+            execucao=execucao,
+            run=run,
+            ano=ano,
+            member=member,
+            promote_enabled=promote_enabled,
+            contadores=contadores,
+            seen_by_row_kind=seen_by_row_kind,
+            header_map=header_map,
+            rows=rows,
+            member_type_map=member_type_map,
+        )
 
-        tipo = member_type_map[member.member_name]
+    update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
+    return contadores
+
+
+def _process_fca_member(
+    db: Session,
+    *,
+    execucao: ExecucaoSincronizacao,
+    run: Any,
+    ano: int,
+    member: Any,
+    promote_enabled: bool,
+    contadores: dict[str, int],
+    seen_by_row_kind: dict[str, dict[str, dict[str, Any]]],
+    header_map: dict[tuple[str | None, int | None, int | None, Any], Any],
+    rows: list[IngestionRow] | None = None,
+    chunk_size: int | None = None,
+    member_type_map: dict[str, str] | None = None,
+) -> None:
+    _, local_member_type_map, _, _ = map_fca_members(ano)
+    member_type_map = member_type_map or local_member_type_map
+    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    chunks = iter([rows]) if rows is not None else iter_staged_member_chunks(
+        db, member_id=member.id, chunk_size=chunk_size or _PROMOTE_CHUNK_SIZE
+    )
+    first_rows = next(chunks, [])
+    schema_result = validate_member_header(first_rows[0].row_kind if first_rows else "desconhecido", member.header)
+    update_member_schema_validation(member, result=schema_result)
+    if schema_result.status == "invalid":
+        contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
+        contadores["lidas"] += member.row_count
+        contadores["rejeitados"] += member.row_count
+        return
+
+    tipo = member_type_map[member.member_name]
+    for chunk_rows in chain([first_rows], chunks):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
-        for row in rows:
+        for row in chunk_rows:
             contadores["lidas"] += 1
             try:
                 row_kind, dados = normalizar_fca_row(
@@ -928,22 +967,20 @@ def _process_fca_rows(
                 execucao_id=execucao.id,
                 contadores=contadores,
             )
-        reconciled_deleted = 0
-        for model, current_hashes in current_hashes_by_model.items():
-            reconciled_deleted += reconcile_promoted_rows(
-                db,
-                model=model,
-                ingestion_run_id=run.id,
-                ingestion_file_member_id=member.id,
-                arquivo_origem=member.member_name,
-                ano_origem=ano,
-                current_hashes=current_hashes,
-            )
-        if reconciled_deleted:
-            contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
 
-    update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
-    return contadores
+    reconciled_deleted = 0
+    for model, current_hashes in current_hashes_by_model.items():
+        reconciled_deleted += reconcile_promoted_rows(
+            db,
+            model=model,
+            ingestion_run_id=run.id,
+            ingestion_file_member_id=member.id,
+            arquivo_origem=member.member_name,
+            ano_origem=ano,
+            current_hashes=current_hashes,
+        )
+    if reconciled_deleted:
+        contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
 
 
 def _ordered_fca_members(payload: bytes, *, ano: int) -> list[tuple[str, bytes]]:

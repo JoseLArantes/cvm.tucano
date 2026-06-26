@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from typing import Any
 
 import httpx
-from sqlalchemy import and_, insert, or_, select
+from sqlalchemy import insert, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -279,12 +279,9 @@ def _key_tuple(dados: dict[str, Any], campos_chave: tuple[str, ...]) -> tuple[An
 
 
 def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: Sequence[tuple[Any, ...]]) -> Any:
-    return or_(
-        *[
-            and_(*[getattr(model, campo) == valor for campo, valor in zip(campos_chave, chave, strict=False)])
-            for chave in chaves
-        ]
-    )
+    if len(campos_chave) == 1:
+        return getattr(model, campos_chave[0]).in_([chave[0] for chave in chaves])
+    return tuple_(*[getattr(model, campo) for campo in campos_chave]).in_(list(chaves))
 
 
 def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
