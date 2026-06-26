@@ -4,6 +4,7 @@ import argparse
 import csv
 import io
 import tracemalloc
+import uuid
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -40,11 +41,11 @@ class BenchmarkResult:
     quarantined_rows: int
 
 
-def _companhia() -> Companhia:
+def _companhia(*, cnpj_companhia: str, codigo_cvm: int) -> Companhia:
     agora = datetime.now(UTC)
     return Companhia(
-        cnpj_companhia="08773135000100",
-        codigo_cvm=25224,
+        cnpj_companhia=cnpj_companhia,
+        codigo_cvm=codigo_cvm,
         denominacao_social="Empresa Benchmark",
         denominacao_comercial="Empresa Benchmark",
         situacao_registro="ATIVA",
@@ -75,14 +76,14 @@ def _companhia() -> Companhia:
     )
 
 
-def _add_identifiers(session: Session, companhia: Companhia) -> None:
+def _add_identifiers(session: Session, companhia: Companhia, *, codigo_cvm: int) -> None:
     session.add_all(
         [
             CompanhiaIdentificador(
                 companhia_id=companhia.id,
                 tipo="cnpj",
-                valor="08773135000100",
-                valor_normalizado="08773135000100",
+                valor=companhia.cnpj_companhia,
+                valor_normalizado=companhia.cnpj_companhia,
                 fonte="cad_cia_aberta",
                 confianca="alta",
                 ativo=True,
@@ -90,8 +91,8 @@ def _add_identifiers(session: Session, companhia: Companhia) -> None:
             CompanhiaIdentificador(
                 companhia_id=companhia.id,
                 tipo="codigo_cvm",
-                valor="25224",
-                valor_normalizado="25224",
+                valor=str(codigo_cvm),
+                valor_normalizado=str(codigo_cvm),
                 fonte="cad_cia_aberta",
                 confianca="alta",
                 ativo=True,
@@ -101,12 +102,12 @@ def _add_identifiers(session: Session, companhia: Companhia) -> None:
     session.flush()
 
 
-def _build_dfp_payload(rows: int) -> bytes:
+def _build_dfp_payload(rows: int, *, cnpj_companhia: str, codigo_cvm: int) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
     writer.writerow(
         [
-            "CNPJ_CIA",
+                "CNPJ_CIA",
             "DT_REFER",
             "VERSAO",
             "DENOM_CIA",
@@ -126,11 +127,11 @@ def _build_dfp_payload(rows: int) -> bytes:
     for index in range(rows):
         writer.writerow(
             [
-                "08.773.135/0001-00",
+                f"{cnpj_companhia[:2]}.{cnpj_companhia[2:5]}.{cnpj_companhia[5:8]}/{cnpj_companhia[8:12]}-{cnpj_companhia[12:14]}",
                 "2025-12-31",
                 "1",
                 "EMPRESA BENCHMARK",
-                "25224",
+                str(codigo_cvm),
                 "GRUPO",
                 "REAL",
                 "UNIDADE",
@@ -139,14 +140,14 @@ def _build_dfp_payload(rows: int) -> bytes:
                 "2025-12-31",
                 f"1.{index:05d}",
                 f"Conta {index}",
-                "1000,00",
+                "1000.00",
                 "S",
             ]
         )
     return buffer.getvalue().encode("latin1")
 
 
-def _build_fre_payload(rows: int) -> bytes:
+def _build_fre_payload(rows: int, *, cnpj_companhia: str) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer, delimiter=";")
     writer.writerow(
@@ -185,7 +186,7 @@ def _build_fre_payload(rows: int) -> bytes:
     for index in range(rows):
         writer.writerow(
             [
-                "08.773.135/0001-00",
+                f"{cnpj_companhia[:2]}.{cnpj_companhia[2:5]}.{cnpj_companhia[5:8]}/{cnpj_companhia[8:12]}-{cnpj_companhia[12:14]}",
                 "2025-12-31",
                 "1",
                 "123",
@@ -249,6 +250,8 @@ def _run_dfp_case(
     rows: int,
     stage_chunk_size: int,
     promote_chunk_size: int,
+    cnpj_companhia: str,
+    codigo_cvm: int,
 ) -> tuple[int, int, float, float]:
     execucao = ExecucaoSincronizacao(
         tipo_fonte="dfp",
@@ -275,7 +278,7 @@ def _run_dfp_case(
         payload=b"benchmark",
         is_zip=True,
     )
-    payload = _build_dfp_payload(rows)
+    payload = _build_dfp_payload(rows, cnpj_companhia=cnpj_companhia, codigo_cvm=codigo_cvm)
     stage_started = perf_counter()
     member = stage_csv_payload_streaming(
         session,
@@ -315,7 +318,14 @@ def _run_dfp_case(
         chunk_size=promote_chunk_size,
     )
     process_elapsed = perf_counter() - process_started
-    promoted_rows = session.scalar(select(func.count()).select_from(DemonstracaoFinanceira)) or 0
+    promoted_rows = (
+        session.scalar(
+            select(func.count())
+            .select_from(DemonstracaoFinanceira)
+            .where(DemonstracaoFinanceira.cnpj_companhia == cnpj_companhia)
+        )
+        or 0
+    )
     quarantined_rows = session.scalar(select(func.count()).where(QuarantineItem.ingestion_run_id == run.id)) or 0
     return promoted_rows, quarantined_rows, stage_elapsed, process_elapsed
 
@@ -326,6 +336,7 @@ def _run_fre_case(
     rows: int,
     stage_chunk_size: int,
     promote_chunk_size: int,
+    cnpj_companhia: str,
 ) -> tuple[int, int, float, float]:
     execucao = ExecucaoSincronizacao(
         tipo_fonte="fre",
@@ -352,7 +363,7 @@ def _run_fre_case(
         payload=b"benchmark",
         is_zip=True,
     )
-    payload = _build_fre_payload(rows)
+    payload = _build_fre_payload(rows, cnpj_companhia=cnpj_companhia)
     stage_started = perf_counter()
     member = stage_csv_payload_streaming(
         session,
@@ -383,7 +394,12 @@ def _run_fre_case(
         chunk_size=promote_chunk_size,
     )
     process_elapsed = perf_counter() - process_started
-    promoted_rows = session.scalar(select(func.count()).select_from(FrePosicaoAcionaria)) or 0
+    promoted_rows = (
+        session.scalar(
+            select(func.count()).select_from(FrePosicaoAcionaria).where(FrePosicaoAcionaria.cnpj_companhia == cnpj_companhia)
+        )
+        or 0
+    )
     quarantined_rows = session.scalar(select(func.count()).where(QuarantineItem.ingestion_run_id == run.id)) or 0
     return promoted_rows, quarantined_rows, stage_elapsed, process_elapsed
 
@@ -412,10 +428,13 @@ def _run_case(
     local_session = session_factory(bind=connection)
     event.listen(engine, "before_cursor_execute", before_cursor_execute)
     try:
-        compania = _companhia()
+        unique_seed = uuid.uuid4().int
+        benchmark_cnpj = f"{unique_seed % 10**14:014d}"
+        benchmark_codigo_cvm = 900000 + (unique_seed % 9999)
+        compania = _companhia(cnpj_companhia=benchmark_cnpj, codigo_cvm=benchmark_codigo_cvm)
         local_session.add(compania)
         local_session.flush()
-        _add_identifiers(local_session, compania)
+        _add_identifiers(local_session, compania, codigo_cvm=benchmark_codigo_cvm)
 
         tracemalloc.start()
         started = perf_counter()
@@ -425,6 +444,8 @@ def _run_case(
                 rows=rows,
                 stage_chunk_size=stage_chunk_size,
                 promote_chunk_size=promote_chunk_size,
+                cnpj_companhia=benchmark_cnpj,
+                codigo_cvm=benchmark_codigo_cvm,
             )
         else:
             promoted_rows, quarantined_rows, stage_seconds, process_seconds = _run_fre_case(
@@ -432,6 +453,7 @@ def _run_case(
                 rows=rows,
                 stage_chunk_size=stage_chunk_size,
                 promote_chunk_size=promote_chunk_size,
+                cnpj_companhia=benchmark_cnpj,
             )
         total_seconds = perf_counter() - started
         _, peak_memory = tracemalloc.get_traced_memory()

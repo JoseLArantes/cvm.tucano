@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Any
 
 import httpx
@@ -284,6 +284,27 @@ def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: S
     return tuple_(*[getattr(model, campo) for campo in campos_chave]).in_(list(chaves))
 
 
+def _load_existing_rows(
+    db: Session,
+    *,
+    model: type[Any],
+    campos_chave: tuple[str, ...],
+    campos_negocio: Collection[str],
+    chaves: list[tuple[Any, ...]],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    if not chaves:
+        return {}
+    campos_select = tuple(dict.fromkeys(("id", *campos_chave, *campos_negocio)))
+    colunas = [getattr(model, campo) for campo in campos_select]
+    existentes: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+        rows = db.execute(select(*colunas).where(_build_key_clause(model, campos_chave, batch))).mappings()
+        for row in rows:
+            item = dict(row)
+            existentes[tuple(item[campo] for campo in campos_chave)] = item
+    return existentes
+
+
 def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
     dados_para_hash = {k: v for k, v in dados_promocao.items() if k not in {"linha_origem"}}
@@ -325,15 +346,18 @@ def _promote_financeiro_chunk_internal(
     agora = _agora()
     preparados = [(row, _preparar_dados_promocao(dados)) for row, dados in linhas_promovidas]
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
-    existentes: list[Any] = []
-    if chaves:
-        for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
-            existentes.extend(db.execute(select(model).where(_build_key_clause(model, campos_chave, batch))).scalars())
-    existentes_por_chave = {tuple(getattr(item, campo) for campo in campos_chave): item for item in existentes}
+    existentes_por_chave = _load_existing_rows(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        campos_negocio=campos_negocio,
+        chaves=chaves,
+    )
 
     payload_insercao: list[dict[str, Any]] = []
     historicos: list[Any] = []
     chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
+    payload_atualizacao: dict[Any, dict[str, Any]] = {}
     for _row, dados in preparados:
         chave = _key_tuple(dados, campos_chave)
         existente_lote = chaves_no_lote.get(chave)
@@ -365,29 +389,47 @@ def _promote_financeiro_chunk_internal(
 
         alteracoes: dict[str, tuple[Any, Any]] = {}
         for campo in campos_negocio:
-            valor_antigo = getattr(existente, campo)
+            valor_antigo = existente[campo]
             valor_novo = dados[campo]
             if not _equivalente(valor_antigo, valor_novo):
                 alteracoes[campo] = (valor_antigo, valor_novo)
 
-        existente.sincronizado_em = agora
-        existente.arquivo_origem = dados["arquivo_origem"]
-        existente.ano_origem = dados["ano_origem"]
-        existente.linha_origem = dados["linha_origem"]
-        existente.hash_origem = dados["hash_origem"]
+        atualizacao = payload_atualizacao.setdefault(
+            existente["id"],
+            {
+                "id": existente["id"],
+                "sincronizado_em": agora,
+                "arquivo_origem": dados["arquivo_origem"],
+                "ano_origem": dados["ano_origem"],
+                "linha_origem": dados["linha_origem"],
+                "hash_origem": dados["hash_origem"],
+            },
+        )
+        atualizacao["sincronizado_em"] = agora
+        atualizacao["arquivo_origem"] = dados["arquivo_origem"]
+        atualizacao["ano_origem"] = dados["ano_origem"]
+        atualizacao["linha_origem"] = dados["linha_origem"]
+        atualizacao["hash_origem"] = dados["hash_origem"]
+        existente["sincronizado_em"] = agora
+        existente["arquivo_origem"] = dados["arquivo_origem"]
+        existente["ano_origem"] = dados["ano_origem"]
+        existente["linha_origem"] = dados["linha_origem"]
+        existente["hash_origem"] = dados["hash_origem"]
 
         if not alteracoes:
             contadores["inalterados"] += 1
         else:
             for campo, (_, valor_novo) in alteracoes.items():
-                setattr(existente, campo, valor_novo)
-            existente.alterado_em = agora
+                atualizacao[campo] = valor_novo
+                existente[campo] = valor_novo
+            atualizacao["alterado_em"] = agora
+            existente["alterado_em"] = agora
             contadores["atualizados"] += 1
             for campo, (valor_antigo, valor_novo) in alteracoes.items():
                 historicos.append(
                     {
                         "entidade": entidade,
-                        "entidade_id": existente.id,
+                        "entidade_id": existente["id"],
                         "companhia_id": dados.get("companhia_id"),
                         "campo": campo,
                         "valor_anterior": _valor_historico(valor_antigo),
@@ -402,6 +444,8 @@ def _promote_financeiro_chunk_internal(
     if payload_insercao:
         for batch in iter_parameter_batches(payload_insercao, parameter_width=mapping_parameter_width(payload_insercao)):
             db.execute(insert(model), batch)
+    if payload_atualizacao:
+        db.bulk_update_mappings(model, list(payload_atualizacao.values()))
     if historicos:
         from app.models.sincronizacao import HistoricoAlteracaoCampo
 
