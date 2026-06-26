@@ -516,6 +516,8 @@ O endpoint de reprocessamento seletivo continua existindo para recuperacao cirur
      - `vlmo`: `_process_vlmo_rows`
      - `cgvn`: `_process_cgvn_rows`
    - **Promocao resiliente** (`safe_promote_chunk`): promove em chunks. Se o chunk inteiro falhar (ex: `NumericValueOutOfRange`), faz rollback do savepoint e promove linha a linha. Linhas com erro vao para quarentena com `normalizacao_invalida`; linhas OK sao salvas.
+   - **Lookup leve antes do promote**: a camada de ingestao consulta primeiro apenas `id` + chave natural + `hash_origem`; a leitura completa dos campos de negocio so acontece para chaves cujo hash mudou.
+   - **Insercao nova no PostgreSQL**: o caminho de insert usa `ON CONFLICT DO NOTHING` nas tabelas com chave natural estavel para reduzir custo de corrida e duplicidade intra-batch sem alterar a trilha de historico.
    - Para linhas bem-sucedidas: atualizacao de contadores
    - Para excecoes de linha: persistencia de quarentena e diagnostico
    - Ao final do membro: purge das linhas staged bem-sucedidas
@@ -786,6 +788,21 @@ na run anterior mas nao aparecem no pacote atual. Isso garante que dados obsolet
 empresas que deixaram de ser listadas) sejam removidos. A operacao le `id` + `hash_origem`
 do escopo atual, identifica os registros ausentes no conjunto promovido e executa `DELETE`
 em batches de 5.000 IDs para evitar statements SQL excessivamente grandes.
+
+### Otimizacoes Atuais do Promote
+
+O hot path atual de promote segue esta ordem:
+
+1. lookup leve por chave natural com `hash_origem`
+2. classificacao local entre `inserido`, `inalterado` e `potencialmente alterado`
+3. lookup completo apenas das chaves realmente alteradas
+4. insert em lote
+5. update em lote das colunas operacionais e dos campos alterados
+6. persistencia de historico campo a campo apenas quando houve mudanca real
+
+No PostgreSQL, os inserts novos usam `ON CONFLICT DO NOTHING` quando a chave natural ja esta
+fechada e testada. Isso reduz round-trips e falhas por unicidade sem mudar o contrato de
+`alterado_em`, historico ou contadores.
 
 ---
 

@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import insert, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
 
@@ -632,6 +633,11 @@ def _expire_updated_instances(db: Session, model: type[Any], ids: Iterable[Any])
             db.expire(instance)
 
 
+def _is_postgresql(db: Session) -> bool:
+    bind = db.get_bind()
+    return bind is not None and bind.dialect.name == "postgresql"
+
+
 def _prepare_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
     dados_promocao["hash_origem"] = gerar_hash_canonico(
@@ -790,7 +796,11 @@ def _promote_fca_chunk_internal(
                 )
     if payload_insercao:
         for batch in iter_parameter_batches(payload_insercao, parameter_width=mapping_parameter_width(payload_insercao)):
-            db.execute(insert(model), batch)
+            if _is_postgresql(db):
+                db.execute(pg_insert(model).values(batch).on_conflict_do_nothing())
+                db.flush()
+            else:
+                db.execute(insert(model), batch)
     if payload_atualizacao:
         db.bulk_update_mappings(model, list(payload_atualizacao.values()))
         _expire_updated_instances(db, model, payload_atualizacao.keys())

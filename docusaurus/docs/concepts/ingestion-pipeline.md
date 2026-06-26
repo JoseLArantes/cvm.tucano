@@ -212,6 +212,17 @@ O repositório mantém benchmarks locais para separar custo de `stage` do custo 
 - `tests/scripts/benchmark_ingestion_stage.py`: compara staging via `insert` e via `COPY`;
 - `tests/scripts/benchmark_ingestion_member.py`: mede `stage` + `promote` por member em fluxos representativos de DFP e FRE, incluindo contagem de statements e memória pico.
 
+## Otimizações Atuais do Promote
+
+O caminho atual de promote foi ajustado para reduzir custo no caso mais comum de reprocessamento:
+
+- lookup inicial só com `id` + chave natural + `hash_origem`;
+- leitura completa de campos de negócio apenas para chaves cujo hash mudou;
+- `bulk_update_mappings` para updates explícitos;
+- `ON CONFLICT DO NOTHING` no PostgreSQL para inserts novos quando a chave natural já está estabilizada.
+
+Com isso, reruns idempotentes deixam de hidratar registros completos sem necessidade e a parte de insert fica menos sensível a duplicidade e corrida entre chunks.
+
 ## Orquestração Celery
 
 ### Hierarquia de Tasks
