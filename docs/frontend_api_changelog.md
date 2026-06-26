@@ -10,6 +10,7 @@
 
 - o backend agora valida `arquivo` de forma case-insensitive no reprocessamento seletivo
 - nomes de members CVM com siglas em maiusculas, como `BPA`, `BPP`, `BPR`, `DRE`, `DVA` e similares, deixam de falhar com `422 Unprocessable Entity`
+- o backend passa a preservar o nome canonico do arquivo ao persistir a execucao filha e ao despachar a task de member; o valor nao e mais regravado em minusculas
 - nao houve mudanca de payload nem de shape da resposta; a correcao e apenas de aceitacao do nome informado
 
 ## 2026-06-26 - Rerun anual de ingestion reaproveita members bem-sucedidos de execucao pai falhada

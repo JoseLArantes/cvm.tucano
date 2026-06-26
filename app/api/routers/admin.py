@@ -211,45 +211,60 @@ def _extrair_ano_arquivo(arquivo: str) -> int | None:
     return None
 
 
-def _arquivo_suportado_por_fonte(fonte: str, arquivo: str, ano: int | None) -> bool:
+def _resolver_arquivo_suportado_por_fonte(fonte: str, arquivo: str, ano: int | None) -> str | None:
     arquivo_normalizado = arquivo.lower().strip()
     fonte_item = obter_fonte(fonte)
     if fonte_item is None:
-        return False
+        return None
     if fonte == "cadastro":
-        return any(
-            item.render_member_name(ano=0).lower() == arquivo_normalizado for item in listar_datasets("cadastro")
-        )
+        for item in listar_datasets("cadastro"):
+            member_name = item.render_member_name(ano=0)
+            if member_name.lower() == arquivo_normalizado:
+                return member_name
+        return None
     if ano is None:
-        return False
-    if fonte_item.render_arquivo_principal(ano=ano).lower() == arquivo_normalizado:
-        return True
-    return any(item.render_member_name(ano=ano).lower() == arquivo_normalizado for item in listar_datasets(fonte))
+        return None
+    arquivo_principal = fonte_item.render_arquivo_principal(ano=ano)
+    if arquivo_principal.lower() == arquivo_normalizado:
+        return arquivo_principal
+    for item in listar_datasets(fonte):
+        member_name = item.render_member_name(ano=ano)
+        if member_name.lower() == arquivo_normalizado:
+            return member_name
+    return None
+
+
+def _arquivo_suportado_por_fonte(fonte: str, arquivo: str, ano: int | None) -> bool:
+    return _resolver_arquivo_suportado_por_fonte(fonte, arquivo, ano) is not None
 
 
 def _agendar_por_arquivo(
     db: DbSession, arquivo: str, ano: int | None, force_reimport: bool = False
 ) -> TarefaAgendadaResumo:
-    arquivo_normalizado = arquivo.lower().strip()
+    arquivo_informado = arquivo.strip()
+    arquivo_normalizado = arquivo_informado.lower()
     ano_efetivo = ano if ano is not None else _extrair_ano_arquivo(arquivo_normalizado)
 
-    if _arquivo_suportado_por_fonte("cadastro", arquivo_normalizado, None):
+    if _arquivo_suportado_por_fonte("cadastro", arquivo_informado, None):
         tarefa = sincronizar_cadastro_companhias_task.delay(force_reimport=force_reimport)
         return TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=str(tarefa.id))
 
     tipo_fonte = None
+    arquivo_canonico = None
     for src in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
-        if _arquivo_suportado_por_fonte(src, arquivo_normalizado, ano_efetivo):
+        arquivo_resolvido = _resolver_arquivo_suportado_por_fonte(src, arquivo_informado, ano_efetivo)
+        if arquivo_resolvido is not None:
             tipo_fonte = src
+            arquivo_canonico = arquivo_resolvido
             break
 
-    if tipo_fonte is None:
+    if tipo_fonte is None or arquivo_canonico is None:
         raise HTTPException(status_code=422, detail="Arquivo nao suportado para reprocessamento seletivo.")
 
     if ano_efetivo is None:
         raise HTTPException(status_code=422, detail=f"Ano obrigatorio para reprocessar arquivo {tipo_fonte.upper()}.")
 
-    is_zip = arquivo_normalizado.endswith(".zip") or arquivo_normalizado == f"{tipo_fonte}_cia_aberta_{ano_efetivo}.zip"
+    is_zip = arquivo_canonico.endswith(".zip") or arquivo_canonico == f"{tipo_fonte}_cia_aberta_{ano_efetivo}.zip"
 
     if is_zip:
         task_mapper = {
@@ -289,7 +304,7 @@ def _agendar_por_arquivo(
             tipo_execucao="arquivo_membro",
             tipo_fonte=tipo_fonte,
             ano=ano_efetivo,
-            arquivo=arquivo_normalizado,
+            arquivo=arquivo_canonico,
             url=exec_pai.url,
             status="agendada",
         )
@@ -300,7 +315,7 @@ def _agendar_por_arquivo(
         tarefa = sincronizar_member_task.delay(
             tipo_fonte=tipo_fonte,
             ano=ano_efetivo,
-            member_name=arquivo_normalizado,
+            member_name=arquivo_canonico,
             parent_execucao_id=str(exec_pai.id),
             child_execucao_id=str(child_exec.id),
             force_reimport=force_reimport,

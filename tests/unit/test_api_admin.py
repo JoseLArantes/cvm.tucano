@@ -219,6 +219,10 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
     assert resposta_csv.json()["tarefas"][0]["tipo_fonte"] == "fre_membro"
     assert resposta_itr_csv_maiusculo.status_code == 200
     assert resposta_itr_csv_maiusculo.json()["tarefas"][0]["tipo_fonte"] == "itr_membro"
+    assert (
+        resposta_itr_csv_maiusculo.json()["tarefas"][0]["id_tarefa"]
+        == "task-itr-member-2026-itr_cia_aberta_BPA_con_2026.csv-False"
+    )
     assert resposta_fca.status_code == 200
     assert resposta_fca.json()["tarefas"][0]["tipo_fonte"] == "fca"
     assert resposta_ipe_zip.status_code == 200
