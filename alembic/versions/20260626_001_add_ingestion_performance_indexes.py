@@ -41,7 +41,7 @@ def upgrade() -> None:
         unique=False,
     )
     op.create_index(
-        "ix_ingestion_file_members_member_name_member_sha256_ingestion_file_id",
+        "ix_ing_file_members_name_sha_file_id",
         "ingestion_file_members",
         ["member_name", "member_sha256", "ingestion_file_id"],
         unique=False,
@@ -80,7 +80,7 @@ def downgrade() -> None:
         table_name="source_member_snapshots",
     )
     op.drop_index(
-        "ix_ingestion_file_members_member_name_member_sha256_ingestion_file_id",
+        "ix_ing_file_members_name_sha_file_id",
         table_name="ingestion_file_members",
     )
     op.drop_index(

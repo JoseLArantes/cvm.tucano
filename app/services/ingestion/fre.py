@@ -1562,6 +1562,26 @@ def _load_existing_rows(
     return existentes
 
 
+def _load_existing_row_hashes(
+    db: Session,
+    *,
+    model: type[Any],
+    campos_chave: tuple[str, ...],
+    chaves: list[tuple[Any, ...]],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    if not chaves:
+        return {}
+    campos_select = ("id", *campos_chave, "hash_origem")
+    colunas = [getattr(model, campo) for campo in campos_select]
+    existentes: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+        rows = db.execute(select(*colunas).where(_build_key_clause(model, campos_chave, batch))).mappings()
+        for row in rows:
+            item = dict(row)
+            existentes[tuple(item[campo] for campo in campos_chave)] = item
+    return existentes
+
+
 def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
     dados_promocao["hash_origem"] = gerar_hash_canonico(
@@ -1609,12 +1629,26 @@ def _promote_fre_chunk_internal(
     agora = _agora()
     preparados = [(row, _preparar_dados_promocao(dados)) for row, dados in linhas_promovidas]
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
+    existentes_hash_por_chave = _load_existing_row_hashes(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        chaves=chaves,
+    )
+    chaves_com_mudanca = list(
+        dict.fromkeys(
+            chave
+            for _row, dados in preparados
+            if (chave := _key_tuple(dados, campos_chave)) in existentes_hash_por_chave
+            and existentes_hash_por_chave[chave]["hash_origem"] != dados["hash_origem"]
+        )
+    )
     existentes_por_chave = _load_existing_rows(
         db,
         model=model,
         campos_chave=campos_chave,
         campos_negocio=campos_negocio,
-        chaves=chaves,
+        chaves=chaves_com_mudanca,
     )
 
     payload_insercao: list[dict[str, Any]] = []
@@ -1635,8 +1669,8 @@ def _promote_fre_chunk_internal(
             existente_lote["hash_origem"] = dados["hash_origem"]
             contadores["atualizados"] += 1
             continue
-        existente = existentes_por_chave.get(chave)
-        if existente is None:
+        existente_hash = existentes_hash_por_chave.get(chave)
+        if existente_hash is None:
             chaves_no_lote[chave] = dados
             novo_id = uuid.uuid4()
             payload_insercao.append(
@@ -1650,7 +1684,27 @@ def _promote_fre_chunk_internal(
             )
             contadores["inseridos"] += 1
             continue
+        if existente_hash["hash_origem"] == dados["hash_origem"]:
+            atualizacao = payload_atualizacao.setdefault(
+                existente_hash["id"],
+                {
+                    "id": existente_hash["id"],
+                    "sincronizado_em": agora,
+                    "arquivo_origem": dados["arquivo_origem"],
+                    "ano_origem": dados["ano_origem"],
+                    "linha_origem": dados["linha_origem"],
+                    "hash_origem": dados["hash_origem"],
+                },
+            )
+            atualizacao["sincronizado_em"] = agora
+            atualizacao["arquivo_origem"] = dados["arquivo_origem"]
+            atualizacao["ano_origem"] = dados["ano_origem"]
+            atualizacao["linha_origem"] = dados["linha_origem"]
+            atualizacao["hash_origem"] = dados["hash_origem"]
+            contadores["inalterados"] += 1
+            continue
 
+        existente = existentes_por_chave[chave]
         alteracoes: dict[str, tuple[Any, Any]] = {}
         for campo in campos_negocio:
             antigo = existente[campo]
