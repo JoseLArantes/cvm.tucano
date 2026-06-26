@@ -267,7 +267,6 @@ Linhas rejeitadas por erro real.
 | `source_member_snapshots` | Snapshot de cada membro CSV |
 | `source_delivery_snapshots` | Índice documental extraído |
 | `ingestion_file_member_payloads` | Payload bruto do membro (self-heal) |
-| `ingestion_reconcile_hashes` | Hashes para reconcile set-based |
 
 ## Relacionamentos
 

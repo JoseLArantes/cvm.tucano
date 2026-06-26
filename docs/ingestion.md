@@ -404,15 +404,6 @@ Linhas rejeitadas por erro real de linha. Falhas de schema em nivel de membro sa
 
 Armazenamento binario duravel do payload bruto do membro (`LargeBinary`). E a base para self-healing e replay de runs/membros sem depender da permanencia das linhas bem-sucedidas em staging. Se um worker reiniciar entre as fases e o arquivo CSV em disco for perdido, o sistema reconstroi o arquivo a partir deste payload.
 
-### `IngestionReconcileHash`
-
-Tabela transitória de apoio ao `reconcile`.
-
-Ela armazena, por run/member/tabela-alvo, o conjunto de `hash_origem` promovidos com sucesso no member atual.
-O `reconcile` usa esse conjunto em SQL para remover linhas antigas por anti-join, sem loop Python por registro.
-
----
-
 ## 5. Pipeline de Ingestao
 
 O pipeline opera em **duas fases** para todas as fontes. A separacao permite que o sistema
@@ -528,7 +519,7 @@ O endpoint de reprocessamento seletivo continua existindo para recuperacao cirur
    - Para linhas bem-sucedidas: atualizacao de contadores
    - Para excecoes de linha: persistencia de quarentena e diagnostico
    - Ao final do membro: purge das linhas staged bem-sucedidas
-   - **Reconcile**: carrega `hash_origem` promovidos com sucesso em `ingestion_reconcile_hashes` e executa delete set-based por anti-join, removendo do dominio as linhas ausentes no member atual
+   - **Reconcile**: carrega `id` + `hash_origem` do escopo atual (`arquivo_origem`/`ano_origem`), compara com os hashes promovidos com sucesso no member atual e remove em lotes apenas os IDs obsoletos
 6. Agregacao dos resultados filhos no pai
 7. Quality gate: se algum filho falhou, pai falha
 8. Limpeza dos arquivos em disco
@@ -792,8 +783,9 @@ para a mesma fonte/ano. Sao rastreadas as seguintes mudancas:
 
 Apos a promocao, o sistema remove das tabelas de dominio os registros que estavam presentes
 na run anterior mas nao aparecem no pacote atual. Isso garante que dados obsoletos (ex:
-empresas que deixaram de ser listadas) sejam removidos. A operacao usa batches de 5.000
-IDs por vez para evitar statements SQL excessivamente grandes.
+empresas que deixaram de ser listadas) sejam removidos. A operacao le `id` + `hash_origem`
+do escopo atual, identifica os registros ausentes no conjunto promovido e executa `DELETE`
+em batches de 5.000 IDs para evitar statements SQL excessivamente grandes.
 
 ---
 

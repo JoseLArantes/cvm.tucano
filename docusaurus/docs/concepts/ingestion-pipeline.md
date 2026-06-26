@@ -321,14 +321,14 @@ Após a promoção, o sistema remove das tabelas de domínio os registros que es
 
 **Implementação:**
 ```sql
--- Anti-join set-based (batches de 5000 IDs)
-DELETE FROM demonstracoes_financeiras
+-- Carrega IDs e hashes do escopo atual, compara com o conjunto promovido
+SELECT id, hash_origem
+FROM demonstracoes_financeiras
 WHERE arquivo_origem = $1
-  AND ano_origem = $2
-  AND hash_origem NOT IN (
-    SELECT hash_origem FROM ingestion_reconcile_hashes
-    WHERE run_id = $3
-  )
+  AND ano_origem = $2;
+
+DELETE FROM demonstracoes_financeiras
+WHERE id IN (...ids obsoletos em batches de 5000...)
 ```
 
 ## Monitoramento

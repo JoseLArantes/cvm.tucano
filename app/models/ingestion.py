@@ -288,34 +288,6 @@ class IngestionAttempt(Base):
     )
 
 
-class IngestionReconcileHash(Base):
-    __tablename__ = "ingestion_reconcile_hashes"
-    __table_args__ = (
-        Index(
-            "ix_ingestion_reconcile_hashes_scope_hash",
-            "ingestion_run_id",
-            "ingestion_file_member_id",
-            "target_table",
-            "arquivo_origem",
-            "ano_origem",
-            "hash_origem",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("ingestion_runs.id"), index=True, nullable=False
-    )
-    ingestion_file_member_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("ingestion_file_members.id"), index=True
-    )
-    target_table: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
-    arquivo_origem: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
-    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
-    hash_origem: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-
 class QuarantineItem(Base):
     __tablename__ = "quarantine_items"
 
