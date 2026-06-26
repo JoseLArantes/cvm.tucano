@@ -1,5 +1,19 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-26 - Gate de materializacao bloqueia apenas ingestao em execucao
+
+### Endpoints com ajuste operacional visivel
+
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+- `POST /analise/materializacoes/controle/resume`
+
+### Mudanca de comportamento
+
+- o admission gate da materializacao deixa de considerar execucoes apenas `agendada` ou `cancelada` como bloqueadoras
+- somente execucoes de ingestao realmente em `em_execucao` mantem o gate em `red` por `INGESTION_ACTIVE`
+- com isso, telas operacionais deixam de exibir bloqueio vermelho indevido quando nao ha ingestao rodando de fato
+
 ## 2026-06-26 - Reprocessamento seletivo aceita nomes de arquivos com maiusculas
 
 ### Endpoint com correcao de validacao

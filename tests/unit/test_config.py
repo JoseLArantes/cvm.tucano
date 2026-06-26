@@ -45,7 +45,7 @@ def test_configura_materializacao_analitica() -> None:
             "ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS": 12,
             "ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_REQUEUES": 6,
             "ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MIN_AGE_SECONDS": 180,
-            "ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES": "em_execucao,agendada",
+            "ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES": "em_execucao",
         }
     )
     assert settings.analise_materializacao_chunk_size == 40
@@ -63,4 +63,4 @@ def test_configura_materializacao_analitica() -> None:
     assert settings.analise_materializacao_pending_recovery_max_campaigns == 12
     assert settings.analise_materializacao_pending_recovery_max_requeues == 6
     assert settings.analise_materializacao_pending_recovery_min_age_seconds == 180
-    assert settings.parse_csv_set(settings.analise_materializacao_blocking_sync_statuses) == {"em_execucao", "agendada"}
+    assert settings.parse_csv_set(settings.analise_materializacao_blocking_sync_statuses) == {"em_execucao"}

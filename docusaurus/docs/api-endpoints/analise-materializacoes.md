@@ -168,6 +168,7 @@ curl -X POST "http://localhost:8007/analise/materializacoes/controle/pause?reaso
 ## `POST /analise/materializacoes/controle/resume`
 
 Remove a pausa manual e devolve o gate ao modo automatico. Se ainda houver ingestao ativa, o gate continua vermelho por `INGESTION_ACTIVE`.
+Execucoes apenas `agendada` ou `cancelada` nao fecham o gate; o bloqueio automatico vale apenas para ingestao realmente em `em_execucao`.
 
 ## `POST /analise/materializacoes/recuperar-stale`
 

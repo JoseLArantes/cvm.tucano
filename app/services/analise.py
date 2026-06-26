@@ -3527,6 +3527,7 @@ def obter_estado_gate_materializacao(db: Session) -> MaterializacaoGateState:
         )
 
     blocking_statuses = _settings.parse_csv_set(_settings.analise_materializacao_blocking_sync_statuses)
+    effective_blocking_statuses = blocking_statuses.intersection({"em_execucao"}) or {"em_execucao"}
     blocker_rows = db.execute(
         select(
             ExecucaoSincronizacao.tipo_fonte,
@@ -3539,13 +3540,15 @@ def obter_estado_gate_materializacao(db: Session) -> MaterializacaoGateState:
         )
         .select_from(ExecucaoSincronizacao)
         .outerjoin(IngestionRun, IngestionRun.execucao_sincronizacao_id == ExecucaoSincronizacao.id)
-        .where(ExecucaoSincronizacao.status.in_(blocking_statuses))
+        .where(ExecucaoSincronizacao.status.in_(effective_blocking_statuses))
         .order_by(func.coalesce(IngestionRun.started_at, ExecucaoSincronizacao.iniciada_em).asc())
         .limit(10)
     ).all()
     blocking_ingestions = int(
         db.scalar(
-            select(func.count(ExecucaoSincronizacao.id)).where(ExecucaoSincronizacao.status.in_(blocking_statuses))
+            select(func.count(ExecucaoSincronizacao.id)).where(
+                ExecucaoSincronizacao.status.in_(effective_blocking_statuses)
+            )
         )
         or 0
     )

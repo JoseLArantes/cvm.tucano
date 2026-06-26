@@ -379,6 +379,45 @@ def test_obter_estado_gate_materializacao_detecta_ingestao_ativa(db_session: Ses
     assert gate.blockers[0].source_type == "itr"
 
 
+def test_obter_estado_gate_materializacao_ignora_execucoes_nao_ativas(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    monkeypatch.setattr(
+        "app.services.analise._settings.analise_materializacao_blocking_sync_statuses",
+        "em_execucao,agendada,cancelada",
+    )
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                tipo_fonte="itr",
+                ano=2025,
+                arquivo="itr_2025.zip",
+                url="http://exemplo/itr",
+                status="cancelada",
+                iniciada_em=agora,
+            ),
+            ExecucaoSincronizacao(
+                tipo_fonte="dfp",
+                ano=2025,
+                arquivo="dfp_2025.zip",
+                url="http://exemplo/dfp",
+                status="agendada",
+                iniciada_em=agora,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    gate = obter_estado_gate_materializacao(db_session)
+
+    assert gate.status == "green"
+    assert gate.reason_code == "NO_BLOCKERS"
+    assert gate.blocking_ingestions == 0
+    assert gate.blockers == ()
+
+
 def test_obter_estado_gate_materializacao_respeita_pausa_manual(db_session: Session) -> None:
     pausar_controle_materializacao(db_session, reason="janela de carga")
 
