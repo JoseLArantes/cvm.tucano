@@ -173,6 +173,17 @@ with db.cursor() as cur:
 
 **Batch size padrão:** 5.000 linhas por chunk (configurável via `INGESTION_STAGE_BATCH_SIZE`)
 
+### Índices operacionais
+
+O pipeline depende de índices compostos para manter custo previsível nas partes mais quentes do processamento:
+
+- `ingestion_rows` por `ingestion_file_member_id` + `linha_origem`, para leitura ordenada em chunks;
+- `ingestion_runs` por `tipo_fonte` + `ano` + `status` + `started_at`, para localizar referências elegíveis mais rápido;
+- `ingestion_files` por `source_url` + `content_sha256`, para deduplicação de artefatos;
+- snapshots de artifact/member/delivery com chaves compostas voltadas a comparação entre runs.
+
+Esses índices são tuning da camada operacional. Eles não alteram a semântica de `quality_summary`, quarentena, replay ou contratos HTTP.
+
 ### Promoção Resiliente (`safe_promote_chunk`)
 
 Este é o mecanismo mais importante para garantir que um único registro problemático não bloqueie toda a ingestão:
@@ -193,6 +204,13 @@ graph TD
 - Estouro de campo texto
 - Violação de integridade referencial
 - Caracteres inválidos em encoding
+
+## Benchmarks de ingestão
+
+O repositório mantém benchmarks locais para separar custo de `stage` do custo de processamento ponta a ponta:
+
+- `tests/scripts/benchmark_ingestion_stage.py`: compara staging via `insert` e via `COPY`;
+- `tests/scripts/benchmark_ingestion_member.py`: mede `stage` + `promote` por member em fluxos representativos de DFP e FRE, incluindo contagem de statements e memória pico.
 
 ## Orquestração Celery
 

@@ -1102,4 +1102,18 @@ Migracoes do pipeline de ingestion:
 
 ### Testes
 
-Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`) e por componente transversal (`validation`, `staging`, `resolver`, `hierarchy`, `audit`, `quarantine_replay`, `ops`, `retry`, `two_phase_ingestion`), mais benchmark de stage.
+Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`) e por componente transversal (`validation`, `staging`, `resolver`, `hierarchy`, `audit`, `quarantine_replay`, `ops`, `retry`, `two_phase_ingestion`), mais:
+
+- benchmark de stage: `tests/scripts/benchmark_ingestion_stage.py`
+- benchmark ponta a ponta por member: `tests/scripts/benchmark_ingestion_member.py`
+
+### Tuning operacional atual
+
+As queries mais quentes do pipeline contam com indices compostos dedicados para:
+
+- varredura ordenada de `ingestion_rows` por `ingestion_file_member_id` + `linha_origem`;
+- lookup de runs por `tipo_fonte` + `ano` + `status` + `started_at`;
+- lookup de arquivos por `source_url` + `content_sha256`;
+- lookup e upsert de snapshots por artifact/member e delivery hash.
+
+Esses indices existem para reduzir custo de stage incremental, reuso por `member_sha256`, comparacao de snapshots e leitura chunked do staging. Eles nao mudam o contrato funcional da ingestao.

@@ -10,6 +10,15 @@ from app.db.base import Base
 
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_runs_tipo_fonte_ano_status_started_at",
+            "tipo_fonte",
+            "ano",
+            "status",
+            "started_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -34,6 +43,14 @@ class IngestionRun(Base):
 
 class SourceArtifactSnapshot(Base):
     __tablename__ = "source_artifact_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_artifact_snapshots_tipo_fonte_ano_ingestion_run_id",
+            "tipo_fonte",
+            "ano",
+            "ingestion_run_id",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -63,6 +80,13 @@ class SourceArtifactSnapshot(Base):
 
 class IngestionFile(Base):
     __tablename__ = "ingestion_files"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_files_source_url_content_sha256",
+            "source_url",
+            "content_sha256",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -86,6 +110,19 @@ class IngestionFile(Base):
 
 class IngestionFileMember(Base):
     __tablename__ = "ingestion_file_members"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_file_members_ingestion_file_id_member_name",
+            "ingestion_file_id",
+            "member_name",
+        ),
+        Index(
+            "ix_ingestion_file_members_member_name_member_sha256_ingestion_file_id",
+            "member_name",
+            "member_sha256",
+            "ingestion_file_id",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_file_id: Mapped[uuid.UUID] = mapped_column(
@@ -108,6 +145,13 @@ class IngestionFileMember(Base):
 
 class SourceMemberSnapshot(Base):
     __tablename__ = "source_member_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_member_snapshots_artifact_snapshot_id_member_name",
+            "artifact_snapshot_id",
+            "member_name",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     artifact_snapshot_id: Mapped[uuid.UUID] = mapped_column(
@@ -136,6 +180,13 @@ class SourceMemberSnapshot(Base):
 
 class SourceDeliverySnapshot(Base):
     __tablename__ = "source_delivery_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_delivery_snapshots_member_snapshot_id_identity_hash",
+            "member_snapshot_id",
+            "identity_hash",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     artifact_snapshot_id: Mapped[uuid.UUID] = mapped_column(
@@ -166,6 +217,13 @@ class SourceDeliverySnapshot(Base):
 
 class IngestionRow(Base):
     __tablename__ = "ingestion_rows"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_rows_ingestion_file_member_id_linha_origem",
+            "ingestion_file_member_id",
+            "linha_origem",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(

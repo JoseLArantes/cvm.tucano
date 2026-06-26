@@ -148,6 +148,24 @@ O pipeline é dividido em duas fases para garantir resiliência:
 
 > **Self-healing:** Os payloads brutos são persistidos em `IngestionFileMemberPayload`. Se um worker reiniciar entre fases, o CSV pode ser reconstruído do banco sem redownload.
 
+### Tuning operacional atual
+
+As otimizações recentes desta arquitetura continuam sem alterar contratos de API ou payloads consumidos pelo frontend. O foco atual está em custo operacional do pipeline:
+
+- leitura chunked do staging com índice composto por `ingestion_file_member_id` + `linha_origem`;
+- lookup de runs por `tipo_fonte` + `ano` + `status` + `started_at`;
+- lookup de arquivos por `source_url` + `content_sha256`;
+- lookup e comparação de snapshots por artifact/member e delivery hash.
+
+Esses ajustes existem para reduzir custo de `stage`, reuso por `member_sha256`, comparação de snapshots e leitura ordenada de `ingestion_rows`, mantendo a semântica atual do pipeline.
+
+### Benchmarks locais
+
+O repositório mantém dois scripts complementares para medir desempenho da ingestão:
+
+- `tests/scripts/benchmark_ingestion_stage.py`: mede somente o custo de staging (`insert` vs `COPY`);
+- `tests/scripts/benchmark_ingestion_member.py`: mede o fluxo ponta a ponta por member, incluindo `stage` e `promote` em DFP e FRE.
+
 ## Rerun anual inteligente
 
 Quando uma sincronização anual precisa ser refeita depois de falha parcial, o pipeline não depende apenas do status final do ZIP pai. Ele observa o histórico de cada member:
