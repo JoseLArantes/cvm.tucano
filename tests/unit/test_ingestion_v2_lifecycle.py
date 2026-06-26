@@ -21,12 +21,7 @@ from app.models import (  # noqa: F401
 )
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador
-from app.models.ingestion import (
-    IngestionReconcileHash,
-    SourceArtifactSnapshot,
-    SourceDeliverySnapshot,
-    SourceMemberSnapshot,
-)
+from app.models.ingestion import SourceArtifactSnapshot, SourceDeliverySnapshot, SourceMemberSnapshot
 from app.models.ipe import IpeDocumento
 from app.services.ingestion.acquisition import probe_remote_source
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
@@ -164,7 +159,7 @@ def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch: p
         session.close()
 
 
-def test_reconcile_promoted_rows_uses_transient_hash_set_and_deletes_stale_rows() -> None:
+def test_reconcile_promoted_rows_deletes_stale_rows_without_persisting_transient_hashes() -> None:
     session = _session()
     try:
         run = create_run(session, tipo_fonte="ipe", ano=2025)
@@ -228,7 +223,6 @@ def test_reconcile_promoted_rows_uses_transient_hash_set_and_deletes_stale_rows(
         assert deleted == 1
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-a")) is not None
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-b")) is None
-        assert session.scalar(select(IngestionReconcileHash)) is None
     finally:
         session.close()
 

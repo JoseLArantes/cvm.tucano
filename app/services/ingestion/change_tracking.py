@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionReconcileHash, IngestionRun
+from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
+from app.services.ingestion.sql_batches import iter_lookup_batches
 
 
 def empty_change_summary() -> dict[str, Any]:
@@ -137,55 +138,16 @@ def reconcile_promoted_rows(
     current_hashes: set[str],
 ) -> int:
     db.flush()
-    db.execute(
-        delete(IngestionReconcileHash).where(
-            IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-            IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-            IngestionReconcileHash.target_table == model.__tablename__,
-            IngestionReconcileHash.arquivo_origem == arquivo_origem,
-            IngestionReconcileHash.ano_origem == ano_origem,
-        )
-    )
-    if current_hashes:
-        db.add_all(
-            [
-                IngestionReconcileHash(
-                    ingestion_run_id=ingestion_run_id,
-                    ingestion_file_member_id=ingestion_file_member_id,
-                    target_table=model.__tablename__,
-                    arquivo_origem=arquivo_origem,
-                    ano_origem=ano_origem,
-                    hash_origem=item,
-                )
-                for item in current_hashes
-            ]
-        )
-        db.flush()
-    stale_stmt = (
-        delete(model)
-        .where(model.arquivo_origem == arquivo_origem, model.ano_origem == ano_origem)
-        .where(
-            ~exists(
-                select(IngestionReconcileHash.id).where(
-                    IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-                    IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-                    IngestionReconcileHash.target_table == model.__tablename__,
-                    IngestionReconcileHash.arquivo_origem == arquivo_origem,
-                    IngestionReconcileHash.ano_origem == ano_origem,
-                    IngestionReconcileHash.hash_origem == model.hash_origem,
-                )
-            )
-        )
-    )
-    deleted = db.execute(stale_stmt)
-    db.execute(
-        delete(IngestionReconcileHash).where(
-            IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-            IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-            IngestionReconcileHash.target_table == model.__tablename__,
-            IngestionReconcileHash.arquivo_origem == arquivo_origem,
-            IngestionReconcileHash.ano_origem == ano_origem,
-        )
-    )
-    rowcount = getattr(deleted, "rowcount", None)
-    return int(rowcount if rowcount is not None else 0)
+    existing_rows = db.execute(
+        select(model.id, model.hash_origem).where(model.arquivo_origem == arquivo_origem, model.ano_origem == ano_origem)
+    ).all()
+    stale_ids = [row.id for row in existing_rows if row.hash_origem not in current_hashes]
+    if not stale_ids:
+        return 0
+
+    deleted_count = 0
+    for batch in iter_lookup_batches(stale_ids, parameter_width=1):
+        deleted = db.execute(delete(model).where(model.id.in_(list(batch))))
+        rowcount = getattr(deleted, "rowcount", None)
+        deleted_count += int(rowcount if rowcount is not None else 0)
+    return deleted_count
