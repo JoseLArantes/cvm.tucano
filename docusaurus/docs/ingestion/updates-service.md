@@ -21,7 +21,7 @@ O **Serviço de Atualizações de Dados (CVM Data Updates Service)** introduz um
 O serviço é dividido em três etapas sequenciais:
 
 1. **Varredura (Scanning)**: Um job diário (`run_daily_scanner_task`) varre todas as fontes cadastradas no `source_registry`. Usando requisições HTTP `HEAD` rápidas, ele compara o `ETag`, `Last-Modified` ou `Content-Length` atual com o da última execução bem-sucedida. Se houver divergência, uma atualização pendente é registrada na tabela `pending_updates` com o status `change_detected`.
-2. **Análise Detalhada (Deep Analysis)**: Quando configurado (`AUTO_ANALYZE_ON_DETECT = True`) ou solicitado via API/CLI, o serviço baixa temporariamente o arquivo (ex: ZIP anual do DFP), extrai os membros CSV e calcula os hashes e linhas de cada um deles. Ele os compara com os metadados da última importação com sucesso e gera uma listagem fina de mudanças no nível de arquivo membro (adicionado, removido, modificado, sem alterações).
+2. **Análise Detalhada (Deep Analysis)**: Quando configurado (`AUTO_ANALYZE_ON_DETECT = True`) ou solicitado via API/CLI, o serviço baixa temporariamente o arquivo (ex: ZIP anual do DFP), extrai os membros CSV e calcula os hashes e linhas de cada um deles. Ele os compara com o baseline canônico de lifecycle da última importação com sucesso (`SourceMemberSnapshot`) e, apenas como compatibilidade, cai para `IngestionFileMember` quando esse snapshot ainda não existe. Isso gera uma listagem fina de mudanças no nível de arquivo membro (adicionado, removido, modificado, sem alterações).
 3. **Disparo Controlado (Manual Trigger)**: Nenhuma ingestão de dados ocorre automaticamente. Os operadores revisam as mudanças e realizam o disparo (via endpoint HTTP ou comando CLI) para uma única atualização pendente ou um lote delas.
 
 ---
@@ -61,6 +61,22 @@ Detalhes de cada membro CSV interno para arquivos compactados (ZIP).
 * `status` (String): Estado detalhado (`schema_changed`, `modified`, `unchanged`, `required_missing`).
 * `current_row_count` (Integer): Linhas do arquivo novo.
 * `previous_row_count` (Integer): Linhas da última ingestão bem-sucedida.
+
+## 3.1 Baseline canônico de comparação
+
+O Updates Service compara members usando, por ordem de prioridade:
+
+1. `SourceMemberSnapshot` da última run bem-sucedida da fonte
+2. `IngestionFileMember` da mesma run, apenas como fallback de compatibilidade
+
+O baseline esperado por member inclui:
+
+- `member_sha256`
+- `row_count`
+- `header`
+- `header_hash`
+
+O `cadastro` agora persiste esse mesmo baseline canônico para `cad_cia_aberta.csv` e `cad_cia_estrang.csv`, alinhando sua análise de updates ao comportamento já usado pelas fontes anuais em ZIP.
 
 ### `update_sessions` e `update_session_items`
 Usados para agrupar múltiplas atualizações sob um lote lógico de execução e validação.

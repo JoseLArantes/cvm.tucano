@@ -6,6 +6,7 @@ from app.db.base import Base
 from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
+from app.models.ingestion import SourceArtifactSnapshot, SourceMemberSnapshot
 from app.services.ingestion.cadastro import (
     ARQUIVO_CADASTRO_ABERTA,
     ARQUIVO_CADASTRO_ESTRANGEIRA,
@@ -224,5 +225,22 @@ def test_sincronizar_cadastro_companhias_downloads_open_and_foreign_sources() ->
         estrangeira = session.query(Companhia).filter(Companhia.codigo_cvm == 80187).one()
         assert estrangeira.tipo_emissor == "estrangeira"
         assert estrangeira.qualidade_identidade == "alta"
+        artifact_snapshot = session.query(SourceArtifactSnapshot).one()
+        assert artifact_snapshot.tipo_fonte == "cadastro"
+        assert artifact_snapshot.content_sha256 is not None
+        member_snapshots = (
+            session.query(SourceMemberSnapshot)
+            .order_by(SourceMemberSnapshot.member_name.asc())
+            .all()
+        )
+        assert [item.member_name for item in member_snapshots] == [
+            ARQUIVO_CADASTRO_ABERTA,
+            ARQUIVO_CADASTRO_ESTRANGEIRA,
+        ]
+        assert all(item.member_sha256 for item in member_snapshots)
+        assert [item.row_count for item in member_snapshots] == [1, 1]
+        assert all(item.header_hash for item in member_snapshots)
+        assert all(item.required_member is True for item in member_snapshots)
+        assert all(item.row_kind == "cadastro_registro_cvm" for item in member_snapshots)
     finally:
         session.close()

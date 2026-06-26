@@ -1,5 +1,24 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-25 - Updates Service usa baseline canônico de members para cadastro e demais fontes
+
+### Endpoints com semântica corrigida
+
+- `GET /updates/pending/{id}`
+- `GET /updates/pending/{id}/members`
+
+### Mudança de comportamento
+
+- a análise detalhada de updates passa a priorizar o baseline canônico de lifecycle (`SourceMemberSnapshot`) da última run bem-sucedida
+- `IngestionFileMember` permanece apenas como fallback de compatibilidade quando o snapshot canônico ainda não existir
+- o fluxo de `cadastro` agora persiste o mesmo baseline estrutural de members já usado nas fontes anuais em ZIP
+
+### Impacto esperado no frontend
+
+- redução de falsos `added` em updates de `cadastro`
+- maior confiabilidade em `change_summary.members_added`, `members_modified` e no detalhamento retornado por `/updates/pending/{id}/members`
+- members removidos passam a preservar metadados anteriores corretos no payload de comparação
+
 ## 2026-06-25 - Autorizacao consistente para operacoes delegadas de materializacao
 
 ### Endpoints impactados

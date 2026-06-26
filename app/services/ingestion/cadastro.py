@@ -16,6 +16,12 @@ from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
+from app.services.ingestion.lifecycle import (
+    extract_delivery_rows,
+    record_member_snapshot,
+    resolve_delivery_index_role,
+    upsert_artifact_snapshot,
+)
 from app.services.ingestion.normalizers import (
     gerar_hash_canonico,
     normalizar_cnpj_opcional,
@@ -26,6 +32,7 @@ from app.services.ingestion.normalizers import (
     normalizar_tipo_mercado,
 )
 from app.services.ingestion.resolver import limpar_caches_resolver
+from app.services.ingestion.source_registry import dataset_por_member_name
 
 ARQUIVO_CADASTRO_ABERTA = "cad_cia_aberta.csv"
 ARQUIVO_CADASTRO_ESTRANGEIRA = "cad_cia_estrang.csv"
@@ -542,6 +549,52 @@ def _download(url: str, *, timeout: float) -> bytes:
     return response.content
 
 
+def _registrar_lifecycle_snapshots_cadastro(
+    db: Session,
+    *,
+    run: Any,
+    source_url: str,
+    source_filename: str,
+    content_sha256: str,
+    members: list[dict[str, Any]],
+) -> None:
+    artifact_snapshot = upsert_artifact_snapshot(
+        db,
+        run=run,
+        source_url=source_url,
+        source_filename=source_filename,
+        remote_probe=None,
+        ingestion_file=None,
+        status=run.status,
+    )
+    artifact_snapshot.content_sha256 = content_sha256
+
+    for member in members:
+        dataset = dataset_por_member_name("cadastro", member["member_name"], 0)
+        delivery_rows = extract_delivery_rows(
+            payload=member["payload"],
+            member_name=member["member_name"],
+            dataset=dataset,
+        )
+        record_member_snapshot(
+            db,
+            artifact_snapshot=artifact_snapshot,
+            member_name=member["member_name"],
+            member_sha256=member["member_sha256"],
+            row_count=member["row_count"],
+            header=member["header"],
+            row_kind=None if dataset is None else dataset.row_kind,
+            required_member=True if dataset is None else dataset.obrigatorio,
+            schema_status="ok",
+            schema_message=None,
+            lifecycle_status="processed",
+            delivery_index_role=resolve_delivery_index_role(dataset),
+            destino_promovido=None if dataset is None else dataset.destino_promovido,
+            ingestion_file_member_id=member["ingestion_file_member_id"],
+            delivery_rows=delivery_rows,
+        )
+
+
 def pre_processar_cadastro(
     db: Session,
     *,
@@ -639,7 +692,7 @@ def pre_processar_cadastro(
         enc_aberta, del_aberta = detect_encoding_and_delimiter(str(dest_abertas))
         header_aberta = get_csv_header(str(dest_abertas), enc_aberta, del_aberta)
         rows_aberta = count_csv_rows(str(dest_abertas), enc_aberta, del_aberta)
-        register_member(
+        member_aberta = register_member(
             db,
             ingestion_file=file_aberta,
             member_name=ARQUIVO_CADASTRO_ABERTA,
@@ -663,7 +716,7 @@ def pre_processar_cadastro(
         enc_estrang, del_estrang = detect_encoding_and_delimiter(str(dest_estrangeiras))
         header_estrang = get_csv_header(str(dest_estrangeiras), enc_estrang, del_estrang)
         rows_estrang = count_csv_rows(str(dest_estrangeiras), enc_estrang, del_estrang)
-        register_member(
+        member_estrang = register_member(
             db,
             ingestion_file=file_estrang,
             member_name=ARQUIVO_CADASTRO_ESTRANGEIRA,
@@ -673,6 +726,32 @@ def pre_processar_cadastro(
             row_count=rows_estrang,
             encoding=enc_estrang,
             delimiter=del_estrang,
+        )
+
+        _registrar_lifecycle_snapshots_cadastro(
+            db,
+            run=run,
+            source_url=f"{url_aberta}|{url_estrang}",
+            source_filename=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
+            content_sha256=hash_arquivo,
+            members=[
+                {
+                    "member_name": ARQUIVO_CADASTRO_ABERTA,
+                    "member_sha256": hash_abertas,
+                    "row_count": rows_aberta,
+                    "header": header_aberta,
+                    "payload": dest_abertas.read_bytes(),
+                    "ingestion_file_member_id": member_aberta.id,
+                },
+                {
+                    "member_name": ARQUIVO_CADASTRO_ESTRANGEIRA,
+                    "member_sha256": hash_estrangeiras,
+                    "row_count": rows_estrang,
+                    "header": header_estrang,
+                    "payload": dest_estrangeiras.read_bytes(),
+                    "ingestion_file_member_id": member_estrang.id,
+                },
+            ],
         )
 
         execucao.status = "aguardando_ingestao"
