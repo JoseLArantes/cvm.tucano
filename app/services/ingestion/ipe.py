@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from itertools import chain
 from typing import Any
 
@@ -10,6 +10,7 @@ import httpx
 from sqlalchemy import insert, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from app.core.config import get_settings
 from app.models.companhia import Companhia
@@ -185,6 +186,32 @@ def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: S
     return tuple_(*[getattr(model, campo) for campo in campos_chave]).in_(list(chaves))
 
 
+def _load_existing_rows(
+    db: Session,
+    *,
+    campos_chave: tuple[str, ...],
+    campos_select: Sequence[str],
+    chaves: list[tuple[Any, ...]],
+) -> dict[tuple[Any, ...], dict[str, Any]]:
+    if not chaves:
+        return {}
+    colunas = [getattr(IpeDocumento, campo) for campo in campos_select]
+    existentes: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
+        rows = db.execute(select(*colunas).where(_build_key_clause(IpeDocumento, campos_chave, batch))).mappings()
+        for row in rows:
+            item = dict(row)
+            existentes[tuple(item[campo] for campo in campos_chave)] = item
+    return existentes
+
+
+def _expire_updated_instances(db: Session, ids: Iterable[Any]) -> None:
+    for item_id in ids:
+        instance = db.identity_map.get(identity_key(class_=IpeDocumento, ident=(item_id,)))
+        if instance is not None:
+            db.expire(instance)
+
+
 def _prepare_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
     dados_promocao["hash_origem"] = gerar_hash_canonico(
@@ -214,49 +241,94 @@ def _promote_ipe_chunk(
 
     for campos_chave, grupo in groups.items():
         chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in grupo))
-        existentes: list[Any] = []
-        if chaves:
-            for batch in iter_lookup_batches(chaves, parameter_width=len(campos_chave)):
-                existentes.extend(
-                    db.execute(select(IpeDocumento).where(_build_key_clause(IpeDocumento, campos_chave, batch))).scalars()
-                )
-        existentes_por_chave = {tuple(getattr(item, campo) for campo in campos_chave): item for item in existentes}
+        existentes_hash_por_chave = _load_existing_rows(
+            db,
+            campos_chave=campos_chave,
+            campos_select=("id", *campos_chave, "hash_origem"),
+            chaves=chaves,
+        )
+        chaves_com_mudanca = list(
+            dict.fromkeys(
+                chave
+                for _row, dados in grupo
+                if (chave := _key_tuple(dados, campos_chave)) in existentes_hash_por_chave
+                and existentes_hash_por_chave[chave]["hash_origem"] != dados["hash_origem"]
+            )
+        )
+        existentes_por_chave = _load_existing_rows(
+            db,
+            campos_chave=campos_chave,
+            campos_select=("id", *campos_chave, *_CAMPOS_NEGOCIO),
+            chaves=chaves_com_mudanca,
+        )
         payload_insercao: list[dict[str, Any]] = []
         historicos: list[dict[str, Any]] = []
+        payload_atualizacao: dict[Any, dict[str, Any]] = {}
 
         for _row, dados in grupo:
             chave = _key_tuple(dados, campos_chave)
-            existente = existentes_por_chave.get(chave)
-            if existente is None:
+            existente_hash = existentes_hash_por_chave.get(chave)
+            if existente_hash is None:
                 novo_id = uuid.uuid4()
                 payload_insercao.append(
                     {"id": novo_id, **dados, "criado_em": agora, "sincronizado_em": agora, "alterado_em": agora}
                 )
                 contadores["inseridos"] += 1
                 continue
+            if existente_hash["hash_origem"] == dados["hash_origem"]:
+                atualizacao = payload_atualizacao.setdefault(
+                    existente_hash["id"],
+                    {
+                        "id": existente_hash["id"],
+                        "sincronizado_em": agora,
+                        "arquivo_origem": dados["arquivo_origem"],
+                        "ano_origem": dados["ano_origem"],
+                        "linha_origem": dados["linha_origem"],
+                        "hash_origem": dados["hash_origem"],
+                    },
+                )
+                atualizacao["sincronizado_em"] = agora
+                atualizacao["arquivo_origem"] = dados["arquivo_origem"]
+                atualizacao["ano_origem"] = dados["ano_origem"]
+                atualizacao["linha_origem"] = dados["linha_origem"]
+                atualizacao["hash_origem"] = dados["hash_origem"]
+                contadores["inalterados"] += 1
+                continue
+            existente = existentes_por_chave[chave]
             alteracoes: dict[str, tuple[Any, Any]] = {}
             for campo in _CAMPOS_NEGOCIO:
-                antigo = getattr(existente, campo)
+                antigo = existente[campo]
                 novo = dados[campo]
                 if not _equivalente(antigo, novo):
                     alteracoes[campo] = (antigo, novo)
-            existente.sincronizado_em = agora
-            existente.arquivo_origem = dados["arquivo_origem"]
-            existente.ano_origem = dados["ano_origem"]
-            existente.linha_origem = dados["linha_origem"]
-            existente.hash_origem = dados["hash_origem"]
+            atualizacao = payload_atualizacao.setdefault(
+                existente["id"],
+                {
+                    "id": existente["id"],
+                    "sincronizado_em": agora,
+                    "arquivo_origem": dados["arquivo_origem"],
+                    "ano_origem": dados["ano_origem"],
+                    "linha_origem": dados["linha_origem"],
+                    "hash_origem": dados["hash_origem"],
+                },
+            )
+            atualizacao["sincronizado_em"] = agora
+            atualizacao["arquivo_origem"] = dados["arquivo_origem"]
+            atualizacao["ano_origem"] = dados["ano_origem"]
+            atualizacao["linha_origem"] = dados["linha_origem"]
+            atualizacao["hash_origem"] = dados["hash_origem"]
             if not alteracoes:
                 contadores["inalterados"] += 1
             else:
                 for campo, (_, novo) in alteracoes.items():
-                    setattr(existente, campo, novo)
-                existente.alterado_em = agora
+                    atualizacao[campo] = novo
+                atualizacao["alterado_em"] = agora
                 contadores["atualizados"] += 1
                 for campo, (antigo, novo) in alteracoes.items():
                     historicos.append(
                         {
                             "entidade": "ipe_documentos",
-                            "entidade_id": existente.id,
+                            "entidade_id": existente["id"],
                             "companhia_id": dados.get("companhia_id"),
                             "campo": campo,
                             "valor_anterior": None if antigo is None else str(antigo),
@@ -280,6 +352,9 @@ def _promote_ipe_chunk(
                 db.execute(pg_insert(IpeDocumento).values(batch).on_conflict_do_nothing())
                 # Flush so the next group's lookup sees these newly-inserted rows.
                 db.flush()
+        if payload_atualizacao:
+            db.bulk_update_mappings(IpeDocumento, list(payload_atualizacao.values()))
+            _expire_updated_instances(db, payload_atualizacao.keys())
         if historicos:
             for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
                 db.execute(insert(HistoricoAlteracaoCampo), batch)

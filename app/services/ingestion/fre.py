@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 import httpx
 from sqlalchemy import insert, select, tuple_
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.util import identity_key
 
 from app.core.config import get_settings
 from app.models.companhia import Companhia
@@ -1582,6 +1583,13 @@ def _load_existing_row_hashes(
     return existentes
 
 
+def _expire_updated_instances(db: Session, model: type[Any], ids: Iterable[Any]) -> None:
+    for item_id in ids:
+        instance = db.identity_map.get(identity_key(class_=model, ident=(item_id,)))
+        if instance is not None:
+            db.expire(instance)
+
+
 def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
     dados_promocao["hash_origem"] = gerar_hash_canonico(
@@ -1763,6 +1771,7 @@ def _promote_fre_chunk_internal(
             db.execute(insert(model), batch)
     if payload_atualizacao:
         db.bulk_update_mappings(model, list(payload_atualizacao.values()))
+        _expire_updated_instances(db, model, payload_atualizacao.keys())
     if historicos:
         for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
             db.execute(insert(HistoricoAlteracaoCampo), batch)
