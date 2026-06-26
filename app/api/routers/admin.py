@@ -212,16 +212,19 @@ def _extrair_ano_arquivo(arquivo: str) -> int | None:
 
 
 def _arquivo_suportado_por_fonte(fonte: str, arquivo: str, ano: int | None) -> bool:
+    arquivo_normalizado = arquivo.lower().strip()
     fonte_item = obter_fonte(fonte)
     if fonte_item is None:
         return False
     if fonte == "cadastro":
-        return any(item.render_member_name(ano=0) == arquivo for item in listar_datasets("cadastro"))
+        return any(
+            item.render_member_name(ano=0).lower() == arquivo_normalizado for item in listar_datasets("cadastro")
+        )
     if ano is None:
         return False
-    if fonte_item.render_arquivo_principal(ano=ano) == arquivo:
+    if fonte_item.render_arquivo_principal(ano=ano).lower() == arquivo_normalizado:
         return True
-    return any(item.render_member_name(ano=ano) == arquivo for item in listar_datasets(fonte))
+    return any(item.render_member_name(ano=ano).lower() == arquivo_normalizado for item in listar_datasets(fonte))
 
 
 def _agendar_por_arquivo(

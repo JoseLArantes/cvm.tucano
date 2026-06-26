@@ -115,13 +115,13 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
 ) -> None:
     from app.models.ingestion import IngestionFile, IngestionRun
 
-    # Seed parent executions for fre, ipe, vlmo
-    for fonte in ("fre", "ipe", "vlmo"):
+    # Seed parent executions for CSV member reprocessing
+    for fonte, ano in (("fre", 2025), ("itr", 2026), ("ipe", 2025), ("vlmo", 2025)):
         exec_pai = ExecucaoSincronizacao(
             id=uuid.uuid4(),
             tipo_fonte=fonte,
-            ano=2025,
-            arquivo=f"{fonte}_cia_aberta_2025.zip",
+            ano=ano,
+            arquivo=f"{fonte}_cia_aberta_{ano}.zip",
             url=f"http://example.com/{fonte}",
             status="sucesso",
             tipo_execucao="arquivo_zip",
@@ -133,7 +133,7 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
             id=uuid.uuid4(),
             execucao_sincronizacao_id=exec_pai.id,
             tipo_fonte=fonte,
-            ano=2025,
+            ano=ano,
             status="sucesso",
             phase="complete",
         )
@@ -188,6 +188,10 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
         "/ingestion/sincronizacoes/reprocessar-arquivo",
         json={"arquivo": "fre_cia_aberta_2025.csv", "ano": 2025},
     )
+    resposta_itr_csv_maiusculo = client.post(
+        "/ingestion/sincronizacoes/reprocessar-arquivo",
+        json={"arquivo": "itr_cia_aberta_BPA_con_2026.csv", "ano": 2026},
+    )
     resposta_fca = client.post("/ingestion/sincronizacoes/reprocessar-arquivo", json={"arquivo": "fca_cia_aberta_2025.zip"})
     resposta_ipe_zip = client.post(
         "/ingestion/sincronizacoes/reprocessar-arquivo", json={"arquivo": "ipe_cia_aberta_2025.zip"}
@@ -213,6 +217,8 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
     assert resposta_zip.json()["tarefas"][0]["id_tarefa"] == "task-dfp-2025-False"
     assert resposta_csv.status_code == 200
     assert resposta_csv.json()["tarefas"][0]["tipo_fonte"] == "fre_membro"
+    assert resposta_itr_csv_maiusculo.status_code == 200
+    assert resposta_itr_csv_maiusculo.json()["tarefas"][0]["tipo_fonte"] == "itr_membro"
     assert resposta_fca.status_code == 200
     assert resposta_fca.json()["tarefas"][0]["tipo_fonte"] == "fca"
     assert resposta_ipe_zip.status_code == 200

@@ -182,6 +182,9 @@ Use este endpoint para recuperacao cirurgica. No fluxo atual, um rerun anual nor
 - `vlmo_cia_aberta_*`
 - `cgvn_cia_aberta_*`
 
+A validacao do campo `arquivo` e case-insensitive. Isso inclui members com siglas em
+maiusculas no nome do CSV, como `itr_cia_aberta_BPA_con_2026.csv`.
+
 ### Exemplo
 
 ```bash

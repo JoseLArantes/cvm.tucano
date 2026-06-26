@@ -851,6 +851,8 @@ Endpoints no router `admin` (todos requerem autenticacao Bearer token):
 
 Todas as rotas de disparo aceitam `?force_reimport=true` para ignorar o skip por hash e
 reprocessar integralmente.
+No reprocessamento seletivo por `arquivo`, a comparacao do nome e case-insensitive para
+aceitar members CVM com siglas em maiusculas no nome do CSV.
 
 **Execucao em duas fases (manual):**
 

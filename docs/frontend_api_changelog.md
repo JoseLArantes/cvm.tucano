@@ -1,5 +1,17 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-26 - Reprocessamento seletivo aceita nomes de arquivos com maiusculas
+
+### Endpoint com correcao de validacao
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+
+### Mudanca de comportamento
+
+- o backend agora valida `arquivo` de forma case-insensitive no reprocessamento seletivo
+- nomes de members CVM com siglas em maiusculas, como `BPA`, `BPP`, `BPR`, `DRE`, `DVA` e similares, deixam de falhar com `422 Unprocessable Entity`
+- nao houve mudanca de payload nem de shape da resposta; a correcao e apenas de aceitacao do nome informado
+
 ## 2026-06-26 - Rerun anual de ingestion reaproveita members bem-sucedidos de execucao pai falhada
 
 ### Endpoints com semantica operacional atualizada
