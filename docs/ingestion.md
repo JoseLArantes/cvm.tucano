@@ -855,6 +855,9 @@ No reprocessamento seletivo por `arquivo`, a comparacao do nome e case-insensiti
 aceitar members CVM com siglas em maiusculas no nome do CSV. Depois da validacao, o
 backend preserva o nome canonico do arquivo para persistencia da execucao filha e para
 extracao do member no ZIP.
+Durante o replay isolado de um member, a resolucao por cabecalho de documento e semeada
+pelas tabelas canonicas de documentos ja promovidos, evitando reconstruir em memoria o
+historico cumulativo de staging de siblings do mesmo ano.
 
 **Execucao em duas fases (manual):**
 

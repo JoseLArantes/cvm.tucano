@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import uuid
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -6,6 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.models.financeiro import DocumentoFinanceiro
 from app.models.ingestion import IngestionFile, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.staging import create_run, register_file
@@ -173,6 +175,112 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
     assert execucao_filha_atualizada.status == "sucesso"
     assert run_filha is not None
     assert ingestion_file is not None
+
+
+def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    execucao_filha = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_DRE_ind_2025.csv",
+        url="http://exemplo/dfp/dre",
+        status="agendada",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_filha)
+    db_session.flush()
+
+    run_pai = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_pai.id,
+        status="sucesso",
+        phase="complete",
+    )
+    register_file(
+        db_session,
+        ingestion_run=run_pai,
+        source_url=execucao_pai.url,
+        source_filename=execucao_pai.arquivo,
+        content_sha256="zip-sha",
+        content_length_bytes=1,
+        is_zip=True,
+    )
+    companhia_id = uuid.uuid4()
+    documento = DocumentoFinanceiro(
+        companhia_id=companhia_id,
+        tipo_formulario="DFP",
+        cnpj_companhia="12345678000199",
+        codigo_cvm=1234,
+        data_referencia=date(2025, 12, 31),
+        versao=1,
+        denominacao_companhia="Companhia Teste",
+        categoria_documento="DFP",
+        id_documento=987,
+        arquivo_origem="dfp_cia_aberta_2025.csv",
+        ano_origem=2025,
+        linha_origem=1,
+        hash_origem="hash-doc",
+    )
+    db_session.add(documento)
+    db_session.commit()
+
+    extracted_dir = tmp_path / str(execucao_pai.id) / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    member_path = extracted_dir / execucao_filha.arquivo
+    member_path.write_text(
+        "CNPJ_CIA;DT_REFER;VERSAO;DENOM_CIA;CD_CVM;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA;COLUNA_DF\n",
+        encoding="latin1",
+    )
+
+    monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+
+    captured: dict[str, object] = {}
+
+    def _fake_process_financeiro_member(*args: Any, **kwargs: Any) -> None:
+        captured["header_map"] = kwargs["header_map"]
+        contadores = kwargs["contadores"]
+        contadores["lidas"] = 1
+
+    monkeypatch.setattr(
+        "app.services.ingestion.financeiro._process_financeiro_member",
+        _fake_process_financeiro_member,
+    )
+
+    resultado = sincronizar_member_internal(
+        db=db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        member_name=execucao_filha.arquivo,
+        parent_execucao_id=str(execucao_pai.id),
+        child_execucao_id=str(execucao_filha.id),
+        force_reimport=False,
+        task_id="task-split-worker-header-map",
+    )
+
+    assert resultado["status"] == "sucesso"
+    header_map = captured["header_map"]
+    assert isinstance(header_map, dict)
+    resolution = header_map[("DFP", 987, 1, date(2025, 12, 31))]
+    assert resolution.companhia_id == companhia_id
+    assert resolution.cnpj_companhia == "12345678000199"
+    assert resolution.codigo_cvm == 1234
 
 
 def test_finalizar_sincronizacao_zip_resume_quality_summary_explicit_reuse(

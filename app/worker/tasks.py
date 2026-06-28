@@ -624,13 +624,85 @@ def get_ordered_members(tipo_fonte: str, ano: int, payload: bytes) -> list[tuple
     return sorted(iter_zip_csv_members(payload), key=lambda item: (order_map.get(item[0], 999), item[0]))
 
 
+def _seed_member_reprocess_header_map(db: Any, *, tipo_fonte: str, ano: int) -> dict[Any, Any]:
+    from sqlalchemy import select
+
+    from app.models.financeiro import DocumentoFinanceiro
+    from app.models.fre import FreDocumento
+    from app.services.ingestion.resolver import register_document_header
+
+    if tipo_fonte == "fca":
+        from app.services.ingestion.fca import _seed_fca_header_map
+
+        return _seed_fca_header_map(db, ano=ano)
+
+    header_map: dict[Any, Any] = {}
+    if tipo_fonte in {"dfp", "itr"}:
+        rows = db.execute(
+            select(
+                DocumentoFinanceiro.tipo_formulario,
+                DocumentoFinanceiro.id_documento,
+                DocumentoFinanceiro.versao,
+                DocumentoFinanceiro.data_referencia,
+                DocumentoFinanceiro.companhia_id,
+                DocumentoFinanceiro.cnpj_companhia,
+                DocumentoFinanceiro.codigo_cvm,
+            ).where(
+                DocumentoFinanceiro.ano_origem == ano,
+                DocumentoFinanceiro.tipo_formulario == tipo_fonte.upper(),
+                DocumentoFinanceiro.companhia_id.is_not(None),
+            )
+        )
+        for row in rows:
+            register_document_header(
+                header_map,
+                tipo_formulario=row[0],
+                id_documento=row[1],
+                versao=row[2],
+                data_referencia=row[3],
+                companhia_id=row[4],
+                cnpj_companhia=row[5],
+                codigo_cvm=row[6],
+            )
+        return header_map
+
+    if tipo_fonte == "fre":
+        rows = db.execute(
+            select(
+                FreDocumento.id_documento,
+                FreDocumento.versao,
+                FreDocumento.data_referencia,
+                FreDocumento.companhia_id,
+                FreDocumento.cnpj_companhia,
+                FreDocumento.codigo_cvm,
+            ).where(
+                FreDocumento.ano_origem == ano,
+                FreDocumento.companhia_id.is_not(None),
+            )
+        )
+        for row in rows:
+            register_document_header(
+                header_map,
+                tipo_formulario="FRE",
+                id_documento=row[0],
+                versao=row[1],
+                data_referencia=row[2],
+                companhia_id=row[3],
+                cnpj_companhia=row[4],
+                codigo_cvm=row[5],
+            )
+        return header_map
+
+    return header_map
+
+
 def rebuild_header_map(db: Any, parent_execucao_id: Any) -> dict[Any, Any]:
     from sqlalchemy import select
 
     from app.models.ingestion import IngestionRow, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.resolver import register_document_header
-    
+
     header_map: dict[Any, Any] = {}
     child_execs = db.execute(
         select(ExecucaoSincronizacao.id)
@@ -1310,7 +1382,7 @@ def sincronizar_member_internal(
 
         header_map = {}
         if tipo_fonte in ("dfp", "itr", "fre", "fca"):
-            header_map = rebuild_header_map(db, parent_execucao.id)
+            header_map = _seed_member_reprocess_header_map(db, tipo_fonte=tipo_fonte, ano=ano)
 
         contadores = {
             "lidas": 0,

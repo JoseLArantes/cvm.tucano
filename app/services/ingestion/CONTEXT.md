@@ -18,6 +18,7 @@ This context covers the priority pipeline that acquires, normalizes, stores, and
 - **ExecucaoSincronizacao** means the synchronization execution record used as a primary operational state source.
 - **Member** means a CSV file inside a CVM ZIP artifact.
 - **Reusable member result** means a previously successful member execution that can be reused by `member_sha256` in a later rerun, even if the yearly ZIP parent execution that originally contained it ended in failure.
+- **Header seed** means the compact set of previously promoted document identities used to resolve company identity during isolated member replay.
 - **Staging** means loading raw CSV rows into `ingestion_rows` before validation and promotion.
 - **Promotion** means writing normalized rows into domain tables.
 - **Reconcile** means removing or marking rows no longer present in the source scope after successful promotion.
@@ -33,6 +34,7 @@ This context covers the priority pipeline that acquires, normalizes, stores, and
 - Treat `ExecucaoSincronizacao` and `IngestionRun` as primary operational state sources.
 - Prefer chunked, restartable operations over large all-or-nothing jobs.
 - Preserve raw payloads where the current pipeline depends on replay and self-healing.
+- Isolated member replay must use bounded in-memory state; it must not depend on reloading the full staged history of sibling members.
 - Be careful with database-specific JSON, locking, and COPY behavior; tests often run on SQLite.
 - Any change to promoted tables, staging contracts, or operational state requires tests for failure and monitoring paths.
 

@@ -1,5 +1,19 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-27 - Replay de member deixa de reconstruir estado cumulativo do ano
+
+### Superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o replay de member isolado para `dfp`, `itr`, `fre` e `fca` deixa de reconstruir em memoria o historico completo de staging de siblings ja processados no mesmo ano
+- a task passa a semear a resolucao por cabecalho a partir das tabelas canonicas de documentos ja promovidos, com footprint por task limitado e previsivel
+- isso reduz o risco de degradacao progressiva, `SIGKILL` por pressao de memoria e reruns interminaveis do mesmo CSV durante reprocessamentos seletivos
+
 ## 2026-06-26 - Gate de materializacao bloqueia apenas ingestao em execucao
 
 ### Endpoints com ajuste operacional visivel
