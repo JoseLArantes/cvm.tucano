@@ -287,6 +287,7 @@ def test_finalizar_sincronizacao_zip_cria_campanha_e_dispara_dispatcher(
         captured["queue"] = queue
 
     monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", _fake_apply_async)
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
     resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
@@ -483,6 +484,32 @@ def test_materializar_analise_campanha_aguarda_gate_vermelho(
     assert campanha_atualizada.summary["wait_reason"] == "INGESTION_ACTIVE"
 
 
+def test_materializar_analise_companhia_task_nao_executa_com_gate_vermelho(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="dfp",
+            ano=2025,
+            arquivo="dfp_2025.zip",
+            url="http://exemplo/dfp",
+            status="em_execucao",
+            iniciada_em=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+
+    resultado = worker_tasks.materializar_analise_companhia_task.run(cia.codigo_cvm)
+
+    assert resultado["status"] == "waiting_for_gate"
+    assert resultado["reason_code"] == "INGESTION_ACTIVE"
+
+
 def test_despachar_materializacao_pendente_nao_enfileira_quando_gate_vermelho(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -522,6 +549,57 @@ def test_despachar_materializacao_pendente_nao_enfileira_quando_gate_vermelho(
     assert called is False
 
 
+def test_materializar_analise_chunk_task_nao_processa_itens_quando_gate_ja_esta_vermelho(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="dfp",
+            ano=2025,
+            arquivo="dfp_2025.zip",
+            url="http://exemplo/dfp",
+            status="em_execucao",
+            iniciada_em=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    called = False
+
+    def _fake_materializar(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks, "materializar_analise_companhia", _fake_materializar, raising=False)
+
+    resultado = worker_tasks.materializar_analise_chunk_task.run(str(campanha.id), str(chunk.id))
+
+    item_atualizado = db_session.get(AnaliseMaterializacaoCampanhaItem, item.id)
+    chunk_atualizado = db_session.get(AnaliseMaterializacaoChunkExecucao, chunk.id)
+
+    assert resultado["status"] == "waiting_for_gate"
+    assert resultado["reason_code"] == "INGESTION_ACTIVE"
+    assert called is False
+    assert item_atualizado is not None
+    assert item_atualizado.status == "pending"
+    assert chunk_atualizado is not None
+    assert chunk_atualizado.status == "cancelled"
+
+
 def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -554,6 +632,86 @@ def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
     assert campanha_atualizada is not None
     assert campanha_atualizada.running_items == 1
     assert campanha_atualizada.pending_items == 1
+
+
+def test_finalizar_sincronizacao_zip_nao_enfileira_dispatcher_quando_gate_vermelho(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agora = datetime.now(UTC)
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    execucao = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    db_session.add(
+        IngestionRun(
+            execucao_sincronizacao_id=execucao.id,
+            tipo_fonte="dfp",
+            ano=2025,
+            status="em_execucao",
+            phase="ingest",
+            started_at=agora,
+        )
+    )
+    db_session.add(
+        DemonstracaoFinanceira(
+            companhia_id=cia.id,
+            tipo_formulario="DFP",
+            tipo_demonstracao="demonstracao_resultado",
+            escopo_demonstracao="consolidado",
+            cnpj_companhia=cia.cnpj_companhia,
+            codigo_cvm=cia.codigo_cvm,
+            data_referencia=datetime(2025, 12, 31, tzinfo=UTC).date(),
+            versao=1,
+            codigo_conta="3.01",
+            valor_conta=Decimal("1"),
+            escala_moeda="MIL",
+            ordem_exercicio="ULTIMO",
+            coluna_df="VALOR",
+            arquivo_origem="dfp.csv",
+            hash_origem="dfp-row",
+            ano_origem=2025,
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2025,
+            arquivo="itr_2025.zip",
+            url="http://exemplo/itr",
+            status="em_execucao",
+            iniciada_em=agora,
+        )
+    )
+    db_session.commit()
+
+    called = False
+
+    def _fake_apply_async(*, countdown: int, queue: str) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", _fake_apply_async)
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
+
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
+
+    assert resultado["status"] == "sucesso"
+    assert campanha is not None
+    assert campanha.source == "post_ingestion"
+    assert called is False
 
 
 def test_materializar_analise_campanha_enfileira_multiplos_chunks_quando_habilitado(

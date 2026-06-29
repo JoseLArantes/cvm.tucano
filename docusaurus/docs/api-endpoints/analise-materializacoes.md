@@ -145,10 +145,12 @@ Semantica importante:
 - chunks historicos ja marcados como `stale` em campanhas concluidas nao entram mais nesses contadores nem no preview
 - `campaigns[].active_chunk_id` continua existindo como identificador representativo de um dos chunks ativos
 - `campaigns[].active_chunks` e `campaigns[].active_chunk_ids_preview` devem ser usados quando a UI precisar refletir concorrencia intra-campanha
+- com o gate em `red`, o backend bloqueia tambem o dispatcher e o reenfileiramento de campanhas; a UI pode continuar vendo campanhas `pending`, mas nao deve esperar progresso ate o gate voltar a `green`
 
 ## `GET /analise/materializacoes/controle`
 
 Retorna o estado consolidado do gate de materializacao e do modo manual persistido.
+As filas continuam isoladas: ingestao usa `celery` e materializacao usa `analise_materializacao`.
 
 ## `POST /analise/materializacoes/controle/pause`
 
@@ -169,6 +171,7 @@ curl -X POST "http://localhost:8007/analise/materializacoes/controle/pause?reaso
 
 Remove a pausa manual e devolve o gate ao modo automatico. Se ainda houver ingestao ativa, o gate continua vermelho por `INGESTION_ACTIVE`.
 Execucoes apenas `agendada` ou `cancelada` nao fecham o gate; o bloqueio automatico vale apenas para ingestao realmente em `em_execucao`.
+Enquanto o gate estiver vermelho, o backend nao deve iniciar novas tasks efetivas de dispatcher, campanha, chunk ou materializacao direta por companhia.
 
 ## `POST /analise/materializacoes/recuperar-stale`
 

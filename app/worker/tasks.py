@@ -38,27 +38,55 @@ def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
     return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
 
 
-def _reagendar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> None:
+def _obter_gate_materializacao_snapshot() -> tuple[str, str, int]:
+    from app.services.analise import obter_estado_gate_materializacao
+
+    db = SessionLocal()
+    try:
+        gate = obter_estado_gate_materializacao(db)
+        return gate.status, gate.reason_code, gate.blocking_ingestions
+    finally:
+        db.close()
+
+
+def _enfileiramento_materializacao_bloqueado() -> tuple[bool, str, int]:
+    status, reason_code, blocking_ingestions = _obter_gate_materializacao_snapshot()
+    return status == "red", reason_code, blocking_ingestions
+
+
+def _reagendar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> bool:
+    blocked, _reason_code, _blocking_ingestions = _enfileiramento_materializacao_bloqueado()
+    if blocked:
+        return False
     materializar_analise_campanha_task.apply_async(
         args=(campanha_id,),
         countdown=_settings.analise_materializacao_gate_poll_seconds if countdown is None else countdown,
         queue=_settings.analise_materializacao_queue_name,
     )
+    return True
 
 
-def _disparar_dispatcher_materializacao(*, countdown: int | None = None) -> None:
+def _disparar_dispatcher_materializacao(*, countdown: int | None = None) -> bool:
+    blocked, _reason_code, _blocking_ingestions = _enfileiramento_materializacao_bloqueado()
+    if blocked:
+        return False
     despachar_materializacao_pendente_task.apply_async(
         countdown=0 if countdown is None else countdown,
         queue=_settings.analise_materializacao_queue_name,
     )
+    return True
 
 
-def _enfileirar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> None:
+def _enfileirar_campanha_materializacao(campanha_id: str, *, countdown: int | None = None) -> bool:
+    blocked, _reason_code, _blocking_ingestions = _enfileiramento_materializacao_bloqueado()
+    if blocked:
+        return False
     materializar_analise_campanha_task.apply_async(
         args=(campanha_id,),
         countdown=0 if countdown is None else countdown,
         queue=_settings.analise_materializacao_queue_name,
     )
+    return True
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.materializar_analise_companhia_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -81,6 +109,15 @@ def materializar_analise_companhia_task(
 
     db = SessionLocal()
     try:
+        gate = _obter_gate_materializacao_snapshot()
+        if gate[0] == "red":
+            return {
+                "status": "waiting_for_gate",
+                "codigo_cvm": codigo_cvm,
+                "escopo": escopo,
+                "reason_code": gate[1],
+                "blocking_ingestions": gate[2],
+            }
         companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
         if companhia is None:
             return {"status": "missing_company", "codigo_cvm": codigo_cvm, "escopo": escopo}
@@ -353,6 +390,37 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
             }
 
         lease_owner = str(self.request.id)
+        gate = obter_estado_gate_materializacao(db)
+        if gate.status == "red":
+            item_ids = [
+                str(item_id)
+                for item_id in db.scalars(
+                    select(AnaliseMaterializacaoCampanhaItem.id)
+                    .where(AnaliseMaterializacaoCampanhaItem.chunk_execucao_id == chunk_uuid)
+                    .order_by(AnaliseMaterializacaoCampanhaItem.ordem.asc(), AnaliseMaterializacaoCampanhaItem.created_at.asc())
+                ).all()
+            ]
+            remaining_ids = [uuid.UUID(item_id) for item_id in item_ids]
+            reverter_itens_materializacao_para_pending(db, remaining_ids, reason=gate.reason_code)
+            chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
+            if chunk is not None:
+                finalizar_chunk_execucao(
+                    db,
+                    chunk,
+                    status="cancelled",
+                    processed_items=0,
+                    success_items=0,
+                    failed_items=0,
+                    summary={"reason": gate.reason_code, "requeued_items": len(remaining_ids)},
+                )
+            _reagendar_campanha_materializacao(campanha_id)
+            return {
+                "status": "waiting_for_gate",
+                "campanha_id": campanha_id,
+                "chunk_execucao_id": chunk_execucao_id,
+                "reason_code": gate.reason_code,
+                "requeued_items": len(remaining_ids),
+            }
         iniciar_chunk_execucao(db, chunk, lease_owner=lease_owner)
         item_ids = [
             str(item_id)

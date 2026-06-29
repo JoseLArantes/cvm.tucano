@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.worker.bootstrap import agendar_sincronizacoes_iniciais
-from app.worker.celery_app import construir_beat_schedule
+from app.worker.celery_app import celery_app, construir_beat_schedule
 
 
 def test_agendar_sincronizacoes_iniciais_agenda_fontes_pendentes(
@@ -218,6 +218,14 @@ def test_construir_beat_schedule_inclui_fontes_configuradas(monkeypatch: pytest.
     assert schedule["sincronizar-ipe-2029-diario"]["args"] == (2029,)
     assert schedule["sincronizar-vlmo-2030-diario"]["args"] == (2030,)
     assert schedule["sincronizar-cgvn-2031-diario"]["args"] == (2031,)
+
+
+def test_celery_routes_isolam_ingestao_e_materializacao() -> None:
+    routes = celery_app.conf.task_routes
+    assert routes["app.worker.tasks.sincronizar_dfp_task"]["queue"] == "celery"
+    assert routes["app.worker.tasks.sincronizar_member_task"]["queue"] == "celery"
+    assert routes["app.worker.tasks.materializar_analise_campanha_task"]["queue"] == "analise_materializacao"
+    assert routes["app.worker.tasks.materializar_analise_chunk_task"]["queue"] == "analise_materializacao"
 
 
 def test_construir_beat_schedule_updates_modo(monkeypatch: pytest.MonkeyPatch) -> None:
