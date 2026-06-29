@@ -48,6 +48,7 @@ Os endpoints de **Administracao da Ingestao** permitem que operadores de backoff
 | `GET` | `/ingestion/sincronizacoes/{id_execucao}` | Detalhar execução |
 | `GET` | `/ingestion/runs` | Listar runs do pipeline |
 | `GET` | `/ingestion/runs/{run_id}` | Detalhar run |
+| `GET` | `/ingestion/runs/{run_id}/phases` | Timeline de fases da run |
 | `GET` | `/ingestion/dashboard` | Dashboard consolidado |
 | `GET` | `/ingestion/alteracoes` | Histórico de alterações |
 

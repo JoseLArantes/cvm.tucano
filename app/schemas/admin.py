@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 from uuid import UUID
 
@@ -78,6 +80,34 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     filhos_em_andamento: int | None = Field(
         default=None, description="Quantidade de arquivos membros/filhos em andamento."
     )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado desta execucao para consumo direto por UI/CLI.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Liveness agregado da run associada a esta execucao, quando existir run correlata.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo de espera/bloqueio agregado desta execucao, quando houver.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para esta execucao, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para esta execucao, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description="Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`.",
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para detalhe desta execucao, run associada e rotas operacionais relacionadas.",
+    )
 
 
 class ListaExecucoesSincronizacao(BaseModel):
@@ -146,6 +176,34 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     )
     execucoes_filhas: list[ExecucaoSincronizacaoResumo] | None = Field(
         default=None, description="Resumo das execuções filhas, caso aplicável."
+    )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado desta execucao para consumo direto por UI/CLI.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Liveness agregado da run associada a esta execucao, quando existir run correlata.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo de espera/bloqueio agregado desta execucao, quando houver.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para esta execucao, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para esta execucao, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description="Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`.",
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para detalhe desta execucao, run associada e rotas operacionais relacionadas.",
     )
 
 
@@ -300,6 +358,84 @@ class DashboardExecucoesResposta(BaseModel):
     ultimas_execucoes: list[ExecucaoSincronizacaoResumo] = Field(
         description="Ultimas execucoes registradas (ordenadas por inicio desc)."
     )
+
+
+class IngestionOperationalLiveness(BaseModel):
+    heartbeat_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Ultimo heartbeat persistido para a fase atual, quando a execucao publica esse sinal.",
+    )
+    lease_owner: str | None = Field(default=None, description="Identificador do owner atual do lease operacional.")
+    task_id: str | None = Field(default=None, description="ID da task Celery associada ao lease/fase atual.")
+    phase_status: str | None = Field(
+        default=None,
+        description="Status da fase atual no ledger operacional: `pending`, `running`, `succeeded`, `failed_final`, `cancelled` ou `stale`.",
+    )
+    is_stale: bool = Field(description="Indica se o heartbeat ficou velho demais para uma execucao que deveria estar rodando.")
+    stale_after_seconds: int = Field(description="Threshold usado para classificar stale.")
+    heartbeat_age_seconds: int | None = Field(
+        default=None,
+        description="Idade do heartbeat atual em segundos, quando houver heartbeat persistido.",
+    )
+
+
+class IngestionOperationalBlocking(BaseModel):
+    reason_code: str = Field(
+        description="Motivo compacto de espera ou bloqueio: `none`, `queued`, `awaiting_ingestion`, `stale` ou `manual_cancel`."
+    )
+    detail: str | None = Field(default=None, description="Explicacao curta para UI operacional.")
+
+
+class IngestionOperationalCancellation(BaseModel):
+    status: str = Field(
+        description="Status do pedido de cancelamento mais recente para este escopo: `none`, `requested`, `propagated` ou `completed`."
+    )
+    requested_by: str | None = Field(default=None, description="Identificador do originador do cancelamento, quando conhecido.")
+    reason: str | None = Field(default=None, description="Motivo livre informado no cancelamento.")
+    terminate_immediately: bool | None = Field(
+        default=None,
+        description="Se `true`, o pedido pediu revogacao imediata com encerramento do worker.",
+    )
+    requested_at: BrazilianDateTime | None = Field(default=None, description="Timestamp de criacao do pedido de cancelamento.")
+    propagated_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Timestamp em que a API marcou a revogacao como propagada para tasks conhecidas.",
+    )
+    completed_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Timestamp em que o pedido foi encerrado do ponto de vista administrativo.",
+    )
+    affected_task_ids: list[str] | None = Field(default=None, description="Tasks afetadas pelo pedido mais recente.")
+
+
+class IngestionOperationalError(BaseModel):
+    error_type: str | None = Field(default=None, description="Classificacao curta do erro mais recente.")
+    error_message: str | None = Field(default=None, description="Mensagem do erro mais recente.")
+    retryable: bool | None = Field(default=None, description="Indica se o erro mais recente foi classificado como recuperavel.")
+    phase: str | None = Field(default=None, description="Fase em que o erro mais recente foi registrado.")
+
+
+class IngestionRunPhaseExecutionResumo(BaseModel):
+    id: str = Field(description="ID do registro de fase.")
+    phase: str = Field(description="Nome da fase operacional.")
+    status: str = Field(description="Status da fase no ledger operacional.")
+    attempt: int = Field(description="Numero da tentativa desta fase para a mesma run.")
+    task_id: str | None = Field(default=None, description="Task Celery associada a esta fase, quando conhecida.")
+    lease_owner: str | None = Field(default=None, description="Owner do lease desta fase, quando conhecido.")
+    started_at: BrazilianDateTime | None = Field(default=None, description="Inicio da fase.")
+    heartbeat_at: BrazilianDateTime | None = Field(default=None, description="Ultimo heartbeat da fase.")
+    finished_at: BrazilianDateTime | None = Field(default=None, description="Fim da fase.")
+    cancel_requested_at: BrazilianDateTime | None = Field(default=None, description="Quando o cancelamento foi solicitado para a fase.")
+    cancelled_at: BrazilianDateTime | None = Field(default=None, description="Quando a fase foi marcada como cancelada.")
+    cancel_reason: str | None = Field(default=None, description="Motivo de cancelamento associado a esta fase.")
+    error_type: str | None = Field(default=None, description="Tipo do erro associado a esta fase.")
+    error_message: str | None = Field(default=None, description="Mensagem do erro associado a esta fase.")
+    error_retryable: bool | None = Field(default=None, description="Se o erro de fase foi classificado como retryable.")
+    metrics: dict[str, Any] | None = Field(default=None, description="Snapshot resumido de metricas persistidas para a fase.")
+
+
+class ListaIngestionRunPhaseExecutions(BaseModel):
+    dados: list[IngestionRunPhaseExecutionResumo] = Field(description="Timeline de fases persistidas para a run.")
 
 
 class IngestionRunResumo(BaseModel):
@@ -524,6 +660,38 @@ class IngestionRunResumo(BaseModel):
             "Chaves relevantes para frontend: `remote_probe`, `artifact_sha`, `members_skipped_by_sha`, `members_processed`, `members_reused_from_previous` e `members_reused_from_failed_parent`. "
             "Este bloco serve como explicacao compacta da decisao de lifecycle; para inventario detalhado por member, o frontend deve cruzar com `member_snapshot_summary`."
         ),
+    )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado e pronto para consumo por API/CLI/UI: `queued`, `waiting`, `running`, `stale`, `succeeded`, `skipped`, `failed` ou `cancelled`.",
+    )
+    progress: dict[str, Any] | None = Field(
+        default=None,
+        description="Contadores agregados de progresso para a run atual, derivados de `quality_summary` e dos snapshots operacionais.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Snapshot de liveness da fase atual, incluindo heartbeat, lease e classificacao `stale`.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo agregado pelo qual a run esta parada, aguardando ou marcada como stale.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para a run, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para a run, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description="Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`.",
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para drill-down desta run, incluindo detalhe, fases, replay e quarentena correlata.",
     )
 
 

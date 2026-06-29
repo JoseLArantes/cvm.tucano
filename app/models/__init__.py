@@ -71,10 +71,12 @@ from app.models.fre import (
 )
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm, RepairRule
 from app.models.ingestion import (
+    IngestionCancellationRequest,
     IngestionAttempt,
     IngestionFile,
     IngestionFileMember,
     IngestionFileMemberPayload,
+    IngestionPhaseExecution,
     IngestionRow,
     IngestionRowEvent,
     IngestionRun,
@@ -165,9 +167,11 @@ __all__ = [
     "FreAdministradorPcd",
     "HistoricoAlteracaoCampo",
     "IngestionAttempt",
+    "IngestionCancellationRequest",
     "IngestionFile",
     "IngestionFileMember",
     "IngestionFileMemberPayload",
+    "IngestionPhaseExecution",
     "IngestionRow",
     "IngestionRowEvent",
     "IngestionRun",

@@ -25,10 +25,12 @@ from app.schemas.admin import (
     FonteDetalheResposta,
     FonteResumoResposta,
     HistoricoAlteracaoCampoResposta,
+    IngestionRunPhaseExecutionResumo,
     IngestionRunResumo,
     ListaExecucoesSincronizacao,
     ListaFontesResposta,
     ListaHistoricoAlteracoes,
+    ListaIngestionRunPhaseExecutions,
     ListaIngestionRuns,
     ListaQuarantineItems,
     QuarantineItemResposta,
@@ -49,10 +51,23 @@ from app.services.ingestion.lifecycle import (
     build_delivery_snapshot_summary,
     build_member_snapshot_summary,
 )
+from app.services.ingestion.operational import (
+    build_liveness_snapshot,
+    get_latest_phase_execution,
+    latest_cancellation_request_for_execucao,
+    latest_cancellation_request_for_run,
+    list_phase_executions,
+)
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.source_registry import listar_datasets, listar_fontes, obter_fonte
-from app.services.ingestion.staging import formatar_tamanho, update_run_state
+from app.services.ingestion.staging import (
+    create_cancellation_request,
+    formatar_tamanho,
+    mark_cancellation_request_completed,
+    mark_cancellation_request_propagated,
+    update_run_state,
+)
 from app.worker.celery_app import celery_app
 from app.worker.tasks import (
     ingerir_sincronizacao_task,
@@ -92,6 +107,191 @@ def _lifecycle_decision_from_run(run: IngestionRun) -> dict[str, Any]:
         "members_processed": quality_summary.get("members_processados"),
         "members_reused_from_previous": quality_summary.get("members_reused_from_previous", 0),
         "members_reused_from_failed_parent": quality_summary.get("members_reused_from_failed_parent", 0),
+    }
+
+
+def _state_from_run(*, run: IngestionRun, liveness: dict[str, Any] | None) -> str:
+    if run.status == "cancelada":
+        return "cancelled"
+    if run.status == "falha":
+        return "failed"
+    if run.status == "agendada":
+        return "queued"
+    if run.status == "aguardando_ingestao":
+        return "waiting"
+    if run.status == "em_execucao":
+        if liveness and liveness.get("is_stale"):
+            return "stale"
+        return "running"
+    if run.status in {"skipped", "sem_alteracao"}:
+        return "skipped"
+    return "succeeded"
+
+
+def _state_from_execucao(*, execucao: ExecucaoSincronizacao, liveness: dict[str, Any] | None) -> str:
+    if execucao.status == "cancelada":
+        return "cancelled"
+    if execucao.status == "falha":
+        return "failed"
+    if execucao.status == "agendada":
+        return "queued"
+    if execucao.status == "aguardando_ingestao":
+        return "waiting"
+    if execucao.status == "em_execucao":
+        if liveness and liveness.get("is_stale"):
+            return "stale"
+        return "running"
+    if execucao.status in {"skipped", "sem_alteracao"}:
+        return "skipped"
+    return "succeeded"
+
+
+def _build_blocking_from_state(*, state: str, status: str) -> dict[str, Any]:
+    if state == "queued":
+        return {"reason_code": "queued", "detail": "Execucao ainda nao iniciou processamento."}
+    if status == "aguardando_ingestao":
+        return {"reason_code": "awaiting_ingestion", "detail": "Pre-processamento concluido; aguardando etapa explicita de ingestao."}
+    if state == "stale":
+        return {"reason_code": "stale", "detail": "Heartbeat da fase ativa ficou velho demais para um processamento ainda marcado como em execucao."}
+    if status == "cancelada":
+        return {"reason_code": "manual_cancel", "detail": "Execucao interrompida por cancelamento administrativo."}
+    return {"reason_code": "none", "detail": None}
+
+
+def _build_progress_for_run(run: IngestionRun) -> dict[str, Any]:
+    quality_summary = run.quality_summary or {}
+    return {
+        "members_total": quality_summary.get("members_total"),
+        "members_processed": quality_summary.get("members_processados"),
+        "members_reprocessed": quality_summary.get("members_reprocessed"),
+        "members_skipped": quality_summary.get("members_skipped"),
+        "members_reused_from_previous": quality_summary.get("members_reused_from_previous"),
+        "quarantine_total": quality_summary.get("quarantine_total"),
+        "row_status_counts": quality_summary.get("row_status_counts"),
+        "staged_rows_purged": quality_summary.get("staged_rows_purged"),
+        "reconciled_deleted": quality_summary.get("reconciled_deleted"),
+    }
+
+
+def _build_progress_for_execucao(execucao: ExecucaoSincronizacao) -> dict[str, Any]:
+    return {
+        "total_linhas_lidas": execucao.total_linhas_lidas,
+        "total_inseridos": execucao.total_inseridos,
+        "total_atualizados": execucao.total_atualizados,
+        "total_inalterados": execucao.total_inalterados,
+        "total_rejeitados": execucao.total_rejeitados,
+    }
+
+
+def _serialize_cancellation(request: Any) -> dict[str, Any]:
+    if request is None:
+        return {
+            "status": "none",
+            "requested_by": None,
+            "reason": None,
+            "terminate_immediately": None,
+            "requested_at": None,
+            "propagated_at": None,
+            "completed_at": None,
+            "affected_task_ids": None,
+        }
+    return {
+        "status": request.status,
+        "requested_by": request.requested_by,
+        "reason": request.reason,
+        "terminate_immediately": request.terminate_immediately,
+        "requested_at": request.created_at,
+        "propagated_at": request.propagated_at,
+        "completed_at": request.completed_at,
+        "affected_task_ids": request.affected_task_ids,
+    }
+
+
+def _serialize_last_error(*, message: str | None, phase_execution: Any, status: str) -> dict[str, Any] | None:
+    if phase_execution is not None and (
+        phase_execution.error_message is not None or phase_execution.error_type is not None
+    ):
+        return {
+            "error_type": phase_execution.error_type,
+            "error_message": phase_execution.error_message,
+            "retryable": phase_execution.error_retryable,
+            "phase": phase_execution.phase,
+        }
+    if status == "falha" and message:
+        return {"error_type": "run_failed", "error_message": message, "retryable": False, "phase": None}
+    return None
+
+
+def _next_action(*, state: str, last_error: dict[str, Any] | None, rejected_total: int | None = None) -> str:
+    if state in {"queued", "waiting", "running"}:
+        return "wait"
+    if state == "stale":
+        return "recover"
+    if state == "failed":
+        return "inspect_error"
+    if rejected_total and rejected_total > 0:
+        return "inspect_quarantine"
+    return "none"
+
+
+def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str, Any]:
+    latest_phase = get_latest_phase_execution(db, run_id=run.id)
+    liveness = build_liveness_snapshot(latest_phase)
+    state = _state_from_run(run=run, liveness=liveness)
+    cancellation = _serialize_cancellation(latest_cancellation_request_for_run(db, run_id=run.id))
+    last_error = _serialize_last_error(message=run.message, phase_execution=latest_phase, status=run.status)
+    quality_summary = run.quality_summary or {}
+    return {
+        "state": state,
+        "progress": _build_progress_for_run(run),
+        "liveness": liveness,
+        "blocking": _build_blocking_from_state(state=state, status=run.status),
+        "cancellation": cancellation,
+        "last_error": last_error,
+        "next_action": _next_action(
+            state=state,
+            last_error=last_error,
+            rejected_total=quality_summary.get("quarantine_total"),
+        ),
+        "links": {
+            "run_detail": f"/ingestion/runs/{run.id}",
+            "run_phases": f"/ingestion/runs/{run.id}/phases",
+            "run_replay": f"/ingestion/runs/{run.id}/replay",
+            "quarantine": f"/ingestion/quarentena?ingestion_run_id={run.id}",
+        },
+    }
+
+
+def _build_execucao_operational_fields(
+    db: DbSession,
+    *,
+    execucao: ExecucaoSincronizacao,
+    run: IngestionRun | None,
+) -> dict[str, Any]:
+    latest_phase = get_latest_phase_execution(db, run_id=run.id) if run is not None else None
+    liveness = build_liveness_snapshot(latest_phase)
+    state = _state_from_execucao(execucao=execucao, liveness=liveness)
+    cancellation = _serialize_cancellation(latest_cancellation_request_for_execucao(db, execucao_id=execucao.id))
+    last_error = _serialize_last_error(message=execucao.mensagem_erro, phase_execution=latest_phase, status=execucao.status)
+    run_detail = f"/ingestion/runs/{run.id}" if run is not None else None
+    links = {
+        "execucao_detail": f"/ingestion/sincronizacoes/{execucao.id}",
+        "quarantine": f"/ingestion/quarentena?execucao_sincronizacao_id={execucao.id}",
+    }
+    if run_detail is not None:
+        links["run_detail"] = run_detail
+    return {
+        "state": state,
+        "liveness": liveness,
+        "blocking": _build_blocking_from_state(state=state, status=execucao.status),
+        "cancellation": cancellation,
+        "last_error": last_error,
+        "next_action": _next_action(
+            state=state,
+            last_error=last_error,
+            rejected_total=execucao.total_rejeitados,
+        ),
+        "links": links,
     }
 
 _DESC_SYNC_ANUAL = (
@@ -860,6 +1060,30 @@ def cancelar_sincronizacao(
     execucoes_relacionadas = (
         _execucoes_relacionadas_cancelamento(db, execucao=execucao) if execucao is not None else []
     )
+    run_map = {
+        run.execucao_sincronizacao_id: run
+        for run in db.scalars(
+            select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id.in_([item.id for item in execucoes_relacionadas])
+            )
+        ).all()
+    }
+    cancellation_requests = []
+    for item in execucoes_relacionadas:
+        related_run = run_map.get(item.id)
+        cancellation_requests.append(
+            create_cancellation_request(
+                db,
+                scope_type="execucao_sincronizacao",
+                scope_id=str(item.id),
+                execucao_sincronizacao_id=item.id,
+                ingestion_run_id=related_run.id if related_run is not None else None,
+                requested_by="api_admin",
+                reason=payload.motivo,
+                terminate_immediately=payload.terminar_imediatamente,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        )
     task_ids_para_revogar = _cancelar_execucoes_relacionadas(
         db,
         execucoes=execucoes_relacionadas,
@@ -872,8 +1096,28 @@ def cancelar_sincronizacao(
     for task_id in task_ids_para_revogar:
         celery_app.control.revoke(task_id, terminate=payload.terminar_imediatamente, signal="SIGTERM")
         revogacao_solicitada = True
+    for request in cancellation_requests:
+        if revogacao_solicitada:
+            mark_cancellation_request_propagated(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        else:
+            mark_cancellation_request_completed(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
 
     if execucao is not None:
+        if revogacao_solicitada:
+            for request in cancellation_requests:
+                mark_cancellation_request_completed(
+                    request,
+                    affected_task_ids=task_ids_para_revogar,
+                    affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+                )
         db.commit()
         return RespostaCancelamentoSincronizacao(
             id_execucao=str(execucao.id),
@@ -888,6 +1132,15 @@ def cancelar_sincronizacao(
                 else "Execucao marcada como cancelada no banco sem revogacao remota."
             ),
         )
+
+    if cancellation_requests:
+        for request in cancellation_requests:
+            mark_cancellation_request_completed(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        db.commit()
 
     return RespostaCancelamentoSincronizacao(
         id_execucao=None,
@@ -1006,6 +1259,16 @@ def listar_execucoes(
         for parent_id, member in rows:
             members_by_parent.setdefault(parent_id, {})[member.member_name] = member
 
+    runs_by_execucao_id = {
+        run.execucao_sincronizacao_id: run
+        for run in db.scalars(
+            select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id.in_([item.id for item in execucoes if item.id is not None])
+            )
+        ).all()
+        if run.execucao_sincronizacao_id is not None
+    }
+
     dados = []
     for item in execucoes:
         # Resolve associated members for analysis
@@ -1014,6 +1277,8 @@ def listar_execucoes(
             members_for_item = [m] if m else []
         else:
             members_for_item = list(members_by_parent.get(item.id, {}).values())
+        run = runs_by_execucao_id.get(item.id)
+        operational = _build_execucao_operational_fields(db, execucao=item, run=run)
 
         dados.append(
             ExecucaoSincronizacaoResumo(
@@ -1068,6 +1333,13 @@ def listar_execucoes(
                     )
                     for m in members_for_item
                 ] or None,
+                state=operational["state"],
+                liveness=operational["liveness"],
+                blocking=operational["blocking"],
+                cancellation=operational["cancellation"],
+                last_error=operational["last_error"],
+                next_action=operational["next_action"],
+                links=operational["links"],
             )
         )
 
@@ -1126,6 +1398,15 @@ def detalhar_execucao(
             .where(ExecucaoSincronizacao.parent_execucao_id == execucao.id)
             .order_by(ExecucaoSincronizacao.arquivo.asc())
         ).all()
+        child_runs_by_execucao_id = {
+            run.execucao_sincronizacao_id: run
+            for run in db.scalars(
+                select(IngestionRun).where(
+                    IngestionRun.execucao_sincronizacao_id.in_([child.id for child in children])
+                )
+            ).all()
+            if run.execucao_sincronizacao_id is not None
+        }
         
         filhos_total = len(children)
         filhos_concluidos = 0
@@ -1170,6 +1451,11 @@ def detalhar_execucao(
                         delimiter=m.delimiter,
                     )
                 ]
+            operational_child = _build_execucao_operational_fields(
+                db,
+                execucao=c,
+                run=child_runs_by_execucao_id.get(c.id),
+            )
                 
             execucoes_filhas.append(
                 ExecucaoSincronizacaoResumo(
@@ -1189,16 +1475,27 @@ def detalhar_execucao(
                     tipo_execucao=c.tipo_execucao,
                     arquivo_principal=execucao.arquivo,
                     analise_arquivos=analise_c,
+                    state=operational_child["state"],
+                    liveness=operational_child["liveness"],
+                    blocking=operational_child["blocking"],
+                    cancellation=operational_child["cancellation"],
+                    last_error=operational_child["last_error"],
+                    next_action=operational_child["next_action"],
+                    links=operational_child["links"],
                 )
             )
             
     # Populate analise_arquivos for the current execution itself
     analise_arquivos = None
+    run_for_execucao: IngestionRun | None = None
     if execucao.tipo_execucao == "arquivo_membro":
         if execucao.parent_execucao_id:
             run = db.scalar(
                 select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.parent_execucao_id)
             )
+            run_for_execucao = db.scalar(
+                select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+            ) or run
             if run:
                 file = db.scalar(
                     select(IngestionFile).where(IngestionFile.ingestion_run_id == run.id)
@@ -1226,6 +1523,7 @@ def detalhar_execucao(
         run = db.scalar(
             select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
         )
+        run_for_execucao = run
         if run:
             files = db.scalars(
                 select(IngestionFile).where(IngestionFile.ingestion_run_id == run.id)
@@ -1248,6 +1546,8 @@ def detalhar_execucao(
                                 delimiter=m.delimiter,
                             )
                         )
+
+    operational = _build_execucao_operational_fields(db, execucao=execucao, run=run_for_execucao)
 
     return ExecucaoSincronizacaoDetalhe(
         id=str(execucao.id),
@@ -1275,6 +1575,13 @@ def detalhar_execucao(
         filhos_falha=filhos_falha,
         filhos_em_andamento=filhos_em_andamento,
         execucoes_filhas=execucoes_filhas,
+        state=operational["state"],
+        liveness=operational["liveness"],
+        blocking=operational["blocking"],
+        cancellation=operational["cancellation"],
+        last_error=operational["last_error"],
+        next_action=operational["next_action"],
+        links=operational["links"],
     )
 
 
@@ -1432,23 +1739,26 @@ def listar_ingestion_runs(
     return ListaIngestionRuns(
         dados=[
             IngestionRunResumo(
-                id=str(run.id),
-                execucao_sincronizacao_id=None
-                if run.execucao_sincronizacao_id is None
-                else str(run.execucao_sincronizacao_id),
-                tipo_fonte=run.tipo_fonte,
-                ano=run.ano,
-                status=run.status,
-                phase=run.phase,
-                remote_probe=run.remote_probe,
-                change_summary=run.change_summary,
-                quality_summary=run.quality_summary,
-                artifact_snapshot=build_artifact_snapshot_response(db, run_id=run.id),
-                member_snapshot_summary=build_member_snapshot_summary(db, run_id=run.id),
-                delivery_snapshot_summary=build_delivery_snapshot_summary(db, run_id=run.id),
-                reconcile_summary=_reconcile_summary_from_run(run),
-                rows_reconciled_deleted=(run.quality_summary or {}).get("reconciled_deleted"),
-                lifecycle_decision=_lifecycle_decision_from_run(run),
+                **{
+                    "id": str(run.id),
+                    "execucao_sincronizacao_id": None
+                    if run.execucao_sincronizacao_id is None
+                    else str(run.execucao_sincronizacao_id),
+                    "tipo_fonte": run.tipo_fonte,
+                    "ano": run.ano,
+                    "status": run.status,
+                    "phase": run.phase,
+                    "remote_probe": run.remote_probe,
+                    "change_summary": run.change_summary,
+                    "quality_summary": run.quality_summary,
+                    "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
+                    "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
+                    "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
+                    "reconcile_summary": _reconcile_summary_from_run(run),
+                    "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
+                    "lifecycle_decision": _lifecycle_decision_from_run(run),
+                    **_build_run_operational_fields(db, run),
+                }
             )
             for run in runs
         ],
@@ -1480,21 +1790,70 @@ def detalhar_ingestion_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
     return IngestionRunResumo(
-        id=str(run.id),
-        execucao_sincronizacao_id=None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
-        tipo_fonte=run.tipo_fonte,
-        ano=run.ano,
-        status=run.status,
-        phase=run.phase,
-        remote_probe=run.remote_probe,
-        change_summary=run.change_summary,
-        quality_summary=run.quality_summary,
-        artifact_snapshot=build_artifact_snapshot_response(db, run_id=run.id),
-        member_snapshot_summary=build_member_snapshot_summary(db, run_id=run.id),
-        delivery_snapshot_summary=build_delivery_snapshot_summary(db, run_id=run.id),
-        reconcile_summary=_reconcile_summary_from_run(run),
-        rows_reconciled_deleted=(run.quality_summary or {}).get("reconciled_deleted"),
-        lifecycle_decision=_lifecycle_decision_from_run(run),
+        **{
+            "id": str(run.id),
+            "execucao_sincronizacao_id": None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
+            "tipo_fonte": run.tipo_fonte,
+            "ano": run.ano,
+            "status": run.status,
+            "phase": run.phase,
+            "remote_probe": run.remote_probe,
+            "change_summary": run.change_summary,
+            "quality_summary": run.quality_summary,
+            "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
+            "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
+            "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
+            "reconcile_summary": _reconcile_summary_from_run(run),
+            "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
+            "lifecycle_decision": _lifecycle_decision_from_run(run),
+            **_build_run_operational_fields(db, run),
+        }
+    )
+
+
+@router.get(
+    "/runs/{run_id}/phases",
+    response_model=ListaIngestionRunPhaseExecutions,
+    summary="Listar fases de uma run de ingestion",
+    description=(
+        "Retorna a timeline persistida de fases da run. "
+        "Use este endpoint para drill-down operacional, principalmente quando a UI precisar distinguir "
+        "heartbeat stale, tentativas repetidas da mesma fase, cancelamento e falha final sem recorrer a logs de worker."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    operation_id="listarIngestionRunPhasesAdmin",
+)
+def listar_ingestion_run_phases(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> ListaIngestionRunPhaseExecutions:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    phase_rows = list_phase_executions(db, run_id=run.id)
+    return ListaIngestionRunPhaseExecutions(
+        dados=[
+            IngestionRunPhaseExecutionResumo(
+                id=str(item.id),
+                phase=item.phase,
+                status=item.status,
+                attempt=item.attempt,
+                task_id=item.task_id,
+                lease_owner=item.lease_owner,
+                started_at=item.started_at,
+                heartbeat_at=item.heartbeat_at,
+                finished_at=item.finished_at,
+                cancel_requested_at=item.cancel_requested_at,
+                cancelled_at=item.cancelled_at,
+                cancel_reason=item.cancel_reason,
+                error_type=item.error_type,
+                error_message=item.error_message,
+                error_retryable=item.error_retryable,
+                metrics=item.metrics,
+            )
+            for item in phase_rows
+        ]
     )
 
 

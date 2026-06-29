@@ -15,6 +15,15 @@ Endpoints para monitorar execuções de sincronização, runs do pipeline e obte
 
 Lista paginada das execuções registradas no sistema.
 
+Cada item agora expõe também um sinal operacional agregado:
+
+- `state`: classificação pronta para UI (`queued`, `waiting`, `running`, `stale`, `succeeded`, `skipped`, `failed`, `cancelled`)
+- `liveness`: heartbeat, task/lease atual e flag `is_stale`
+- `blocking`: motivo compacto de espera ou bloqueio
+- `cancellation`: último pedido de cancelamento persistido
+- `last_error`: erro operacional mais recente conhecido
+- `next_action`: ação recomendada para consumidor desacoplado (`wait`, `recover`, `inspect_error`, `inspect_quarantine`, `none`)
+
 ### Query Parameters
 
 | Parâmetro | Tipo | Padrão | Descrição |
@@ -59,7 +68,18 @@ curl -X GET "http://localhost:8007/ingestion/sincronizacoes?pagina=1&tamanho_pag
       "filhos_total": 15,
       "filhos_concluidos": 15,
       "filhos_falha": 0,
-      "filhos_em_andamento": 0
+      "filhos_em_andamento": 0,
+      "state": "succeeded",
+      "liveness": null,
+      "blocking": {"reason_code": "none", "detail": null},
+      "cancellation": {"status": "none"},
+      "last_error": null,
+      "next_action": "none",
+      "links": {
+        "execucao_detail": "/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+        "run_detail": "/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+        "quarantine": "/ingestion/quarentena?execucao_sincronizacao_id=6a31c7f8-1c89-4f3d-87db-7e6a8e196999"
+      }
     }
   ],
   "paginacao": {
@@ -149,6 +169,17 @@ curl -X GET "http://localhost:8007/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-8
 
 Lista paginada das runs do pipeline de ingestão.
 
+Além dos snapshots estruturais (`remote_probe`, `change_summary`, `quality_summary`, `member_snapshot_summary`), cada run agora expõe:
+
+- `state`: estado operacional agregado
+- `progress`: contadores resumidos para cards e progresso
+- `liveness`: heartbeat, owner do lease e classificação `stale`
+- `blocking`: motivo de espera ou bloqueio
+- `cancellation`: último pedido de cancelamento persistido
+- `last_error`: erro operacional mais recente conhecido
+- `next_action`: próxima ação recomendada
+- `links`: rotas relativas para detalhe, fases, replay e quarentena
+
 ### Query Parameters
 
 | Parâmetro | Tipo | Padrão | Descrição |
@@ -185,7 +216,28 @@ curl -X GET "http://localhost:8007/ingestion/runs?pagina=1&tamanho_pagina=50" \
       "delivery_snapshot_summary": {...},
       "reconcile_summary": {...},
       "rows_reconciled_deleted": 4,
-      "lifecycle_decision": {...}
+      "lifecycle_decision": {...},
+      "state": "running",
+      "progress": {"members_processed": 13, "quarantine_total": 3},
+      "liveness": {
+        "heartbeat_at": "2026-06-29T20:26:10Z",
+        "lease_owner": "task-dfp-2025",
+        "task_id": "task-dfp-2025",
+        "phase_status": "running",
+        "is_stale": false,
+        "stale_after_seconds": 1800,
+        "heartbeat_age_seconds": 12
+      },
+      "blocking": {"reason_code": "none", "detail": null},
+      "cancellation": {"status": "none"},
+      "last_error": null,
+      "next_action": "wait",
+      "links": {
+        "run_detail": "/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+        "run_phases": "/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/phases",
+        "run_replay": "/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/replay",
+        "quarantine": "/ingestion/quarentena?ingestion_run_id=6a31c7f8-1c89-4f3d-87db-7e6a8e196999"
+      }
     }
   ],
   "paginacao": {
@@ -218,6 +270,50 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
 ### Response 200
 
 **Schema:** `IngestionRunResumo`
+
+Use `state`, `liveness` e `next_action` como contrato primário para UX operacional. `quality_summary` continua sendo a fonte principal dos contadores de processamento; `liveness` responde se a run ainda parece viva; e `GET /ingestion/runs/{run_id}/phases` é o drill-down recomendado quando a UI precisar mostrar tentativas, heartbeat e falha por fase.
+
+---
+
+## `GET /ingestion/runs/{run_id}/phases`
+
+Retorna a timeline persistida de fases da run.
+
+### Exemplo
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/phases" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+### Response 200
+
+**Schema:** `ListaIngestionRunPhaseExecutions`
+
+```json
+{
+  "dados": [
+    {
+      "id": "7b6d2875-5f59-41f7-b5f9-c3b76014e584",
+      "phase": "promote",
+      "status": "running",
+      "attempt": 1,
+      "task_id": "task-dfp-2025",
+      "lease_owner": "task-dfp-2025",
+      "started_at": "2026-06-29T20:15:00Z",
+      "heartbeat_at": "2026-06-29T20:26:10Z",
+      "finished_at": null,
+      "cancel_requested_at": null,
+      "cancelled_at": null,
+      "cancel_reason": null,
+      "error_type": null,
+      "error_message": null,
+      "error_retryable": null,
+      "metrics": {"members_processados": 13}
+    }
+  ]
+}
+```
 
 ```json
 {

@@ -1,5 +1,33 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-30 - Ingestao passa a expor estado operacional agregado e timeline de fases
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/runs/{run_id}/phases`
+- `POST /ingestion/sincronizacoes/cancelar`
+
+### Mudanca de comportamento
+
+- execucoes administrativas e runs tecnicas passam a expor `state`, `liveness`, `blocking`, `cancellation`, `last_error`, `next_action` e `links`
+- `state` deixa explicito se o escopo esta `queued`, `waiting`, `running`, `stale`, `succeeded`, `skipped`, `failed` ou `cancelled`
+- `liveness` passa a refletir heartbeat, owner do lease, task ativa e classificacao `is_stale`, evitando depender de logs para diagnostico de run presa
+- `blocking` resume por que a execucao esta parada ou aguardando, com codigos como `queued`, `awaiting_ingestion`, `stale` e `manual_cancel`
+- `cancellation` passa a refletir o ultimo pedido de cancelamento persistido, inclusive `requested`, `propagated` e `completed`
+- o backend agora persiste a timeline operacional de fases da run e a expõe em `GET /ingestion/runs/{run_id}/phases`
+
+### Leitura recomendada pelo frontend
+
+- para listagem operacional: consumir `GET /ingestion/runs` e `GET /ingestion/sincronizacoes`
+- para detalhe de run: consumir `GET /ingestion/runs/{run_id}` e `GET /ingestion/runs/{run_id}/phases`
+- para detalhe de execucao ZIP/member: consumir `GET /ingestion/sincronizacoes/{id_execucao}`
+- quando `state=stale`, tratar `next_action=recover` como sinal de recuperacao administrativa ou investigacao operacional
+- quando `status=aguardando_ingestao`, tratar `blocking.reason_code=awaiting_ingestion` como espera normal da fase 2
+
 ## 2026-06-29 - Gate de materializacao passa a bloquear tambem o despacho e o inicio de tasks
 
 ### Endpoints e superficies com impacto operacional visivel

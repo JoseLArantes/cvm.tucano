@@ -146,6 +146,11 @@ class Settings(BaseSettings):
     )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
+    ingestion_phase_stale_after_seconds: int = Field(
+        default=1800,
+        ge=1,
+        alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
+    )
     storage_dir: str = Field(default="data/storage", alias="STORAGE_DIR")
     updates_service_enabled: bool = Field(default=True, alias="UPDATES_SERVICE_ENABLED")
     auto_trigger_updates: bool = Field(default=False, alias="AUTO_TRIGGER_UPDATES")

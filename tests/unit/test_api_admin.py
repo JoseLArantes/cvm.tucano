@@ -1,12 +1,18 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionRow, IngestionRun, QuarantineItem
+from app.models.ingestion import (
+    IngestionCancellationRequest,
+    IngestionPhaseExecution,
+    IngestionRow,
+    IngestionRun,
+    QuarantineItem,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 
 
@@ -377,6 +383,11 @@ def test_admin_cancelar_sincronizacao_por_execucao(
     assert execucao.status == "cancelada"
     assert execucao.finalizada_em is not None
     assert "Teste" in (execucao.mensagem_erro or "")
+    requests = db_session.query(IngestionCancellationRequest).all()
+    assert len(requests) == 1
+    assert requests[0].scope_type == "execucao_sincronizacao"
+    assert requests[0].status == "completed"
+    assert requests[0].affected_task_ids == ["task-dfp-2025"]
 
 
 def test_admin_cancelar_sincronizacao_por_tarefa_sem_execucao(
@@ -596,6 +607,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "/ingestion/quarantine" not in payload["paths"]
 
     rota_runs = payload["paths"]["/ingestion/runs"]["get"]
+    rota_run_phases = payload["paths"]["/ingestion/runs/{run_id}/phases"]["get"]
     rota_quarantine = payload["paths"]["/ingestion/quarentena"]["get"]
     rota_replay_quarantine = payload["paths"]["/ingestion/replay/quarentena"]["post"]
     rota_quarentena_resumo = payload["paths"]["/ingestion/quarentena/resumo"]["get"]
@@ -604,6 +616,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
+    assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
     assert "quality_summary" in rota_runs["description"]
     assert "members reaproveitados" in rota_runs["description"]
     assert rota_tudo["summary"] == "Disparar Sincronizacao Completa por Ano"
@@ -641,6 +654,11 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "delivery_snapshot_summary" in esquema_run["properties"]
     assert "reconcile_summary" in esquema_run["properties"]
     assert "lifecycle_decision" in esquema_run["properties"]
+    assert "state" in esquema_run["properties"]
+    assert "liveness" in esquema_run["properties"]
+    assert "blocking" in esquema_run["properties"]
+    assert "cancellation" in esquema_run["properties"]
+    assert "next_action" in esquema_run["properties"]
     assert "members_reused_from_failed_parent" in esquema_run["properties"]["quality_summary"]["description"]
     assert "reaproveitados a partir de resultados anteriores" in esquema_run["properties"]["lifecycle_decision"]["description"]
     assert "tentativas_reprocessamento" in esquema_quarentena["properties"]
@@ -726,6 +744,96 @@ def test_admin_sincronizacao_detalhe_analise_arquivos(client: TestClient, db_ses
     assert analise["header_columns"] == ["CNPJ_CIA", "DT_REFER", "VERSAO", "ID_DOC"]
     assert analise["encoding"] == "utf-8"
     assert analise["delimiter"] == ";"
+
+
+def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=execucao_id,
+            tipo_fonte="dfp",
+            ano=2026,
+            arquivo="dfp_cia_aberta_2026.zip",
+            url="http://exemplo/dfp-2026",
+            status="em_execucao",
+            tipo_execucao="arquivo_zip",
+            total_rejeitados=2,
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            tipo_fonte="dfp",
+            ano=2026,
+            status="em_execucao",
+            phase="promote",
+            requested_by_task_id="task-dfp-2026",
+            quality_summary={"quarantine_total": 2, "members_processados": 3},
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            phase="promote",
+            status="running",
+            attempt=1,
+            lease_owner="task-dfp-2026",
+            task_id="task-dfp-2026",
+            started_at=agora,
+            heartbeat_at=agora - timedelta(hours=1),
+            metrics={"members_processados": 3},
+        )
+    )
+    db_session.add(
+        IngestionCancellationRequest(
+            scope_type="execucao_sincronizacao",
+            scope_id=str(execucao_id),
+            execucao_sincronizacao_id=execucao_id,
+            ingestion_run_id=run_id,
+            requested_by="api_admin",
+            reason="janela operacional",
+            terminate_immediately=True,
+            status="propagated",
+            affected_task_ids=["task-dfp-2026"],
+            created_at=agora,
+            propagated_at=agora,
+        )
+    )
+    db_session.commit()
+
+    resposta_runs = client.get("/ingestion/runs")
+    assert resposta_runs.status_code == 200
+    run_payload = resposta_runs.json()["dados"][0]
+    assert run_payload["state"] == "stale"
+    assert run_payload["liveness"]["is_stale"] is True
+    assert run_payload["blocking"]["reason_code"] == "stale"
+    assert run_payload["cancellation"]["status"] == "propagated"
+    assert run_payload["next_action"] == "recover"
+    assert run_payload["links"]["run_phases"] == f"/ingestion/runs/{run_id}/phases"
+
+    resposta_run = client.get(f"/ingestion/runs/{run_id}")
+    assert resposta_run.status_code == 200
+    assert resposta_run.json()["state"] == "stale"
+
+    resposta_execucao = client.get(f"/ingestion/sincronizacoes/{execucao_id}")
+    assert resposta_execucao.status_code == 200
+    execucao_payload = resposta_execucao.json()
+    assert execucao_payload["state"] == "stale"
+    assert execucao_payload["cancellation"]["status"] == "propagated"
+    assert execucao_payload["next_action"] == "recover"
+
+    resposta_fases = client.get(f"/ingestion/runs/{run_id}/phases")
+    assert resposta_fases.status_code == 200
+    fases_payload = resposta_fases.json()["dados"]
+    assert len(fases_payload) == 1
+    assert fases_payload[0]["phase"] == "promote"
+    assert fases_payload[0]["status"] == "running"
+    assert fases_payload[0]["task_id"] == "task-dfp-2026"
 
 
 def test_admin_pre_processar_cadastro_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

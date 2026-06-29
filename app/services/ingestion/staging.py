@@ -11,10 +11,11 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from sqlalchemy import and_, delete, insert, or_, select
-from sqlalchemy.orm import Session, aliased, load_only
+from sqlalchemy.orm import Session, aliased, load_only, object_session
 
 from app.models.ingestion import (
     IngestionAttempt,
+    IngestionCancellationRequest,
     IngestionFile,
     IngestionFileMember,
     IngestionFileMemberPayload,
@@ -25,6 +26,11 @@ from app.models.ingestion import (
 )
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
+from app.services.ingestion.operational import (
+    register_cancellation_request,
+    sync_phase_execution,
+    update_cancellation_request,
+)
 
 DEFAULT_CSV_DELIMITER = ";"
 DEFAULT_ROW_VALIDATION_STATUS = "pending"
@@ -150,6 +156,15 @@ def create_run(
     )
     db.add(run)
     db.flush()
+    sync_phase_execution(
+        db,
+        run=run,
+        previous_phase=None,
+        previous_status=None,
+        message=message,
+        quality_summary=quality_summary,
+        force_create=True,
+    )
     return run
 
 
@@ -164,6 +179,8 @@ def update_run_state(
     change_summary: dict[str, Any] | None = None,
     finished_at: datetime | None = None,
 ) -> IngestionRun:
+    previous_phase = run.phase
+    previous_status = run.status
     if status is not None:
         run.status = status
     if phase is not None:
@@ -178,7 +195,73 @@ def update_run_state(
         run.change_summary = change_summary
     if finished_at is not None:
         run.finished_at = finished_at
+    db = object_session(run)
+    if db is not None:
+        sync_phase_execution(
+            db,
+            run=run,
+            previous_phase=previous_phase,
+            previous_status=previous_status,
+            message=message,
+            quality_summary=quality_summary,
+        )
     return run
+
+
+def create_cancellation_request(
+    db: Session,
+    *,
+    scope_type: str,
+    scope_id: str,
+    execucao_sincronizacao_id: Any = None,
+    ingestion_run_id: Any = None,
+    requested_by: str | None = None,
+    reason: str | None = None,
+    terminate_immediately: bool = True,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return register_cancellation_request(
+        db,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        execucao_sincronizacao_id=execucao_sincronizacao_id,
+        ingestion_run_id=ingestion_run_id,
+        requested_by=requested_by,
+        reason=reason,
+        terminate_immediately=terminate_immediately,
+        status="requested",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
+
+
+def mark_cancellation_request_propagated(
+    request: IngestionCancellationRequest,
+    *,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return update_cancellation_request(
+        request,
+        status="propagated",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
+
+
+def mark_cancellation_request_completed(
+    request: IngestionCancellationRequest,
+    *,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return update_cancellation_request(
+        request,
+        status="completed",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
 
 
 def register_file(

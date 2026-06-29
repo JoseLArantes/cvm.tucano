@@ -41,6 +41,85 @@ class IngestionRun(Base):
     )
 
 
+class IngestionPhaseExecution(Base):
+    __tablename__ = "ingestion_phase_executions"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_phase_executions_run_phase_attempt",
+            "ingestion_run_id",
+            "phase",
+            "attempt",
+        ),
+        Index(
+            "ix_ingestion_phase_executions_status_heartbeat_at",
+            "status",
+            "heartbeat_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), index=True
+    )
+    phase: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    error_type: Mapped[str | None] = mapped_column(String(120))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    error_retryable: Mapped[bool | None] = mapped_column(Boolean)
+    input_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    output_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class IngestionCancellationRequest(Base):
+    __tablename__ = "ingestion_cancellation_requests"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_cancellation_requests_scope_type_scope_id",
+            "scope_type",
+            "scope_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), index=True
+    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL"), index=True
+    )
+    requested_by: Mapped[str | None] = mapped_column(String(120))
+    reason: Mapped[str | None] = mapped_column(Text)
+    terminate_immediately: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    propagated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    affected_task_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    affected_execution_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class SourceArtifactSnapshot(Base):
     __tablename__ = "source_artifact_snapshots"
     __table_args__ = (
