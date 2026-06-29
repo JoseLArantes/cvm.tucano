@@ -661,6 +661,9 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "next_action" in esquema_run["properties"]
     assert "members_reused_from_failed_parent" in esquema_run["properties"]["quality_summary"]["description"]
     assert "reaproveitados a partir de resultados anteriores" in esquema_run["properties"]["lifecycle_decision"]["description"]
+    esquema_phase = payload["components"]["schemas"]["IngestionRunPhaseExecutionResumo"]
+    assert "input_artifact_uri" in esquema_phase["properties"]
+    assert "output_artifact_uri" in esquema_phase["properties"]
     assert "tentativas_reprocessamento" in esquema_quarentena["properties"]
     assert "total_pendentes" in esquema_resumo_quarentena["properties"]
     assert "total_resolvidos" in esquema_resumo_quarentena["properties"]
@@ -786,7 +789,12 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
             task_id="task-dfp-2026",
             started_at=agora,
             heartbeat_at=agora - timedelta(hours=1),
-            metrics={"members_processados": 3},
+            input_artifact_uri="/tmp/input.csv",
+            output_artifact_uri="/tmp/output.csv",
+            metrics={
+                "members_processados": 3,
+                "artifacts": [{"uri": "/tmp/output.csv", "role": "raw_member_payload"}],
+            },
         )
     )
     db_session.add(
@@ -834,6 +842,9 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert fases_payload[0]["phase"] == "promote"
     assert fases_payload[0]["status"] == "running"
     assert fases_payload[0]["task_id"] == "task-dfp-2026"
+    assert fases_payload[0]["input_artifact_uri"] == "/tmp/input.csv"
+    assert fases_payload[0]["output_artifact_uri"] == "/tmp/output.csv"
+    assert fases_payload[0]["metrics"]["artifacts"][0]["uri"] == "/tmp/output.csv"
 
 
 def test_admin_pre_processar_cadastro_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

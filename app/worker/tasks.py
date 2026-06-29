@@ -825,6 +825,7 @@ def pre_processar_sincronizacao_zip(
 
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.artifact_store import build_artifact_metadata, describe_member_artifact
     from app.services.ingestion.dedup import buscar_execucao_hash_existente
     from app.services.ingestion.file_manager import (
         compute_file_sha256,
@@ -834,6 +835,7 @@ def pre_processar_sincronizacao_zip(
         extract_zip_member,
         get_csv_header,
     )
+    from app.services.ingestion.operational import record_phase_artifact
     from app.services.ingestion.staging import (
         create_run,
         find_reusable_member_match,
@@ -880,6 +882,18 @@ def pre_processar_sincronizacao_zip(
     try:
         hash_arquivo = download_file_to_disk(url, str(zip_path), timeout=300)
         execucao.hash_arquivo = hash_arquivo
+        record_phase_artifact(
+            db,
+            run_id=run.id,
+            direction="output",
+            artifact=build_artifact_metadata(
+                artifact_path=zip_path,
+                role="raw_zip",
+                content_type="application/zip",
+                logical_name=arquivo_zip,
+                content_sha256=hash_arquivo,
+            ),
+        )
 
         anterior = buscar_execucao_hash_existente(
             db,
@@ -996,6 +1010,16 @@ def pre_processar_sincronizacao_zip(
                     schema_status="ok",
                 )
                 save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
+                record_phase_artifact(
+                    db,
+                    run_id=run_created.id,
+                    direction="output",
+                    artifact=describe_member_artifact(
+                        execution_id=str(child_exec.id),
+                        member_name=member_name,
+                        content_sha256=member_hash,
+                    ),
+                )
                 db.flush()
                 continue
 
@@ -1050,6 +1074,16 @@ def pre_processar_sincronizacao_zip(
                     schema_status="ok",
                 )
                 save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
+                record_phase_artifact(
+                    db,
+                    run_id=run_created.id,
+                    direction="output",
+                    artifact=describe_member_artifact(
+                        execution_id=str(child_exec.id),
+                        member_name=member_name,
+                        content_sha256=member_hash,
+                    ),
+                )
                 db.flush()
                 continue
 
@@ -1066,7 +1100,7 @@ def pre_processar_sincronizacao_zip(
             db.add(child_exec)
             db.flush()
 
-            create_run(
+            child_run = create_run(
                 db,
                 tipo_fonte=tipo_fonte,
                 ano=ano,
@@ -1093,6 +1127,16 @@ def pre_processar_sincronizacao_zip(
                 delimiter=delimiter,
             )
             save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
+            record_phase_artifact(
+                db,
+                run_id=child_run.id,
+                direction="output",
+                artifact=describe_member_artifact(
+                    execution_id=str(child_exec.id),
+                    member_name=member_name,
+                    content_sha256=member_hash,
+                ),
+            )
             db.flush()
 
         # Update parent execution to aguardando_ingestao
@@ -1334,12 +1378,14 @@ def sincronizar_member_internal(
 
     from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.artifact_store import build_artifact_metadata, describe_member_artifact
     from app.services.ingestion.file_manager import (
         compute_file_sha256,
         detect_encoding_and_delimiter,
         download_file_to_disk,
         extract_zip_member,
     )
+    from app.services.ingestion.operational import record_phase_artifact
     from app.services.ingestion.staging import (
         create_run,
         get_member_payload,
@@ -1398,17 +1444,30 @@ def sincronizar_member_internal(
         # Check if member file exists locally, otherwise self-heal
         zip_dir = Path(_settings.storage_dir) / str(parent_execucao.id)
         member_path = zip_dir / "extracted" / member_name
+        input_artifact: dict[str, Any] | None = None
 
         if not member_path.exists():
             try:
                 payload = get_member_payload(db, execucao.id, member_name=member_name)
                 member_path.parent.mkdir(parents=True, exist_ok=True)
                 member_path.write_bytes(payload)
+                input_artifact = describe_member_artifact(
+                    execution_id=str(execucao.id),
+                    member_name=member_name,
+                )
             except ValueError:
                 zip_path = zip_dir / parent_execucao.arquivo
                 if not zip_path.exists():
                     download_file_to_disk(parent_execucao.url, str(zip_path), timeout=300)
                 extract_zip_member(str(zip_path), member_name, str(zip_dir / "extracted"))
+        if input_artifact is None:
+            input_artifact = build_artifact_metadata(
+                artifact_path=member_path,
+                role="raw_member_extracted",
+                content_type="text/csv",
+                logical_name=member_name,
+            )
+        record_phase_artifact(db, run_id=run.id, direction="input", artifact=input_artifact)
 
         encoding, delimiter = detect_encoding_and_delimiter(str(member_path))
         member_sha256 = compute_file_sha256(str(member_path))

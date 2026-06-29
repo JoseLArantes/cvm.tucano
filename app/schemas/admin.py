@@ -431,6 +431,14 @@ class IngestionRunPhaseExecutionResumo(BaseModel):
     error_type: str | None = Field(default=None, description="Tipo do erro associado a esta fase.")
     error_message: str | None = Field(default=None, description="Mensagem do erro associado a esta fase.")
     error_retryable: bool | None = Field(default=None, description="Se o erro de fase foi classificado como retryable.")
+    input_artifact_uri: str | None = Field(
+        default=None,
+        description="URI local do artifact de entrada usado pela fase, quando registrado no manifesto operacional.",
+    )
+    output_artifact_uri: str | None = Field(
+        default=None,
+        description="URI local do artifact de saida produzido pela fase, quando registrado no manifesto operacional.",
+    )
     metrics: dict[str, Any] | None = Field(default=None, description="Snapshot resumido de metricas persistidas para a fase.")
 
 

@@ -925,6 +925,37 @@ type AnaliseMaterializacaoProgress = {
   fact_revisions: number | null;
 };
 
+## 2026-06-29 - Manifesto de artifacts por fase de ingestao
+
+Impacto para frontend/admin: **sim**. O endpoint operacional `GET /ingestion/runs/{run_id}/phases` passou a expor metadados duraveis sobre os artifacts locais efetivamente usados e produzidos por cada fase.
+
+### Alteracoes de contrato
+
+- Schema `IngestionRunPhaseExecutionResumo`:
+  - novo campo `input_artifact_uri: string | null`
+  - novo campo `output_artifact_uri: string | null`
+- Campo existente `metrics`:
+  - pode incluir `artifacts: Array<{
+      uri: string;
+      role: string;
+      content_type: string;
+      logical_name: string;
+      size_bytes: number;
+      content_sha256: string;
+    }>`
+
+### Uso esperado no consumidor
+
+- Usar `input_artifact_uri` para explicar qual artifact de entrada foi realmente consumido pela fase.
+- Usar `output_artifact_uri` para drill-down de replay e troubleshooting operacional.
+- Usar `metrics.artifacts` para exibir manifesto resumido por fase sem depender de logs do worker.
+- O nome logico do member preserva o case original em `logical_name`.
+
+### Compatibilidade
+
+- Campos novos sao aditivos.
+- Consumidores atuais continuam funcionando se ignorarem `input_artifact_uri`, `output_artifact_uri` e `metrics.artifacts`.
+
 type AnaliseMaterializacaoExecucaoResumo = {
   id: string;
   codigo_cvm: number;

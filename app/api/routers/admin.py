@@ -1850,6 +1850,8 @@ def listar_ingestion_run_phases(
                 error_type=item.error_type,
                 error_message=item.error_message,
                 error_retryable=item.error_retryable,
+                input_artifact_uri=item.input_artifact_uri,
+                output_artifact_uri=item.output_artifact_uri,
                 metrics=item.metrics,
             )
             for item in phase_rows

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+from typing import Any
 
 from app.core.config import get_settings
 
@@ -63,3 +65,39 @@ def member_artifact_exists(*, execution_id: str, member_name: str) -> bool:
 
 def delete_member_artifact(*, execution_id: str, member_name: str) -> None:
     _artifact_store().delete_member(execution_id=execution_id, member_name=member_name)
+
+
+def build_artifact_metadata(
+    *,
+    artifact_path: str | Path,
+    role: str,
+    content_type: str,
+    logical_name: str | None = None,
+    content_sha256: str | None = None,
+) -> dict[str, Any]:
+    path = Path(artifact_path)
+    sha256 = content_sha256 or hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        "uri": str(path),
+        "role": role,
+        "content_type": content_type,
+        "logical_name": logical_name or path.name,
+        "size_bytes": path.stat().st_size,
+        "content_sha256": sha256,
+    }
+
+
+def describe_member_artifact(
+    *,
+    execution_id: str,
+    member_name: str,
+    content_sha256: str | None = None,
+) -> dict[str, Any]:
+    artifact_path = _artifact_store().member_artifact_path(execution_id=execution_id, member_name=member_name)
+    return build_artifact_metadata(
+        artifact_path=artifact_path,
+        role="raw_member_payload",
+        content_type="text/csv",
+        logical_name=member_name,
+        content_sha256=content_sha256,
+    )

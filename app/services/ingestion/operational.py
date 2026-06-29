@@ -57,6 +57,38 @@ def get_latest_phase_execution(db: Session, *, run_id: Any) -> IngestionPhaseExe
     return phase_execution if isinstance(phase_execution, IngestionPhaseExecution) else None
 
 
+def record_phase_artifact(
+    db: Session,
+    *,
+    run_id: Any,
+    direction: str,
+    artifact: dict[str, Any],
+) -> IngestionPhaseExecution | None:
+    phase_execution = get_latest_phase_execution(db, run_id=run_id)
+    if phase_execution is None:
+        return None
+
+    artifact_uri = artifact.get("uri")
+    if direction == "input":
+        phase_execution.input_artifact_uri = artifact_uri
+    elif direction == "output":
+        phase_execution.output_artifact_uri = artifact_uri
+    else:
+        raise ValueError(f"Direcao de artifact invalida: {direction}")
+
+    metrics = dict(phase_execution.metrics or {})
+    artifacts = [
+        item
+        for item in metrics.get("artifacts", [])
+        if isinstance(item, dict) and item.get("uri") != artifact_uri
+    ]
+    artifacts.append(artifact)
+    metrics["artifacts"] = artifacts
+    phase_execution.metrics = metrics
+    db.flush()
+    return phase_execution
+
+
 def list_phase_executions(db: Session, *, run_id: Any) -> list[IngestionPhaseExecution]:
     return list(
         db.scalars(

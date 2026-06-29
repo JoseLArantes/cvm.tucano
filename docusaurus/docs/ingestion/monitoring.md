@@ -271,13 +271,19 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
 
 **Schema:** `IngestionRunResumo`
 
-Use `state`, `liveness` e `next_action` como contrato primário para UX operacional. `quality_summary` continua sendo a fonte principal dos contadores de processamento; `liveness` responde se a run ainda parece viva; e `GET /ingestion/runs/{run_id}/phases` é o drill-down recomendado quando a UI precisar mostrar tentativas, heartbeat e falha por fase.
+Use `state`, `liveness` e `next_action` como contrato primário para UX operacional. `quality_summary` continua sendo a fonte principal dos contadores de processamento; `liveness` responde se a run ainda parece viva; e `GET /ingestion/runs/{run_id}/phases` é o drill-down recomendado quando a UI precisar mostrar tentativas, heartbeat, falha por fase e o manifesto local de artifacts usados ou produzidos pela fase.
 
 ---
 
 ## `GET /ingestion/runs/{run_id}/phases`
 
 Retorna a timeline persistida de fases da run.
+
+Campos de artifact:
+
+- `input_artifact_uri`: artifact de entrada efetivamente consumido pela fase, quando conhecido.
+- `output_artifact_uri`: artifact gerado pela fase, quando conhecido.
+- `metrics.artifacts`: manifesto resumido com `uri`, `role`, `content_type`, `logical_name`, `size_bytes` e `content_sha256`.
 
 ### Exemplo
 
@@ -309,7 +315,21 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
       "error_type": null,
       "error_message": null,
       "error_retryable": null,
-      "metrics": {"members_processados": 13}
+      "input_artifact_uri": "/var/lib/cvm/artifacts/member_payloads/769d9633-4989-4668-8eba-89d62f32bde7/itr_cia_aberta_BPA_con_2026.csv",
+      "output_artifact_uri": "/var/lib/cvm/artifacts/member_payloads/769d9633-4989-4668-8eba-89d62f32bde7/itr_cia_aberta_BPA_con_2026.csv",
+      "metrics": {
+        "members_processados": 13,
+        "artifacts": [
+          {
+            "uri": "/var/lib/cvm/artifacts/member_payloads/769d9633-4989-4668-8eba-89d62f32bde7/itr_cia_aberta_BPA_con_2026.csv",
+            "role": "raw_member_payload",
+            "content_type": "text/csv",
+            "logical_name": "itr_cia_aberta_BPA_con_2026.csv",
+            "size_bytes": 1048576,
+            "content_sha256": "4d8f5c2d7ff53f6eec4f7f686cb4d88a8e6508b66f661d4ec0d1a9f1848401fb"
+          }
+        ]
+      }
     }
   ]
 }
