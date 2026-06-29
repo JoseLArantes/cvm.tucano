@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import and_, delete, insert, or_, select
 from sqlalchemy.orm import Session, aliased, load_only, object_session
 
+from app.core.config import get_settings
 from app.models.ingestion import (
     IngestionAttempt,
     IngestionCancellationRequest,
@@ -42,6 +43,7 @@ DEFAULT_CSV_DELIMITER = ";"
 DEFAULT_ROW_VALIDATION_STATUS = "pending"
 DEFAULT_MEMBER_SCHEMA_STATUS = "ok"
 _ROW_KINDS_WITH_LINE_FALLBACK = {"fre_relacao_familiar"}
+_settings = get_settings()
 
 
 def _agora() -> datetime:
@@ -402,6 +404,8 @@ def save_member_payload(db: Session, execution_id: Any, payload: bytes, *, membe
         member_name=member_name,
         payload=payload,
     )
+    if not _settings.ingestion_member_payload_db_fallback_enabled:
+        return
     member_payload = db.scalar(
         select(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id

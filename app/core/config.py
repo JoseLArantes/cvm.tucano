@@ -151,6 +151,10 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
     )
+    ingestion_member_payload_db_fallback_enabled: bool = Field(
+        default=False,
+        alias="INGESTION_MEMBER_PAYLOAD_DB_FALLBACK_ENABLED",
+    )
     storage_dir: str = Field(default="data/storage", alias="STORAGE_DIR")
     updates_service_enabled: bool = Field(default=True, alias="UPDATES_SERVICE_ENABLED")
     auto_trigger_updates: bool = Field(default=False, alias="AUTO_TRIGGER_UPDATES")

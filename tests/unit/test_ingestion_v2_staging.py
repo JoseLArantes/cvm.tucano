@@ -259,6 +259,7 @@ def test_member_payload_is_upserted_and_readable(monkeypatch) -> None:
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", True)
             execution_id = uuid.uuid4()
             member_name = "itr_cia_aberta_BPA_con_2026.csv"
 
@@ -285,6 +286,7 @@ def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypa
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
             monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", True)
             execution_id = uuid.uuid4()
             member_name = "itr_cia_aberta_BPA_con_2026.csv"
             payload = IngestionFileMemberPayload(id=execution_id, payload=b"fallback-db")
@@ -292,6 +294,25 @@ def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypa
             session.commit()
 
             assert get_member_payload(session, execution_id, member_name=member_name) == b"fallback-db"
+    finally:
+        session.close()
+
+
+def test_member_payload_skips_database_fallback_when_disabled(monkeypatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", False)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
+
+            save_member_payload(session, execution_id, b"artifact-only", member_name=member_name)
+            session.commit()
+
+            persisted = session.get(IngestionFileMemberPayload, execution_id)
+            assert persisted is None
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"artifact-only"
     finally:
         session.close()
 
