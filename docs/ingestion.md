@@ -858,6 +858,9 @@ extracao do member no ZIP.
 Durante o replay isolado de um member, a resolucao por cabecalho de documento e semeada
 pelas tabelas canonicas de documentos ja promovidos, evitando reconstruir em memoria o
 historico cumulativo de staging de siblings do mesmo ano.
+O promote por member tambem processa os chunks de staging de forma estritamente incremental:
+o worker carrega apenas os campos minimos por `ingestion_row` e desaloca os rows de cada
+chunk antes de avancar para o seguinte.
 
 **Execucao em duas fases (manual):**
 

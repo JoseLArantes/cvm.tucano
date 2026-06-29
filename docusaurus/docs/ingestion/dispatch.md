@@ -189,6 +189,9 @@ member do ZIP.
 No replay isolado do member, a resolucao por cabecalho usa uma semente compacta das
 tabelas canonicas de documentos ja promovidos, em vez de reconstruir em memoria o
 historico cumulativo de staging de siblings do mesmo ano.
+O worker tambem percorre os chunks de staging de forma incremental, carregando apenas o
+payload minimo de cada `ingestion_row` e liberando os rows processados antes do chunk
+seguinte.
 
 ### Exemplo
 

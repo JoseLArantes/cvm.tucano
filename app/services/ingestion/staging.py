@@ -800,24 +800,11 @@ def iter_staged_member_chunks(
                 load_only(
                     IngestionRow.id,
                     IngestionRow.ingestion_run_id,
-                    IngestionRow.ingestion_file_member_id,
                     IngestionRow.arquivo_origem,
                     IngestionRow.ano_origem,
                     IngestionRow.linha_origem,
                     IngestionRow.raw_data,
-                    IngestionRow.raw_hash,
                     IngestionRow.row_kind,
-                    IngestionRow.validation_status,
-                    IngestionRow.validation_reason_code,
-                    IngestionRow.validation_details,
-                    IngestionRow.normalized_data,
-                    IngestionRow.normalized_hash,
-                    IngestionRow.natural_key,
-                    IngestionRow.resolved_companhia_id,
-                    IngestionRow.resolution_method,
-                    IngestionRow.resolution_confidence,
-                    IngestionRow.promoted_entity,
-                    IngestionRow.promoted_entity_id,
                 )
             )
             .where(IngestionRow.ingestion_file_member_id == member_id)
@@ -831,6 +818,8 @@ def iter_staged_member_chunks(
             break
         yield rows
         last_line = rows[-1].linha_origem
+        for row in rows:
+            db.expunge(row)
 
 
 def iter_zip_csv_members(payload: bytes) -> list[tuple[str, bytes]]:

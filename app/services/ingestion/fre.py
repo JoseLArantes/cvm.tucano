@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import uuid
 from collections.abc import Iterable, Sequence
+from itertools import chain
 from typing import Any
 
 import httpx
@@ -2058,7 +2059,7 @@ def _process_fre_member(
         return
 
     current_hashes_by_model: dict[type[Any], set[str]] = {}
-    for rows in [first_rows, *chunks]:
+    for rows in chain([first_rows], chunks):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
             contadores["lidas"] += 1

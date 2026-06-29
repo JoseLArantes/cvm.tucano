@@ -1,5 +1,19 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-29 - Worker de replay de member reduz footprint por chunk
+
+### Superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o worker de replay de member deixa de materializar todos os chunks restantes de `fre` em memoria de uma vez
+- a leitura de `ingestion_rows` por chunk passa a carregar apenas os campos minimos necessarios ao promote e expunge os rows processados da sessao antes de seguir para o proximo chunk
+- isso reduz crescimento do identity map por member e diminui o risco de `SIGKILL` em workers durante promote de CSVs volumosos
+
 ## 2026-06-27 - Replay de member deixa de reconstruir estado cumulativo do ano
 
 ### Superficies com impacto operacional visivel

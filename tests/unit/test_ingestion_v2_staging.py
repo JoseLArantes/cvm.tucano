@@ -2,7 +2,7 @@ import io
 import uuid
 import zipfile
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -205,6 +205,47 @@ def test_stage_csv_payload_streaming_persists_rows_and_chunk_iteration() -> None
         assert session.query(IngestionRow).count() == 3
         assert [len(chunk) for chunk in chunks] == [2, 1]
         assert [row.linha_origem for chunk in chunks for row in chunk] == [2, 3, 4]
+    finally:
+        session.close()
+
+
+def test_iter_staged_member_chunks_carrega_payload_minimo_e_expunge_chunks() -> None:
+    session = _session()
+    try:
+        run = create_run(session, tipo_fonte="itr", ano=2022)
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/itr.zip",
+            source_filename="itr.zip",
+            payload=b"fake",
+        )
+
+        member = stage_csv_payload_streaming(
+            session,
+            ingestion_run=run,
+            ingestion_file=ingestion_file,
+            payload=b"col_a;col_b\n1;2\n3;4\n5;6\n",
+            member_name="itr_cia_aberta_2022.csv",
+            arquivo_origem="itr_cia_aberta_2022.csv",
+            ano_origem=2022,
+            row_kind="itr_documento",
+            chunk_size=2,
+        )
+        session.commit()
+
+        chunks = iter_staged_member_chunks(session, member_id=member.id, chunk_size=2)
+        first_chunk = next(chunks)
+
+        first_state = inspect(first_chunk[0])
+        assert "validation_status" in first_state.unloaded
+        assert "normalized_data" in first_state.unloaded
+        assert "resolved_companhia_id" in first_state.unloaded
+
+        second_chunk = next(chunks)
+        assert [row.linha_origem for row in second_chunk] == [4]
+        assert inspect(first_chunk[0]).detached is True
+        assert inspect(first_chunk[1]).detached is True
     finally:
         session.close()
 
