@@ -24,7 +24,9 @@ from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.dependencies import ensure_identity_graph_ready
 from app.services.ingestion.engine import ZipIngestionSpec, process_zip_members
 from app.services.ingestion.lifecycle import build_custom_remote_probe, upsert_artifact_snapshot
+from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.normalizers import gerar_hash_canonico
+from app.services.ingestion.operational import record_phase_artifact
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.quarantine import create_quarantine_item
 from app.services.ingestion.resolver import (
@@ -881,6 +883,7 @@ def _process_financeiro_member(
     fallback_row_kind = f"{prefixo}_documento"
     current_model, _, _, _ = _financeiro_promotion_spec(member_row_kind or fallback_row_kind)
     current_row_kinds_by_model.setdefault(current_model, set()).add(member_row_kind or fallback_row_kind)
+    normalized_writers: dict[str, NormalizedArtifactWriter] = {}
     for rows in iter_staged_member_chunks(db, member_id=member_id, chunk_size=chunk_size):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
@@ -1034,6 +1037,27 @@ def _process_financeiro_member(
                 normalized_data=dados,
                 natural_key=natural_key,
             )
+            writer = normalized_writers.get(row_kind)
+            if writer is None:
+                writer = NormalizedArtifactWriter(
+                    run_id=str(run_id),
+                    member_id=str(member_id),
+                    member_name=member.member_name,
+                    row_kind=row_kind,
+                )
+                normalized_writers[row_kind] = writer
+            writer.write_row(
+                {
+                    "row_kind": row_kind,
+                    "linha_origem": row.linha_origem,
+                    "arquivo_origem": row.arquivo_origem,
+                    "ano_origem": ano,
+                    "companhia_id": dados.get("companhia_id"),
+                    "normalized_hash": gerar_hash_canonico(dados),
+                    "natural_key": natural_key,
+                    **dados,
+                }
+            )
             if promote_enabled:
                 model, _, _, _ = _financeiro_promotion_spec(row_kind)
                 current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
@@ -1074,6 +1098,14 @@ def _process_financeiro_member(
                 row_kinds=row_kinds,
             )
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
+
+    for writer in normalized_writers.values():
+        record_phase_artifact(
+            db,
+            run_id=run_id,
+            direction="output",
+            artifact=writer.close(),
+        )
 
     execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
     run_atual = db.get(IngestionRun, run_id)
