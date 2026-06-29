@@ -1086,8 +1086,26 @@ def _process_financeiro_member(
                 contadores=contadores,
             )
 
+    normalized_artifacts = {
+        row_kind: writer.close()
+        for row_kind, writer in normalized_writers.items()
+    }
+    for artifact in normalized_artifacts.values():
+        record_phase_artifact(
+            db,
+            run_id=run_id,
+            direction="output",
+            artifact=artifact,
+        )
+
     if promote_enabled and reconcile_required:
         for model, row_kinds in current_row_kinds_by_model.items():
+            normalized_artifact_uri = None
+            for row_kind in sorted(row_kinds):
+                artifact_metadata = normalized_artifacts.get(row_kind)
+                if artifact_metadata is not None:
+                    normalized_artifact_uri = str(artifact_metadata["uri"])
+                    break
             reconciled_deleted += reconcile_promoted_rows(
                 db,
                 model=model,
@@ -1096,16 +1114,9 @@ def _process_financeiro_member(
                 arquivo_origem=member.arquivo_origem if hasattr(member, "arquivo_origem") else member.member_name,
                 ano_origem=ano,
                 row_kinds=row_kinds,
+                normalized_artifact_uri=normalized_artifact_uri,
             )
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
-
-    for writer in normalized_writers.values():
-        record_phase_artifact(
-            db,
-            run_id=run_id,
-            direction="output",
-            artifact=writer.close(),
-        )
 
     execucao_atual = db.get(ExecucaoSincronizacao, execucao_id)
     run_atual = db.get(IngestionRun, run_id)

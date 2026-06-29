@@ -1,4 +1,5 @@
 import io
+import tempfile
 import uuid
 import zipfile
 from datetime import UTC, date, datetime
@@ -8,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.models import (  # noqa: F401
     cgvn,
@@ -33,6 +35,7 @@ from app.models.ipe import IpeDocumento
 from app.services.ingestion.acquisition import probe_remote_source
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.ipe import sincronizar_ipe
+from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.staging import create_run, register_file
 
 
@@ -265,6 +268,113 @@ def test_reconcile_promoted_rows_deletes_stale_rows_without_persisting_transient
         assert deleted == 1
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-a")) is not None
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-b")) is None
+    finally:
+        session.close()
+
+
+def test_reconcile_promoted_rows_can_use_normalized_artifact_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            run = create_run(session, tipo_fonte="ipe", ano=2025)
+            ingestion_file = register_file(
+                session,
+                ingestion_run=run,
+                source_url="https://example.test/ipe.zip",
+                source_filename="ipe_cia_aberta_2025.zip",
+                payload=b"fake",
+                is_zip=True,
+            )
+            member = IngestionFileMember(
+                ingestion_file_id=ingestion_file.id,
+                member_name="ipe_cia_aberta_2025.csv",
+                member_sha256="member-hash",
+                member_size_bytes=123,
+                encoding="utf-8",
+                delimiter=";",
+                header=["COLUNA"],
+                row_count=1,
+                schema_status="ok",
+            )
+            session.add(member)
+            company = _companhia()
+            session.add(company)
+            session.flush()
+
+            writer = NormalizedArtifactWriter(
+                run_id=str(run.id),
+                member_id=str(member.id),
+                member_name=member.member_name,
+                row_kind="ipe_documento",
+            )
+            writer.write_row(
+                {
+                    "normalized_hash": "hash-a",
+                    "arquivo_origem": "ipe_cia_aberta_2025.csv",
+                    "linha_origem": 2,
+                }
+            )
+            artifact = writer.close()
+
+            current = IpeDocumento(
+                companhia_id=company.id,
+                cnpj_companhia="00000000000191",
+                codigo_cvm=1023,
+                nome_companhia="Banco do Brasil",
+                data_referencia=date(2025, 1, 1),
+                categoria="Categoria X",
+                tipo="Tipo X",
+                especie="Especie X",
+                assunto="Atual",
+                data_entrega=date(2025, 1, 15),
+                tipo_apresentacao="Apresentacao",
+                protocolo_entrega="123",
+                versao=1,
+                link_download="http://ipe/1",
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=2,
+                hash_origem="hash-a",
+            )
+            stale = IpeDocumento(
+                companhia_id=company.id,
+                cnpj_companhia="00000000000191",
+                codigo_cvm=1023,
+                nome_companhia="Banco do Brasil",
+                data_referencia=date(2025, 1, 1),
+                categoria="Categoria X",
+                tipo="Tipo Y",
+                especie="Especie X",
+                assunto="Obsoleto",
+                data_entrega=date(2025, 1, 15),
+                tipo_apresentacao="Apresentacao",
+                protocolo_entrega="456",
+                versao=1,
+                link_download="http://ipe/2",
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=3,
+                hash_origem="hash-b",
+            )
+            session.add_all([current, stale])
+            session.commit()
+
+            deleted = reconcile_promoted_rows(
+                session,
+                model=IpeDocumento,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                row_kinds={"ipe_documento"},
+                normalized_artifact_uri=str(artifact["uri"]),
+            )
+            session.commit()
+
+            assert deleted == 1
+            assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-a")) is not None
+            assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-b")) is None
     finally:
         session.close()
 

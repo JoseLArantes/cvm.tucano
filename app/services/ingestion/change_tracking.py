@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, true
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRow, IngestionRun
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
+from app.services.ingestion.normalized_artifacts import read_normalized_hashes
 
 
 def empty_change_summary() -> dict[str, Any]:
@@ -135,8 +136,21 @@ def reconcile_promoted_rows(
     arquivo_origem: str,
     ano_origem: int | None,
     row_kinds: set[str],
+    normalized_artifact_uri: str | None = None,
 ) -> int:
     db.flush()
+    if normalized_artifact_uri is not None:
+        current_hashes = read_normalized_hashes(artifact_uri=normalized_artifact_uri)
+        deleted = db.execute(
+            delete(model).where(
+                model.arquivo_origem == arquivo_origem,
+                model.ano_origem == ano_origem,
+                model.hash_origem.not_in(sorted(current_hashes)) if current_hashes else true(),
+            )
+        )
+        rowcount = getattr(deleted, "rowcount", None)
+        return int(rowcount if rowcount is not None else 0)
+
     current_hashes_subquery = (
         select(IngestionRow.normalized_hash)
         .where(

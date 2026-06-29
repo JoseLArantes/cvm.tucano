@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections.abc import Iterator
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -72,3 +73,18 @@ class NormalizedArtifactWriter:
             "row_count": self._row_count,
             "fieldnames": self._fieldnames or [],
         }
+
+
+def iter_normalized_artifact_rows(*, artifact_uri: str | Path) -> Iterator[dict[str, str]]:
+    with Path(artifact_uri).open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle, delimiter=";")
+        for row in reader:
+            yield dict(row)
+
+
+def read_normalized_hashes(*, artifact_uri: str | Path) -> set[str]:
+    return {
+        row["normalized_hash"]
+        for row in iter_normalized_artifact_rows(artifact_uri=artifact_uri)
+        if row.get("normalized_hash")
+    }
