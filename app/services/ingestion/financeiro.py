@@ -877,7 +877,10 @@ def _process_financeiro_member(
     run_final: IngestionRun | None = None
     member_final: IngestionFileMember | None = None
     reconciled_deleted = 0
-    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    current_row_kinds_by_model: dict[type[Any], set[str]] = {}
+    fallback_row_kind = f"{prefixo}_documento"
+    current_model, _, _, _ = _financeiro_promotion_spec(member_row_kind or fallback_row_kind)
+    current_row_kinds_by_model.setdefault(current_model, set()).add(member_row_kind or fallback_row_kind)
     for rows in iter_staged_member_chunks(db, member_id=member_id, chunk_size=chunk_size):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
@@ -1033,7 +1036,7 @@ def _process_financeiro_member(
             )
             if promote_enabled:
                 model, _, _, _ = _financeiro_promotion_spec(row_kind)
-                current_hashes_by_model.setdefault(model, set()).add(_preparar_dados_promocao(dados)["hash_origem"])
+                current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
                 linhas_promovidas.append((row, dados))
             else:
                 contadores["inalterados"] += 1
@@ -1060,7 +1063,7 @@ def _process_financeiro_member(
             )
 
     if promote_enabled and reconcile_required:
-        for model, current_hashes in current_hashes_by_model.items():
+        for model, row_kinds in current_row_kinds_by_model.items():
             reconciled_deleted += reconcile_promoted_rows(
                 db,
                 model=model,
@@ -1068,7 +1071,7 @@ def _process_financeiro_member(
                 ingestion_file_member_id=member.id,
                 arquivo_origem=member.arquivo_origem if hasattr(member, "arquivo_origem") else member.member_name,
                 ano_origem=ano,
-                current_hashes=current_hashes,
+                row_kinds=row_kinds,
             )
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
 

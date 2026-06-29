@@ -491,7 +491,10 @@ def _process_cgvn_member(
     rows: list[IngestionRow] | None = None,
     chunk_size: int | None = None,
 ) -> None:
-    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    current_row_kinds_by_model: dict[type[Any], set[str]] = {
+        CgvnDocumento: {"cgvn_documento"},
+        CgvnPratica: {"cgvn_pratica"},
+    }
     chunks = iter([rows]) if rows is not None else iter_staged_member_chunks(
         db, member_id=member.id, chunk_size=chunk_size or _PROMOTE_CHUNK_SIZE
     )
@@ -609,8 +612,6 @@ def _process_cgvn_member(
                 db, ingestion_row=row, result=duplicate_result, normalized_data=dados, natural_key=natural_key
             )
             if promote_enabled and row_kind in _PROMOTED_ROW_KINDS:
-                model = CgvnDocumento if row_kind == "cgvn_documento" else CgvnPratica
-                current_hashes_by_model.setdefault(model, set()).add(_prepare_promocao(dados)["hash_origem"])
                 linhas_promovidas.append((row, dados))
                 if len(linhas_promovidas) >= _PROMOTE_CHUNK_SIZE:
                     _promote_cgvn_chunk(
@@ -643,7 +644,7 @@ def _process_cgvn_member(
                 contadores=contadores,
             )
 
-    for model, current_hashes in current_hashes_by_model.items():
+    for model, row_kinds in current_row_kinds_by_model.items():
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconcile_promoted_rows(
             db,
             model=model,
@@ -651,7 +652,7 @@ def _process_cgvn_member(
             ingestion_file_member_id=member.id,
             arquivo_origem=member.member_name,
             ano_origem=ano,
-            current_hashes=current_hashes,
+            row_kinds=row_kinds,
         )
 
 

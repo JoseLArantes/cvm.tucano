@@ -2058,7 +2058,9 @@ def _process_fre_member(
     if tipo is None:
         return
 
-    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    current_row_kinds_by_model: dict[type[Any], set[str]] = {}
+    current_model, _, _ = _fre_promotion_spec(first_rows[0].row_kind)
+    current_row_kinds_by_model.setdefault(current_model, set()).add(first_rows[0].row_kind)
     for rows in chain([first_rows], chunks):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in rows:
@@ -2198,7 +2200,7 @@ def _process_fre_member(
             )
             if promote_enabled:
                 model, _, _ = _fre_promotion_spec(row_kind)
-                current_hashes_by_model.setdefault(model, set()).add(_preparar_dados_promocao(dados)["hash_origem"])
+                current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
                 linhas_promovidas.append((row, dados))
             else:
                 contadores["inalterados"] += 1
@@ -2231,7 +2233,7 @@ def _process_fre_member(
         db.commit()
 
     if promote_enabled and reconcile_required:
-        for model, current_hashes in current_hashes_by_model.items():
+        for model, row_kinds in current_row_kinds_by_model.items():
             contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconcile_promoted_rows(
                 db,
                 model=model,
@@ -2239,7 +2241,7 @@ def _process_fre_member(
                 ingestion_file_member_id=member.id,
                 arquivo_origem=member.member_name,
                 ano_origem=ano,
-                current_hashes=current_hashes,
+                row_kinds=row_kinds,
             )
 
 

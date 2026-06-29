@@ -423,7 +423,7 @@ def _process_ipe_member(
     rows: list[IngestionRow] | None = None,
     chunk_size: int | None = None,
 ) -> None:
-    current_hashes: set[str] = set()
+    current_row_kinds: set[str] = set(_PROMOTED_ROW_KINDS)
     chunks = iter([rows]) if rows is not None else iter_staged_member_chunks(
         db, member_id=member.id, chunk_size=chunk_size or _PROMOTE_CHUNK_SIZE
     )
@@ -541,7 +541,6 @@ def _process_ipe_member(
                 db, ingestion_row=row, result=duplicate_result, normalized_data=dados, natural_key=natural_key
             )
             if promote_enabled and row_kind in _PROMOTED_ROW_KINDS:
-                current_hashes.add(_prepare_promocao(dados)["hash_origem"])
                 linhas_promovidas.append((row, dados))
                 if len(linhas_promovidas) >= _PROMOTE_CHUNK_SIZE:
                     _promote_ipe_chunk(
@@ -572,7 +571,7 @@ def _process_ipe_member(
                 contadores=contadores,
             )
 
-    if promote_enabled and current_hashes:
+    if promote_enabled:
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconcile_promoted_rows(
             db,
             model=IpeDocumento,
@@ -580,7 +579,7 @@ def _process_ipe_member(
             ingestion_file_member_id=member.id,
             arquivo_origem=member.member_name,
             ano_origem=ano,
-            current_hashes=current_hashes,
+            row_kinds=current_row_kinds,
         )
 
 

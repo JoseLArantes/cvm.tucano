@@ -1,4 +1,5 @@
 import io
+import uuid
 import zipfile
 from datetime import UTC, date, datetime
 
@@ -21,7 +22,13 @@ from app.models import (  # noqa: F401
 )
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador
-from app.models.ingestion import SourceArtifactSnapshot, SourceDeliverySnapshot, SourceMemberSnapshot
+from app.models.ingestion import (
+    IngestionFileMember,
+    IngestionRow,
+    SourceArtifactSnapshot,
+    SourceDeliverySnapshot,
+    SourceMemberSnapshot,
+)
 from app.models.ipe import IpeDocumento
 from app.services.ingestion.acquisition import probe_remote_source
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
@@ -163,9 +170,44 @@ def test_reconcile_promoted_rows_deletes_stale_rows_without_persisting_transient
     session = _session()
     try:
         run = create_run(session, tipo_fonte="ipe", ano=2025)
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/ipe.zip",
+            source_filename="ipe_cia_aberta_2025.zip",
+            payload=b"fake",
+            is_zip=True,
+        )
+        member = IngestionFileMember(
+            ingestion_file_id=ingestion_file.id,
+            member_name="ipe_cia_aberta_2025.csv",
+            member_sha256="member-hash",
+            member_size_bytes=123,
+            encoding="utf-8",
+            delimiter=";",
+            header=["COLUNA"],
+            row_count=1,
+            schema_status="ok",
+        )
+        session.add(member)
         company = _companhia()
         session.add(company)
         session.flush()
+        session.add(
+            IngestionRow(
+                id=uuid.uuid4(),
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=2,
+                raw_data={"COLUNA": "valor"},
+                raw_hash="raw-hash",
+                row_kind="ipe_documento",
+                validation_status="valid",
+                normalized_hash="hash-a",
+            )
+        )
         current = IpeDocumento(
             companhia_id=company.id,
             cnpj_companhia="00000000000191",
@@ -213,10 +255,10 @@ def test_reconcile_promoted_rows_deletes_stale_rows_without_persisting_transient
             session,
             model=IpeDocumento,
             ingestion_run_id=run.id,
-            ingestion_file_member_id=None,
+            ingestion_file_member_id=member.id,
             arquivo_origem="ipe_cia_aberta_2025.csv",
             ano_origem=2025,
-            current_hashes={"hash-a"},
+            row_kinds={"ipe_documento"},
         )
         session.commit()
 

@@ -886,7 +886,7 @@ def _process_fca_member(
 ) -> None:
     _, local_member_type_map, _, _ = map_fca_members(ano)
     member_type_map = member_type_map or local_member_type_map
-    current_hashes_by_model: dict[type[Any], set[str]] = {}
+    current_row_kinds_by_model: dict[type[Any], set[str]] = {}
     chunks = iter([rows]) if rows is not None else iter_staged_member_chunks(
         db, member_id=member.id, chunk_size=chunk_size or _PROMOTE_CHUNK_SIZE
     )
@@ -900,6 +900,10 @@ def _process_fca_member(
         return
 
     tipo = member_type_map[member.member_name]
+    if first_rows:
+        first_model, _, _, _ = _fca_promotion_spec(first_rows[0].row_kind, {})
+        if first_model is not None:
+            current_row_kinds_by_model.setdefault(first_model, set()).add(first_rows[0].row_kind)
     for chunk_rows in chain([first_rows], chunks):
         linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]] = []
         for row in chunk_rows:
@@ -1013,7 +1017,7 @@ def _process_fca_member(
             if promote_enabled and row_kind in _PROMOTED_ROW_KINDS:
                 model, _, _, _ = _fca_promotion_spec(row_kind, dados)
                 if model is not None:
-                    current_hashes_by_model.setdefault(model, set()).add(_prepare_promocao(dados)["hash_origem"])
+                    current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
                 linhas_promovidas.append((row, dados))
                 if len(linhas_promovidas) >= _PROMOTE_CHUNK_SIZE:
                     _promote_fca_chunk(
@@ -1059,7 +1063,7 @@ def _process_fca_member(
             )
 
     reconciled_deleted = 0
-    for model, current_hashes in current_hashes_by_model.items():
+    for model, row_kinds in current_row_kinds_by_model.items():
         reconciled_deleted += reconcile_promoted_rows(
             db,
             model=model,
@@ -1067,7 +1071,7 @@ def _process_fca_member(
             ingestion_file_member_id=member.id,
             arquivo_origem=member.member_name,
             ano_origem=ano,
-            current_hashes=current_hashes,
+            row_kinds=row_kinds,
         )
     if reconciled_deleted:
         contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted

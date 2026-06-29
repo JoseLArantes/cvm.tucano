@@ -6,9 +6,8 @@ from typing import Any
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun
+from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRow, IngestionRun
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
-from app.services.ingestion.sql_batches import iter_lookup_batches
 
 
 def empty_change_summary() -> dict[str, Any]:
@@ -135,19 +134,29 @@ def reconcile_promoted_rows(
     ingestion_file_member_id: Any,
     arquivo_origem: str,
     ano_origem: int | None,
-    current_hashes: set[str],
+    row_kinds: set[str],
 ) -> int:
     db.flush()
-    existing_rows = db.execute(
-        select(model.id, model.hash_origem).where(model.arquivo_origem == arquivo_origem, model.ano_origem == ano_origem)
-    ).all()
-    stale_ids = [row.id for row in existing_rows if row.hash_origem not in current_hashes]
-    if not stale_ids:
-        return 0
+    current_hashes_subquery = (
+        select(IngestionRow.normalized_hash)
+        .where(
+            IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
+            IngestionRow.validation_status == "valid",
+            IngestionRow.normalized_hash.is_not(None),
+        )
+        .distinct()
+    )
+    if row_kinds:
+        current_hashes_subquery = current_hashes_subquery.where(
+            IngestionRow.row_kind.in_(sorted(row_kinds))
+        )
 
-    deleted_count = 0
-    for batch in iter_lookup_batches(stale_ids, parameter_width=1):
-        deleted = db.execute(delete(model).where(model.id.in_(list(batch))))
-        rowcount = getattr(deleted, "rowcount", None)
-        deleted_count += int(rowcount if rowcount is not None else 0)
-    return deleted_count
+    deleted = db.execute(
+        delete(model).where(
+            model.arquivo_origem == arquivo_origem,
+            model.ano_origem == ano_origem,
+            model.hash_origem.not_in(current_hashes_subquery),
+        )
+    )
+    rowcount = getattr(deleted, "rowcount", None)
+    return int(rowcount if rowcount is not None else 0)
