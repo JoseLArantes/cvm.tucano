@@ -4,6 +4,8 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q celery
     env_file:
       - .env
+    mem_limit: 2560m
+    mem_reservation: 2g
     volumes:
       - .:/app
     deploy:

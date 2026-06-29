@@ -2,7 +2,7 @@
 
 ## Status
 
-Aceito
+Parcialmente superado pelo ADR 0003
 
 ## Contexto
 
@@ -29,6 +29,10 @@ As otimizações prioritárias devem acontecer dentro da arquitetura atual:
 - benchmark e observabilidade SQL antes de qualquer mudança estrutural maior.
 
 NoSQL não será introduzido como write model canônico nesta etapa.
+
+## Nota histórica
+
+O ADR 0003 mantém PostgreSQL como base canônica de domínio, mas revê a parte desta decisão que tratava PostgreSQL como storage principal do caminho feliz para artefatos brutos e staging detalhado.
 
 ## Consequências
 
