@@ -995,7 +995,7 @@ def pre_processar_sincronizacao_zip(
                     encoding=None,
                     schema_status="ok",
                 )
-                save_member_payload(db, child_exec.id, member_payload)
+                save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
                 db.flush()
                 continue
 
@@ -1049,7 +1049,7 @@ def pre_processar_sincronizacao_zip(
                     encoding=None,
                     schema_status="ok",
                 )
-                save_member_payload(db, child_exec.id, member_payload)
+                save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
                 db.flush()
                 continue
 
@@ -1092,7 +1092,7 @@ def pre_processar_sincronizacao_zip(
                 encoding=encoding,
                 delimiter=delimiter,
             )
-            save_member_payload(db, child_exec.id, member_payload)
+            save_member_payload(db, child_exec.id, member_payload, member_name=member_name)
             db.flush()
 
         # Update parent execution to aguardando_ingestao
@@ -1401,7 +1401,7 @@ def sincronizar_member_internal(
 
         if not member_path.exists():
             try:
-                payload = get_member_payload(db, execucao.id)
+                payload = get_member_payload(db, execucao.id, member_name=member_name)
                 member_path.parent.mkdir(parents=True, exist_ok=True)
                 member_path.write_bytes(payload)
             except ValueError:

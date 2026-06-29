@@ -1,16 +1,20 @@
 import io
+import tempfile
 import uuid
 import zipfile
+from pathlib import Path
 
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.models.ingestion import (
     IngestionAttempt,
     IngestionFile,
     IngestionFileMember,
+    IngestionFileMemberPayload,
     IngestionRow,
     IngestionRowEvent,
     QuarantineItem,
@@ -250,15 +254,44 @@ def test_iter_staged_member_chunks_carrega_payload_minimo_e_expunge_chunks() -> 
         session.close()
 
 
-def test_member_payload_is_upserted_and_readable() -> None:
+def test_member_payload_is_upserted_and_readable(monkeypatch) -> None:
     session = _session()
     try:
-        execution_id = uuid.uuid4()
-        save_member_payload(session, execution_id, b"primeiro")
-        save_member_payload(session, execution_id, b"segundo")
-        session.commit()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
 
-        assert get_member_payload(session, execution_id) == b"segundo"
+            save_member_payload(session, execution_id, b"primeiro", member_name=member_name)
+            save_member_payload(session, execution_id, b"segundo", member_name=member_name)
+            session.commit()
+
+            artifact_path = (
+                Path(tmp_dir)
+                / "artifacts"
+                / "member_payloads"
+                / str(execution_id)
+                / member_name
+            )
+
+            assert artifact_path.read_bytes() == b"segundo"
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"segundo"
+    finally:
+        session.close()
+
+
+def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
+            payload = IngestionFileMemberPayload(id=execution_id, payload=b"fallback-db")
+            session.add(payload)
+            session.commit()
+
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"fallback-db"
     finally:
         session.close()
 

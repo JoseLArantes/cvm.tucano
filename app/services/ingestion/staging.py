@@ -25,6 +25,12 @@ from app.models.ingestion import (
     QuarantineItem,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.artifact_store import (
+    delete_member_artifact,
+    member_artifact_exists,
+    read_member_artifact,
+    save_member_artifact,
+)
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
 from app.services.ingestion.operational import (
     register_cancellation_request,
@@ -390,7 +396,12 @@ def register_member(
     return member
 
 
-def save_member_payload(db: Session, execution_id: Any, payload: bytes) -> None:
+def save_member_payload(db: Session, execution_id: Any, payload: bytes, *, member_name: str) -> None:
+    save_member_artifact(
+        execution_id=str(execution_id),
+        member_name=member_name,
+        payload=payload,
+    )
     member_payload = db.scalar(
         select(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
@@ -407,7 +418,9 @@ def save_member_payload(db: Session, execution_id: Any, payload: bytes) -> None:
     db.flush()
 
 
-def get_member_payload(db: Session, execution_id: Any) -> bytes:
+def get_member_payload(db: Session, execution_id: Any, *, member_name: str) -> bytes:
+    if member_artifact_exists(execution_id=str(execution_id), member_name=member_name):
+        return read_member_artifact(execution_id=str(execution_id), member_name=member_name)
     payload_obj = db.scalar(
         select(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
@@ -418,7 +431,8 @@ def get_member_payload(db: Session, execution_id: Any) -> bytes:
     return payload_obj.payload
 
 
-def delete_member_payload(db: Session, execution_id: Any) -> None:
+def delete_member_payload(db: Session, execution_id: Any, *, member_name: str) -> None:
+    delete_member_artifact(execution_id=str(execution_id), member_name=member_name)
     db.execute(
         delete(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
