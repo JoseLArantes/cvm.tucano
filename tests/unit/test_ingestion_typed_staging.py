@@ -1,8 +1,10 @@
+import json
 import tempfile
 import uuid
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -28,7 +30,11 @@ from app.services.ingestion.financeiro import (
     process_financeiro_member_direct_from_disk,
 )
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
-from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
+from app.services.ingestion.typed_staging import (
+    _STAGE_COLUMNS,
+    _copy_financeiro_stage_rows_postgres,
+    load_financeiro_artifact_to_stage,
+)
 
 
 def _session() -> Session:
@@ -529,3 +535,41 @@ def test_filtrar_payload_promocao_financeiro_remove_colunas_estranhas_por_modelo
     assert "escopo_demonstracao" not in filtrado
     assert "codigo_conta" not in filtrado
     assert "valor_conta" not in filtrado
+
+
+def test_copy_financeiro_stage_rows_postgres_serializes_dict() -> None:
+    mock_db = MagicMock()
+    mock_connection = MagicMock()
+    mock_raw_connection = MagicMock()
+    mock_cursor = MagicMock()
+    mock_copy = MagicMock()
+
+    mock_db.connection.return_value = mock_connection
+    mock_connection.connection = mock_connection
+    mock_connection.driver_connection = mock_raw_connection
+    mock_raw_connection.cursor.return_value = mock_cursor
+    mock_cursor.copy.return_value.__enter__.return_value = mock_copy
+
+    payload = [
+        {
+            "id": uuid.UUID("3531e7e8-d661-4b08-becf-5d49be7d3c2e"),
+            "natural_key": {"codigo_conta": "1.01"},
+            "valor_conta": 100.5,
+            "conta_fixa": True,
+        }
+    ]
+
+    _copy_financeiro_stage_rows_postgres(mock_db, payload=payload)
+
+    assert mock_copy.write_row.called
+    written_row = mock_copy.write_row.call_args[0][0]
+
+    natural_key_idx = _STAGE_COLUMNS.index("natural_key")
+    assert isinstance(written_row[natural_key_idx], str)
+    assert json.loads(written_row[natural_key_idx]) == {"codigo_conta": "1.01"}
+
+    id_idx = _STAGE_COLUMNS.index("id")
+    assert isinstance(written_row[id_idx], uuid.UUID)
+
+    conta_fixa_idx = _STAGE_COLUMNS.index("conta_fixa")
+    assert written_row[conta_fixa_idx] is True

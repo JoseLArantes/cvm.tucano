@@ -179,14 +179,10 @@ def clear_financeiro_stage_rows(db: Session, *, ingestion_file_member_id: Any) -
     return int(rowcount if rowcount is not None else 0)
 
 
-def _serialize_copy_value(value: Any) -> str:
-    if value is None:
-        return "\\N"
-    if isinstance(value, bool):
-        return "true" if value else "false"
+def _serialize_copy_value(value: Any) -> Any:
     if isinstance(value, dict):
         return json.dumps(value, ensure_ascii=True, sort_keys=True)
-    return str(value)
+    return value
 
 
 def _copy_financeiro_stage_rows_postgres(db: Session, *, payload: Iterable[dict[str, Any]]) -> int:
@@ -204,7 +200,7 @@ def _copy_financeiro_stage_rows_postgres(db: Session, *, payload: Iterable[dict[
     try:
         with cursor.copy(copy_sql) as copy:
             for item in payload:
-                copy.write_row([item.get(column) for column in _STAGE_COLUMNS])
+                copy.write_row([_serialize_copy_value(item.get(column)) for column in _STAGE_COLUMNS])
                 rows_loaded += 1
     finally:
         cursor.close()
