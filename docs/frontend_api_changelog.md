@@ -1,5 +1,26 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-30 - Ingestao expande telemetria de staging tipado financeiro no resumo operacional
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o backend passa a expor no `quality_summary` e no `progress` das runs os sinais `typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged` e `typed_stage_copy_loads`
+- esses campos permitem separar custo de carga no staging tipado, recarga de member e limpeza pos-promocao sem depender de logs de worker
+- o staging tipado financeiro passa a ser purgado explicitamente ao final do processamento do member, mantendo replay baseado em artifact normalizado e reduzindo residuo operacional
+
+### Leitura recomendada pelo frontend
+
+- para cards de progresso por run: ler `progress.typed_stage_rows_loaded`, `progress.typed_stage_bytes_loaded` e `progress.typed_stage_copy_loads`
+- para troubleshooting de custo ou loops de recarga: ler `quality_summary.typed_stage_rows_replaced` e `quality_summary.typed_stage_rows_purged`
+- para consumidores que ja usam `quality_summary`, a mudanca e aditiva e nao exige remocao de campos antigos
+
 ## 2026-06-30 - Ingestao ganha inventario por member, snapshot consolidado de operacao e acoes diretas por run
 
 ### Endpoints e superficies com impacto operacional visivel

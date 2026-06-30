@@ -579,6 +579,11 @@ class IngestionRunResumo(BaseModel):
                     "members_reused_from_previous": 1,
                     "members_reused_from_failed_parent": 1,
                     "staged_rows_purged": 1197,
+                    "typed_stage_rows_loaded": 1198,
+                    "typed_stage_bytes_loaded": 845231,
+                    "typed_stage_rows_replaced": 0,
+                    "typed_stage_rows_purged": 1198,
+                    "typed_stage_copy_loads": 14,
                     "reconciled_deleted": 4,
                 },
                 "artifact_snapshot": {
@@ -675,7 +680,9 @@ class IngestionRunResumo(BaseModel):
             "Na arquitetura simplificada, a API nao garante retencao de linhas staged bem-sucedidas apos a conclusao; "
             "o frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
             "motivos de rejeicao, metodos de resolucao, retries, membros processados/skipped, total real de quarentena, "
-            "quantidade de staging purgado com sucesso (`staged_rows_purged`) e remocoes aplicadas no reconcile (`reconciled_deleted`). "
+            "quantidade de staging purgado com sucesso (`staged_rows_purged`), sinais do staging tipado financeiro "
+            "(`typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged`, `typed_stage_copy_loads`) "
+            "e remocoes aplicadas no reconcile (`reconciled_deleted`). "
             "Quando a run representa um rerun de recuperacao, `members_reused_from_previous` informa quantos members foram reaproveitados sem nova promocao, "
             "e `members_reused_from_failed_parent` destaca o subconjunto desses members cuja ultima execucao anual pai havia terminado em `falha`. "
             "O contrato esperado para consumo de frontend inclui, quando disponivel: "
@@ -685,6 +692,12 @@ class IngestionRunResumo(BaseModel):
             "`members_reprocessed` (members que realmente voltaram para `stage -> promote -> reconcile`), "
             "`members_reused_from_previous` (members reaproveitados por SHA a partir de resultado anterior) e "
             "`members_reused_from_failed_parent` (subset reaproveitado cuja execucao anual pai anterior falhou). "
+            "Para diagnostico de custo do staging tipado financeiro, consumidores podem ler "
+            "`typed_stage_rows_loaded` (linhas carregadas no staging tipado), "
+            "`typed_stage_bytes_loaded` (bytes lidos dos artifacts normalizados), "
+            "`typed_stage_rows_replaced` (linhas antigas removidas antes de recarga do mesmo member), "
+            "`typed_stage_rows_purged` (linhas removidas apos promote/reconcile) e "
+            "`typed_stage_copy_loads` (quantas cargas usaram o caminho PostgreSQL `COPY`). "
             "Para cards e resumos operacionais, o frontend deve considerar `members_reprocessed` como trabalho efetivamente executado e "
             "`members_reused_from_previous` como trabalho economizado pelo mecanismo de recuperacao. "
             "Este objeto e um resumo operacional por contadores; ele nao substitui um ledger duravel de sucesso por linha."

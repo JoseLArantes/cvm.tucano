@@ -7,7 +7,7 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Any
 
 import httpx
-from sqlalchemy import insert, select, tuple_
+from sqlalchemy import case, insert, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -49,7 +49,7 @@ from app.services.ingestion.staging import (
     update_run_state,
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary_snapshot
-from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
+from app.services.ingestion.typed_staging import clear_financeiro_stage_rows, load_financeiro_artifact_to_stage
 from app.services.ingestion.validation import (
     build_natural_key,
     classify_duplicate,
@@ -189,6 +189,18 @@ def _build_incremental_quality_summary(
     )
     provisional_raw = quality_counters.get("provisional_company_count", 0)
     provisional_count = provisional_raw if isinstance(provisional_raw, int) else 0
+    typed_stage_rows_loaded_raw = quality_counters.get("typed_stage_rows_loaded", 0)
+    typed_stage_bytes_loaded_raw = quality_counters.get("typed_stage_bytes_loaded", 0)
+    typed_stage_rows_replaced_raw = quality_counters.get("typed_stage_rows_replaced", 0)
+    typed_stage_rows_purged_raw = quality_counters.get("typed_stage_rows_purged", 0)
+    typed_stage_copy_loads_raw = quality_counters.get("typed_stage_copy_loads", 0)
+    typed_stage_rows_loaded = typed_stage_rows_loaded_raw if isinstance(typed_stage_rows_loaded_raw, int) else 0
+    typed_stage_bytes_loaded = typed_stage_bytes_loaded_raw if isinstance(typed_stage_bytes_loaded_raw, int) else 0
+    typed_stage_rows_replaced = (
+        typed_stage_rows_replaced_raw if isinstance(typed_stage_rows_replaced_raw, int) else 0
+    )
+    typed_stage_rows_purged = typed_stage_rows_purged_raw if isinstance(typed_stage_rows_purged_raw, int) else 0
+    typed_stage_copy_loads = typed_stage_copy_loads_raw if isinstance(typed_stage_copy_loads_raw, int) else 0
     validos = contadores.get("inseridos", 0) + contadores.get("atualizados", 0) + contadores.get("inalterados", 0)
     rejeitados = contadores.get("rejeitados", 0)
     return build_quality_summary_snapshot(
@@ -200,7 +212,15 @@ def _build_incremental_quality_summary(
         ],
         provisional_company_count=provisional_count,
         quarantine_total=rejeitados,
-        extras={"reconciled_deleted": contadores.get("reconciled_deleted", 0), **(extras or {})},
+        extras={
+            "reconciled_deleted": contadores.get("reconciled_deleted", 0),
+            "typed_stage_rows_loaded": typed_stage_rows_loaded,
+            "typed_stage_bytes_loaded": typed_stage_bytes_loaded,
+            "typed_stage_rows_replaced": typed_stage_rows_replaced,
+            "typed_stage_rows_purged": typed_stage_rows_purged,
+            "typed_stage_copy_loads": typed_stage_copy_loads,
+            **(extras or {}),
+        },
     )
 
 
@@ -360,6 +380,159 @@ def _promote_financeiro_payloads_internal(
     if not dados_promovidos:
         return
 
+    if _is_postgresql(db):
+        _promote_financeiro_payloads_postgresql(
+            db,
+            row_kind=row_kind,
+            dados_promovidos=dados_promovidos,
+            execucao_id=execucao_id,
+            contadores=contadores,
+        )
+        return
+
+    _promote_financeiro_payloads_fallback(
+        db,
+        row_kind=row_kind,
+        dados_promovidos=dados_promovidos,
+        execucao_id=execucao_id,
+        contadores=contadores,
+    )
+
+
+def _promote_financeiro_payloads_postgresql(
+    db: Session,
+    *,
+    row_kind: str,
+    dados_promovidos: list[dict[str, Any]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    model, entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
+    agora = _agora()
+    preparados = [_preparar_dados_promocao(dados) for dados in dados_promovidos]
+    preparados_por_chave: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for dados in preparados:
+        preparados_por_chave[_key_tuple(dados, campos_chave)] = dados
+    preparados_unicos = list(preparados_por_chave.values())
+    chaves = list(preparados_por_chave)
+    existentes_hash_por_chave = _load_existing_row_hashes(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        chaves=chaves,
+    )
+    chaves_com_mudanca = [
+        chave
+        for chave, dados in preparados_por_chave.items()
+        if (existente := existentes_hash_por_chave.get(chave)) is not None
+        and existente["hash_origem"] != dados["hash_origem"]
+    ]
+    existentes_por_chave = _load_existing_rows(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        campos_negocio=campos_negocio,
+        chaves=chaves_com_mudanca,
+    )
+
+    historicos: list[Any] = []
+    payload_upsert: list[dict[str, Any]] = []
+    for dados in preparados_unicos:
+        chave = _key_tuple(dados, campos_chave)
+        existente_hash = existentes_hash_por_chave.get(chave)
+        if existente_hash is None:
+            contadores["inseridos"] += 1
+            row_id = uuid.uuid4()
+        elif existente_hash["hash_origem"] == dados["hash_origem"]:
+            contadores["inalterados"] += 1
+            row_id = existente_hash["id"]
+        else:
+            row_id = existente_hash["id"]
+            existente = existentes_por_chave[chave]
+            houve_alteracao = False
+            for campo in campos_negocio:
+                valor_antigo = existente[campo]
+                valor_novo = dados[campo]
+                if _equivalente(valor_antigo, valor_novo):
+                    continue
+                houve_alteracao = True
+                historicos.append(
+                    {
+                        "entidade": entidade,
+                        "entidade_id": existente["id"],
+                        "companhia_id": dados.get("companhia_id"),
+                        "campo": campo,
+                        "valor_anterior": _valor_historico(valor_antigo),
+                        "valor_novo": _valor_historico(valor_novo),
+                        "alterado_em": agora,
+                        "execucao_sincronizacao_id": execucao_id,
+                        "arquivo_origem": dados["arquivo_origem"],
+                        "ano_origem": dados["ano_origem"],
+                    }
+                )
+            if houve_alteracao:
+                contadores["atualizados"] += 1
+            else:
+                contadores["inalterados"] += 1
+
+        payload_upsert.append(
+            {
+                "id": row_id,
+                **dados,
+                "criado_em": agora,
+                "sincronizado_em": agora,
+                "alterado_em": agora,
+            }
+        )
+
+    if payload_upsert:
+        stmt = pg_insert(model).values(payload_upsert)
+        business_change_expression = or_(
+            *[getattr(model, campo).is_distinct_from(getattr(stmt.excluded, campo)) for campo in sorted(campos_negocio)]
+        )
+        update_columns = {
+            campo: getattr(stmt.excluded, campo)
+            for campo in sorted(
+                {
+                    *campos_negocio,
+                    "arquivo_origem",
+                    "ano_origem",
+                    "linha_origem",
+                    "hash_origem",
+                    "sincronizado_em",
+                }
+            )
+        }
+        update_columns["alterado_em"] = case(
+            (
+                business_change_expression,
+                stmt.excluded.alterado_em,
+            ),
+            else_=model.alterado_em,
+        )
+        db.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[getattr(model, campo) for campo in campos_chave],
+                set_=update_columns,
+            )
+        )
+        db.flush()
+
+    if historicos:
+        from app.models.sincronizacao import HistoricoAlteracaoCampo
+
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
+
+
+def _promote_financeiro_payloads_fallback(
+    db: Session,
+    *,
+    row_kind: str,
+    dados_promovidos: list[dict[str, Any]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
     model, entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
     agora = _agora()
     preparados = [_preparar_dados_promocao(dados) for dados in dados_promovidos]
@@ -704,6 +877,50 @@ def _promote_financeiro_member_from_stage(
     contadores: dict[str, int],
     chunk_size: int,
 ) -> None:
+    if _is_postgresql(db):
+        _promote_financeiro_member_from_stage_postgresql(
+            db,
+            member_id=member_id,
+            execucao_id=execucao_id,
+            contadores=contadores,
+            chunk_size=chunk_size,
+        )
+        return
+
+    _promote_financeiro_member_from_stage_fallback(
+        db,
+        member_id=member_id,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        chunk_size=chunk_size,
+    )
+
+
+def _promote_financeiro_member_from_stage_postgresql(
+    db: Session,
+    *,
+    member_id: Any,
+    execucao_id: Any,
+    contadores: dict[str, int],
+    chunk_size: int,
+) -> None:
+    _promote_financeiro_member_from_stage_fallback(
+        db,
+        member_id=member_id,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        chunk_size=chunk_size,
+    )
+
+
+def _promote_financeiro_member_from_stage_fallback(
+    db: Session,
+    *,
+    member_id: Any,
+    execucao_id: Any,
+    contadores: dict[str, int],
+    chunk_size: int,
+) -> None:
     row_kinds = list(
         db.execute(
             select(IngestionFinanceiroStageRow.row_kind)
@@ -958,6 +1175,11 @@ def _process_financeiro_member(
     resolver_methods = quality_counters.setdefault("resolver_methods", Counter())
     top_quarantine_files = quality_counters.setdefault("top_quarantine_files", Counter())
     quality_counters.setdefault("provisional_company_count", 0)
+    quality_counters.setdefault("typed_stage_rows_loaded", 0)
+    quality_counters.setdefault("typed_stage_bytes_loaded", 0)
+    quality_counters.setdefault("typed_stage_rows_replaced", 0)
+    quality_counters.setdefault("typed_stage_rows_purged", 0)
+    quality_counters.setdefault("typed_stage_copy_loads", 0)
     typed_staging_enabled = get_settings().ingestion_financeiro_typed_staging_enabled
     member_row_kind = db.scalar(
         select(IngestionRow.row_kind)
@@ -1214,12 +1436,27 @@ def _process_financeiro_member(
     settings = get_settings()
     if settings.ingestion_financeiro_typed_staging_enabled:
         for artifact in normalized_artifacts.values():
-            load_financeiro_artifact_to_stage(
+            load_result = load_financeiro_artifact_to_stage(
                 db,
                 ingestion_run_id=run_id,
                 ingestion_file_member_id=member.id,
                 artifact_uri=str(artifact["uri"]),
             )
+            rows_loaded = quality_counters.get("typed_stage_rows_loaded", 0)
+            bytes_loaded = quality_counters.get("typed_stage_bytes_loaded", 0)
+            rows_replaced = quality_counters.get("typed_stage_rows_replaced", 0)
+            copy_loads = quality_counters.get("typed_stage_copy_loads", 0)
+            quality_counters["typed_stage_rows_loaded"] = (
+                (rows_loaded if isinstance(rows_loaded, int) else 0) + load_result.rows_loaded
+            )
+            quality_counters["typed_stage_bytes_loaded"] = (
+                (bytes_loaded if isinstance(bytes_loaded, int) else 0) + load_result.bytes_loaded
+            )
+            quality_counters["typed_stage_rows_replaced"] = (
+                (rows_replaced if isinstance(rows_replaced, int) else 0) + load_result.rows_replaced
+            )
+            if load_result.copy_used:
+                quality_counters["typed_stage_copy_loads"] = (copy_loads if isinstance(copy_loads, int) else 0) + 1
         if promote_enabled:
             _promote_financeiro_member_from_stage(
                 db,
@@ -1228,6 +1465,11 @@ def _process_financeiro_member(
                 contadores=contadores,
                 chunk_size=chunk_size,
             )
+        purged_rows = clear_financeiro_stage_rows(db, ingestion_file_member_id=member.id)
+        typed_stage_rows_purged = quality_counters.get("typed_stage_rows_purged", 0)
+        quality_counters["typed_stage_rows_purged"] = (
+            (typed_stage_rows_purged if isinstance(typed_stage_rows_purged, int) else 0) + purged_rows
+        )
     for artifact in normalized_artifacts.values():
         record_phase_artifact(
             db,

@@ -5,6 +5,8 @@ import io
 import json
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import delete, insert
@@ -66,6 +68,14 @@ _STAGE_COLUMNS = [
     "numero_item_parecer_declaracao",
     "texto_parecer_declaracao",
 ]
+
+
+@dataclass(frozen=True)
+class FinanceiroStageLoadResult:
+    rows_loaded: int
+    bytes_loaded: int
+    rows_replaced: int
+    copy_used: bool
 
 
 def _should_use_postgres_copy(db: Session) -> bool:
@@ -160,13 +170,15 @@ def _normalize_stage_row(
     }
 
 
-def clear_financeiro_stage_rows(db: Session, *, ingestion_file_member_id: Any) -> None:
-    db.execute(
+def clear_financeiro_stage_rows(db: Session, *, ingestion_file_member_id: Any) -> int:
+    deleted = db.execute(
         delete(IngestionFinanceiroStageRow).where(
             IngestionFinanceiroStageRow.ingestion_file_member_id == ingestion_file_member_id
         )
     )
     db.flush()
+    rowcount = getattr(deleted, "rowcount", None)
+    return int(rowcount if rowcount is not None else 0)
 
 
 def _serialize_copy_value(value: Any) -> str:
@@ -212,8 +224,8 @@ def load_financeiro_artifact_to_stage(
     ingestion_file_member_id: Any,
     artifact_uri: str,
     use_copy: bool | None = None,
-) -> int:
-    clear_financeiro_stage_rows(db, ingestion_file_member_id=ingestion_file_member_id)
+) -> FinanceiroStageLoadResult:
+    rows_replaced = clear_financeiro_stage_rows(db, ingestion_file_member_id=ingestion_file_member_id)
     payload = [
         _normalize_stage_row(
             ingestion_run_id=ingestion_run_id,
@@ -233,4 +245,10 @@ def load_financeiro_artifact_to_stage(
     elif payload:
         db.execute(insert(IngestionFinanceiroStageRow), payload)
     db.flush()
-    return len(payload)
+    bytes_loaded = Path(artifact_uri).stat().st_size if Path(artifact_uri).exists() else 0
+    return FinanceiroStageLoadResult(
+        rows_loaded=len(payload),
+        bytes_loaded=bytes_loaded,
+        rows_replaced=rows_replaced,
+        copy_used=should_use_copy,
+    )

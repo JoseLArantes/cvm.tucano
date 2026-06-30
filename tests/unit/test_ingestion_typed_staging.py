@@ -109,7 +109,7 @@ def test_load_financeiro_artifact_to_stage_persists_typed_rows(monkeypatch: pyte
             )
             artifact = writer.close()
 
-            inserted = load_financeiro_artifact_to_stage(
+            load_result = load_financeiro_artifact_to_stage(
                 session,
                 ingestion_run_id=run.id,
                 ingestion_file_member_id=member.id,
@@ -120,7 +120,10 @@ def test_load_financeiro_artifact_to_stage_persists_typed_rows(monkeypatch: pyte
 
             row = session.scalar(select(IngestionFinanceiroStageRow))
 
-            assert inserted == 1
+            assert load_result.rows_loaded == 1
+            assert load_result.rows_replaced == 0
+            assert load_result.bytes_loaded > 0
+            assert load_result.copy_used is False
             assert row is not None
             assert row.row_kind == "itr_demonstracao"
             assert row.cnpj_companhia == "00000000000191"
@@ -191,7 +194,7 @@ def test_load_financeiro_artifact_to_stage_replaces_previous_member_rows(monkeyp
                 }
             )
             first_artifact = first_writer.close()
-            load_financeiro_artifact_to_stage(
+            first_load = load_financeiro_artifact_to_stage(
                 session,
                 ingestion_run_id=run.id,
                 ingestion_file_member_id=member.id,
@@ -216,7 +219,7 @@ def test_load_financeiro_artifact_to_stage_replaces_previous_member_rows(monkeyp
                 }
             )
             second_artifact = second_writer.close()
-            load_financeiro_artifact_to_stage(
+            second_load = load_financeiro_artifact_to_stage(
                 session,
                 ingestion_run_id=run.id,
                 ingestion_file_member_id=member.id,
@@ -225,6 +228,10 @@ def test_load_financeiro_artifact_to_stage_replaces_previous_member_rows(monkeyp
             )
             session.commit()
 
+            assert first_load.rows_loaded == 1
+            assert first_load.rows_replaced == 0
+            assert second_load.rows_loaded == 1
+            assert second_load.rows_replaced == 1
             rows = list(
                 session.execute(
                     select(IngestionFinanceiroStageRow).order_by(IngestionFinanceiroStageRow.linha_origem.asc())

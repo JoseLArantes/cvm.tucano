@@ -14,7 +14,7 @@ from app.models import financeiro, fre, identidade, ingestion, sincronizacao, us
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.identidade import CompanhiaIdentificador
-from app.models.ingestion import QuarantineItem
+from app.models.ingestion import IngestionFinanceiroStageRow, IngestionRun, QuarantineItem
 from app.models.sincronizacao import RegistroQuarentena
 from app.services.financeiro_mapas import arquivos_demonstracao
 from app.services.ingestion.cadastro import (
@@ -497,6 +497,32 @@ def test_sincronizar_financeiro_idempotencia_e_alteracao() -> None:
         demonstracao_alterada = session.query(DemonstracaoFinanceira).first()
         assert demonstracao_alterada is not None
         assert demonstracao_alterada.alterado_em > demonstracao_alterado_em
+    finally:
+        session.close()
+
+
+def test_sincronizar_financeiro_purges_typed_stage_and_exposes_stage_metrics() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        payload = _zip_financeiro("dfp", 2025, valor_conta="1000.00", cnpj="08.773.135/0001-00", codigo_cvm="25224")
+        resultado = sincronizar_dfp(session, 2025, downloader=lambda _: payload)
+
+        assert resultado["status"] == "sucesso"
+        assert session.scalar(select(IngestionFinanceiroStageRow).limit(1)) is None
+
+        run = session.scalar(select(IngestionRun).order_by(IngestionRun.started_at.desc()).limit(1))
+        assert run is not None
+        quality_summary = run.quality_summary or {}
+        assert quality_summary["typed_stage_rows_loaded"] >= 19
+        assert quality_summary["typed_stage_bytes_loaded"] > 0
+        assert quality_summary["typed_stage_rows_purged"] >= quality_summary["typed_stage_rows_loaded"]
+        assert quality_summary["typed_stage_rows_replaced"] == 0
     finally:
         session.close()
 

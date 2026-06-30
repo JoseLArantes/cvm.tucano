@@ -471,6 +471,11 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
     },
     "quarantine_total": 3,
     "staged_rows_purged": 1197,
+    "typed_stage_rows_loaded": 1198,
+    "typed_stage_bytes_loaded": 845231,
+    "typed_stage_rows_replaced": 0,
+    "typed_stage_rows_purged": 1198,
+    "typed_stage_copy_loads": 14,
     "reconciled_deleted": 4
   },
   "artifact_snapshot": {
@@ -540,6 +545,16 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
 - `members_reused_from_failed_parent`: subset de reaproveitamento vindo de execucao pai anual que terminou `falha`, mas tinha children ja consolidados corretamente.
 
 Esses counters existem para o operador e para o frontend distinguirem tres cenarios que antes pareciam iguais: run sem alteracao, rerun anual que reutilizou members bons e run que realmente reprocessou members do zero.
+
+### Leitura recomendada dos counters de staging tipado financeiro
+
+- `typed_stage_rows_loaded`: total de linhas carregadas dos artifacts normalizados para o staging tipado;
+- `typed_stage_bytes_loaded`: volume total, em bytes, dos artifacts normalizados consumidos nessa carga;
+- `typed_stage_rows_replaced`: linhas antigas removidas antes de recarregar o mesmo member no staging;
+- `typed_stage_rows_purged`: linhas removidas do staging tipado ao final do processamento do member;
+- `typed_stage_copy_loads`: quantidade de cargas que usaram o caminho PostgreSQL `COPY`.
+
+Esses campos sao aditivos e servem para diagnosticar se o custo da run esta concentrado em normalizacao, carga de staging ou promote.
 
 ---
 

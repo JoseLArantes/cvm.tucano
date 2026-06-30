@@ -183,6 +183,11 @@ def _build_progress_for_run(run: IngestionRun) -> dict[str, Any]:
         "quarantine_total": quality_summary.get("quarantine_total"),
         "row_status_counts": quality_summary.get("row_status_counts"),
         "staged_rows_purged": quality_summary.get("staged_rows_purged"),
+        "typed_stage_rows_loaded": quality_summary.get("typed_stage_rows_loaded"),
+        "typed_stage_bytes_loaded": quality_summary.get("typed_stage_bytes_loaded"),
+        "typed_stage_rows_replaced": quality_summary.get("typed_stage_rows_replaced"),
+        "typed_stage_rows_purged": quality_summary.get("typed_stage_rows_purged"),
+        "typed_stage_copy_loads": quality_summary.get("typed_stage_copy_loads"),
         "reconciled_deleted": quality_summary.get("reconciled_deleted"),
     }
 
