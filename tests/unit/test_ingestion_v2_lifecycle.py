@@ -2,7 +2,7 @@ import io
 import tempfile
 import uuid
 import zipfile
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -26,6 +26,7 @@ from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador
 from app.models.ingestion import (
     IngestionFileMember,
+    IngestionPhaseExecution,
     IngestionRow,
     SourceArtifactSnapshot,
     SourceDeliverySnapshot,
@@ -36,7 +37,7 @@ from app.services.ingestion.acquisition import probe_remote_source
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.ipe import sincronizar_ipe
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
-from app.services.ingestion.staging import create_run, register_file
+from app.services.ingestion.staging import create_run, register_file, stage_csv_payload_streaming
 
 
 def _session() -> Session:
@@ -165,6 +166,52 @@ def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch: p
         assert probe["decision"] == "unknown"
         assert probe["download_required"] is True
         assert probe["confidence"] == "unknown"
+    finally:
+        session.close()
+
+
+def test_stage_csv_payload_streaming_atualiza_heartbeat_em_fronteiras_de_chunk() -> None:
+    session = _session()
+    try:
+        run = create_run(session, tipo_fonte="ipe", ano=2025, status="em_execucao", phase="stage")
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/ipe.zip",
+            source_filename="ipe_cia_aberta_2025.zip",
+            payload=b"fake",
+            is_zip=True,
+        )
+        session.flush()
+        phase = session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+        assert phase is not None
+        heartbeat_anterior = datetime.now(UTC) - timedelta(hours=1)
+        phase.heartbeat_at = heartbeat_anterior
+        session.commit()
+
+        payload = (
+            "CNPJ_Companhia;Nome_Companhia;Codigo_CVM\n"
+            "00.000.000/0001-91;Banco do Brasil;1023\n"
+            "00.000.000/0001-91;Banco do Brasil;1023\n"
+        ).encode("latin1")
+        stage_csv_payload_streaming(
+            session,
+            ingestion_run=run,
+            ingestion_file=ingestion_file,
+            payload=payload,
+            member_name="ipe_cia_aberta_2025.csv",
+            arquivo_origem="ipe_cia_aberta_2025.csv",
+            ano_origem=2025,
+            row_kind="ipe_documento",
+            chunk_size=1,
+        )
+
+        phase_atualizada = session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+        assert phase_atualizada is not None
+        assert phase_atualizada.heartbeat_at is not None
+        assert phase_atualizada.heartbeat_at > heartbeat_anterior
+        assert phase_atualizada.metrics is not None
+        assert phase_atualizada.metrics["staged_rows"] == 2
     finally:
         session.close()
 

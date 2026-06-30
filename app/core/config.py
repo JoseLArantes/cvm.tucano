@@ -151,6 +151,11 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
     )
+    ingestion_recovery_sweep_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="INGESTION_RECOVERY_SWEEP_SECONDS",
+    )
     ingestion_financeiro_typed_staging_enabled: bool = Field(
         default=True,
         alias="INGESTION_FINANCEIRO_TYPED_STAGING_ENABLED",

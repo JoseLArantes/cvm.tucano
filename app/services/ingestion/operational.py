@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.ingestion import IngestionCancellationRequest, IngestionPhaseExecution, IngestionRun
+from app.models.sincronizacao import ExecucaoSincronizacao
 
 _settings = get_settings()
 
@@ -85,6 +86,24 @@ def record_phase_artifact(
     artifacts.append(artifact)
     metrics["artifacts"] = artifacts
     phase_execution.metrics = metrics
+    db.flush()
+    return phase_execution
+
+
+def touch_run_heartbeat(
+    db: Session,
+    *,
+    run_id: Any,
+    metrics: dict[str, Any] | None = None,
+) -> IngestionPhaseExecution | None:
+    phase_execution = get_latest_phase_execution(db, run_id=run_id)
+    if phase_execution is None or phase_execution.finished_at is not None or phase_execution.status != "running":
+        return None
+    phase_execution.heartbeat_at = _agora()
+    if metrics:
+        merged_metrics = dict(phase_execution.metrics or {})
+        merged_metrics.update(metrics)
+        phase_execution.metrics = merged_metrics
     db.flush()
     return phase_execution
 
@@ -291,4 +310,80 @@ def build_liveness_snapshot(
         "is_stale": is_stale,
         "stale_after_seconds": stale_after_seconds,
         "heartbeat_age_seconds": age_seconds,
+    }
+
+
+def reconcile_stale_ingestion_phase_executions(
+    db: Session,
+    *,
+    limit: int = 50,
+) -> dict[str, Any]:
+    stale_cutoff = _agora() - timedelta(seconds=_settings.ingestion_phase_stale_after_seconds)
+    stale_phases = list(
+        db.scalars(
+            select(IngestionPhaseExecution)
+            .where(
+                IngestionPhaseExecution.status == "running",
+                IngestionPhaseExecution.finished_at.is_(None),
+                IngestionPhaseExecution.heartbeat_at.is_not(None),
+                IngestionPhaseExecution.heartbeat_at < stale_cutoff,
+            )
+            .order_by(IngestionPhaseExecution.heartbeat_at.asc())
+            .limit(limit)
+        ).all()
+    )
+    recovered_run_ids: list[str] = []
+    cancelled_run_ids: list[str] = []
+    failed_run_ids: list[str] = []
+    for phase_execution in stale_phases:
+        run = db.get(IngestionRun, phase_execution.ingestion_run_id)
+        if run is None:
+            continue
+        cancellation_request = latest_cancellation_request_for_run(db, run_id=run.id)
+        execucao = (
+            db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+            if run.execucao_sincronizacao_id is not None
+            else None
+        )
+        message = (
+            "Execucao cancelada pelo recovery sweep apos heartbeat stale e cancelamento pendente."
+            if cancellation_request is not None and cancellation_request.status in {"requested", "propagated"}
+            else "Recovery sweep marcou a run como falha recuperavel apos heartbeat stale."
+        )
+        if cancellation_request is not None and cancellation_request.status in {"requested", "propagated"}:
+            run.status = "cancelada"
+            run.message = message
+            run.finished_at = _agora()
+            phase_execution.status = "cancelled"
+            phase_execution.cancel_requested_at = phase_execution.cancel_requested_at or _agora()
+            phase_execution.cancelled_at = _agora()
+            phase_execution.cancel_reason = cancellation_request.reason or message
+            phase_execution.finished_at = _agora()
+            if execucao is not None and execucao.status not in {"cancelada", "sucesso", "sem_alteracao", "skipped", "falha"}:
+                execucao.status = "cancelada"
+                execucao.mensagem_erro = message
+                execucao.finalizada_em = _agora()
+            update_cancellation_request(cancellation_request, status="completed")
+            cancelled_run_ids.append(str(run.id))
+        else:
+            run.status = "falha"
+            run.message = message
+            run.finished_at = _agora()
+            phase_execution.status = "failed_final"
+            phase_execution.error_type = "stale_phase"
+            phase_execution.error_message = message
+            phase_execution.error_retryable = True
+            phase_execution.finished_at = _agora()
+            if execucao is not None and execucao.status not in {"cancelada", "sucesso", "sem_alteracao", "skipped", "falha"}:
+                execucao.status = "falha"
+                execucao.mensagem_erro = message
+                execucao.finalizada_em = _agora()
+            failed_run_ids.append(str(run.id))
+        recovered_run_ids.append(str(run.id))
+    db.flush()
+    return {
+        "stale_candidates": len(stale_phases),
+        "recovered_runs": recovered_run_ids,
+        "cancelled_runs": cancelled_run_ids,
+        "failed_retryable_runs": failed_run_ids,
     }

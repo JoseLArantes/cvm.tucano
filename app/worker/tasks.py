@@ -38,6 +38,22 @@ def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
     return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
 
 
+@celery_app.task(bind=True, name="app.worker.tasks.reconciliar_ingestion_stale_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def reconciliar_ingestion_stale_task(self: Any) -> dict[str, Any]:
+    from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
+
+    db = SessionLocal()
+    try:
+        resultado = reconcile_stale_ingestion_phase_executions(db)
+        db.commit()
+        return {
+            "status": "completed",
+            **resultado,
+        }
+    finally:
+        db.close()
+
+
 def _obter_gate_materializacao_snapshot() -> tuple[str, str, int]:
     from app.services.analise import obter_estado_gate_materializacao
 

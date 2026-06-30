@@ -40,6 +40,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.sincronizar_cgvn_task": {"queue": "celery"},
     "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": "celery"},
     "app.worker.tasks.ingerir_sincronizacao_task": {"queue": "celery"},
+    "app.worker.tasks.reconciliar_ingestion_stale_task": {"queue": "celery"},
     "app.worker.tasks.materializar_analise_companhia_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_campanha_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_chunk_task": {"queue": settings.analise_materializacao_queue_name},
@@ -51,6 +52,10 @@ celery_app.conf.task_routes = {
 
 def construir_beat_schedule() -> dict[str, dict[str, Any]]:
     beat_schedule: dict[str, dict[str, Any]] = {
+        "ingestion-stale-recovery": {
+            "task": "app.worker.tasks.reconciliar_ingestion_stale_task",
+            "schedule": timedelta(seconds=settings.ingestion_recovery_sweep_seconds),
+        },
         "analise-materializacao-stale-recovery": {
             "task": "app.worker.tasks.reconciliar_materializacao_stale_task",
             "schedule": timedelta(seconds=settings.analise_materializacao_recovery_sweep_seconds),

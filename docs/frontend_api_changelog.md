@@ -1,5 +1,27 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-30 - Ingestao ganha recovery sweep para runs stale e `next_action=recover` em falhas recuperaveis
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o backend passa a executar recovery sweep periodico sobre fases de ingestao com heartbeat stale
+- quando o sweep encontra run presa sem cancelamento pendente, a run pode sair de `state=stale` para `state=failed`, mas com `last_error.retryable=true` e `next_action=recover`
+- quando o sweep encontra cancelamento propagado em uma run stale, ele conclui o cancelamento e estabiliza o estado final como `cancelled`
+- `next_action=recover` deixa de significar apenas `state=stale`; agora tambem cobre falha recuperavel marcada pelo sweep
+
+### Leitura recomendada pelo frontend
+
+- usar `next_action` como sinal primario de recuperacao administrativa, em vez de depender apenas de `state=stale`
+- quando `state=failed` e `last_error.retryable=true`, oferecer a mesma acao de recuperacao usada para stale
+- para troubleshooting fino, ler `liveness`, `last_error` e `cancellation` em conjunto
+
 ## 2026-06-30 - Ingestao expande telemetria de staging tipado financeiro no resumo operacional
 
 ### Endpoints e superficies com impacto operacional visivel

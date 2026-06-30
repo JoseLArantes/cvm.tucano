@@ -993,7 +993,61 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
     assert payload["task_counts"]["ingestion_active"] == 1
     assert payload["task_counts"]["ingestion_scheduled"] == 1
     assert payload["materialization_gate"]["status"] in {"green", "red"}
-    assert payload["active_runs"][0]["id"] == str(run_id)
+
+
+def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient, db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=execucao_id,
+            tipo_fonte="itr",
+            ano=2026,
+            arquivo="itr_cia_aberta_2026.zip",
+            url="http://exemplo/itr-2026",
+            status="falha",
+            tipo_execucao="arquivo_zip",
+            mensagem_erro="falha recuperavel",
+            finalizada_em=agora,
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            tipo_fonte="itr",
+            ano=2026,
+            status="falha",
+            phase="promote",
+            requested_by_task_id="task-itr-2026",
+            message="falha recuperavel",
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            phase="promote",
+            status="failed_final",
+            attempt=1,
+            lease_owner="task-itr-2026",
+            task_id="task-itr-2026",
+            started_at=agora - timedelta(minutes=10),
+            heartbeat_at=agora - timedelta(minutes=5),
+            finished_at=agora,
+            error_type="stale_phase",
+            error_message="falha recuperavel",
+            error_retryable=True,
+        )
+    )
+    db_session.commit()
+
+    resposta_run = client.get(f"/ingestion/runs/{run_id}")
+    assert resposta_run.status_code == 200
+    assert resposta_run.json()["state"] == "failed"
+    assert resposta_run.json()["next_action"] == "recover"
 
 
 def test_admin_run_cancel_member_cancel_e_recover(

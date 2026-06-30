@@ -36,6 +36,7 @@ from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
 from app.services.ingestion.operational import (
     register_cancellation_request,
     sync_phase_execution,
+    touch_run_heartbeat,
     update_cancellation_request,
 )
 
@@ -837,6 +838,11 @@ def stage_csv_payload_streaming(
                 fetch_inserted_rows=False,
                 use_copy=use_copy,
             )
+            touch_run_heartbeat(
+                db,
+                run_id=ingestion_run.id,
+                metrics={"staged_rows": total_rows},
+            )
             chunk = []
     if chunk:
         insert_rows(
@@ -849,6 +855,11 @@ def stage_csv_payload_streaming(
             rows=chunk,
             fetch_inserted_rows=False,
             use_copy=use_copy,
+        )
+        touch_run_heartbeat(
+            db,
+            run_id=ingestion_run.id,
+            metrics={"staged_rows": total_rows},
         )
     member.row_count = total_rows
     _log_file_analysis(member)
@@ -917,6 +928,11 @@ def iter_staged_member_chunks(
         rows = list(db.execute(query).scalars())
         if not rows:
             break
+        touch_run_heartbeat(
+            db,
+            run_id=rows[0].ingestion_run_id,
+            metrics={"promote_last_line": rows[-1].linha_origem},
+        )
         yield rows
         last_line = rows[-1].linha_origem
         for row in rows:
@@ -1029,6 +1045,11 @@ def stage_csv_payload_streaming_from_disk(
                 fetch_inserted_rows=False,
                 use_copy=use_copy,
             )
+            touch_run_heartbeat(
+                db,
+                run_id=ingestion_run.id,
+                metrics={"staged_rows": total_rows},
+            )
             chunk = []
     if chunk:
         insert_rows(
@@ -1041,6 +1062,11 @@ def stage_csv_payload_streaming_from_disk(
             rows=chunk,
             fetch_inserted_rows=False,
             use_copy=use_copy,
+        )
+        touch_run_heartbeat(
+            db,
+            run_id=ingestion_run.id,
+            metrics={"staged_rows": total_rows},
         )
     member.row_count = total_rows
     _log_file_analysis(member)

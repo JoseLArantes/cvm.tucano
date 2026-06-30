@@ -247,6 +247,8 @@ def _next_action(*, state: str, last_error: dict[str, Any] | None, rejected_tota
     if state == "stale":
         return "recover"
     if state == "failed":
+        if last_error is not None and last_error.get("retryable") is True:
+            return "recover"
         return "inspect_error"
     if rejected_total and rejected_total > 0:
         return "inspect_quarantine"

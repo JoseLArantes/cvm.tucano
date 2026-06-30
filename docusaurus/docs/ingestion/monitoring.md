@@ -29,6 +29,7 @@ Cada item agora expõe também um sinal operacional agregado:
 - `cancellation`: último pedido de cancelamento persistido
 - `last_error`: erro operacional mais recente conhecido
 - `next_action`: ação recomendada para consumidor desacoplado (`wait`, `recover`, `inspect_error`, `inspect_quarantine`, `none`)
+- existe recovery sweep periódico para runs de ingestão com heartbeat stale; quando ele marca a falha como recuperável, `next_action` continua vindo como `recover` mesmo com `state=failed`
 
 ### Query Parameters
 
@@ -338,7 +339,7 @@ Este é o endpoint recomendado para ações de parar reprocessamento seletivo se
 
 ## `POST /ingestion/runs/{run_id}/recover`
 
-Executa recuperação administrativa controlada de uma run marcada como `stale` ou com erro recuperável.
+Executa recuperação administrativa controlada de uma run marcada como `stale` ou com erro recuperável. O recovery sweep periódico da ingestão também pode converter uma run presa em `failed` com `last_error.retryable=true`; nesse caso o contrato esperado continua sendo `next_action=recover`.
 
 Na implementação atual, a recuperação reaplica o replay completo da run a partir dos artefatos já retidos.
 

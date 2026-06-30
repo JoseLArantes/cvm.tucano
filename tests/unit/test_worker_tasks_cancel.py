@@ -1,5 +1,5 @@
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +8,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.financeiro import DocumentoFinanceiro
-from app.models.ingestion import IngestionFile, IngestionRun
+from app.models.ingestion import IngestionCancellationRequest, IngestionFile, IngestionPhaseExecution, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
 from app.services.ingestion.staging import create_run, register_file
 from app.worker import tasks as worker_tasks
 from app.worker.tasks import sincronizar_member_internal
@@ -83,6 +84,101 @@ def test_sincronizar_member_internal_cancela_filho_quando_pai_ja_cancelado(db_se
     assert resultado["status"] == "cancelada"
     assert execucao_filha.status == "cancelada"
     assert execucao_filha.finalizada_em is not None
+
+
+def test_reconciliar_ingestion_stale_task_marca_falha_recuperavel(db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    execucao = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=execucao.id,
+        status="em_execucao",
+        phase="promote",
+    )
+    phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+    assert phase is not None
+    phase.heartbeat_at = agora - timedelta(hours=1)
+    db_session.commit()
+
+    resultado = reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    db_session.refresh(execucao)
+    db_session.refresh(run)
+    phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+    assert resultado["stale_candidates"] >= 1
+    assert str(run.id) in resultado["failed_retryable_runs"]
+    assert execucao.status == "falha"
+    assert run.status == "falha"
+    assert phase is not None
+    assert phase.status == "failed_final"
+    assert phase.error_type == "stale_phase"
+    assert phase.error_retryable is True
+
+
+def test_reconciliar_ingestion_stale_task_conclui_cancelamento_propagado(db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    execucao = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    run = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao.id,
+        status="em_execucao",
+        phase="promote",
+    )
+    phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+    assert phase is not None
+    phase.heartbeat_at = agora - timedelta(hours=1)
+    db_session.add(
+        IngestionCancellationRequest(
+            scope_type="ingestion_run",
+            scope_id=str(run.id),
+            execucao_sincronizacao_id=execucao.id,
+            ingestion_run_id=run.id,
+            requested_by="api_admin",
+            reason="cancelar",
+            terminate_immediately=True,
+            status="propagated",
+        )
+    )
+    db_session.commit()
+
+    resultado = reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    db_session.refresh(execucao)
+    db_session.refresh(run)
+    phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+    request = db_session.scalar(select(IngestionCancellationRequest).where(IngestionCancellationRequest.ingestion_run_id == run.id))
+    assert resultado["stale_candidates"] >= 1
+    assert str(run.id) in resultado["cancelled_runs"]
+    assert execucao.status == "cancelada"
+    assert run.status == "cancelada"
+    assert phase is not None
+    assert phase.status == "cancelled"
+    assert request is not None
+    assert request.status == "completed"
 
 
 def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(

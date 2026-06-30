@@ -102,7 +102,10 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     )
     next_action: str | None = Field(
         default=None,
-        description="Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`.",
+        description=(
+            "Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`. "
+            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+        ),
     )
     links: dict[str, str] | None = Field(
         default=None,
@@ -782,7 +785,10 @@ class IngestionRunResumo(BaseModel):
     )
     next_action: str | None = Field(
         default=None,
-        description="Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`.",
+        description=(
+            "Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
+            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+        ),
     )
     links: dict[str, str] | None = Field(
         default=None,
