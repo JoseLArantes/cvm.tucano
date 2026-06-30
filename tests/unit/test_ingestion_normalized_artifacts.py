@@ -1,11 +1,13 @@
 import csv
 import tempfile
 
+import pytest
+
 from app.core.config import get_settings
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 
 
-def test_normalized_artifact_writer_persists_typed_csv(monkeypatch) -> None:
+def test_normalized_artifact_writer_persists_typed_csv(monkeypatch: pytest.MonkeyPatch) -> None:
     with tempfile.TemporaryDirectory() as tmp_dir:
         monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
         writer = NormalizedArtifactWriter(

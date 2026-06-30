@@ -4,6 +4,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -254,7 +255,7 @@ def test_iter_staged_member_chunks_carrega_payload_minimo_e_expunge_chunks() -> 
         session.close()
 
 
-def test_member_payload_is_upserted_and_readable(monkeypatch) -> None:
+def test_member_payload_is_upserted_and_readable(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -281,7 +282,7 @@ def test_member_payload_is_upserted_and_readable(monkeypatch) -> None:
         session.close()
 
 
-def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypatch) -> None:
+def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -298,7 +299,7 @@ def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypa
         session.close()
 
 
-def test_member_payload_skips_database_fallback_when_disabled(monkeypatch) -> None:
+def test_member_payload_skips_database_fallback_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
