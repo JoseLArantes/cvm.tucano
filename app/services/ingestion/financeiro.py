@@ -493,36 +493,40 @@ def _promote_financeiro_payloads_postgresql(
         )
 
     if payload_upsert:
-        stmt = pg_insert(model).values(payload_upsert)
-        business_change_expression = or_(
-            *[getattr(model, campo).is_distinct_from(getattr(stmt.excluded, campo)) for campo in sorted(campos_negocio)]
-        )
-        update_columns = {
-            campo: getattr(stmt.excluded, campo)
-            for campo in sorted(
-                {
-                    *campos_negocio,
-                    "arquivo_origem",
-                    "ano_origem",
-                    "linha_origem",
-                    "hash_origem",
-                    "sincronizado_em",
-                }
+        for batch in iter_parameter_batches(payload_upsert, parameter_width=mapping_parameter_width(payload_upsert)):
+            stmt = pg_insert(model).values(batch)
+            business_change_expression = or_(
+                *[
+                    getattr(model, campo).is_distinct_from(getattr(stmt.excluded, campo))
+                    for campo in sorted(campos_negocio)
+                ]
             )
-        }
-        update_columns["alterado_em"] = case(
-            (
-                business_change_expression,
-                stmt.excluded.alterado_em,
-            ),
-            else_=model.alterado_em,
-        )
-        db.execute(
-            stmt.on_conflict_do_update(
-                index_elements=[getattr(model, campo) for campo in campos_chave],
-                set_=update_columns,
+            update_columns = {
+                campo: getattr(stmt.excluded, campo)
+                for campo in sorted(
+                    {
+                        *campos_negocio,
+                        "arquivo_origem",
+                        "ano_origem",
+                        "linha_origem",
+                        "hash_origem",
+                        "sincronizado_em",
+                    }
+                )
+            }
+            update_columns["alterado_em"] = case(
+                (
+                    business_change_expression,
+                    stmt.excluded.alterado_em,
+                ),
+                else_=model.alterado_em,
             )
-        )
+            db.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[getattr(model, campo) for campo in campos_chave],
+                    set_=update_columns,
+                )
+            )
         db.flush()
 
     if historicos:
