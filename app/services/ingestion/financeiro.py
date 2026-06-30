@@ -369,6 +369,11 @@ def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     return dados_promocao
 
 
+def _filtrar_payload_promocao_por_modelo(model: type[Any], dados: dict[str, Any]) -> dict[str, Any]:
+    colunas_modelo = set(model.__table__.columns.keys())
+    return {chave: valor for chave, valor in dados.items() if chave in colunas_modelo}
+
+
 def _promote_financeiro_payloads_internal(
     db: Session,
     *,
@@ -409,7 +414,9 @@ def _promote_financeiro_payloads_postgresql(
 ) -> None:
     model, entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
     agora = _agora()
-    preparados = [_preparar_dados_promocao(dados) for dados in dados_promovidos]
+    preparados = [
+        _preparar_dados_promocao(_filtrar_payload_promocao_por_modelo(model, dados)) for dados in dados_promovidos
+    ]
     preparados_por_chave: dict[tuple[Any, ...], dict[str, Any]] = {}
     for dados in preparados:
         preparados_por_chave[_key_tuple(dados, campos_chave)] = dados
@@ -535,7 +542,9 @@ def _promote_financeiro_payloads_fallback(
 ) -> None:
     model, entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
     agora = _agora()
-    preparados = [_preparar_dados_promocao(dados) for dados in dados_promovidos]
+    preparados = [
+        _preparar_dados_promocao(_filtrar_payload_promocao_por_modelo(model, dados)) for dados in dados_promovidos
+    ]
     chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for dados in preparados))
     existentes_hash_por_chave = _load_existing_row_hashes(
         db,

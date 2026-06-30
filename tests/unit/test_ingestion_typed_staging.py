@@ -13,7 +13,10 @@ from app.models import companhia, ingestion  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.financeiro import DocumentoFinanceiro
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionFinanceiroStageRow, IngestionRun
-from app.services.ingestion.financeiro import _promote_financeiro_member_from_stage
+from app.services.ingestion.financeiro import (
+    _filtrar_payload_promocao_por_modelo,
+    _promote_financeiro_member_from_stage,
+)
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
 
@@ -372,3 +375,29 @@ def test_promote_financeiro_member_from_stage_inserts_documentos(monkeypatch: py
             assert contadores["inseridos"] == 1
     finally:
         session.close()
+
+
+def test_filtrar_payload_promocao_financeiro_remove_colunas_estranhas_por_modelo() -> None:
+    payload = {
+        "tipo_formulario": "DFP",
+        "id_documento": 123,
+        "versao": 1,
+        "data_referencia": "2025-12-31",
+        "categoria_documento": "Categoria X",
+        "tipo_demonstracao": "DRE",
+        "escopo_demonstracao": "consolidado",
+        "codigo_conta": "1.01",
+        "valor_conta": "100.00",
+        "arquivo_origem": "dfp_cia_aberta_2025.csv",
+    }
+
+    filtrado = _filtrar_payload_promocao_por_modelo(DocumentoFinanceiro, payload)
+
+    assert "tipo_formulario" in filtrado
+    assert "id_documento" in filtrado
+    assert "categoria_documento" in filtrado
+    assert "arquivo_origem" in filtrado
+    assert "tipo_demonstracao" not in filtrado
+    assert "escopo_demonstracao" not in filtrado
+    assert "codigo_conta" not in filtrado
+    assert "valor_conta" not in filtrado
