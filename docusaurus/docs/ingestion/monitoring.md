@@ -70,7 +70,11 @@ Leitura recomendada do rerun anual:
 - `quality_summary.members_reprocessed`
 - `quality_summary.members_reused_from_previous`
 - `quality_summary.members_reused_from_failed_parent`
+- `artifact_snapshot.storage_uri`
+- `artifact_snapshot.storage_role`
 - `member_snapshot_summary.by_status`
+- `member_snapshot_summary.members[].raw_artifact_uri`
+- `member_snapshot_summary.members[].normalized_artifact_uri`
 - `lifecycle_decision`
 
 ## `GET /ingestion/runs/{run_id}/phases`

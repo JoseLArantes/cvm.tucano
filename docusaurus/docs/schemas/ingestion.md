@@ -33,8 +33,8 @@ Campos principais:
 | `remote_probe` | `object \| null` | decisao de preflight remoto |
 | `change_summary` | `object \| null` | mudanca estrutural detectada |
 | `quality_summary` | `object \| null` | resumo principal de progresso |
-| `artifact_snapshot` | `object \| null` | snapshot do artefato avaliado |
-| `member_snapshot_summary` | `object \| null` | inventario de members |
+| `artifact_snapshot` | `object \| null` | snapshot do artefato avaliado, incluindo ponteiro do artifact local persistido |
+| `member_snapshot_summary` | `object \| null` | inventario de members com ponteiros para artifact bruto e normalizado quando disponiveis |
 | `delivery_snapshot_summary` | `object \| null` | indice documental agregado |
 | `reconcile_summary` | `object \| null` | remocoes do reconcile |
 | `rows_reconciled_deleted` | `integer \| null` | atalho numerico do reconcile |
@@ -58,6 +58,28 @@ Campos principais:
 - `promote`
 - `reconcile`
 - `complete`
+
+### Campos chave dentro de `artifact_snapshot`
+
+- `resource_url`
+- `source_filename`
+- `storage_uri`
+- `storage_role`
+- `storage_content_type`
+- `storage_size_bytes`
+- `content_sha256`
+
+### Campos chave dentro de `member_snapshot_summary.members[]`
+
+- `member_name`
+- `member_sha256`
+- `raw_artifact_uri`
+- `raw_artifact_content_type`
+- `raw_artifact_size_bytes`
+- `normalized_artifact_uri`
+- `normalized_artifact_format`
+- `normalized_artifact_content_sha256`
+- `normalized_artifact_size_bytes`
 
 ## `ExecucaoSincronizacaoResumo` e `ExecucaoSincronizacaoDetalhe`
 

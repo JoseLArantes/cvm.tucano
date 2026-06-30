@@ -170,6 +170,7 @@ def upsert_artifact_snapshot(
     remote_probe: dict[str, Any] | None,
     ingestion_file: IngestionFile | None,
     status: str,
+    storage_artifact: dict[str, Any] | None = None,
 ) -> SourceArtifactSnapshot:
     snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run.id))
     if snapshot is None:
@@ -185,6 +186,11 @@ def upsert_artifact_snapshot(
     probe = remote_probe or {}
     snapshot.resource_url = source_url
     snapshot.source_filename = source_filename
+    artifact = storage_artifact or {}
+    snapshot.storage_uri = artifact.get("uri")
+    snapshot.storage_role = artifact.get("role")
+    snapshot.storage_content_type = artifact.get("content_type")
+    snapshot.storage_size_bytes = artifact.get("size_bytes")
     snapshot.content_sha256 = ingestion_file.content_sha256 if ingestion_file is not None else snapshot.content_sha256
     snapshot.remote_etag = probe.get("resource_etag") or (ingestion_file.etag if ingestion_file is not None else None)
     snapshot.remote_last_modified = probe.get("resource_last_modified") or (
@@ -222,6 +228,8 @@ def record_member_snapshot(
     destino_promovido: str | None = None,
     ingestion_file_member_id: Any = None,
     delivery_rows: list[dict[str, Any]] | None = None,
+    raw_artifact: dict[str, Any] | None = None,
+    normalized_artifact: dict[str, Any] | None = None,
 ) -> SourceMemberSnapshot:
     snapshot = db.scalar(
         select(SourceMemberSnapshot)
@@ -233,6 +241,15 @@ def record_member_snapshot(
             artifact_snapshot_id=artifact_snapshot.id,
             member_name=member_name,
             member_sha256=member_sha256,
+            raw_artifact_uri=None if raw_artifact is None else raw_artifact.get("uri"),
+            raw_artifact_content_type=None if raw_artifact is None else raw_artifact.get("content_type"),
+            raw_artifact_size_bytes=None if raw_artifact is None else raw_artifact.get("size_bytes"),
+            normalized_artifact_uri=None if normalized_artifact is None else normalized_artifact.get("uri"),
+            normalized_artifact_format=None if normalized_artifact is None else normalized_artifact.get("format"),
+            normalized_artifact_content_sha256=(
+                None if normalized_artifact is None else normalized_artifact.get("content_sha256")
+            ),
+            normalized_artifact_size_bytes=None if normalized_artifact is None else normalized_artifact.get("size_bytes"),
             row_count=row_count,
             header_hash=_header_hash(header),
             header=header,
@@ -251,6 +268,17 @@ def record_member_snapshot(
         db.execute(delete(SourceDeliverySnapshot).where(SourceDeliverySnapshot.member_snapshot_id == snapshot.id))
         snapshot.ingestion_file_member_id = ingestion_file_member_id
         snapshot.member_sha256 = member_sha256
+        snapshot.raw_artifact_uri = None if raw_artifact is None else raw_artifact.get("uri")
+        snapshot.raw_artifact_content_type = None if raw_artifact is None else raw_artifact.get("content_type")
+        snapshot.raw_artifact_size_bytes = None if raw_artifact is None else raw_artifact.get("size_bytes")
+        snapshot.normalized_artifact_uri = None if normalized_artifact is None else normalized_artifact.get("uri")
+        snapshot.normalized_artifact_format = None if normalized_artifact is None else normalized_artifact.get("format")
+        snapshot.normalized_artifact_content_sha256 = (
+            None if normalized_artifact is None else normalized_artifact.get("content_sha256")
+        )
+        snapshot.normalized_artifact_size_bytes = (
+            None if normalized_artifact is None else normalized_artifact.get("size_bytes")
+        )
         snapshot.row_count = row_count
         snapshot.header_hash = _header_hash(header)
         snapshot.header = header
@@ -405,6 +433,10 @@ def build_artifact_snapshot_response(db: Session, *, run_id: Any) -> dict[str, A
         "ano": snapshot.ano,
         "resource_url": snapshot.resource_url,
         "source_filename": snapshot.source_filename,
+        "storage_uri": snapshot.storage_uri,
+        "storage_role": snapshot.storage_role,
+        "storage_content_type": snapshot.storage_content_type,
+        "storage_size_bytes": snapshot.storage_size_bytes,
         "content_sha256": snapshot.content_sha256,
         "remote_etag": snapshot.remote_etag,
         "remote_last_modified": snapshot.remote_last_modified,
@@ -441,6 +473,13 @@ def build_member_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, Any]
             {
                 "member_name": member.member_name,
                 "member_sha256": member.member_sha256,
+                "raw_artifact_uri": member.raw_artifact_uri,
+                "raw_artifact_content_type": member.raw_artifact_content_type,
+                "raw_artifact_size_bytes": member.raw_artifact_size_bytes,
+                "normalized_artifact_uri": member.normalized_artifact_uri,
+                "normalized_artifact_format": member.normalized_artifact_format,
+                "normalized_artifact_content_sha256": member.normalized_artifact_content_sha256,
+                "normalized_artifact_size_bytes": member.normalized_artifact_size_bytes,
                 "row_count": member.row_count,
                 "required_member": member.required_member,
                 "schema_status": member.schema_status,

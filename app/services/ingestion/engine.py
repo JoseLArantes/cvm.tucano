@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun, SourceArtifactSnapshot
+from app.services.ingestion.artifact_store import describe_member_artifact, member_artifact_exists
 from app.services.ingestion.change_tracking import (
     compare_member_with_previous,
     finalize_member_change_summary,
@@ -83,6 +84,16 @@ def process_zip_members(
     )
 
     for member_name, member_payload in ordered_members:
+        raw_artifact = None
+        if run.execucao_sincronizacao_id is not None and member_artifact_exists(
+            execution_id=str(run.execucao_sincronizacao_id),
+            member_name=member_name,
+        ):
+            raw_artifact = describe_member_artifact(
+                execution_id=str(run.execucao_sincronizacao_id),
+                member_name=member_name,
+                content_sha256=hashlib.sha256(member_payload).hexdigest(),
+            )
         staged_names.add(member_name)
         dataset = dataset_por_member_name(spec.tipo_fonte, member_name, spec.ano)
         header_preview, row_count_preview = inspect_csv_member_payload(member_payload)
@@ -120,6 +131,7 @@ def process_zip_members(
                 delivery_index_role=delivery_index_role,
                 destino_promovido=None if dataset is None else dataset.destino_promovido,
                 delivery_rows=delivery_rows,
+                raw_artifact=raw_artifact,
             )
             delivery_delta = compare_delivery_snapshot(
                 db,
@@ -215,6 +227,7 @@ def process_zip_members(
                 destino_promovido=None if dataset is None else dataset.destino_promovido,
                 ingestion_file_member_id=member_atual.id,
                 delivery_rows=delivery_rows,
+                raw_artifact=raw_artifact,
             )
             change_summary = compare_member_with_previous(
                 member=member_atual,

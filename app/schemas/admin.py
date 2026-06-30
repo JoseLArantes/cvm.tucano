@@ -582,6 +582,10 @@ class IngestionRunResumo(BaseModel):
                 "artifact_snapshot": {
                     "resource_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip",
                     "source_filename": "dfp_cia_aberta_2025.zip",
+                    "storage_uri": "/tmp/artifacts/dfp_cia_aberta_2025.zip",
+                    "storage_role": "raw_zip",
+                    "storage_content_type": "application/zip",
+                    "storage_size_bytes": 845231,
                     "content_sha256": "abc123",
                     "probe_decision": "changed",
                     "probe_confidence": "medium",
@@ -592,6 +596,14 @@ class IngestionRunResumo(BaseModel):
                     "total": 14,
                     "by_status": {"processed": 13, "member_skipped": 1},
                     "by_schema_status": {"ok": 13, "reused": 1},
+                    "members": [
+                        {
+                            "member_name": "dfp_cia_aberta_BPA_con_2025.csv",
+                            "raw_artifact_uri": "/tmp/artifacts/dfp_cia_aberta_BPA_con_2025.csv",
+                            "normalized_artifact_uri": "/tmp/artifacts/normalized/dfp_cia_aberta_BPA_con_2025.csv",
+                            "normalized_artifact_format": "typed_csv",
+                        }
+                    ],
                 },
                 "delivery_snapshot_summary": {
                     "total": 1204,
@@ -700,7 +712,8 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Snapshot duravel do artefato remoto considerado pela run. "
             "Resume o recurso CVM avaliado nesta execucao: URL, nome do arquivo, SHA final quando houve download, "
-            "metadados remotos observados, confianca do probe e status operacional persistido. "
+            "metadados remotos observados, ponteiro do artifact local persistido (`storage_uri`, `storage_role`, `storage_content_type`, `storage_size_bytes`), "
+            "confianca do probe e status operacional persistido. "
             "Use este campo quando o frontend precisar explicar por que houve skip, download, reuso ou reconcile."
         ),
     )
@@ -712,7 +725,8 @@ class IngestionRunResumo(BaseModel):
             "O frontend deve esperar pelo menos `total`, `by_status`, `by_schema_status` e `members`. "
             "Em `by_status`, valores como `processed` e `member_skipped` permitem separar members realmente executados de members apenas reaproveitados. "
             "Em `by_schema_status`, `reused` identifica skip por `member_sha256`; `ok` identifica members que passaram pelo fluxo normal; "
-            "outros valores podem sinalizar schema invalido ou warning estrutural."
+            "outros valores podem sinalizar schema invalido ou warning estrutural. "
+            "Quando disponivel, cada item de `members` tambem inclui os ponteiros de artifact bruto e normalizado para rebuild, replay e troubleshooting operacional."
         ),
     )
     delivery_snapshot_summary: dict[str, Any] | None = Field(

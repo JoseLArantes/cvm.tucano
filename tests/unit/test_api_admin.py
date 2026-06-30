@@ -921,6 +921,10 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
             ano=2026,
             resource_url="http://exemplo/itr-2026.zip",
             source_filename="itr_cia_aberta_2026.zip",
+            storage_uri="/tmp/artifacts/itr_cia_aberta_2026.zip",
+            storage_role="raw_zip",
+            storage_content_type="application/zip",
+            storage_size_bytes=100,
             status="downloaded",
             download_required=True,
         )
@@ -931,6 +935,13 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
             ingestion_file_member_id=member_id,
             member_name="itr_cia_aberta_BPA_con_2026.csv",
             member_sha256="sha-member",
+            raw_artifact_uri="/tmp/artifacts/itr_cia_aberta_BPA_con_2026.csv",
+            raw_artifact_content_type="text/csv",
+            raw_artifact_size_bytes=50,
+            normalized_artifact_uri="/tmp/normalized/itr_cia_aberta_BPA_con_2026.csv",
+            normalized_artifact_format="typed_csv",
+            normalized_artifact_content_sha256="sha-normalized",
+            normalized_artifact_size_bytes=40,
             row_count=10,
             header=["CNPJ_CIA", "DT_REFER"],
             row_kind="itr_demonstracao",
@@ -977,6 +988,15 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
             return {"worker-a": [{"name": "app.worker.tasks.pre_processar_sincronizacao_task"}]}
 
     monkeypatch.setattr("app.api.routers.admin.celery_app.control.inspect", lambda timeout=1.0: _FakeInspect())
+
+    resposta_run = client.get(f"/ingestion/runs/{run_id}")
+    assert resposta_run.status_code == 200
+    run_payload = resposta_run.json()
+    assert run_payload["artifact_snapshot"]["storage_uri"] == "/tmp/artifacts/itr_cia_aberta_2026.zip"
+    assert run_payload["artifact_snapshot"]["storage_role"] == "raw_zip"
+    assert run_payload["member_snapshot_summary"]["members"][0]["raw_artifact_uri"] == "/tmp/artifacts/itr_cia_aberta_BPA_con_2026.csv"
+    assert run_payload["member_snapshot_summary"]["members"][0]["normalized_artifact_uri"] == "/tmp/normalized/itr_cia_aberta_BPA_con_2026.csv"
+    assert run_payload["member_snapshot_summary"]["members"][0]["normalized_artifact_format"] == "typed_csv"
 
     resposta_members = client.get(f"/ingestion/runs/{run_id}/members")
     assert resposta_members.status_code == 200

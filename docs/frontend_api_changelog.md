@@ -9,6 +9,25 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-06-30 - Snapshots operacionais de ingestao passam a expor ponteiros duraveis para artifacts locais
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+
+### Mudanca de comportamento
+
+- `artifact_snapshot` passa a expor `storage_uri`, `storage_role`, `storage_content_type` e `storage_size_bytes` quando a run persistiu o artifact local correspondente
+- `member_snapshot_summary.members[]` passa a poder expor `raw_artifact_uri`, `raw_artifact_content_type`, `raw_artifact_size_bytes`, `normalized_artifact_uri`, `normalized_artifact_format`, `normalized_artifact_content_sha256` e `normalized_artifact_size_bytes`
+- esses campos tornam explicito, no contrato da API, qual artifact bruto foi usado no replay e qual artifact normalizado foi produzido para staging e promocao
+
+### Leitura recomendada pelo frontend
+
+- para drill-down operacional de run, usar `artifact_snapshot.storage_uri` como ponteiro primario do artifact persistido da run
+- para troubleshooting de member, usar `member_snapshot_summary.members[].raw_artifact_uri` para replay bruto e `member_snapshot_summary.members[].normalized_artifact_uri` para rastrear o artifact que alimentou o staging tipado
+- a mudanca e aditiva; consumidores que ignoram esses campos continuam compativeis
+
 ## 2026-06-30 - Ingestao ganha recovery sweep para runs stale e `next_action=recover` em falhas recuperaveis
 
 ### Endpoints e superficies com impacto operacional visivel

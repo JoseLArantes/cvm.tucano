@@ -15,15 +15,28 @@ from sqlalchemy.orm.util import identity_key
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
-from app.models.ingestion import IngestionFileMember, IngestionFinanceiroStageRow, IngestionRow, IngestionRun
+from app.models.ingestion import (
+    IngestionFileMember,
+    IngestionFinanceiroStageRow,
+    IngestionRow,
+    IngestionRun,
+    SourceArtifactSnapshot,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.financeiro_mapas import arquivos_demonstracao
 from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
+from app.services.ingestion.artifact_store import describe_member_artifact, member_artifact_exists, read_member_artifact
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.dependencies import ensure_identity_graph_ready
 from app.services.ingestion.engine import ZipIngestionSpec, process_zip_members
-from app.services.ingestion.lifecycle import build_custom_remote_probe, upsert_artifact_snapshot
+from app.services.ingestion.lifecycle import (
+    build_custom_remote_probe,
+    extract_delivery_rows,
+    record_member_snapshot,
+    resolve_delivery_index_role,
+    upsert_artifact_snapshot,
+)
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.normalizers import gerar_hash_canonico
 from app.services.ingestion.operational import record_phase_artifact
@@ -38,7 +51,7 @@ from app.services.ingestion.resolver import (
     register_document_header,
     resolve_companhia,
 )
-from app.services.ingestion.source_registry import listar_datasets
+from app.services.ingestion.source_registry import dataset_por_member_name, listar_datasets
 from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
@@ -1489,6 +1502,40 @@ def _process_financeiro_member(
             run_id=run_id,
             direction="output",
             artifact=artifact,
+        )
+
+    artifact_snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
+    dataset = dataset_por_member_name(tipo_formulario, member.member_name, ano)
+    raw_artifact = None
+    delivery_rows: list[dict[str, Any]] = []
+    if member_artifact_exists(execution_id=str(execucao_id), member_name=member.member_name):
+        raw_artifact = describe_member_artifact(
+            execution_id=str(execucao_id),
+            member_name=member.member_name,
+            content_sha256=member.member_sha256,
+        )
+        payload = read_member_artifact(execution_id=str(execucao_id), member_name=member.member_name)
+        delivery_rows = extract_delivery_rows(payload=payload, member_name=member.member_name, dataset=dataset)
+    normalized_artifact = next(iter(normalized_artifacts.values()), None)
+    if artifact_snapshot is not None:
+        record_member_snapshot(
+            db,
+            artifact_snapshot=artifact_snapshot,
+            member_name=member.member_name,
+            member_sha256=member.member_sha256,
+            row_count=member.row_count,
+            header=member.header,
+            row_kind=None if dataset is None else dataset.row_kind,
+            required_member=False if dataset is None else dataset.obrigatorio,
+            schema_status=member.schema_status,
+            schema_message=member.schema_message,
+            lifecycle_status="processed",
+            delivery_index_role=resolve_delivery_index_role(dataset),
+            destino_promovido=None if dataset is None else dataset.destino_promovido,
+            ingestion_file_member_id=member.id,
+            delivery_rows=delivery_rows,
+            raw_artifact=raw_artifact,
+            normalized_artifact=normalized_artifact,
         )
 
     if promote_enabled and reconcile_required:
