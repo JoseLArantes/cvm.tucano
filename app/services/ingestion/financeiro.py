@@ -39,7 +39,7 @@ from app.services.ingestion.lifecycle import (
 )
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.normalizers import gerar_hash_canonico
-from app.services.ingestion.operational import record_phase_artifact
+from app.services.ingestion.operational import record_phase_artifact, touch_run_heartbeat
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.quarantine import create_quarantine_item
 from app.services.ingestion.resolver import (
@@ -55,9 +55,12 @@ from app.services.ingestion.source_registry import dataset_por_member_name, list
 from app.services.ingestion.sql_batches import iter_lookup_batches, iter_parameter_batches, mapping_parameter_width
 from app.services.ingestion.staging import (
     create_run,
+    insert_rows,
+    iter_csv_rows_from_disk,
     iter_staged_member_chunks,
     iter_zip_csv_members,
     register_file,
+    register_member,
     safe_promote_chunk,
     update_run_state,
 )
@@ -1178,6 +1181,457 @@ def _process_financeiro_rows(
 
     update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
     return contadores
+
+
+def _create_financeiro_quarantine_row(
+    db: Session,
+    *,
+    execucao_id: Any,
+    run: IngestionRun,
+    member: IngestionFileMember,
+    arquivo_origem: str,
+    ano: int,
+    linha_origem: int,
+    row_kind: str,
+    raw_data: dict[str, str],
+    result: Any,
+    legacy_reason: str | None = None,
+    normalized_data: dict[str, Any] | None = None,
+    natural_key: dict[str, Any] | None = None,
+) -> None:
+    rows = insert_rows(
+        db,
+        ingestion_run=run,
+        ingestion_file_member=member,
+        arquivo_origem=arquivo_origem,
+        ano_origem=ano,
+        row_kind=row_kind,
+        rows=[(linha_origem, raw_data)],
+        validation_status="invalid",
+        fetch_inserted_rows=True,
+        use_copy=False,
+    )
+    if not rows:
+        raise ValueError("linha_quarentena_nao_criada")
+    row = rows[0]
+    write_validation_result(
+        db,
+        ingestion_row=row,
+        result=result,
+        normalized_data=normalized_data,
+        natural_key=natural_key,
+    )
+    create_quarantine_item(
+        db,
+        ingestion_row=row,
+        result=result,
+        execucao_sincronizacao_id=execucao_id,
+        legacy_reason=legacy_reason,
+    )
+    _registrar_quarentena(
+        db,
+        execucao_id=execucao_id,
+        arquivo_origem=arquivo_origem,
+        ano_origem=ano,
+        linha_origem=linha_origem,
+        motivo=legacy_reason or result.reason_code or "linha_rejeitada",
+        dados_originais=raw_data,
+    )
+
+
+def process_financeiro_member_direct_from_disk(
+    db: Session,
+    *,
+    execucao: ExecucaoSincronizacao,
+    run: IngestionRun,
+    ingestion_file: Any,
+    file_path: str,
+    member_name: str,
+    row_kind: str,
+    member_sha256: str,
+    member_size_bytes: int,
+    encoding: str,
+    delimiter: str,
+    reconcile_required: bool,
+    prefixo: str,
+    tipo_formulario: str,
+    ano: int,
+    promote_enabled: bool,
+    contadores: dict[str, int],
+    quality_counters: dict[str, Counter[str] | int],
+    seen_by_row_kind: dict[str, dict[str, dict[str, Any]]],
+    header_map: dict[tuple[str | None, int | None, int | None, Any], Any],
+    chunk_size: int,
+) -> tuple[ExecucaoSincronizacao, IngestionRun, IngestionFileMember]:
+    settings = get_settings()
+    if not settings.ingestion_financeiro_typed_staging_enabled:
+        raise ValueError("financial_direct_path_requires_typed_staging")
+
+    reason_counts = quality_counters.setdefault("reason_counts", Counter())
+    resolver_methods = quality_counters.setdefault("resolver_methods", Counter())
+    top_quarantine_files = quality_counters.setdefault("top_quarantine_files", Counter())
+    quality_counters.setdefault("provisional_company_count", 0)
+    quality_counters.setdefault("typed_stage_rows_loaded", 0)
+    quality_counters.setdefault("typed_stage_bytes_loaded", 0)
+    quality_counters.setdefault("typed_stage_rows_replaced", 0)
+    quality_counters.setdefault("typed_stage_rows_purged", 0)
+    quality_counters.setdefault("typed_stage_copy_loads", 0)
+
+    update_run_state(run, status="em_execucao", phase="profile")
+    header, row_iter, encoding = iter_csv_rows_from_disk(file_path, encoding, delimiter=delimiter)
+    member = register_member(
+        db,
+        ingestion_file=ingestion_file,
+        member_name=member_name,
+        member_sha256=member_sha256,
+        member_size_bytes=member_size_bytes,
+        header=header,
+        row_count=0,
+        encoding=encoding,
+        delimiter=delimiter,
+    )
+    schema_result = validate_member_header(row_kind, member.header)
+    update_member_schema_validation(member, result=schema_result)
+    db.commit()
+    db.refresh(member)
+
+    execucao_id = execucao.id
+    run_id = run.id
+    member_id = member.id
+    normalized_writers: dict[str, NormalizedArtifactWriter] = {}
+    current_row_kinds_by_model: dict[type[Any], set[str]] = {}
+    total_rows = 0
+    reconciled_deleted = 0
+
+    if schema_result.status == "invalid":
+        for linha_origem, raw_data in row_iter:
+            total_rows += 1
+            contadores["lidas"] += 1
+            contadores["rejeitados"] += 1
+            assert isinstance(reason_counts, Counter)
+            assert isinstance(top_quarantine_files, Counter)
+            reason_counts[schema_result.reason_code or "schema_inesperado"] += 1
+            top_quarantine_files[member_name] += 1
+            _create_financeiro_quarantine_row(
+                db,
+                execucao_id=execucao_id,
+                run=run,
+                member=member,
+                arquivo_origem=member_name,
+                ano=ano,
+                linha_origem=linha_origem,
+                row_kind=row_kind,
+                raw_data=raw_data,
+                result=schema_result,
+                legacy_reason=schema_result.reason_code or "schema_inesperado",
+            )
+        member.row_count = total_rows
+        contadores["members_invalid_schema"] = contadores.get("members_invalid_schema", 0) + 1
+        update_run_state(
+            run,
+            phase="complete",
+            quality_summary=_build_incremental_quality_summary(contadores, quality_counters),
+        )
+        _atualizar_execucao(execucao, contadores)
+        db.commit()
+        return execucao, run, member
+
+    update_run_state(run, phase="normalize_artifact")
+    for linha_origem, raw_data in row_iter:
+        total_rows += 1
+        contadores["lidas"] += 1
+        try:
+            resolved_row_kind, dados = normalizar_financeiro_row(
+                prefixo=prefixo,
+                tipo_formulario=tipo_formulario,
+                arquivo_origem=member_name,
+                ano_origem=ano,
+                linha_origem=linha_origem,
+                linha=raw_data,
+            )
+        except Exception as exc:
+            result = invalid_result(
+                f"normalizacao_invalida: {exc}",
+                details={"erro": str(exc)},
+                repairable=True,
+            )
+            _create_financeiro_quarantine_row(
+                db,
+                execucao_id=execucao_id,
+                run=run,
+                member=member,
+                arquivo_origem=member_name,
+                ano=ano,
+                linha_origem=linha_origem,
+                row_kind=row_kind,
+                raw_data=raw_data,
+                result=result,
+                legacy_reason=f"normalizacao_invalida: {exc}",
+            )
+            contadores["rejeitados"] += 1
+            assert isinstance(reason_counts, Counter)
+            assert isinstance(top_quarantine_files, Counter)
+            reason_counts["normalizacao_invalida"] += 1
+            top_quarantine_files[member_name] += 1
+            continue
+
+        natural_key = build_natural_key(resolved_row_kind, dados)
+        duplicate_result = classify_duplicate(
+            row_kind=resolved_row_kind,
+            natural_key=natural_key,
+            normalized_hash=gerar_hash_canonico(dados),
+            normalized_data=dados,
+            seen_by_key=seen_by_row_kind.setdefault(resolved_row_kind, {}),
+        )
+        if duplicate_result.status == "ignored_duplicate":
+            contadores["inalterados"] += 1
+            continue
+        if duplicate_result.status == "invalid":
+            _create_financeiro_quarantine_row(
+                db,
+                execucao_id=execucao_id,
+                run=run,
+                member=member,
+                arquivo_origem=member_name,
+                ano=ano,
+                linha_origem=linha_origem,
+                row_kind=resolved_row_kind,
+                raw_data=raw_data,
+                result=duplicate_result,
+                normalized_data=dados,
+                natural_key=natural_key,
+            )
+            contadores["rejeitados"] += 1
+            assert isinstance(reason_counts, Counter)
+            assert isinstance(top_quarantine_files, Counter)
+            reason_counts[duplicate_result.reason_code or "chave_natural_duplicada_conflitante"] += 1
+            top_quarantine_files[member_name] += 1
+            continue
+
+        resolver_result = resolve_companhia(
+            db,
+            _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
+            header_map=header_map,
+            provisional_enabled=True,
+        )
+        if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
+            result = invalid_result(
+                resolver_result.resolution_method or "companhia_nao_encontrada",
+                details=resolver_result.details,
+                repairable=True,
+            )
+            _create_financeiro_quarantine_row(
+                db,
+                execucao_id=execucao_id,
+                run=run,
+                member=member,
+                arquivo_origem=member_name,
+                ano=ano,
+                linha_origem=linha_origem,
+                row_kind=resolved_row_kind,
+                raw_data=raw_data,
+                result=result,
+                legacy_reason=resolver_result.resolution_method or "companhia_nao_encontrada",
+                normalized_data=dados,
+                natural_key=natural_key,
+            )
+            contadores["rejeitados"] += 1
+            assert isinstance(reason_counts, Counter)
+            assert isinstance(top_quarantine_files, Counter)
+            reason_counts[resolver_result.resolution_method or "companhia_nao_encontrada"] += 1
+            top_quarantine_files[member_name] += 1
+            continue
+
+        assert isinstance(resolver_methods, Counter)
+        resolver_methods[resolver_result.resolution_method or "none"] += 1
+        if resolver_result.status == STATUS_PROVISIONAL_CREATED:
+            provisional_raw = quality_counters.get("provisional_company_count", 0)
+            quality_counters["provisional_company_count"] = (
+                (provisional_raw if isinstance(provisional_raw, int) else 0) + 1
+            )
+        dados["companhia_id"] = resolver_result.companhia_id
+        if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
+            companhia = db.get(Companhia, resolver_result.companhia_id)
+            if companhia is not None:
+                dados["codigo_cvm"] = companhia.codigo_cvm
+
+        writer = normalized_writers.get(resolved_row_kind)
+        if writer is None:
+            writer = NormalizedArtifactWriter(
+                run_id=str(run_id),
+                member_id=str(member_id),
+                member_name=member.member_name,
+                row_kind=resolved_row_kind,
+            )
+            normalized_writers[resolved_row_kind] = writer
+        writer.write_row(
+            {
+                "row_kind": resolved_row_kind,
+                "linha_origem": linha_origem,
+                "arquivo_origem": member_name,
+                "ano_origem": ano,
+                "companhia_id": dados.get("companhia_id"),
+                "normalized_hash": gerar_hash_canonico(dados),
+                "natural_key": natural_key,
+                **dados,
+            }
+        )
+        model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
+        current_row_kinds_by_model.setdefault(model, set()).add(resolved_row_kind)
+        if resolved_row_kind.endswith("_documento") and resolver_result.companhia_id is not None:
+            register_document_header(
+                header_map,
+                tipo_formulario=tipo_formulario,
+                id_documento=dados.get("id_documento"),
+                versao=dados.get("versao"),
+                data_referencia=dados.get("data_referencia"),
+                companhia_id=resolver_result.companhia_id,
+                cnpj_companhia=dados.get("cnpj_companhia"),
+                codigo_cvm=dados.get("codigo_cvm"),
+            )
+
+        if total_rows % chunk_size == 0:
+            member.row_count = total_rows
+            touch_run_heartbeat(
+                db,
+                run_id=run_id,
+                metrics={
+                    "rows_read": contadores["lidas"],
+                    "rows_normalized": total_rows - contadores["rejeitados"],
+                },
+            )
+            _atualizar_execucao(execucao, contadores)
+            db.commit()
+
+    member.row_count = total_rows
+    normalized_artifacts = {kind: writer.close() for kind, writer in normalized_writers.items()}
+    for artifact in normalized_artifacts.values():
+        record_phase_artifact(db, run_id=run_id, direction="output", artifact=artifact)
+
+    update_run_state(run, phase="load_typed_staging")
+    for artifact in normalized_artifacts.values():
+        load_result = load_financeiro_artifact_to_stage(
+            db,
+            ingestion_run_id=run_id,
+            ingestion_file_member_id=member_id,
+            artifact_uri=str(artifact["uri"]),
+        )
+        rows_loaded = quality_counters.get("typed_stage_rows_loaded", 0)
+        bytes_loaded = quality_counters.get("typed_stage_bytes_loaded", 0)
+        rows_replaced = quality_counters.get("typed_stage_rows_replaced", 0)
+        copy_loads = quality_counters.get("typed_stage_copy_loads", 0)
+        quality_counters["typed_stage_rows_loaded"] = (
+            (rows_loaded if isinstance(rows_loaded, int) else 0) + load_result.rows_loaded
+        )
+        quality_counters["typed_stage_bytes_loaded"] = (
+            (bytes_loaded if isinstance(bytes_loaded, int) else 0) + load_result.bytes_loaded
+        )
+        quality_counters["typed_stage_rows_replaced"] = (
+            (rows_replaced if isinstance(rows_replaced, int) else 0) + load_result.rows_replaced
+        )
+        if load_result.copy_used:
+            quality_counters["typed_stage_copy_loads"] = (copy_loads if isinstance(copy_loads, int) else 0) + 1
+    db.commit()
+
+    if promote_enabled:
+        update_run_state(run, phase="promote")
+        _promote_financeiro_member_from_stage(
+            db,
+            member_id=member_id,
+            execucao_id=execucao_id,
+            contadores=contadores,
+            chunk_size=chunk_size,
+        )
+    else:
+        typed_stage_rows_loaded_raw = quality_counters.get("typed_stage_rows_loaded", 0)
+        contadores["inalterados"] += (
+            typed_stage_rows_loaded_raw if isinstance(typed_stage_rows_loaded_raw, int) else 0
+        )
+
+    if promote_enabled and reconcile_required:
+        update_run_state(run, phase="reconcile")
+        for model, row_kinds in current_row_kinds_by_model.items():
+            normalized_artifact_uri = None
+            for current_row_kind in sorted(row_kinds):
+                artifact_metadata = normalized_artifacts.get(current_row_kind)
+                if artifact_metadata is not None:
+                    normalized_artifact_uri = str(artifact_metadata["uri"])
+                    break
+            reconciled_deleted += reconcile_promoted_rows(
+                db,
+                model=model,
+                ingestion_run_id=run_id,
+                ingestion_file_member_id=member_id,
+                arquivo_origem=member_name,
+                ano_origem=ano,
+                row_kinds=row_kinds,
+                normalized_artifact_uri=normalized_artifact_uri,
+            )
+        contadores["reconciled_deleted"] = contadores.get("reconciled_deleted", 0) + reconciled_deleted
+
+    purged_rows = clear_financeiro_stage_rows(db, ingestion_file_member_id=member_id)
+    typed_stage_rows_purged = quality_counters.get("typed_stage_rows_purged", 0)
+    quality_counters["typed_stage_rows_purged"] = (
+        (typed_stage_rows_purged if isinstance(typed_stage_rows_purged, int) else 0) + purged_rows
+    )
+
+    artifact_snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
+    dataset = dataset_por_member_name(prefixo, member.member_name, ano)
+    raw_artifact = None
+    delivery_rows: list[dict[str, Any]] = []
+    if member_artifact_exists(execution_id=str(execucao_id), member_name=member.member_name):
+        raw_artifact = describe_member_artifact(
+            execution_id=str(execucao_id),
+            member_name=member.member_name,
+            content_sha256=member.member_sha256,
+        )
+        payload = read_member_artifact(execution_id=str(execucao_id), member_name=member.member_name)
+        delivery_rows = extract_delivery_rows(payload=payload, member_name=member.member_name, dataset=dataset)
+    normalized_artifact = next(iter(normalized_artifacts.values()), None)
+    if artifact_snapshot is not None:
+        record_member_snapshot(
+            db,
+            artifact_snapshot=artifact_snapshot,
+            member_name=member.member_name,
+            member_sha256=member.member_sha256,
+            row_count=member.row_count,
+            header=member.header,
+            row_kind=None if dataset is None else dataset.row_kind,
+            required_member=False if dataset is None else dataset.obrigatorio,
+            schema_status=member.schema_status,
+            schema_message=member.schema_message,
+            lifecycle_status="processed",
+            delivery_index_role=resolve_delivery_index_role(dataset),
+            destino_promovido=None if dataset is None else dataset.destino_promovido,
+            ingestion_file_member_id=member.id,
+            delivery_rows=delivery_rows,
+            raw_artifact=raw_artifact,
+            normalized_artifact=normalized_artifact,
+        )
+
+    update_run_state(
+        run,
+        phase="complete",
+        quality_summary=_build_incremental_quality_summary(
+            contadores,
+            quality_counters,
+            extras={
+                "rows_read": contadores["lidas"],
+                "rows_normalized": total_rows - contadores["rejeitados"],
+                "rows_loaded_to_stage": quality_counters.get("typed_stage_rows_loaded", 0),
+                "rows_reconciled_deleted": reconciled_deleted,
+            },
+        ),
+    )
+    _atualizar_execucao(execucao, contadores)
+    db.commit()
+    db.expunge_all()
+    execucao_final = db.get(ExecucaoSincronizacao, execucao_id)
+    run_final = db.get(IngestionRun, run_id)
+    member_final = db.get(IngestionFileMember, member_id)
+    if execucao_final is None or run_final is None or member_final is None:
+        raise ValueError("estado_execucao_financeiro_direct_path_inconsistente")
+    return execucao_final, run_final, member_final
 
 
 def _process_financeiro_member(

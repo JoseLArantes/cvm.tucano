@@ -4,7 +4,7 @@ from uuid import UUID
 
 from celery import chain, group
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.api.auth import validar_token_api
 from app.api.deps import DbSession
@@ -12,7 +12,10 @@ from app.models.ingestion import (
     IngestionCancellationRequest,
     IngestionFile,
     IngestionFileMember,
+    IngestionFinanceiroStageRow,
+    IngestionPhaseExecution,
     IngestionRow,
+    IngestionRowEvent,
     IngestionRun,
     QuarantineItem,
     SourceArtifactSnapshot,
@@ -223,6 +226,103 @@ def _serialize_cancellation(request: Any) -> dict[str, Any]:
         "propagated_at": request.propagated_at,
         "completed_at": request.completed_at,
         "affected_task_ids": request.affected_task_ids,
+    }
+
+
+def _cleanup_transient_state_for_run(db: DbSession, *, run: IngestionRun) -> dict[str, Any]:
+    execucao_ids: list[UUID] = []
+    if run.execucao_sincronizacao_id is not None:
+        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+        if execucao is not None:
+            execucao_ids.append(execucao.id)
+            if execucao.parent_execucao_id is None:
+                execucao_ids.extend(
+                    db.scalars(
+                        select(ExecucaoSincronizacao.id).where(
+                            ExecucaoSincronizacao.parent_execucao_id == execucao.id
+                        )
+                    ).all()
+                )
+
+    run_ids = [run.id]
+    if execucao_ids:
+        run_ids.extend(
+            db.scalars(select(IngestionRun.id).where(IngestionRun.execucao_sincronizacao_id.in_(execucao_ids))).all()
+        )
+    run_ids = list(dict.fromkeys(run_ids))
+
+    member_ids = db.scalars(
+        select(IngestionFileMember.id)
+        .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
+        .where(IngestionFile.ingestion_run_id.in_(run_ids))
+    ).all()
+    row_ids = db.scalars(select(IngestionRow.id).where(IngestionRow.ingestion_run_id.in_(run_ids))).all()
+
+    deleted_quarantine = 0
+    deleted_events = 0
+    deleted_rows = 0
+    deleted_stage = 0
+    if row_ids:
+        deleted_quarantine_result = db.execute(delete(QuarantineItem).where(QuarantineItem.ingestion_row_id.in_(row_ids)))
+        deleted_events_result = db.execute(delete(IngestionRowEvent).where(IngestionRowEvent.ingestion_row_id.in_(row_ids)))
+        deleted_rows_result = db.execute(delete(IngestionRow).where(IngestionRow.id.in_(row_ids)))
+        deleted_quarantine = int(getattr(deleted_quarantine_result, "rowcount", 0) or 0)
+        deleted_events = int(getattr(deleted_events_result, "rowcount", 0) or 0)
+        deleted_rows = int(getattr(deleted_rows_result, "rowcount", 0) or 0)
+    if member_ids:
+        deleted_stage_result = db.execute(
+            delete(IngestionFinanceiroStageRow).where(
+                IngestionFinanceiroStageRow.ingestion_file_member_id.in_(member_ids)
+            )
+        )
+        deleted_stage = int(getattr(deleted_stage_result, "rowcount", 0) or 0)
+
+    now = datetime.now(UTC)
+    closed_phases = 0
+    phases = db.scalars(
+        select(IngestionPhaseExecution).where(
+            IngestionPhaseExecution.ingestion_run_id.in_(run_ids),
+            IngestionPhaseExecution.finished_at.is_(None),
+        )
+    ).all()
+    for phase in phases:
+        phase.status = "cancelled"
+        phase.cancelled_at = phase.cancelled_at or now
+        phase.cancel_reason = phase.cancel_reason or "Limpeza administrativa de estado transitorio."
+        phase.finished_at = now
+        closed_phases += 1
+
+    closed_executions = 0
+    if execucao_ids:
+        execucoes = db.scalars(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id.in_(execucao_ids))).all()
+        for execucao in execucoes:
+            if execucao.status not in _STATUS_FINAL_EXECUCAO:
+                execucao.status = "cancelada"
+                execucao.finalizada_em = now
+                execucao.mensagem_erro = "Estado transitorio limpo administrativamente."
+                closed_executions += 1
+
+    for run_item in db.scalars(select(IngestionRun).where(IngestionRun.id.in_(run_ids))).all():
+        if run_item.status not in _STATUS_FINAL_EXECUCAO:
+            update_run_state(
+                run_item,
+                status="cancelada",
+                phase="complete",
+                message="Estado transitorio limpo administrativamente.",
+                finished_at=now,
+            )
+
+    db.commit()
+    return {
+        "run_ids": [str(item) for item in run_ids],
+        "execucao_ids": [str(item) for item in execucao_ids],
+        "member_ids": [str(item) for item in member_ids],
+        "deleted_quarantine_items": deleted_quarantine,
+        "deleted_row_events": deleted_events,
+        "deleted_ingestion_rows": deleted_rows,
+        "deleted_typed_stage_rows": deleted_stage,
+        "closed_phase_executions": closed_phases,
+        "closed_executions": closed_executions,
     }
 
 
@@ -1819,6 +1919,8 @@ def dashboard_execucoes(
         "`remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, `member_snapshot_summary`, "
         "`delivery_snapshot_summary`, `reconcile_summary`, `lifecycle_decision` e `links`. "
         "Para progresso e cards, use `progress` e `quality_summary`. "
+        "Em DFP/ITR financeiro, linhas validas seguem direct path artifact-backed; progresso deve ser lido por fases, "
+        "`quality_summary` e snapshots de artifacts, nao por volume em `ingestion_rows`. "
         "Para explicar members reaproveitados ou reprocessados, use `member_snapshot_summary` e `lifecycle_decision`. "
         "Para diagnostico operacional, use `state`, `liveness`, `blocking`, `cancellation`, `last_error` e `next_action`."
     ),
@@ -1852,6 +1954,8 @@ def listar_ingestion_runs(
         "Retorna o detalhe completo de uma run do pipeline. "
         "Use este endpoint para drill-down operacional, leitura de snapshots estruturais, progresso, liveness, bloqueios, "
         "cancelamento, erro mais recente, reconcile, inventario de members e decisao de lifecycle. "
+        "Para DFP/ITR, fases e counters representam o direct path financeiro: profile, artifact normalizado, staging tipado, "
+        "promocao e reconcile. "
         "Para explicar por que uma run anual reaproveitou ou reprocessou members, use `quality_summary`, `member_snapshot_summary` e `lifecycle_decision`."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
@@ -1875,7 +1979,9 @@ def detalhar_ingestion_run(
     description=(
         "Retorna a timeline persistida de fases da run. "
         "Use este endpoint para drill-down operacional, principalmente quando a UI precisar distinguir "
-        "heartbeat stale, tentativas repetidas da mesma fase, cancelamento e falha final sem recorrer a logs de worker."
+        "heartbeat stale, tentativas repetidas da mesma fase, cancelamento e falha final sem recorrer a logs de worker. "
+        "Em members financeiros DFP/ITR, a timeline pode incluir `profile`, `normalize_artifact`, `load_typed_staging`, "
+        "`promote`, `reconcile` e `complete`, com counters em `metrics`."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
     operation_id="listarIngestionRunPhasesAdmin",
@@ -2260,6 +2366,37 @@ def recover_ingestion_run(
     if operational["state"] != "stale" and not is_retryable_failure:
         raise HTTPException(status_code=409, detail="Run nao esta em estado recuperavel.")
     resultado = replay_ingestion_run_service(db, run_id=run_id)
+    return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/runs/{run_id}/cleanup-transient-state",
+    response_model=ReplayResposta,
+    summary="Limpar estado transitorio de run cancelada ou falha",
+    description=(
+        "Remove staging generico, staging tipado financeiro e eventos/quarentena associados a linhas da run, "
+        "e fecha fases ou execucoes relacionadas que ainda estejam presas. "
+        "Use apos cancelamento administrativo ou falha recuperavel quando a politica operacional permitir reconstruir a ingestao. "
+        "A acao nao remove dados canonicos ja promovidos."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run nao encontrada."},
+        409: {"description": "A run precisa estar cancelada ou falha para limpeza transitoria."},
+    },
+    operation_id="cleanupIngestionRunTransientStateAdmin",
+)
+def cleanup_ingestion_run_transient_state(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> ReplayResposta:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrada.")
+    if run.status not in {"cancelada", "falha"}:
+        raise HTTPException(status_code=409, detail="A run precisa estar cancelada ou falha para limpeza transitoria.")
+    resultado = _cleanup_transient_state_for_run(db, run=run)
     return ReplayResposta(status="sucesso", detalhe=resultado)
 
 

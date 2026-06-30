@@ -161,6 +161,17 @@ class Settings(BaseSettings):
         default=True,
         alias="INGESTION_FINANCEIRO_TYPED_STAGING_ENABLED",
     )
+    ingestion_financeiro_direct_path_enabled: bool = Field(
+        default=True,
+        alias="INGESTION_FINANCEIRO_DIRECT_PATH_ENABLED",
+    )
+    ingestion_max_active_members_per_parent: int = Field(
+        default=2,
+        ge=1,
+        alias="INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT",
+    )
+    ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
+    ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
     ingestion_normalized_artifact_format: Literal["typed_csv", "parquet"] = Field(
         default="typed_csv",
         alias="INGESTION_NORMALIZED_ARTIFACT_FORMAT",

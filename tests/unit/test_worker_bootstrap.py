@@ -222,8 +222,10 @@ def test_construir_beat_schedule_inclui_fontes_configuradas(monkeypatch: pytest.
 
 def test_celery_routes_isolam_ingestao_e_materializacao() -> None:
     routes = celery_app.conf.task_routes
-    assert routes["app.worker.tasks.sincronizar_dfp_task"]["queue"] == "celery"
-    assert routes["app.worker.tasks.sincronizar_member_task"]["queue"] == "celery"
+    assert routes["app.worker.tasks.sincronizar_dfp_task"]["queue"] == "ingestion_control"
+    assert routes["app.worker.tasks.disparar_dependentes_task"]["queue"] == "ingestion_control"
+    assert routes["app.worker.tasks.finalizar_sincronizacao_zip_task"]["queue"] == "ingestion_control"
+    assert routes["app.worker.tasks.sincronizar_member_task"]["queue"] == "ingestion"
     assert routes["app.worker.tasks.materializar_analise_campanha_task"]["queue"] == "analise_materializacao"
     assert routes["app.worker.tasks.materializar_analise_chunk_task"]["queue"] == "analise_materializacao"
 

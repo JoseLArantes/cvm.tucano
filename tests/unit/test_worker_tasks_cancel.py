@@ -237,6 +237,7 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
     )
 
     monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_financeiro_direct_path_enabled", False)
 
     captured: dict[str, object] = {}
 
@@ -346,6 +347,7 @@ def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
     )
 
     monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_financeiro_direct_path_enabled", False)
 
     captured: dict[str, object] = {}
 

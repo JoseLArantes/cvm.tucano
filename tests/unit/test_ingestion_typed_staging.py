@@ -1,6 +1,8 @@
 import tempfile
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -9,13 +11,21 @@ from sqlalchemy.pool import StaticPool
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import companhia, ingestion  # noqa: F401
+from app.models import companhia, identidade, ingestion, sincronizacao  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.financeiro import DocumentoFinanceiro
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionFinanceiroStageRow, IngestionRun
+from app.models.ingestion import (
+    IngestionFile,
+    IngestionFileMember,
+    IngestionFinanceiroStageRow,
+    IngestionRow,
+    IngestionRun,
+)
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.financeiro import (
     _filtrar_payload_promocao_por_modelo,
     _promote_financeiro_member_from_stage,
+    process_financeiro_member_direct_from_disk,
 )
 from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
 from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
@@ -373,6 +383,124 @@ def test_promote_financeiro_member_from_stage_inserts_documentos(monkeypatch: py
             assert documento.id_documento == 123
             assert documento.companhia_id == company.id
             assert contadores["inseridos"] == 1
+    finally:
+        session.close()
+
+
+def test_process_financeiro_member_direct_from_disk_nao_grava_ingestion_rows_validas(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = _session()
+    try:
+        monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path))
+        company = Companhia(
+            id=uuid.uuid4(),
+            cnpj_companhia="00000000000191",
+            codigo_cvm=1023,
+            denominacao_social="Banco do Brasil",
+            denominacao_comercial="Banco do Brasil",
+            situacao_registro="ATIVA",
+            data_registro=datetime(2020, 1, 1, tzinfo=UTC).date(),
+            data_constituicao=datetime(1908, 10, 12, tzinfo=UTC).date(),
+            data_inicio_situacao=datetime(2020, 1, 1, tzinfo=UTC).date(),
+            setor_atividade="Bancos",
+            tipo_mercado="Categoria A",
+            categoria_registro="Categoria A",
+            data_inicio_categoria=datetime(2020, 1, 1, tzinfo=UTC).date(),
+            situacao_emissor="ATIVO",
+            data_inicio_situacao_emissor=datetime(2020, 1, 1, tzinfo=UTC).date(),
+            controle_acionario="ESTATAL",
+            endereco={"municipio": "Brasilia"},
+            responsavel={"nome_responsavel": "Fulano"},
+            auditor="KPMG",
+            cnpj_auditor="57755217001281",
+            arquivo_origem="cad.csv",
+            ano_origem=None,
+            linha_origem=2,
+            hash_origem="companhia-hash",
+            criado_em=datetime.now(UTC),
+            sincronizado_em=datetime.now(UTC),
+            alterado_em=datetime.now(UTC),
+        )
+        execucao = ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2026,
+            arquivo="itr_cia_aberta_2026.csv",
+            url="https://example.test/itr_cia_aberta_2026.csv",
+            status="em_execucao",
+        )
+        session.add_all([company, execucao])
+        session.flush()
+        run = IngestionRun(
+            id=uuid.uuid4(),
+            execucao_sincronizacao_id=execucao.id,
+            tipo_fonte="itr",
+            ano=2026,
+            status="em_execucao",
+            phase="profile",
+            started_at=datetime.now(UTC),
+        )
+        session.add(run)
+        session.flush()
+        ingestion_file = IngestionFile(
+            id=uuid.uuid4(),
+            ingestion_run_id=run.id,
+            source_url="https://example.test/itr.zip",
+            source_filename="itr_cia_aberta_2026.zip",
+            content_sha256="zip-hash",
+            content_length_bytes=10,
+            is_zip=True,
+            already_seen_success=False,
+        )
+        session.add(ingestion_file)
+        session.flush()
+        member_path = tmp_path / "itr_cia_aberta_2026.csv"
+        member_path.write_text(
+            "\n".join(
+                [
+                    "CNPJ_CIA;CD_CVM;DT_REFER;VERSAO;DENOM_CIA;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC",
+                    "00.000.000/0001-91;1023;2026-03-31;1;Banco do Brasil;ITR;123;2026-04-01;http://exemplo",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        process_financeiro_member_direct_from_disk(
+            session,
+            execucao=execucao,
+            run=run,
+            ingestion_file=ingestion_file,
+            file_path=str(member_path),
+            member_name=member_path.name,
+            row_kind="itr_documento",
+            member_sha256="member-hash",
+            member_size_bytes=member_path.stat().st_size,
+            encoding="utf-8",
+            delimiter=";",
+            reconcile_required=False,
+            prefixo="itr",
+            tipo_formulario="ITR",
+            ano=2026,
+            promote_enabled=True,
+            contadores={"lidas": 0, "inseridos": 0, "atualizados": 0, "inalterados": 0, "rejeitados": 0},
+            quality_counters={
+                "reason_counts": Counter(),
+                "resolver_methods": Counter(),
+                "top_quarantine_files": Counter(),
+                "provisional_company_count": 0,
+            },
+            seen_by_row_kind={},
+            header_map={},
+            chunk_size=100,
+        )
+        session.commit()
+
+        assert session.query(IngestionRow).count() == 0
+        documento = session.scalar(select(DocumentoFinanceiro))
+        assert documento is not None
+        assert documento.id_documento == 123
+        assert documento.companhia_id == company.id
     finally:
         session.close()
 

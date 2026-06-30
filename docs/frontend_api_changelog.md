@@ -9,6 +9,33 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-06-30 - Direct path financeiro expoe fases e contadores mais precisos para DFP/ITR
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/runs/{run_id}/phases`
+- `GET /ingestion/runs/{run_id}/members`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/cleanup-transient-state`
+
+### Mudanca de comportamento
+
+- members financeiros DFP/ITR passam a reportar fases especificas: `profile`, `normalize_artifact`, `load_typed_staging`, `promote`, `reconcile` e `complete`
+- linhas validas de DFP/ITR nao sao persistidas em `ingestion_rows`; a UI deve usar fases, counters e snapshots de artifacts para progresso operacional
+- `quality_summary` e `metrics` podem incluir `rows_read`, `rows_normalized`, `rows_loaded_to_stage`, `rows_reconciled_deleted`, `typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged` e `typed_stage_copy_loads`
+- a coordenacao de ZIP financeiro limita members ativos por pai, entao uma run ITR/DFP pode permanecer em execucao com poucos filhos ativos por vez; isso e esperado e reduz pressao no worker/banco
+- as filas de ingestion ficam separadas em `ingestion` e `ingestion_control`; materializacao permanece em `analise_materializacao`
+- novo endpoint administrativo `POST /ingestion/runs/{run_id}/cleanup-transient-state` limpa staging transitorio de run `cancelada` ou `falha`, fecha fases/execucoes presas e retorna contadores do que foi removido
+
+### Leitura recomendada pelo frontend
+
+- para progresso de ITR/DFP, priorizar `GET /ingestion/runs/{run_id}/phases` e os counters de `quality_summary`
+- para tela de filhos/members, tratar filhos aguardando como fila pendente normal quando a janela ativa do pai estiver cheia
+- para diagnostico de stuck, considerar `heartbeat_at` e evolucao dos counters da fase atual, nao apenas o status `em_execucao`
+- oferecer limpeza transitoria apenas para operadores e apenas depois de cancelamento/falha, pois o endpoint prepara a run para reconstrução a partir dos artifacts/dados remotos
+
 ## 2026-06-30 - Snapshots operacionais de ingestao passam a expor ponteiros duraveis para artifacts locais
 
 ### Endpoints e superficies com impacto operacional visivel

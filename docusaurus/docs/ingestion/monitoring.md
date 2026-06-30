@@ -18,6 +18,7 @@ Para cada tipo de tela:
 | auditoria do disparo | `GET /ingestion/sincronizacoes` |
 | detalhe da execucao administrativa | `GET /ingestion/sincronizacoes/{id_execucao}` |
 | snapshot global do cluster | `GET /ingestion/operations` |
+| limpeza transitoria de run cancelada/falha | `POST /ingestion/runs/{run_id}/cleanup-transient-state` |
 
 ## `GET /ingestion/runs`
 
@@ -107,6 +108,31 @@ Use este endpoint para:
 - entender retentativas;
 - auditar artifacts de entrada e saida por fase.
 
+Fases esperadas para members financeiros DFP/ITR:
+
+| Fase | Sinal principal |
+| --- | --- |
+| `profile` | CSV identificado e schema validado |
+| `normalize_artifact` | linhas lidas e normalizadas para artifact |
+| `load_typed_staging` | artifact carregado no staging tipado |
+| `promote` | linhas promovidas para tabelas canonicas |
+| `reconcile` | registros obsoletos removidos no escopo do member |
+| `complete` | execucao estabilizada |
+
+Metricas comuns em `metrics` ou `quality_summary`:
+
+- `rows_read`
+- `rows_normalized`
+- `rows_loaded_to_stage`
+- `rows_reconciled_deleted`
+- `typed_stage_rows_loaded`
+- `typed_stage_bytes_loaded`
+- `typed_stage_rows_replaced`
+- `typed_stage_rows_purged`
+- `typed_stage_copy_loads`
+
+Para DFP/ITR, linhas validas nao aparecem em `ingestion_rows`; a leitura operacional deve usar fases, counters e snapshots de artifacts.
+
 ## `GET /ingestion/runs/{run_id}/members`
 
 Inventario paginado dos CSVs de uma run.
@@ -177,6 +203,32 @@ O retorno agrega:
 - `materialization_gate`
 - `active_runs`
 - `recoverable_runs`
+
+## Filas e independencia operacional
+
+Ingestao e materializacao usam filas separadas:
+
+| Fila | Responsabilidade |
+| --- | --- |
+| `ingestion` | processamento pesado de members |
+| `ingestion_control` | coordenacao, finalizacao e recovery de ingestao |
+| `analise_materializacao` | chunks e campanhas de materializacao |
+
+O gate de materializacao bloqueia a execucao de novos chunks de materializacao quando ha ingestao ativa ou pausa manual. Ele nao bloqueia workers de ingestao.
+
+## Limpeza transitoria
+
+`POST /ingestion/runs/{run_id}/cleanup-transient-state` prepara uma run `cancelada` ou `falha` para reconstrução operacional.
+
+O endpoint:
+
+- remove staging generico (`ingestion_rows`) e eventos/quarentena associados a linhas da run;
+- remove staging tipado financeiro;
+- fecha fases ainda abertas como `cancelled`;
+- marca execucoes relacionadas nao finais como `cancelada`;
+- retorna contadores do que foi removido ou fechado.
+
+Ele nao remove dados canonicos promovidos.
 
 Uso recomendado:
 

@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import csv
-import io
 import json
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -191,30 +189,41 @@ def _serialize_copy_value(value: Any) -> str:
     return str(value)
 
 
-def _copy_financeiro_stage_rows_postgres(db: Session, *, payload: Iterable[dict[str, Any]]) -> None:
-    rows = list(payload)
-    if not rows:
-        return
+def _copy_financeiro_stage_rows_postgres(db: Session, *, payload: Iterable[dict[str, Any]]) -> int:
     sa_connection = db.connection()
     proxied = sa_connection.connection
     raw_connection = getattr(proxied, "driver_connection", proxied)
-    buffer = io.StringIO()
-    writer = csv.writer(buffer, delimiter="\t", quotechar='"', lineterminator="\n")
-    for item in rows:
-        writer.writerow([_serialize_copy_value(item.get(column)) for column in _STAGE_COLUMNS])
-    buffer.seek(0)
     copy_sql = f"""
         COPY ingestion_financeiro_stage_rows (
             {", ".join(_STAGE_COLUMNS)}
         )
-        FROM STDIN WITH (FORMAT CSV, DELIMITER E'\\t', NULL '\\N')
+        FROM STDIN
     """
     cursor = raw_connection.cursor()
+    rows_loaded = 0
     try:
         with cursor.copy(copy_sql) as copy:
-            copy.write(buffer.getvalue())
+            for item in payload:
+                copy.write_row([item.get(column) for column in _STAGE_COLUMNS])
+                rows_loaded += 1
     finally:
         cursor.close()
+    return rows_loaded
+
+
+def _iter_stage_payload(
+    *,
+    ingestion_run_id: Any,
+    ingestion_file_member_id: Any,
+    artifact_uri: str,
+) -> Iterator[dict[str, Any]]:
+    for row in iter_normalized_artifact_rows(artifact_uri=artifact_uri):
+        yield _normalize_stage_row(
+            ingestion_run_id=ingestion_run_id,
+            ingestion_file_member_id=ingestion_file_member_id,
+            artifact_uri=artifact_uri,
+            row=row,
+        )
 
 
 def load_financeiro_artifact_to_stage(
@@ -226,28 +235,39 @@ def load_financeiro_artifact_to_stage(
     use_copy: bool | None = None,
 ) -> FinanceiroStageLoadResult:
     rows_replaced = clear_financeiro_stage_rows(db, ingestion_file_member_id=ingestion_file_member_id)
-    payload = [
-        _normalize_stage_row(
-            ingestion_run_id=ingestion_run_id,
-            ingestion_file_member_id=ingestion_file_member_id,
-            artifact_uri=artifact_uri,
-            row=row,
-        )
-        for row in iter_normalized_artifact_rows(artifact_uri=artifact_uri)
-    ]
     should_use_copy = (
         _should_use_postgres_copy(db)
         if use_copy is None
         else (use_copy and _should_use_postgres_copy(db))
     )
     if should_use_copy:
-        _copy_financeiro_stage_rows_postgres(db, payload=payload)
-    elif payload:
-        db.execute(insert(IngestionFinanceiroStageRow), payload)
+        rows_loaded = _copy_financeiro_stage_rows_postgres(
+            db,
+            payload=_iter_stage_payload(
+                ingestion_run_id=ingestion_run_id,
+                ingestion_file_member_id=ingestion_file_member_id,
+                artifact_uri=artifact_uri,
+            ),
+        )
+    else:
+        rows_loaded = 0
+        batch: list[dict[str, Any]] = []
+        for item in _iter_stage_payload(
+            ingestion_run_id=ingestion_run_id,
+            ingestion_file_member_id=ingestion_file_member_id,
+            artifact_uri=artifact_uri,
+        ):
+            batch.append(item)
+            rows_loaded += 1
+            if len(batch) >= 5_000:
+                db.execute(insert(IngestionFinanceiroStageRow), batch)
+                batch = []
+        if batch:
+            db.execute(insert(IngestionFinanceiroStageRow), batch)
     db.flush()
     bytes_loaded = Path(artifact_uri).stat().st_size if Path(artifact_uri).exists() else 0
     return FinanceiroStageLoadResult(
-        rows_loaded=len(payload),
+        rows_loaded=rows_loaded,
         bytes_loaded=bytes_loaded,
         rows_replaced=rows_replaced,
         copy_used=should_use_copy,

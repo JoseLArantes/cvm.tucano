@@ -410,7 +410,12 @@ class IngestionOperationalError(BaseModel):
 
 class IngestionRunPhaseExecutionResumo(BaseModel):
     id: str = Field(description="ID do registro de fase.")
-    phase: str = Field(description="Nome da fase operacional.")
+    phase: str = Field(
+        description=(
+            "Nome da fase operacional. Para DFP/ITR financeiro, valores esperados incluem "
+            "`profile`, `normalize_artifact`, `load_typed_staging`, `promote`, `reconcile` e `complete`."
+        )
+    )
     status: str = Field(description="Status da fase no ledger operacional.")
     attempt: int = Field(description="Numero da tentativa desta fase para a mesma run.")
     task_id: str | None = Field(default=None, description="Task Celery associada a esta fase, quando conhecida.")
@@ -432,7 +437,13 @@ class IngestionRunPhaseExecutionResumo(BaseModel):
         default=None,
         description="URI local do artifact de saida produzido pela fase, quando registrado no manifesto operacional.",
     )
-    metrics: dict[str, Any] | None = Field(default=None, description="Snapshot resumido de metricas persistidas para a fase.")
+    metrics: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Snapshot resumido de metricas persistidas para a fase. Pode incluir `rows_read`, "
+            "`rows_normalized`, `rows_loaded_to_stage`, `rows_reconciled_deleted` e `artifacts`."
+        ),
+    )
 
 
 class ListaIngestionRunPhaseExecutions(BaseModel):

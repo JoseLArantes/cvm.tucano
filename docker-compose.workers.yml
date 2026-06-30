@@ -1,7 +1,7 @@
 services:
   cvm_worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q celery
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
     env_file:
       - .env
     mem_limit: ${WORKER_MEM_LIMIT:-4g}

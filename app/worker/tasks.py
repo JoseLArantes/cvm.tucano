@@ -1490,24 +1490,6 @@ def sincronizar_member_internal(
         member_size = member_path.stat().st_size
 
         row_kind = get_row_kind(tipo_fonte, ano, member_name)
-
-        member = stage_csv_payload_streaming_from_disk(
-            db,
-            ingestion_run=run,
-            ingestion_file=ingestion_file,
-            file_path=str(member_path),
-            member_name=member_name,
-            arquivo_origem=member_name,
-            ano_origem=ano,
-            row_kind=row_kind,
-            member_sha256=member_sha256,
-            member_size_bytes=member_size,
-            encoding=encoding,
-            delimiter=delimiter,
-            chunk_size=_settings.ingestion_stage_batch_size,
-        )
-        db.commit()
-        db.refresh(member)
         reconcile_required = False
         if tipo_fonte in ("dfp", "itr", "fre"):
             from app.services.ingestion.lifecycle import previous_member_snapshot
@@ -1537,9 +1519,65 @@ def sincronizar_member_internal(
         }
         seen_by_row_kind: dict[str, Any] = {}
 
-        if tipo_fonte in ("dfp", "itr"):
-            from app.services.ingestion.financeiro import _process_financeiro_member
+        financeiro_direct_path = (
+            tipo_fonte in {"dfp", "itr"} and _settings.ingestion_financeiro_direct_path_enabled
+        )
+
+        if financeiro_direct_path:
+            from app.services.ingestion.financeiro import process_financeiro_member_direct_from_disk
+
             quality_counters: dict[str, Any] = {
+                "reason_counts": Counter(),
+                "resolver_methods": Counter(),
+                "top_quarantine_files": Counter(),
+                "provisional_company_count": 0,
+            }
+            _, _, member = process_financeiro_member_direct_from_disk(
+                db,
+                execucao=execucao,
+                run=run,
+                ingestion_file=ingestion_file,
+                file_path=str(member_path),
+                member_name=member_name,
+                row_kind=row_kind,
+                member_sha256=member_sha256,
+                member_size_bytes=member_size,
+                encoding=encoding,
+                delimiter=delimiter,
+                reconcile_required=reconcile_required,
+                prefixo=tipo_fonte,
+                tipo_formulario=tipo_fonte.upper(),
+                ano=ano,
+                promote_enabled=_settings.ingestion_promote_enabled,
+                contadores=contadores,
+                quality_counters=quality_counters,
+                seen_by_row_kind=seen_by_row_kind,
+                header_map=header_map,
+                chunk_size=_settings.ingestion_promote_batch_size,
+            )
+        else:
+            member = stage_csv_payload_streaming_from_disk(
+                db,
+                ingestion_run=run,
+                ingestion_file=ingestion_file,
+                file_path=str(member_path),
+                member_name=member_name,
+                arquivo_origem=member_name,
+                ano_origem=ano,
+                row_kind=row_kind,
+                member_sha256=member_sha256,
+                member_size_bytes=member_size,
+                encoding=encoding,
+                delimiter=delimiter,
+                chunk_size=_settings.ingestion_stage_batch_size,
+            )
+            db.commit()
+            db.refresh(member)
+
+        if tipo_fonte in ("dfp", "itr") and not financeiro_direct_path:
+            from app.services.ingestion.financeiro import _process_financeiro_member
+
+            quality_counters = {
                 "reason_counts": Counter(),
                 "resolver_methods": Counter(),
                 "top_quarantine_files": Counter(),
@@ -1756,11 +1794,25 @@ def disparar_dependentes_task(
             )
         ).all()
 
-        dep_signatures = []
-        for c in children:
-            if c.status == "skipped":
-                continue
+        final_statuses = _STATUS_FINAL_EXECUCAO | {"skipped", "sem_alteracao", "sucesso_com_alerta", "quality_fail"}
+        active_statuses = {"agendada", "em_execucao"}
+        pending_children = [c for c in children if c.status not in final_statuses and c.status not in active_statuses]
+        active_children = [c for c in children if c.status in active_statuses]
+        if active_children:
+            return {
+                "status": "waiting_active_members",
+                "parent_execucao_id": parent_execucao_id,
+                "active_members": str(len(active_children)),
+            }
 
+        window_size = (
+            _settings.ingestion_max_active_members_per_parent
+            if execucao.tipo_fonte in {"dfp", "itr"}
+            else max(len(pending_children), 1)
+        )
+        selected_children = pending_children[:window_size]
+        dep_signatures = []
+        for c in selected_children:
             c.status = "agendada"
 
             sig = sincronizar_member_task.si(
@@ -1778,8 +1830,9 @@ def disparar_dependentes_task(
         if dep_signatures:
             workflow = chord(
                 group(dep_signatures),
-                finalizar_sincronizacao_zip_task.si(
+                disparar_dependentes_task.si(
                     parent_execucao_id=parent_execucao_id,
+                    force_reimport=force_reimport,
                     pending_update_id=pending_update_id,
                 ),
             )

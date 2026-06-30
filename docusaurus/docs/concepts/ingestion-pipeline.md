@@ -17,12 +17,19 @@ Para fontes anuais, o artefato principal e o ZIP. O trabalho real, porem, e deci
 ## Fluxo atual
 
 ```mermaid
-flowchart LR
+flowchart TD
     A["Disparo administrativo"] --> B["acquire"]
-    B --> C["stage"]
-    C --> D["promote"]
-    D --> E["reconcile"]
-    E --> F["complete"]
+    B --> C{"Fonte/member financeiro DFP ou ITR?"}
+    C -->|Sim| D["profile"]
+    D --> E["normalize_artifact"]
+    E --> F["load_typed_staging"]
+    F --> G["promote"]
+    G --> H["reconcile"]
+    H --> I["complete"]
+    C -->|Nao| J["stage"]
+    J --> K["promote"]
+    K --> L["reconcile"]
+    L --> I
 ```
 
 ### `acquire`
@@ -31,6 +38,33 @@ flowchart LR
 - decide se o artefato precisa ser baixado;
 - registra snapshot do artefato;
 - prepara a run para o restante do fluxo.
+
+### `profile`
+
+Usada no direct path financeiro DFP/ITR.
+
+- identifica header, encoding, delimiter, tamanho e quantidade de linhas;
+- registra ou atualiza o member;
+- valida o schema esperado para o `row_kind`;
+- nao grava linhas validas em `ingestion_rows`.
+
+### `normalize_artifact`
+
+Usada no direct path financeiro DFP/ITR.
+
+- le o CSV bruto do member em streaming;
+- normaliza linhas validas;
+- resolve companhia com caches carregados na sessao;
+- grava artifact normalizado `typed_csv`;
+- envia linhas rejeitadas para quarentena.
+
+### `load_typed_staging`
+
+Usada no direct path financeiro DFP/ITR.
+
+- carrega o artifact normalizado para `ingestion_financeiro_stage_rows`;
+- usa `COPY` streaming em PostgreSQL;
+- registra contadores de linhas e bytes carregados.
 
 ### `stage`
 
@@ -53,6 +87,18 @@ flowchart LR
 - remove registros promovidos que ficaram obsoletos para o escopo reprocessado;
 - atualiza counters operacionais da run.
 
+## Direct path financeiro
+
+DFP e ITR usam o direct path financeiro para members validos. O objetivo e manter PostgreSQL como base canonica sem duplicar milhoes de linhas validas em staging JSON.
+
+Garantias operacionais:
+
+- linhas validas nao sao persistidas em `ingestion_rows`;
+- linhas rejeitadas ainda entram em quarentena com contexto minimo;
+- artifacts normalizados preservam replay e auditoria;
+- staging tipado e purgado ao final do member;
+- o ZIP financeiro despacha members em janela ativa limitada por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, default `2`.
+
 ## Reuso por member
 
 Para fontes anuais, a decisao de trabalho e feita por member:
@@ -61,7 +107,7 @@ Para fontes anuais, a decisao de trabalho e feita por member:
 flowchart TD
     A["Member atual"] --> B{"member_sha256 reaproveitavel?"}
     B -->|Sim| C["member_skipped"]
-    B -->|Nao| D["stage -> promote -> reconcile"]
+    B -->|Nao| D["profile/normalize_artifact ou stage -> promote -> reconcile"]
 ```
 
 Campos que explicam essa decisao:
@@ -78,13 +124,23 @@ O pipeline suporta artifact normalizado por member.
 
 Formato atual:
 
-- `typed_csv` por default
+- `typed_csv` por default para DFP/ITR
 - `parquet` como opcional de benchmark
 
 Decisao atual do projeto:
 
 - manter `typed_csv` como default no ambiente Docker medido;
 - usar `parquet` apenas quando benchmark por fonte/member justificar.
+
+## Filas Celery
+
+As filas operacionais sao isoladas:
+
+- `ingestion`: processamento pesado de members;
+- `ingestion_control`: coordenacao, finalizadores e recovery de ingestao;
+- `analise_materializacao`: materializacao analitica.
+
+Workers de materializacao nao devem consumir filas de ingestao. Workers de ingestao podem manter a fila historica `celery` apenas para drenar mensagens legadas ja publicadas.
 
 ## Quarentena
 
@@ -124,11 +180,14 @@ O pipeline suporta:
 
 - cancelamento administrativo por execucao, run ou member;
 - recovery administrativo de run stale ou com erro recuperavel;
+- limpeza transitoria de run cancelada ou falha;
 - replay de run;
 - replay de quarentena;
 - rebuild de identidade.
 
 O endpoint agregado `GET /ingestion/operations` existe para consumidores desacoplados que precisam de um snapshot unico do cluster, das filas e do gate de materializacao.
+
+`POST /ingestion/runs/{run_id}/cleanup-transient-state` remove staging e fecha fases presas de uma run `cancelada` ou `falha`, mantendo dados canonicos promovidos.
 
 ## Benchmarks
 
