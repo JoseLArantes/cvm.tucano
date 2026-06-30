@@ -1328,13 +1328,11 @@ def write_validation_result(
     natural_key: dict[str, Any] | None = None,
     created_by: str = "validation",
 ) -> IngestionRow:
-    if result.status in {"valid", "ignored_duplicate"}:
-        return ingestion_row
     normalized_hash = None
     normalized_data_payload = None
     natural_key_payload = None
     if normalized_data is not None:
-        normalized_hash = gerar_hash_canonico(normalized_data)
+        normalized_hash = gerar_hash_canonico(normalized_data, campos_ignorados={"linha_origem"})
         normalized_data_payload = normalizar_chave_natural(normalized_data)
     if natural_key is not None:
         natural_key_payload = normalizar_chave_natural(natural_key)

@@ -7,6 +7,7 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.ingestion import IngestionRowEvent
+from app.services.ingestion.normalizers import gerar_hash_canonico
 from app.services.ingestion.quarantine import _normalizar_reason_code
 from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 from app.services.ingestion.validation import (
@@ -286,6 +287,41 @@ def test_write_validation_result_updates_row_and_event_and_member_schema() -> No
         assert member.schema_status == "valid"
         event = session.query(IngestionRowEvent).one()
         assert event.event_type == "quarantined"
+    finally:
+        session.close()
+
+
+def test_write_validation_result_persists_valid_row_metadata() -> None:
+    session = _session()
+    try:
+        _member, row = _staged_row(session)
+        result = ValidationResult(
+            status="valid",
+            reason_code=None,
+            severity="info",
+            details={"duplicate_status": "new"},
+            repairable=False,
+        )
+        normalized_data = {"tipo_formulario": "DFP", "id_documento": 10}
+        natural_key = {"tipo_formulario": "DFP", "id_documento": 10}
+
+        write_validation_result(
+            session,
+            ingestion_row=row,
+            result=result,
+            normalized_data=normalized_data,
+            natural_key=natural_key,
+        )
+        session.commit()
+        session.refresh(row)
+
+        assert row.validation_status == "valid"
+        assert row.validation_reason_code is None
+        assert row.normalized_data == normalized_data
+        assert row.natural_key == natural_key
+        assert row.normalized_hash == gerar_hash_canonico(normalized_data, campos_ignorados={"linha_origem"})
+        event = session.query(IngestionRowEvent).one()
+        assert event.event_type == "validated"
     finally:
         session.close()
 
