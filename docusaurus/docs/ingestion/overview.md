@@ -175,6 +175,15 @@ O repositório mantém dois scripts complementares para medir desempenho da inge
 
 O formato default do artifact normalizado continua sendo `typed_csv`. O formato `parquet` permanece opcional e só deve ser ativado com `INGESTION_NORMALIZED_ARTIFACT_FORMAT=parquet` quando a dependência `pyarrow` estiver instalada e o benchmark mostrar ganho real para a fonte avaliada.
 
+Fluxo recomendado para a decisão:
+
+```bash
+pip install -e ".[parquet]"
+python -m tests.scripts.benchmark_normalized_artifacts --rows 100000
+```
+
+O benchmark também aceita `--output json` para automações e retorna uma recomendação simples de default com base em tempo agregado de escrita/leitura, memória pico e tamanho do artifact.
+
 ## Rerun anual inteligente
 
 Quando uma sincronização anual precisa ser refeita depois de falha parcial, o pipeline não depende apenas do status final do ZIP pai. Ele observa o histórico de cada member:

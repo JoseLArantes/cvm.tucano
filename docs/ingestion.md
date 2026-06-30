@@ -1133,6 +1133,20 @@ Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo
 - benchmark ponta a ponta por member: `tests/scripts/benchmark_ingestion_member.py`
 - benchmark de artifact normalizado: `tests/scripts/benchmark_normalized_artifacts.py`
 
+Para avaliar `parquet` com dependencia opcional instalada:
+
+```bash
+pip install -e ".[parquet]"
+python -m tests.scripts.benchmark_normalized_artifacts --rows 100000
+python -m tests.scripts.benchmark_normalized_artifacts --rows 100000 --output json
+```
+
+Leitura operacional do resultado:
+
+- se `parquet` estiver `unavailable`, o ambiente nao tem `pyarrow` e a decisao continua sendo `typed_csv`;
+- se `parquet` for menor em disco, nao piorar memoria pico e reduzir o tempo agregado de escrita + leitura, ele vira candidato real para default;
+- caso contrario, `typed_csv` continua sendo o formato recomendado.
+
 ### Tuning operacional atual
 
 As queries mais quentes do pipeline contam com indices compostos dedicados para:

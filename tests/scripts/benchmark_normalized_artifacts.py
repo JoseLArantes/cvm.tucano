@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import tempfile
 import tracemalloc
 import uuid
@@ -129,6 +130,45 @@ def _print_summary(results: list[BenchmarkResult]) -> None:
         )
 
 
+def _recommend_default(results: list[BenchmarkResult]) -> str:
+    typed_csv = next((result for result in results if result.artifact_format == "typed_csv"), None)
+    parquet = next((result for result in results if result.artifact_format == "parquet"), None)
+    if typed_csv is None:
+        return "Sem baseline typed_csv; manter typed_csv como default."
+    if parquet is None or parquet.status != "ok":
+        return "Parquet indisponivel ou sem benchmark valido; manter typed_csv como default."
+    assert typed_csv.size_bytes is not None
+    assert parquet.size_bytes is not None
+    parquet_faster = parquet.elapsed_write_seconds + parquet.elapsed_read_seconds < (
+        typed_csv.elapsed_write_seconds + typed_csv.elapsed_read_seconds
+    )
+    parquet_smaller = parquet.size_bytes < typed_csv.size_bytes
+    parquet_memory_ok = parquet.peak_memory_bytes <= typed_csv.peak_memory_bytes
+    if parquet_faster and parquet_smaller and parquet_memory_ok:
+        return "Parquet venceu o benchmark local; candidato a default para a fonte avaliada."
+    return "Typed CSV continua melhor ou mais estavel; manter typed_csv como default."
+
+
+def _print_json(results: list[BenchmarkResult]) -> None:
+    payload = {
+        "results": [
+            {
+                "artifact_format": result.artifact_format,
+                "rows": result.rows,
+                "elapsed_write_seconds": result.elapsed_write_seconds,
+                "elapsed_read_seconds": result.elapsed_read_seconds,
+                "peak_memory_bytes": result.peak_memory_bytes,
+                "size_bytes": result.size_bytes,
+                "status": result.status,
+                "detail": result.detail,
+            }
+            for result in results
+        ],
+        "recommendation": _recommend_default(results),
+    }
+    print(json.dumps(payload, ensure_ascii=True, indent=2))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark de artifact normalizado typed_csv vs parquet.")
     parser.add_argument("--rows", type=int, default=100_000)
@@ -137,6 +177,11 @@ def main() -> None:
         nargs="+",
         choices=["typed_csv", "parquet"],
         default=["typed_csv", "parquet"],
+    )
+    parser.add_argument(
+        "--output",
+        choices=["table", "json"],
+        default="table",
     )
     args = parser.parse_args()
 
@@ -149,7 +194,12 @@ def main() -> None:
             )
             for artifact_format in args.formats
         ]
+    if args.output == "json":
+        _print_json(results)
+        return
     _print_summary(results)
+    print()
+    print(_recommend_default(results))
 
 
 if __name__ == "__main__":
