@@ -15,7 +15,7 @@ from sqlalchemy.orm.util import identity_key
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
-from app.models.ingestion import IngestionFileMember, IngestionRow, IngestionRun
+from app.models.ingestion import IngestionFileMember, IngestionFinanceiroStageRow, IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.financeiro_mapas import arquivos_demonstracao
 from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
@@ -349,40 +349,21 @@ def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     return dados_promocao
 
 
-def _promote_financeiro_chunk(
+def _promote_financeiro_payloads_internal(
     db: Session,
     *,
     row_kind: str,
-    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    dados_promovidos: list[dict[str, Any]],
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> None:
-    safe_promote_chunk(
-        db,
-        promote_func=_promote_financeiro_chunk_internal,
-        linhas_promovidas=linhas_promovidas,
-        execucao_id=execucao_id,
-        contadores=contadores,
-        registrar_quarentena_fn=_registrar_quarentena,
-        row_kind=row_kind,
-    )
-
-
-def _promote_financeiro_chunk_internal(
-    db: Session,
-    *,
-    row_kind: str,
-    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
-    execucao_id: Any,
-    contadores: dict[str, int],
-) -> None:
-    if not linhas_promovidas:
+    if not dados_promovidos:
         return
 
     model, entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
     agora = _agora()
-    preparados = [(row, _preparar_dados_promocao(dados)) for row, dados in linhas_promovidas]
-    chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for _, dados in preparados))
+    preparados = [_preparar_dados_promocao(dados) for dados in dados_promovidos]
+    chaves = list(dict.fromkeys(_key_tuple(dados, campos_chave) for dados in preparados))
     existentes_hash_por_chave = _load_existing_row_hashes(
         db,
         model=model,
@@ -392,7 +373,7 @@ def _promote_financeiro_chunk_internal(
     chaves_com_mudanca = list(
         dict.fromkeys(
             chave
-            for _row, dados in preparados
+            for dados in preparados
             if (chave := _key_tuple(dados, campos_chave)) in existentes_hash_por_chave
             and existentes_hash_por_chave[chave]["hash_origem"] != dados["hash_origem"]
         )
@@ -409,7 +390,7 @@ def _promote_financeiro_chunk_internal(
     historicos: list[Any] = []
     chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
     payload_atualizacao: dict[Any, dict[str, Any]] = {}
-    for _row, dados in preparados:
+    for dados in preparados:
         chave = _key_tuple(dados, campos_chave)
         existente_lote = chaves_no_lote.get(chave)
         if existente_lote is not None:
@@ -529,6 +510,42 @@ def _promote_financeiro_chunk_internal(
             db.execute(insert(HistoricoAlteracaoCampo), batch)
 
 
+def _promote_financeiro_chunk(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    safe_promote_chunk(
+        db,
+        promote_func=_promote_financeiro_chunk_internal,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+        registrar_quarentena_fn=_registrar_quarentena,
+        row_kind=row_kind,
+    )
+
+
+def _promote_financeiro_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    _promote_financeiro_payloads_internal(
+        db,
+        row_kind=row_kind,
+        dados_promovidos=[dados for _row, dados in linhas_promovidas],
+        execucao_id=execucao_id,
+        contadores=contadores,
+    )
+
+
 def _promote_financeiro_row(
     db: Session,
     *,
@@ -607,6 +624,108 @@ def _promote_financeiro_row(
         execucao_id=execucao_id,
         contadores=contadores,
     )
+
+
+def _stage_row_to_promocao_payload(stage_row: IngestionFinanceiroStageRow) -> dict[str, Any]:
+    return {
+        "companhia_id": stage_row.companhia_id,
+        "tipo_formulario": stage_row.tipo_formulario,
+        "cnpj_companhia": stage_row.cnpj_companhia,
+        "codigo_cvm": stage_row.codigo_cvm,
+        "data_referencia": stage_row.data_referencia,
+        "versao": stage_row.versao,
+        "denominacao_companhia": stage_row.denominacao_companhia,
+        "categoria_documento": stage_row.categoria_documento,
+        "id_documento": stage_row.id_documento,
+        "data_recebimento": stage_row.data_recebimento,
+        "link_documento": stage_row.link_documento,
+        "tipo_demonstracao": stage_row.tipo_demonstracao,
+        "escopo_demonstracao": stage_row.escopo_demonstracao,
+        "grupo_demonstracao": stage_row.grupo_demonstracao,
+        "moeda": stage_row.moeda,
+        "escala_moeda": stage_row.escala_moeda,
+        "ordem_exercicio": stage_row.ordem_exercicio,
+        "data_inicio_exercicio": stage_row.data_inicio_exercicio,
+        "data_fim_exercicio": stage_row.data_fim_exercicio,
+        "codigo_conta": stage_row.codigo_conta,
+        "coluna_df": stage_row.coluna_df or "",
+        "descricao_conta": stage_row.descricao_conta,
+        "valor_conta": stage_row.valor_conta,
+        "conta_fixa": stage_row.conta_fixa,
+        "quantidade_acoes_ordinarias_capital_integralizado": stage_row.quantidade_acoes_ordinarias_capital_integralizado,
+        "quantidade_acoes_preferenciais_capital_integralizado": stage_row.quantidade_acoes_preferenciais_capital_integralizado,
+        "quantidade_total_acoes_capital_integralizado": stage_row.quantidade_total_acoes_capital_integralizado,
+        "quantidade_acoes_ordinarias_tesouraria": stage_row.quantidade_acoes_ordinarias_tesouraria,
+        "quantidade_acoes_preferenciais_tesouraria": stage_row.quantidade_acoes_preferenciais_tesouraria,
+        "quantidade_total_acoes_tesouraria": stage_row.quantidade_total_acoes_tesouraria,
+        "tipo_relatorio_auditor": stage_row.tipo_relatorio_auditor,
+        "tipo_parecer_declaracao": stage_row.tipo_parecer_declaracao,
+        "numero_item_parecer_declaracao": stage_row.numero_item_parecer_declaracao,
+        "texto_parecer_declaracao": stage_row.texto_parecer_declaracao,
+        "arquivo_origem": stage_row.arquivo_origem,
+        "ano_origem": stage_row.ano_origem,
+        "linha_origem": stage_row.linha_origem,
+    }
+
+
+def _iter_financeiro_stage_chunks(
+    db: Session,
+    *,
+    ingestion_file_member_id: Any,
+    row_kind: str,
+    chunk_size: int,
+) -> Iterable[list[IngestionFinanceiroStageRow]]:
+    last_line = 0
+    while True:
+        query = (
+            select(IngestionFinanceiroStageRow)
+            .where(
+                IngestionFinanceiroStageRow.ingestion_file_member_id == ingestion_file_member_id,
+                IngestionFinanceiroStageRow.row_kind == row_kind,
+                IngestionFinanceiroStageRow.linha_origem > last_line,
+            )
+            .order_by(IngestionFinanceiroStageRow.linha_origem.asc())
+            .limit(chunk_size)
+        )
+        chunk = list(db.execute(query).scalars())
+        if not chunk:
+            break
+        yield chunk
+        last_line = chunk[-1].linha_origem
+        for item in chunk:
+            db.expunge(item)
+
+
+def _promote_financeiro_member_from_stage(
+    db: Session,
+    *,
+    member_id: Any,
+    execucao_id: Any,
+    contadores: dict[str, int],
+    chunk_size: int,
+) -> None:
+    row_kinds = list(
+        db.execute(
+            select(IngestionFinanceiroStageRow.row_kind)
+            .where(IngestionFinanceiroStageRow.ingestion_file_member_id == member_id)
+            .distinct()
+            .order_by(IngestionFinanceiroStageRow.row_kind.asc())
+        ).scalars()
+    )
+    for row_kind in row_kinds:
+        for chunk in _iter_financeiro_stage_chunks(
+            db,
+            ingestion_file_member_id=member_id,
+            row_kind=row_kind,
+            chunk_size=chunk_size,
+        ):
+            _promote_financeiro_payloads_internal(
+                db,
+                row_kind=row_kind,
+                dados_promovidos=[_stage_row_to_promocao_payload(item) for item in chunk],
+                execucao_id=execucao_id,
+                contadores=contadores,
+            )
 
 
 def _process_financeiro_rows(
@@ -839,6 +958,7 @@ def _process_financeiro_member(
     resolver_methods = quality_counters.setdefault("resolver_methods", Counter())
     top_quarantine_files = quality_counters.setdefault("top_quarantine_files", Counter())
     quality_counters.setdefault("provisional_company_count", 0)
+    typed_staging_enabled = get_settings().ingestion_financeiro_typed_staging_enabled
     member_row_kind = db.scalar(
         select(IngestionRow.row_kind)
         .where(IngestionRow.ingestion_file_member_id == member.id)
@@ -1059,11 +1179,11 @@ def _process_financeiro_member(
                     **dados,
                 }
             )
-            if promote_enabled:
-                model, _, _, _ = _financeiro_promotion_spec(row_kind)
-                current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
+            model, _, _, _ = _financeiro_promotion_spec(row_kind)
+            current_row_kinds_by_model.setdefault(model, set()).add(row_kind)
+            if promote_enabled and not typed_staging_enabled:
                 linhas_promovidas.append((row, dados))
-            else:
+            elif not promote_enabled:
                 contadores["inalterados"] += 1
             if row_kind.endswith("_documento"):
                 if resolver_result.companhia_id is not None:
@@ -1099,6 +1219,14 @@ def _process_financeiro_member(
                 ingestion_run_id=run_id,
                 ingestion_file_member_id=member.id,
                 artifact_uri=str(artifact["uri"]),
+            )
+        if promote_enabled:
+            _promote_financeiro_member_from_stage(
+                db,
+                member_id=member.id,
+                execucao_id=execucao_id,
+                contadores=contadores,
+                chunk_size=chunk_size,
             )
     for artifact in normalized_artifacts.values():
         record_phase_artifact(
