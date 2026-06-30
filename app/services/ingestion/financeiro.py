@@ -49,6 +49,7 @@ from app.services.ingestion.staging import (
     update_run_state,
 )
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary_snapshot
+from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
 from app.services.ingestion.validation import (
     build_natural_key,
     classify_duplicate,
@@ -1090,6 +1091,15 @@ def _process_financeiro_member(
         row_kind: writer.close()
         for row_kind, writer in normalized_writers.items()
     }
+    settings = get_settings()
+    if settings.ingestion_financeiro_typed_staging_enabled:
+        for artifact in normalized_artifacts.values():
+            load_financeiro_artifact_to_stage(
+                db,
+                ingestion_run_id=run_id,
+                ingestion_file_member_id=member.id,
+                artifact_uri=str(artifact["uri"]),
+            )
     for artifact in normalized_artifacts.values():
         record_phase_artifact(
             db,

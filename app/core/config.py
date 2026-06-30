@@ -151,6 +151,10 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
     )
+    ingestion_financeiro_typed_staging_enabled: bool = Field(
+        default=True,
+        alias="INGESTION_FINANCEIRO_TYPED_STAGING_ENABLED",
+    )
     ingestion_member_payload_db_fallback_enabled: bool = Field(
         default=False,
         alias="INGESTION_MEMBER_PAYLOAD_DB_FALLBACK_ENABLED",

@@ -1,8 +1,22 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -405,3 +419,85 @@ class IngestionFileMemberPayload(Base):
         Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="CASCADE"), primary_key=True
     )
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class IngestionFinanceiroStageRow(Base):
+    __tablename__ = "ingestion_financeiro_stage_rows"
+    __table_args__ = (
+        Index(
+            "ix_ing_fin_stage_run_member_row_kind_line",
+            "ingestion_run_id",
+            "ingestion_file_member_id",
+            "row_kind",
+            "linha_origem",
+        ),
+        Index(
+            "ix_ing_fin_stage_member_hash",
+            "ingestion_file_member_id",
+            "normalized_hash",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("ingestion_runs.id"), index=True, nullable=False)
+    ingestion_file_member_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ingestion_file_members.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    artifact_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
+    row_kind: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    arquivo_origem: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
+    linha_origem: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalized_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
+    natural_key: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    tipo_formulario: Mapped[str | None] = mapped_column(String(10), index=True)
+    cnpj_companhia: Mapped[str | None] = mapped_column(String(14), index=True)
+    codigo_cvm: Mapped[int | None] = mapped_column(Integer, index=True)
+    data_referencia: Mapped[date | None] = mapped_column(Date, index=True)
+    versao: Mapped[int | None] = mapped_column(Integer, index=True)
+    denominacao_companhia: Mapped[str | None] = mapped_column(String(255))
+
+    categoria_documento: Mapped[str | None] = mapped_column(String(255))
+    id_documento: Mapped[int | None] = mapped_column(Integer, index=True)
+    data_recebimento: Mapped[date | None] = mapped_column(Date)
+    link_documento: Mapped[str | None] = mapped_column(String(1000))
+
+    tipo_demonstracao: Mapped[str | None] = mapped_column(String(80), index=True)
+    escopo_demonstracao: Mapped[str | None] = mapped_column(String(20), index=True)
+    grupo_demonstracao: Mapped[str | None] = mapped_column(String(255))
+    moeda: Mapped[str | None] = mapped_column(String(20))
+    escala_moeda: Mapped[str | None] = mapped_column(String(50))
+    ordem_exercicio: Mapped[str | None] = mapped_column(String(20))
+    data_inicio_exercicio: Mapped[date | None] = mapped_column(Date)
+    data_fim_exercicio: Mapped[date | None] = mapped_column(Date)
+    codigo_conta: Mapped[str | None] = mapped_column(String(40), index=True)
+    coluna_df: Mapped[str | None] = mapped_column(Text)
+    descricao_conta: Mapped[str | None] = mapped_column(Text)
+    valor_conta: Mapped[Any | None] = mapped_column(Numeric(38, 10))
+    conta_fixa: Mapped[bool | None] = mapped_column(Boolean)
+
+    quantidade_acoes_ordinarias_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_preferenciais_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_total_acoes_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_ordinarias_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_preferenciais_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_total_acoes_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+
+    tipo_relatorio_auditor: Mapped[str | None] = mapped_column(String(255))
+    tipo_parecer_declaracao: Mapped[str | None] = mapped_column(String(255))
+    numero_item_parecer_declaracao: Mapped[str | None] = mapped_column(String(100))
+    texto_parecer_declaracao: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

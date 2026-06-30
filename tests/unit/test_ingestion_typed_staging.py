@@ -1,0 +1,234 @@
+import tempfile
+import uuid
+from datetime import UTC, datetime
+
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.core.config import get_settings
+from app.db.base import Base
+from app.models import companhia, ingestion  # noqa: F401
+from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionFinanceiroStageRow, IngestionRun
+from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
+from app.services.ingestion.typed_staging import load_financeiro_artifact_to_stage
+
+
+def _session() -> Session:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    local_session = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False)
+    return local_session()
+
+
+def test_load_financeiro_artifact_to_stage_persists_typed_rows(monkeypatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            run = IngestionRun(
+                id=uuid.uuid4(),
+                tipo_fonte="itr",
+                ano=2026,
+                status="em_execucao",
+                phase="promote",
+                started_at=datetime.now(UTC),
+            )
+            session.add(run)
+            session.flush()
+            ingestion_file = IngestionFile(
+                id=uuid.uuid4(),
+                ingestion_run_id=run.id,
+                source_url="https://example.test/itr.zip",
+                source_filename="itr_cia_aberta_2026.zip",
+                content_sha256="zip-hash",
+                content_length_bytes=10,
+                is_zip=True,
+                already_seen_success=False,
+            )
+            session.add(ingestion_file)
+            session.flush()
+            member = IngestionFileMember(
+                id=uuid.uuid4(),
+                ingestion_file_id=ingestion_file.id,
+                member_name="itr_cia_aberta_BPA_con_2026.csv",
+                member_sha256="member-hash",
+                member_size_bytes=100,
+                encoding="utf-8",
+                delimiter=";",
+                header=["row_kind"],
+                row_count=1,
+                schema_status="ok",
+            )
+            session.add(member)
+            session.flush()
+
+            writer = NormalizedArtifactWriter(
+                run_id=str(run.id),
+                member_id=str(member.id),
+                member_name=member.member_name,
+                row_kind="itr_demonstracao",
+            )
+            writer.write_row(
+                {
+                    "row_kind": "itr_demonstracao",
+                    "linha_origem": 2,
+                    "arquivo_origem": member.member_name,
+                    "ano_origem": 2026,
+                    "companhia_id": "",
+                    "normalized_hash": "hash-a",
+                    "natural_key": {"codigo_conta": "1.01"},
+                    "tipo_formulario": "ITR",
+                    "cnpj_companhia": "00000000000191",
+                    "codigo_cvm": 1023,
+                    "data_referencia": "2026-03-31",
+                    "versao": 1,
+                    "denominacao_companhia": "Banco do Brasil",
+                    "tipo_demonstracao": "BPA",
+                    "escopo_demonstracao": "consolidado",
+                    "grupo_demonstracao": "DF Consolidado",
+                    "moeda": "BRL",
+                    "escala_moeda": "MIL",
+                    "ordem_exercicio": "ULT",
+                    "data_inicio_exercicio": "2026-01-01",
+                    "data_fim_exercicio": "2026-03-31",
+                    "codigo_conta": "1.01",
+                    "coluna_df": "valor",
+                    "descricao_conta": "Caixa",
+                    "valor_conta": "100.50",
+                    "conta_fixa": "true",
+                }
+            )
+            artifact = writer.close()
+
+            inserted = load_financeiro_artifact_to_stage(
+                session,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                artifact_uri=str(artifact["uri"]),
+                use_copy=False,
+            )
+            session.commit()
+
+            row = session.scalar(select(IngestionFinanceiroStageRow))
+
+            assert inserted == 1
+            assert row is not None
+            assert row.row_kind == "itr_demonstracao"
+            assert row.cnpj_companhia == "00000000000191"
+            assert row.codigo_cvm == 1023
+            assert row.escala_moeda == "MIL"
+            assert str(row.valor_conta) == "100.5000000000"
+            assert row.natural_key == {"codigo_conta": "1.01"}
+    finally:
+        session.close()
+
+
+def test_load_financeiro_artifact_to_stage_replaces_previous_member_rows(monkeypatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            run = IngestionRun(
+                id=uuid.uuid4(),
+                tipo_fonte="itr",
+                ano=2026,
+                status="em_execucao",
+                phase="promote",
+                started_at=datetime.now(UTC),
+            )
+            session.add(run)
+            session.flush()
+            ingestion_file = IngestionFile(
+                id=uuid.uuid4(),
+                ingestion_run_id=run.id,
+                source_url="https://example.test/itr.zip",
+                source_filename="itr_cia_aberta_2026.zip",
+                content_sha256="zip-hash",
+                content_length_bytes=10,
+                is_zip=True,
+                already_seen_success=False,
+            )
+            session.add(ingestion_file)
+            session.flush()
+            member = IngestionFileMember(
+                id=uuid.uuid4(),
+                ingestion_file_id=ingestion_file.id,
+                member_name="itr_cia_aberta_BPA_con_2026.csv",
+                member_sha256="member-hash",
+                member_size_bytes=100,
+                encoding="utf-8",
+                delimiter=";",
+                header=["row_kind"],
+                row_count=1,
+                schema_status="ok",
+            )
+            session.add(member)
+            session.flush()
+
+            first_writer = NormalizedArtifactWriter(
+                run_id=str(run.id),
+                member_id=str(member.id),
+                member_name=member.member_name,
+                row_kind="itr_documento",
+            )
+            first_writer.write_row(
+                {
+                    "row_kind": "itr_documento",
+                    "linha_origem": 2,
+                    "arquivo_origem": member.member_name,
+                    "ano_origem": 2026,
+                    "normalized_hash": "hash-a",
+                    "tipo_formulario": "ITR",
+                }
+            )
+            first_artifact = first_writer.close()
+            load_financeiro_artifact_to_stage(
+                session,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                artifact_uri=str(first_artifact["uri"]),
+                use_copy=False,
+            )
+
+            second_writer = NormalizedArtifactWriter(
+                run_id=str(run.id),
+                member_id=str(member.id),
+                member_name=member.member_name,
+                row_kind="itr_documento",
+            )
+            second_writer.write_row(
+                {
+                    "row_kind": "itr_documento",
+                    "linha_origem": 3,
+                    "arquivo_origem": member.member_name,
+                    "ano_origem": 2026,
+                    "normalized_hash": "hash-b",
+                    "tipo_formulario": "ITR",
+                }
+            )
+            second_artifact = second_writer.close()
+            load_financeiro_artifact_to_stage(
+                session,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                artifact_uri=str(second_artifact["uri"]),
+                use_copy=False,
+            )
+            session.commit()
+
+            rows = list(
+                session.execute(
+                    select(IngestionFinanceiroStageRow).order_by(IngestionFinanceiroStageRow.linha_origem.asc())
+                ).scalars()
+            )
+
+            assert len(rows) == 1
+            assert rows[0].normalized_hash == "hash-b"
+            assert rows[0].linha_origem == 3
+    finally:
+        session.close()
