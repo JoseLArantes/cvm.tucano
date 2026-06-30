@@ -1,5 +1,14 @@
 # Changelog de Contrato da API para Clientes
 
+Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
+
+Convencoes deste changelog:
+
+- cada entrada lista endpoints ou superficies afetadas;
+- descreve o comportamento atual entregue ao cliente;
+- documentacao editorial sem mudanca de contrato nao entra aqui;
+- a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
+
 ## 2026-06-30 - Ingestao ganha recovery sweep para runs stale e `next_action=recover` em falhas recuperaveis
 
 ### Endpoints e superficies com impacto operacional visivel

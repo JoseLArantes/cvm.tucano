@@ -1814,16 +1814,13 @@ def dashboard_execucoes(
     summary="Listar Runs de Ingestion",
     description=(
         "Lista paginada das runs do pipeline de ingestao. "
-        "O frontend pode usar este endpoint como visao principal de monitoramento, "
-        "consumindo `status`, `phase`, `remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, "
-        "`member_snapshot_summary`, `delivery_snapshot_summary`, `reconcile_summary` e `lifecycle_decision` para cards, grids e alertas. "
-        "`remote_probe` descreve a decisao de preflight remoto antes do download; `change_summary` descreve drift estrutural entre o pacote atual e a referencia anterior; "
-        "`artifact_snapshot` explica a evidencia remota/local usada para decidir skip ou download; `member_snapshot_summary` descreve o inventario de members processados ou reaproveitados; "
-        "`quality_summary` tambem deixa explicitos members reaproveitados em reruns de recuperacao, inclusive quando vieram de uma execucao anual pai anteriormente falha; "
-        "`delivery_snapshot_summary` resume o indice documental capturado (protocolo, versao, id_documento, etc.); "
-        "`quality_summary` e a fonte principal de progresso porque linhas staged bem-sucedidas podem ser removidas apos a promocao do member. "
-        "Para UI operacional, interprete `members_reprocessed` como trabalho realmente executado no rerun atual e `members_reused_from_previous` como trabalho economizado por reaproveitamento. "
-        "Uma run concluida nao implica permanencia de staging de sucesso: o contrato duravel e o resumo operacional, os itens de quarentena e as linhas promovidas com lineage."
+        "Este e o endpoint principal para monitoramento operacional. "
+        "Cada item consolida `status`, `phase`, `state`, `progress`, `liveness`, `blocking`, `cancellation`, `last_error`, "
+        "`remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, `member_snapshot_summary`, "
+        "`delivery_snapshot_summary`, `reconcile_summary`, `lifecycle_decision` e `links`. "
+        "Para progresso e cards, use `progress` e `quality_summary`. "
+        "Para explicar members reaproveitados ou reprocessados, use `member_snapshot_summary` e `lifecycle_decision`. "
+        "Para diagnostico operacional, use `state`, `liveness`, `blocking`, `cancellation`, `last_error` e `next_action`."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="listarIngestionRunsAdmin",
@@ -1852,12 +1849,10 @@ def listar_ingestion_runs(
     response_model=IngestionRunResumo,
     summary="Detalhar Run de Ingestion",
     description=(
-        "Retorna uma run especifica do pipeline. "
-        "Use este endpoint para telas de detalhe e drill-down operacional, "
-        "especialmente quando o frontend precisar ler `remote_probe`, `change_summary`, `quality_summary`, `artifact_snapshot`, `member_snapshot_summary`, `delivery_snapshot_summary` e `reconcile_summary` consolidados antes de buscar quarentena ou acionar replay. "
-        "A resposta descreve o estado agregado da run: decisao de preflight remoto, inventario estrutural do pacote, contadores de processamento, members reaproveitados, inclusive de execucoes anuais pai anteriormente falhas, indice documental capturado e remocoes feitas no reconcile. "
-        "O detalhe da run e o endpoint recomendado para explicar ao operador por que um rerun anual nao executou todos os CSVs novamente: use `quality_summary.members_reused_from_previous`, `quality_summary.members_reused_from_failed_parent`, `member_snapshot_summary.by_status` e `lifecycle_decision.members_skipped_by_sha`. "
-        "Ela nao implica que todas as linhas bem-sucedidas ainda existam em staging."
+        "Retorna o detalhe completo de uma run do pipeline. "
+        "Use este endpoint para drill-down operacional, leitura de snapshots estruturais, progresso, liveness, bloqueios, "
+        "cancelamento, erro mais recente, reconcile, inventario de members e decisao de lifecycle. "
+        "Para explicar por que uma run anual reaproveitou ou reprocessou members, use `quality_summary`, `member_snapshot_summary` e `lifecycle_decision`."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
     operation_id="detalharIngestionRunAdmin",
@@ -2273,27 +2268,13 @@ def recover_ingestion_run(
     response_model=ListaQuarantineItems,
     summary="Listar Quarentena de Ingestion",
     description=(
-        "Lista paginada da fila de reparo da quarentena.\n\n"
-        "Quando o parâmetro `status` não é enviado, o endpoint retorna apenas itens `pendente`, "
-        "ou seja, a fila aberta de reparo. Para consultar histórico completo, envie `status=all`.\n\n"
-        "Os filtros antigos/atuais suportam `motivo_codigo`; o frontend deve tratar `motivo_codigo`, `status`, "
-        "`reparavel` e `tentativas_reprocessamento` como colunas de primeira classe. "
-        "A quarentena representa exceções reais de linha; falhas de schema em nível de membro não são mais expandidas "
-        "automaticamente em milhares de itens. "
-        "Linhas bem-sucedidas podem ser promovidas e depois removidas do staging; por isso a quarentena é o canal durável apenas para falhas realmente linha-a-linha.\n\n"
-        "### Resiliência a Falhas de Banco de Dados (`safe_promote_chunk`):\n"
-        "Este endpoint reflete itens rejeitados pelo mecanismo resiliente de banco de dados (`safe_promote_chunk`). Se um lote de inserção ou atualização no PostgreSQL falhar (por exemplo, devido a limites numéricos excedidos como `NumericValueOutOfRange`, estouro de tamanho de campo texto ou violações de integridade referencial), o processamento do lote é automaticamente revertido via savepoint (`db.begin_nested()`) e cada linha é promovida individualmente. As linhas problemáticas que causarem exceções de banco de dados são capturadas, marcadas com `normalizacao_invalida` contendo os detalhes do erro do banco (ex. `NumericValueOutOfRange`), e direcionadas para a quarentena, enquanto as demais linhas do lote são salvas com sucesso.\n\n"
-        "### Códigos de Erro da Quarentena (`motivo_codigo`):\n"
-        "- **`normalizacao_invalida`**: Erro de conversão ou parse de campos da linha (ex. decimais, inteiros, datas) ou erros persistidos por falha no banco de dados durante a inserção/promoção (ex. limites numéricos excedidos, estouro de campo de texto, etc.). "
-        "Recentemente robustecido para tolerar símbolos monetários (ex: R$), percentuais (ex: %), formatação decimal mista (brasileira/americana) e representações textuais de nulos (ex: 'N/A', 'N.D.', '-'). Além disso, os campos `saldo_existente`, `taxa_juros` e `montante_interesse_parte_relacionada` na tabela de transações com partes relacionadas foram corrigidos para o tipo `Text` no banco de dados e normalizador, alinhados com o layout oficial da CVM, o que aceita livremente descrições textuais das empresas (ex. 'TJLP + 1,72% a.a.' ou '100% do CDI') e elimina falsos positivos por cast numérico.\n"
-        "- **`chave_natural_duplicada_conflitante`**: Múltiplas linhas com a mesma chave natural (identificador de negócio único) "
-        "mas com dados/conteúdo divergentes (conflito). Com a melhoria na normalização, este erro foi mitigado.\n"
-        "- **`companhia_nao_encontrada`**: Nenhuma companhia pôde ser resolvida no grafo de identidade para os identificadores fornecidos (CNPJ/CVM). "
-        "Pode ser resolvido via regras de reparo ou atualizando o cadastro de companhias.\n"
-        "- **`companhia_ambigua`**: Conflito onde os dados da linha apontam para múltiplas companhias ou informações incongruentes (ex: CNPJ associado a uma empresa e Código CVM associado a outra).\n"
-        "- **`schema_inesperado`**: Colunas obrigatórias ausentes no cabeçalho do arquivo CSV de origem (geralmente causa falha no membro de arquivo).\n"
-        "- **`denominacao_social_ausente`**: Não foi possível extrair a denominação social da companhia (erro não reparável).\n"
-        "- **`identidade_ausente`**: Falta de identificadores mínimos (CNPJ e Código CVM) na linha para associar a uma companhia (erro não reparável)."
+        "Lista paginada da fila de reparo da ingestao.\n\n"
+        "Quando `status` nao e informado, o endpoint retorna apenas itens `pendente`. "
+        "Use `status=all` para consultar o historico completo.\n\n"
+        "Cada item representa uma excecao persistida de linha, com `motivo_codigo`, `status`, `reparavel`, "
+        "`tentativas_reprocessamento` e `diagnostico` apropriados para filtragem e suporte operacional.\n\n"
+        "Erros de lote durante promote sao isolados por savepoint. Quando uma linha falha individualmente, ela permanece "
+        "na quarentena com `motivo_codigo=normalizacao_invalida` e diagnostico estruturado do erro."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="listarIngestionQuarentenaAdmin",
@@ -2367,17 +2348,11 @@ def listar_ingestion_quarentena(
     response_model=QuarentenaResumoResposta,
     summary="Resumo Analítico da Quarentena",
     description=(
-        "Retorna métricas agregadas e consolidadas de erros na quarentena. "
-        "Quando o parâmetro `status` não é enviado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` "
-        "consideram apenas itens `pendente`. Para histórico completo, envie `status=all`. "
-        "O retorno inclui o total geral absoluto de erros, distribuição por status "
-        "(pendente, resolvido, etc.), ranking de erros por tipo de motivo (motivo_codigo), "
-        "ranking de arquivos de origem mais afetados, e agrupamentos detalhados cruzando "
-        "arquivo de origem e motivo do erro. "
-        "Suporta filtragem opcional por `status` (ex.: 'pendente'), `ingestion_run_id` ou "
-        "`execucao_sincronizacao_id` para permitir drill-down dinâmico no dashboard do frontend.\n\n"
-        "### Integração com Promoção Resiliente:\n"
-        "Este resumo inclui as estatísticas de erros de banco capturados durante a promoção resiliente de linhas individuais. Quando ocorrem erros de banco de dados (como estouro de valor numérico ou violação de restrições), as linhas afetadas são marcadas com código `normalizacao_invalida` e detalhadas no resumo agregador por arquivo e motivo."
+        "Retorna metricas agregadas da fila de reparo. "
+        "Quando `status` nao e informado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` consideram apenas itens `pendente`. "
+        "Use `status=all` para consultar o historico completo. "
+        "O retorno agrega distribuicao por status, ranking por `motivo_codigo`, ranking por `arquivo_origem` "
+        "e o cruzamento entre arquivo e motivo."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="resumoIngestionQuarentenaAdmin",
@@ -2495,15 +2470,10 @@ def obter_resumo_quarentena(
     summary="Reprocessar Quarentena de Ingestion",
     description=(
         "Executa replay sobre itens pendentes da quarentena. "
-        "A requisição aceita filtros opcionais por `reason_code`, `arquivo_origem` e `ano`. "
-        "Quando nenhum filtro é enviado, todos os itens `pendente` são considerados. "
-        "O replay de quarentena reprocessa apenas exceções persistidas, preservando a arquitetura simplificada do caminho de sucesso. "
-        "Ele não reconstrói todas as linhas bem-sucedidas do arquivo; isso fica reservado ao replay de run/member a partir do payload bruto retido.\n\n"
-        "O processo de replay agora é resiliente no nível da linha individual: se o reprocessamento de uma determinada "
-        "linha falhar (como por erros de parsing residuais ou outras exceções inesperadas), "
-        "essa linha específica registrará um erro no lote, mas a execução do replay continuará sem abortar as demais linhas.\n\n"
-        "### Comportamento sob Falhas de Banco de Dados:\n"
-        "Isso inclui exceções de banco de dados capturadas pelo mecanismo `safe_promote_chunk` durante a promoção no replay: se uma linha reprocessada causar falha no banco de dados, o replay faz o rollback no savepoint da linha correspondente (`db.begin_nested()`), mantém o item na quarentena com o erro atualizado do banco de dados (código `normalizacao_invalida` detalhando a exceção) e prossegue para as próximas linhas do lote."
+        "A requisicao aceita filtros opcionais por `reason_code`, `arquivo_origem` e `ano`. "
+        "Quando nenhum filtro e enviado, todos os itens `pendente` sao considerados. "
+        "O replay atua apenas sobre excecoes persistidas da quarentena e processa cada linha de forma independente. "
+        "Se uma linha falhar novamente, o item permanece na quarentena com diagnostico atualizado."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="replayIngestionQuarentenaAdmin",
@@ -2536,12 +2506,9 @@ def replay_ingestion_quarentena(
     response_model=ReplayResposta,
     summary="Reprocessar Run de Ingestion",
     description=(
-        "Executa replay administrativo de uma run. "
-        "Para runs de membro, a API pode reconstruir o processamento a partir do payload bruto retido do CSV membro, "
-        "sem depender da permanencia das linhas bem-sucedidas em `ingestion_rows`. "
-        "A operacao e util quando uma correcao de identidade, parser ou regra de reparo precisa ser aplicada em lote "
-        "sem redownload do arquivo original. "
-        "No replay completo, o member volta a passar por `stage`, `promote` e `reconcile`, inclusive com nova avaliacao de members reaproveitaveis, quarentena real e remocao de linhas promovidas obsoletas."
+        "Executa replay administrativo de uma run a partir dos artefatos retidos. "
+        "A operacao reaplica o fluxo operacional da run, incluindo reavaliacao de members, promote, quarentena e reconcile. "
+        "Use este endpoint quando uma correcao de regra, parser ou identidade precisar ser aplicada novamente ao escopo inteiro da run."
     ),
     responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
     operation_id="replayIngestionRunAdmin",

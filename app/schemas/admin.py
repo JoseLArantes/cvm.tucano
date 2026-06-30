@@ -36,15 +36,10 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     arquivo: str = Field(description="Nome do arquivo (CSV ou ZIP) associado à execução.")
     status: str = Field(
         description=(
-            "Status atual ou final da execução. Estados possíveis incluem: "
-            '"agendada" (tarefa enfileirada no Celery), '
-            '"em_execucao" (processamento ativo), '
-            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
-            '"sucesso" (ingestão finalizada com sucesso), '
-            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
-            '"skipped" (ignorado por hash de arquivo já existente), '
-            '"falha" (erro durante qualquer fase de processamento), '
-            '"cancelada" (execução abortada manualmente).'
+            "Status persistido da execucao. "
+            "Valores operacionais esperados incluem: "
+            "`agendada`, `em_execucao`, `aguardando_ingestao`, `sucesso`, `sucesso_com_alerta`, "
+            "`sem_alteracao`, `falha`, `falha_qualidade` e `cancelada`."
         )
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início da execução, em `DD/MM/AAAA HH:MM:SS`.")
@@ -134,15 +129,10 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     hash_arquivo: str | None = Field(description="Hash SHA-256 do arquivo processado.")
     status: str = Field(
         description=(
-            "Status atual ou final da execução. Estados possíveis incluem: "
-            '"agendada" (tarefa enfileirada no Celery), '
-            '"em_execucao" (processamento ativo), '
-            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
-            '"sucesso" (ingestão finalizada com sucesso), '
-            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
-            '"skipped" (ignorado por hash de arquivo já existente), '
-            '"falha" (erro durante qualquer fase de processamento), '
-            '"cancelada" (execução abortada manualmente).'
+            "Status persistido da execucao. "
+            "Valores operacionais esperados incluem: "
+            "`agendada`, `em_execucao`, `aguardando_ingestao`, `sucesso`, `sucesso_com_alerta`, "
+            "`sem_alteracao`, `falha`, `falha_qualidade` e `cancelada`."
         )
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início, em `DD/MM/AAAA HH:MM:SS`.")
@@ -372,7 +362,7 @@ class IngestionOperationalLiveness(BaseModel):
     task_id: str | None = Field(default=None, description="ID da task Celery associada ao lease/fase atual.")
     phase_status: str | None = Field(
         default=None,
-        description="Status da fase atual no ledger operacional: `pending`, `running`, `succeeded`, `failed_final`, `cancelled` ou `stale`.",
+        description="Status da fase atual no ledger operacional, por exemplo `pending`, `running`, `succeeded`, `failed_retryable`, `failed_final`, `cancel_requested`, `cancelled` ou `stale`.",
     )
     is_stale: bool = Field(description="Indica se o heartbeat ficou velho demais para uma execucao que deveria estar rodando.")
     stale_after_seconds: int = Field(description="Threshold usado para classificar stale.")
@@ -643,7 +633,7 @@ class IngestionRunResumo(BaseModel):
             "`sucesso_com_alerta` indica ingestao concluida com drift estrutural ou outro alerta operacional; "
             "`falha` indica erro impeditivo; "
             "`sem_alteracao` indica que o recurso CVM foi considerado igual a referencia anterior, seja por probe remoto forte sem download, seja por download seguido de confirmacao de SHA igual; "
-            "`skipped` indica reaproveitamento administrativo legado e permanece aceito por compatibilidade historica, mas a arquitetura atual prefere `sem_alteracao` para igualdade confirmada do artefato; "
+            "`skipped` indica encerramento sem processamento adicional para o escopo da run; "
             "`cancelada` indica interrupcao administrativa."
         )
     )
@@ -651,7 +641,7 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Fase atual ou final da run. "
             "`acquire` cobre o preflight remoto (CKAN/HEAD) e, quando necessario, o download do arquivo; "
-            "`stage` cobre extracao de membros, captura de header, contagem de linhas, hash de membros e verificacoes de schema/presenca; "
+            "`stage` cobre extracao de members, captura de header, contagem de linhas, hash de members, artifacts normalizados e carregamento do staging operacional; "
             "`promote` cobre normalizacao, resolucao de companhia, deduplicacao e escrita nas tabelas de dominio; "
             "`reconcile` representa a remocao de linhas promovidas que ficaram obsoletas apos um member alterado ser reprocessado; "
             "`complete` indica encerramento da run."
@@ -680,13 +670,12 @@ class IngestionRunResumo(BaseModel):
         default=None,
         description=(
             "Resumo agregado e orientado a progresso. "
-            "Na arquitetura simplificada, a API nao garante retencao de linhas staged bem-sucedidas apos a conclusao; "
-            "o frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
+            "O frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
             "motivos de rejeicao, metodos de resolucao, retries, membros processados/skipped, total real de quarentena, "
             "quantidade de staging purgado com sucesso (`staged_rows_purged`), sinais do staging tipado financeiro "
             "(`typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged`, `typed_stage_copy_loads`) "
             "e remocoes aplicadas no reconcile (`reconciled_deleted`). "
-            "Quando a run representa um rerun de recuperacao, `members_reused_from_previous` informa quantos members foram reaproveitados sem nova promocao, "
+            "`members_reused_from_previous` informa quantos members foram reaproveitados sem nova promocao, "
             "e `members_reused_from_failed_parent` destaca o subconjunto desses members cuja ultima execucao anual pai havia terminado em `falha`. "
             "O contrato esperado para consumo de frontend inclui, quando disponivel: "
             "`members_total` (quantidade total de members avaliados no ZIP atual), "
@@ -703,7 +692,7 @@ class IngestionRunResumo(BaseModel):
             "`typed_stage_copy_loads` (quantas cargas usaram o caminho PostgreSQL `COPY`). "
             "Para cards e resumos operacionais, o frontend deve considerar `members_reprocessed` como trabalho efetivamente executado e "
             "`members_reused_from_previous` como trabalho economizado pelo mecanismo de recuperacao. "
-            "Este objeto e um resumo operacional por contadores; ele nao substitui um ledger duravel de sucesso por linha."
+            "Este objeto e um resumo operacional por contadores."
         ),
     )
     artifact_snapshot: dict[str, Any] | None = Field(
@@ -723,8 +712,7 @@ class IngestionRunResumo(BaseModel):
             "O frontend deve esperar pelo menos `total`, `by_status`, `by_schema_status` e `members`. "
             "Em `by_status`, valores como `processed` e `member_skipped` permitem separar members realmente executados de members apenas reaproveitados. "
             "Em `by_schema_status`, `reused` identifica skip por `member_sha256`; `ok` identifica members que passaram pelo fluxo normal; "
-            "outros valores podem sinalizar schema invalido ou warning estrutural. "
-            "Ao contrario de `ingestion_rows`, este objeto foi desenhado para permanecer disponivel apos limpeza do staging bem-sucedido."
+            "outros valores podem sinalizar schema invalido ou warning estrutural."
         ),
     )
     delivery_snapshot_summary: dict[str, Any] | None = Field(
@@ -982,8 +970,7 @@ class ReplayResposta(BaseModel):
             "Payload operacional devolvido pelo servico de replay ou rebuild. "
             "Para runs ou membros completos, o replay pode reconstruir o processamento a partir do payload bruto retido do membro; "
             "para quarentena, o retorno resume apenas os itens excepcionais reprocessados. "
-            "O replay nao depende da permanencia de linhas staged bem-sucedidas; a fonte de verdade para rebuild e o payload bruto retido do member/arquivo, "
-            "com nova execucao das fases `stage`, `promote` e `reconcile`."
+            "A fonte de verdade para replay e o artefato retido do member ou da run, com nova execucao das fases operacionais aplicaveis."
         ),
     )
 
