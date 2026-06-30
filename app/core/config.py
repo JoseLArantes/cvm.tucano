@@ -1,6 +1,7 @@
 import csv
 import sys
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -159,6 +160,10 @@ class Settings(BaseSettings):
     ingestion_financeiro_typed_staging_enabled: bool = Field(
         default=True,
         alias="INGESTION_FINANCEIRO_TYPED_STAGING_ENABLED",
+    )
+    ingestion_normalized_artifact_format: Literal["typed_csv", "parquet"] = Field(
+        default="typed_csv",
+        alias="INGESTION_NORMALIZED_ARTIFACT_FORMAT",
     )
     ingestion_member_payload_db_fallback_enabled: bool = Field(
         default=False,

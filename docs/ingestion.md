@@ -1102,6 +1102,12 @@ Anos iniciais por fonte (environment vars):
 |---|---|
 | `config` | `Settings` com variaveis de ambiente prefixadas `INGESTION_` e `CELERY_` |
 
+Configuracoes relevantes do artifact normalizado:
+
+- `INGESTION_NORMALIZED_ARTIFACT_FORMAT=typed_csv` por default;
+- `INGESTION_NORMALIZED_ARTIFACT_FORMAT=parquet` apenas quando a dependencia opcional `pyarrow` estiver disponivel;
+- o formato `parquet` continua opcional e deve ser habilitado por evidencia de benchmark, nao por preferencia.
+
 ### Docker
 
 | Arquivo | Servicos |
@@ -1125,6 +1131,7 @@ Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo
 
 - benchmark de stage: `tests/scripts/benchmark_ingestion_stage.py`
 - benchmark ponta a ponta por member: `tests/scripts/benchmark_ingestion_member.py`
+- benchmark de artifact normalizado: `tests/scripts/benchmark_normalized_artifacts.py`
 
 ### Tuning operacional atual
 

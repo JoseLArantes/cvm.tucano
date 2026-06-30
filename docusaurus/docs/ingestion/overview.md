@@ -171,6 +171,9 @@ O repositório mantém dois scripts complementares para medir desempenho da inge
 
 - `tests/scripts/benchmark_ingestion_stage.py`: mede somente o custo de staging (`insert` vs `COPY`);
 - `tests/scripts/benchmark_ingestion_member.py`: mede o fluxo ponta a ponta por member, incluindo `stage` e `promote` em DFP e FRE.
+- `tests/scripts/benchmark_normalized_artifacts.py`: compara `typed_csv` e `parquet` no artifact normalizado, reportando tempo de escrita, tempo de leitura, memória pico e tamanho em disco.
+
+O formato default do artifact normalizado continua sendo `typed_csv`. O formato `parquet` permanece opcional e só deve ser ativado com `INGESTION_NORMALIZED_ARTIFACT_FORMAT=parquet` quando a dependência `pyarrow` estiver instalada e o benchmark mostrar ganho real para a fonte avaliada.
 
 ## Rerun anual inteligente
 
