@@ -8,7 +8,7 @@ from itertools import chain
 from typing import Any
 
 import httpx
-from sqlalchemy import insert, select, tuple_
+from sqlalchemy import case, insert, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -325,6 +325,162 @@ def _promote_vlmo_chunk(
 
 
 def _promote_vlmo_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if _is_postgresql(db):
+        _promote_vlmo_chunk_postgresql(
+            db,
+            row_kind=row_kind,
+            linhas_promovidas=linhas_promovidas,
+            execucao_id=execucao_id,
+            contadores=contadores,
+        )
+        return
+    _promote_vlmo_chunk_fallback(
+        db,
+        row_kind=row_kind,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+    )
+
+
+def _promote_vlmo_chunk_postgresql(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if not linhas_promovidas:
+        return
+    _, _, campos_chave, campos_negocio = _vlmo_promotion_spec(row_kind, linhas_promovidas[0][1])
+    model, entidade, _, _ = _vlmo_promotion_spec(row_kind, linhas_promovidas[0][1])
+    agora = _agora()
+    grupos: dict[tuple[str, ...], dict[tuple[Any, ...], dict[str, Any]]] = {}
+    preparados = [(_row, _prepare_promocao(dados)) for _row, dados in linhas_promovidas]
+    if row_kind == "vlmo_documento":
+        for _row, dados in preparados:
+            group_campos = _vlmo_documento_campos_chave(dados)
+            grupos.setdefault(group_campos, {})[_key_tuple(dados, group_campos)] = dados
+    else:
+        grupos[campos_chave] = {_key_tuple(dados, campos_chave): dados for _row, dados in preparados}
+
+    historicos: list[dict[str, Any]] = []
+    for group_campos, grupo_por_chave in grupos.items():
+        grupo = list(grupo_por_chave.values())
+        chaves = list(grupo_por_chave)
+        existentes_hash_por_chave = _load_existing_rows(
+            db,
+            model=model,
+            campos_chave=group_campos,
+            campos_select=("id", *group_campos, "hash_origem"),
+            chaves=chaves,
+        )
+        chaves_com_mudanca = [
+            chave
+            for chave, dados in grupo_por_chave.items()
+            if (existente := existentes_hash_por_chave.get(chave)) is not None
+            and existente["hash_origem"] != dados["hash_origem"]
+        ]
+        existentes_por_chave = _load_existing_rows(
+            db,
+            model=model,
+            campos_chave=group_campos,
+            campos_select=("id", *group_campos, *campos_negocio),
+            chaves=chaves_com_mudanca,
+        )
+        payload_upsert: list[dict[str, Any]] = []
+        for dados in grupo:
+            chave = _key_tuple(dados, group_campos)
+            existente_hash = existentes_hash_por_chave.get(chave)
+            if existente_hash is None:
+                contadores["inseridos"] += 1
+                row_id = uuid.uuid4()
+            elif existente_hash["hash_origem"] == dados["hash_origem"]:
+                contadores["inalterados"] += 1
+                row_id = existente_hash["id"]
+            else:
+                row_id = existente_hash["id"]
+                existente = existentes_por_chave[chave]
+                houve_alteracao = False
+                for campo in campos_negocio:
+                    antigo = existente[campo]
+                    novo = dados[campo]
+                    if _equivalente(antigo, novo):
+                        continue
+                    houve_alteracao = True
+                    historicos.append(
+                        {
+                            "entidade": entidade,
+                            "entidade_id": existente["id"],
+                            "companhia_id": dados.get("companhia_id"),
+                            "campo": campo,
+                            "valor_anterior": None if antigo is None else str(antigo),
+                            "valor_novo": None if novo is None else str(novo),
+                            "alterado_em": agora,
+                            "execucao_sincronizacao_id": execucao_id,
+                            "arquivo_origem": dados["arquivo_origem"],
+                            "ano_origem": dados["ano_origem"],
+                        }
+                    )
+                if houve_alteracao:
+                    contadores["atualizados"] += 1
+                else:
+                    contadores["inalterados"] += 1
+            payload_upsert.append(
+                {
+                    "id": row_id,
+                    **dados,
+                    "criado_em": agora,
+                    "sincronizado_em": agora,
+                    "alterado_em": agora,
+                }
+            )
+        if payload_upsert:
+            stmt = pg_insert(model).values(payload_upsert)
+            business_change_expression = or_(
+                *[
+                    getattr(model, campo).is_distinct_from(getattr(stmt.excluded, campo))
+                    for campo in sorted(campos_negocio)
+                ]
+            )
+            update_columns = {
+                campo: getattr(stmt.excluded, campo)
+                for campo in sorted(
+                    {
+                        *campos_negocio,
+                        "arquivo_origem",
+                        "ano_origem",
+                        "linha_origem",
+                        "hash_origem",
+                        "sincronizado_em",
+                    }
+                )
+            }
+            update_columns["alterado_em"] = case(
+                (business_change_expression, stmt.excluded.alterado_em),
+                else_=model.alterado_em,
+            )
+            db.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[getattr(model, campo) for campo in group_campos],
+                    set_=update_columns,
+                )
+            )
+            db.flush()
+    if historicos:
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
+
+
+def _promote_vlmo_chunk_fallback(
     db: Session,
     *,
     row_kind: str,

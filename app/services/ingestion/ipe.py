@@ -7,7 +7,7 @@ from itertools import chain
 from typing import Any
 
 import httpx
-from sqlalchemy import insert, select, tuple_
+from sqlalchemy import case, insert, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -186,6 +186,11 @@ def _build_key_clause(model: type[Any], campos_chave: tuple[str, ...], chaves: S
     return tuple_(*[getattr(model, campo) for campo in campos_chave]).in_(list(chaves))
 
 
+def _is_postgresql(db: Session) -> bool:
+    bind = db.get_bind()
+    return bind is not None and bind.dialect.name == "postgresql"
+
+
 def _load_existing_rows(
     db: Session,
     *,
@@ -221,6 +226,151 @@ def _prepare_promocao(dados: dict[str, Any]) -> dict[str, Any]:
 
 
 def _promote_ipe_chunk(
+    db: Session,
+    *,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if _is_postgresql(db):
+        _promote_ipe_chunk_postgresql(
+            db,
+            linhas_promovidas=linhas_promovidas,
+            execucao_id=execucao_id,
+            contadores=contadores,
+        )
+        return
+    _promote_ipe_chunk_fallback(
+        db,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+    )
+
+
+def _promote_ipe_chunk_postgresql(
+    db: Session,
+    *,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if not linhas_promovidas:
+        return
+    agora = _agora()
+    preparados = [(_row, _prepare_promocao(dados)) for _row, dados in linhas_promovidas]
+    groups: dict[tuple[str, ...], dict[tuple[Any, ...], dict[str, Any]]] = {}
+    for _row, dados in preparados:
+        campos_chave = _ipe_campos_chave(dados)
+        groups.setdefault(campos_chave, {})[_key_tuple(dados, campos_chave)] = dados
+
+    for campos_chave, grupo_por_chave in groups.items():
+        grupo = list(grupo_por_chave.values())
+        chaves = list(grupo_por_chave)
+        existentes_hash_por_chave = _load_existing_rows(
+            db,
+            campos_chave=campos_chave,
+            campos_select=("id", *campos_chave, "hash_origem"),
+            chaves=chaves,
+        )
+        chaves_com_mudanca = [
+            chave
+            for chave, dados in grupo_por_chave.items()
+            if (existente := existentes_hash_por_chave.get(chave)) is not None
+            and existente["hash_origem"] != dados["hash_origem"]
+        ]
+        existentes_por_chave = _load_existing_rows(
+            db,
+            campos_chave=campos_chave,
+            campos_select=("id", *campos_chave, *_CAMPOS_NEGOCIO),
+            chaves=chaves_com_mudanca,
+        )
+        historicos: list[dict[str, Any]] = []
+        payload_upsert: list[dict[str, Any]] = []
+        for dados in grupo:
+            chave = _key_tuple(dados, campos_chave)
+            existente_hash = existentes_hash_por_chave.get(chave)
+            if existente_hash is None:
+                contadores["inseridos"] += 1
+                row_id = uuid.uuid4()
+            elif existente_hash["hash_origem"] == dados["hash_origem"]:
+                contadores["inalterados"] += 1
+                row_id = existente_hash["id"]
+            else:
+                row_id = existente_hash["id"]
+                existente = existentes_por_chave[chave]
+                houve_alteracao = False
+                for campo in _CAMPOS_NEGOCIO:
+                    antigo = existente[campo]
+                    novo = dados[campo]
+                    if _equivalente(antigo, novo):
+                        continue
+                    houve_alteracao = True
+                    historicos.append(
+                        {
+                            "entidade": "ipe_documentos",
+                            "entidade_id": existente["id"],
+                            "companhia_id": dados.get("companhia_id"),
+                            "campo": campo,
+                            "valor_anterior": None if antigo is None else str(antigo),
+                            "valor_novo": None if novo is None else str(novo),
+                            "alterado_em": agora,
+                            "execucao_sincronizacao_id": execucao_id,
+                            "arquivo_origem": dados["arquivo_origem"],
+                            "ano_origem": dados["ano_origem"],
+                        }
+                    )
+                if houve_alteracao:
+                    contadores["atualizados"] += 1
+                else:
+                    contadores["inalterados"] += 1
+            payload_upsert.append(
+                {
+                    "id": row_id,
+                    **dados,
+                    "criado_em": agora,
+                    "sincronizado_em": agora,
+                    "alterado_em": agora,
+                }
+            )
+        if payload_upsert:
+            stmt = pg_insert(IpeDocumento).values(payload_upsert)
+            business_change_expression = or_(
+                *[
+                    getattr(IpeDocumento, campo).is_distinct_from(getattr(stmt.excluded, campo))
+                    for campo in sorted(_CAMPOS_NEGOCIO)
+                ]
+            )
+            update_columns = {
+                campo: getattr(stmt.excluded, campo)
+                for campo in sorted(
+                    {
+                        *_CAMPOS_NEGOCIO,
+                        "arquivo_origem",
+                        "ano_origem",
+                        "linha_origem",
+                        "hash_origem",
+                        "sincronizado_em",
+                    }
+                )
+            }
+            update_columns["alterado_em"] = case(
+                (business_change_expression, stmt.excluded.alterado_em),
+                else_=IpeDocumento.alterado_em,
+            )
+            db.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=[getattr(IpeDocumento, campo) for campo in campos_chave],
+                    set_=update_columns,
+                )
+            )
+            db.flush()
+        if historicos:
+            for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+                db.execute(insert(HistoricoAlteracaoCampo), batch)
+
+
+def _promote_ipe_chunk_fallback(
     db: Session,
     *,
     linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],

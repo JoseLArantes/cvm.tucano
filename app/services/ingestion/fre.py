@@ -7,7 +7,7 @@ from itertools import chain
 from typing import Any
 
 import httpx
-from sqlalchemy import insert, select, tuple_
+from sqlalchemy import case, insert, or_, select, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -1625,6 +1625,157 @@ def _promote_fre_chunk(
 
 
 def _promote_fre_chunk_internal(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if _is_postgresql(db):
+        _promote_fre_chunk_postgresql(
+            db,
+            row_kind=row_kind,
+            linhas_promovidas=linhas_promovidas,
+            execucao_id=execucao_id,
+            contadores=contadores,
+        )
+        return
+    _promote_fre_chunk_fallback(
+        db,
+        row_kind=row_kind,
+        linhas_promovidas=linhas_promovidas,
+        execucao_id=execucao_id,
+        contadores=contadores,
+    )
+
+
+def _promote_fre_chunk_postgresql(
+    db: Session,
+    *,
+    row_kind: str,
+    linhas_promovidas: list[tuple[IngestionRow, dict[str, Any]]],
+    execucao_id: Any,
+    contadores: dict[str, int],
+) -> None:
+    if not linhas_promovidas:
+        return
+
+    model, entidade, campos_chave = _fre_promotion_spec(row_kind)
+    campos_negocio = tuple(
+        campo
+        for campo in linhas_promovidas[0][1].keys()
+        if campo not in {"arquivo_origem", "ano_origem", "linha_origem", "hash_origem"}
+    )
+    agora = _agora()
+    preparados_por_chave: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for _row, dados in linhas_promovidas:
+        preparado = _preparar_dados_promocao(dados)
+        preparados_por_chave[_key_tuple(preparado, campos_chave)] = preparado
+    preparados = list(preparados_por_chave.values())
+    chaves = list(preparados_por_chave)
+    existentes_hash_por_chave = _load_existing_row_hashes(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        chaves=chaves,
+    )
+    chaves_com_mudanca = [
+        chave
+        for chave, dados in preparados_por_chave.items()
+        if (existente := existentes_hash_por_chave.get(chave)) is not None
+        and existente["hash_origem"] != dados["hash_origem"]
+    ]
+    existentes_por_chave = _load_existing_rows(
+        db,
+        model=model,
+        campos_chave=campos_chave,
+        campos_negocio=campos_negocio,
+        chaves=chaves_com_mudanca,
+    )
+    historicos: list[dict[str, Any]] = []
+    payload_upsert: list[dict[str, Any]] = []
+    for dados in preparados:
+        chave = _key_tuple(dados, campos_chave)
+        existente_hash = existentes_hash_por_chave.get(chave)
+        if existente_hash is None:
+            contadores["inseridos"] += 1
+            row_id = uuid.uuid4()
+        elif existente_hash["hash_origem"] == dados["hash_origem"]:
+            contadores["inalterados"] += 1
+            row_id = existente_hash["id"]
+        else:
+            row_id = existente_hash["id"]
+            existente = existentes_por_chave[chave]
+            houve_alteracao = False
+            for campo in campos_negocio:
+                antigo = existente[campo]
+                novo = dados[campo]
+                if _equivalente(antigo, novo):
+                    continue
+                houve_alteracao = True
+                historicos.append(
+                    {
+                        "entidade": entidade,
+                        "entidade_id": existente["id"],
+                        "companhia_id": dados.get("companhia_id"),
+                        "campo": campo,
+                        "valor_anterior": None if antigo is None else str(antigo),
+                        "valor_novo": None if novo is None else str(novo),
+                        "alterado_em": agora,
+                        "execucao_sincronizacao_id": execucao_id,
+                        "arquivo_origem": dados["arquivo_origem"],
+                        "ano_origem": dados["ano_origem"],
+                    }
+                )
+            if houve_alteracao:
+                contadores["atualizados"] += 1
+            else:
+                contadores["inalterados"] += 1
+        payload_upsert.append(
+            {
+                "id": row_id,
+                **dados,
+                "criado_em": agora,
+                "sincronizado_em": agora,
+                "alterado_em": agora,
+            }
+        )
+    if payload_upsert:
+        stmt = pg_insert(model).values(payload_upsert)
+        business_change_expression = or_(
+            *[getattr(model, campo).is_distinct_from(getattr(stmt.excluded, campo)) for campo in sorted(campos_negocio)]
+        )
+        update_columns = {
+            campo: getattr(stmt.excluded, campo)
+            for campo in sorted(
+                {
+                    *campos_negocio,
+                    "arquivo_origem",
+                    "ano_origem",
+                    "linha_origem",
+                    "hash_origem",
+                    "sincronizado_em",
+                }
+            )
+        }
+        update_columns["alterado_em"] = case(
+            (business_change_expression, stmt.excluded.alterado_em),
+            else_=model.alterado_em,
+        )
+        db.execute(
+            stmt.on_conflict_do_update(
+                index_elements=[getattr(model, campo) for campo in campos_chave],
+                set_=update_columns,
+            )
+        )
+        db.flush()
+    if historicos:
+        for batch in iter_parameter_batches(historicos, parameter_width=mapping_parameter_width(historicos)):
+            db.execute(insert(HistoricoAlteracaoCampo), batch)
+
+
+def _promote_fre_chunk_fallback(
     db: Session,
     *,
     row_kind: str,
