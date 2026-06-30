@@ -1133,12 +1133,11 @@ Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo
 - benchmark ponta a ponta por member: `tests/scripts/benchmark_ingestion_member.py`
 - benchmark de artifact normalizado: `tests/scripts/benchmark_normalized_artifacts.py`
 
-Para avaliar `parquet` com dependencia opcional instalada:
+Para avaliar `parquet` com dependencia opcional instalada usando o mesmo ambiente Docker da aplicacao:
 
 ```bash
-pip install -e ".[parquet]"
-python -m tests.scripts.benchmark_normalized_artifacts --rows 100000
-python -m tests.scripts.benchmark_normalized_artifacts --rows 100000 --output json
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000"
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000 --output json"
 ```
 
 Leitura operacional do resultado:
@@ -1146,6 +1145,17 @@ Leitura operacional do resultado:
 - se `parquet` estiver `unavailable`, o ambiente nao tem `pyarrow` e a decisao continua sendo `typed_csv`;
 - se `parquet` for menor em disco, nao piorar memoria pico e reduzir o tempo agregado de escrita + leitura, ele vira candidato real para default;
 - caso contrario, `typed_csv` continua sendo o formato recomendado.
+
+Benchmark atual executado em `2026-06-30` via `docker compose` com `100000` linhas:
+
+- `typed_csv`: escrita `5.56s`, leitura `1.87s`, memoria pico `26.90 MB`, artifact `26.76 MB`;
+- `parquet`: escrita `5.09s`, leitura `6.36s`, memoria pico `219.16 MB`, artifact `3.93 MB`.
+
+Conclusao operacional atual:
+
+- `parquet` ganhou apenas em tamanho de artifact;
+- `typed_csv` continua melhor default para este projeto no ambiente Docker atual, por leitura bem mais rapida e memoria muito menor;
+- `parquet` segue opcional para novas medicoes por fonte/member antes de qualquer troca de default.
 
 ### Tuning operacional atual
 

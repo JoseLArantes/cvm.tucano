@@ -178,11 +178,17 @@ O formato default do artifact normalizado continua sendo `typed_csv`. O formato 
 Fluxo recomendado para a decisão:
 
 ```bash
-pip install -e ".[parquet]"
-python -m tests.scripts.benchmark_normalized_artifacts --rows 100000
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000"
 ```
 
 O benchmark também aceita `--output json` para automações e retorna uma recomendação simples de default com base em tempo agregado de escrita/leitura, memória pico e tamanho do artifact.
+
+Medição local mais recente em `2026-06-30`, com `100000` linhas no container `cvm_api`:
+
+- `typed_csv`: `5.56s` de escrita, `1.87s` de leitura, `26.90 MB` de pico e `26.76 MB` em disco;
+- `parquet`: `5.09s` de escrita, `6.36s` de leitura, `219.16 MB` de pico e `3.93 MB` em disco.
+
+Decisão atual: manter `typed_csv` como default. `Parquet` continua opcional porque, neste ambiente, a redução de tamanho não compensou o aumento de memória e o custo de leitura.
 
 ## Rerun anual inteligente
 
