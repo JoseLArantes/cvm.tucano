@@ -4,8 +4,9 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q celery
     env_file:
       - .env
-    mem_limit: 2560m
-    mem_reservation: 2g
+    mem_limit: ${WORKER_MEM_LIMIT:-2560m}
+    mem_reservation: ${WORKER_MEM_RESERVATION:-2g}
+    cpus: ${WORKER_CPUS:-2.0}
     volumes:
       - .:/app
     deploy:
@@ -19,6 +20,9 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q analise_materializacao
     env_file:
       - .env
+    mem_limit: ${ANALISE_MATERIALIZACAO_WORKER_MEM_LIMIT:-2560m}
+    mem_reservation: ${ANALISE_MATERIALIZACAO_WORKER_MEM_RESERVATION:-2g}
+    cpus: ${ANALISE_MATERIALIZACAO_WORKER_CPUS:-2.0}
     volumes:
       - .:/app
     deploy:
