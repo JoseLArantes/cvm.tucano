@@ -8,10 +8,15 @@ from sqlalchemy.orm import Session
 
 from app.models.ingestion import (
     IngestionCancellationRequest,
+    IngestionFile,
+    IngestionFileMember,
     IngestionPhaseExecution,
     IngestionRow,
     IngestionRun,
     QuarantineItem,
+    SourceArtifactSnapshot,
+    SourceDeliverySnapshot,
+    SourceMemberSnapshot,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 
@@ -845,6 +850,294 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert fases_payload[0]["input_artifact_uri"] == "/tmp/input.csv"
     assert fases_payload[0]["output_artifact_uri"] == "/tmp/output.csv"
     assert fases_payload[0]["metrics"]["artifacts"][0]["uri"] == "/tmp/output.csv"
+
+
+def test_admin_run_members_e_operations_expoem_snapshot_operacional(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    ingestion_file_id = uuid.uuid4()
+    member_id = uuid.uuid4()
+    artifact_snapshot_id = uuid.uuid4()
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=execucao_id,
+            tipo_fonte="itr",
+            ano=2026,
+            arquivo="itr_cia_aberta_2026.zip",
+            url="http://exemplo/itr-2026",
+            status="em_execucao",
+            tipo_execucao="arquivo_zip",
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            tipo_fonte="itr",
+            ano=2026,
+            status="em_execucao",
+            phase="promote",
+            requested_by_task_id="task-itr-2026",
+            quality_summary={"members_processados": 1},
+        )
+    )
+    db_session.add(
+        IngestionFile(
+            id=ingestion_file_id,
+            ingestion_run_id=run_id,
+            source_url="http://exemplo/itr-2026.zip",
+            source_filename="itr_cia_aberta_2026.zip",
+            content_sha256="sha-zip",
+            content_length_bytes=100,
+            is_zip=True,
+            already_seen_success=False,
+        )
+    )
+    db_session.add(
+        IngestionFileMember(
+            id=member_id,
+            ingestion_file_id=ingestion_file_id,
+            member_name="itr_cia_aberta_BPA_con_2026.csv",
+            member_sha256="sha-member",
+            member_size_bytes=50,
+            encoding="latin1",
+            delimiter=";",
+            header=["CNPJ_CIA", "DT_REFER"],
+            row_count=10,
+            schema_status="ok",
+            schema_message=None,
+        )
+    )
+    db_session.add(
+        SourceArtifactSnapshot(
+            id=artifact_snapshot_id,
+            ingestion_run_id=run_id,
+            tipo_fonte="itr",
+            ano=2026,
+            resource_url="http://exemplo/itr-2026.zip",
+            source_filename="itr_cia_aberta_2026.zip",
+            status="downloaded",
+            download_required=True,
+        )
+    )
+    db_session.add(
+        SourceMemberSnapshot(
+            artifact_snapshot_id=artifact_snapshot_id,
+            ingestion_file_member_id=member_id,
+            member_name="itr_cia_aberta_BPA_con_2026.csv",
+            member_sha256="sha-member",
+            row_count=10,
+            header=["CNPJ_CIA", "DT_REFER"],
+            row_kind="itr_demonstracao",
+            destino_promovido="demonstracoes_financeiras",
+            required_member=True,
+            schema_status="ok",
+            schema_message=None,
+            delivery_index_role="none",
+            lifecycle_status="processed",
+        )
+    )
+    db_session.add(
+        SourceDeliverySnapshot(
+            artifact_snapshot_id=artifact_snapshot_id,
+            ingestion_file_member_id=member_id,
+            member_name="itr_cia_aberta_BPA_con_2026.csv",
+            identity_hash="delivery-1",
+            status="captured",
+        )
+    )
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            phase="promote",
+            status="running",
+            attempt=1,
+            lease_owner="task-itr-2026",
+            task_id="task-itr-2026",
+            started_at=agora,
+            heartbeat_at=agora,
+        )
+    )
+    db_session.commit()
+
+    class _FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {"worker-a": [{"name": "app.worker.tasks.sincronizar_itr_task"}]}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {"worker-a": []}
+
+        def scheduled(self) -> dict[str, list[dict[str, str]]]:
+            return {"worker-a": [{"name": "app.worker.tasks.pre_processar_sincronizacao_task"}]}
+
+    monkeypatch.setattr("app.api.routers.admin.celery_app.control.inspect", lambda timeout=1.0: _FakeInspect())
+
+    resposta_members = client.get(f"/ingestion/runs/{run_id}/members")
+    assert resposta_members.status_code == 200
+    members_payload = resposta_members.json()["dados"]
+    assert len(members_payload) == 1
+    assert members_payload[0]["member_name"] == "itr_cia_aberta_BPA_con_2026.csv"
+    assert members_payload[0]["state"] == "processed"
+    assert members_payload[0]["delivery_total"] == 1
+    assert members_payload[0]["links"]["cancel"] == f"/ingestion/runs/{run_id}/members/{member_id}/cancel"
+
+    resposta_operations = client.get("/ingestion/operations")
+    assert resposta_operations.status_code == 200
+    payload = resposta_operations.json()
+    assert payload["task_counts"]["ingestion_active"] == 1
+    assert payload["task_counts"]["ingestion_scheduled"] == 1
+    assert payload["materialization_gate"]["status"] in {"green", "red"}
+    assert payload["active_runs"][0]["id"] == str(run_id)
+
+
+def test_admin_run_cancel_member_cancel_e_recover(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    parent_execucao_id = uuid.uuid4()
+    child_execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    ingestion_file_id = uuid.uuid4()
+    member_id = uuid.uuid4()
+    revoked: list[str] = []
+    replay_calls: list[str] = []
+
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=parent_execucao_id,
+            id_tarefa="task-parent",
+            tipo_fonte="dfp",
+            ano=2026,
+            arquivo="dfp_cia_aberta_2026.zip",
+            url="http://exemplo/dfp-2026",
+            status="em_execucao",
+            tipo_execucao="arquivo_zip",
+        )
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=child_execucao_id,
+            parent_execucao_id=parent_execucao_id,
+            id_tarefa="task-child",
+            tipo_fonte="dfp",
+            ano=2026,
+            arquivo="dfp_cia_aberta_BPA_con_2026.csv",
+            url="http://exemplo/dfp-2026",
+            status="em_execucao",
+            tipo_execucao="arquivo_membro",
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=parent_execucao_id,
+            tipo_fonte="dfp",
+            ano=2026,
+            status="em_execucao",
+            phase="promote",
+            requested_by_task_id="task-parent",
+        )
+    )
+    db_session.add(
+        IngestionFile(
+            id=ingestion_file_id,
+            ingestion_run_id=run_id,
+            source_url="http://exemplo/dfp-2026.zip",
+            source_filename="dfp_cia_aberta_2026.zip",
+            content_sha256="sha-zip",
+            content_length_bytes=100,
+            is_zip=True,
+            already_seen_success=False,
+        )
+    )
+    db_session.add(
+        IngestionFileMember(
+            id=member_id,
+            ingestion_file_id=ingestion_file_id,
+            member_name="dfp_cia_aberta_BPA_con_2026.csv",
+            member_sha256="sha-member",
+            member_size_bytes=50,
+            encoding="latin1",
+            delimiter=";",
+            header=["CNPJ_CIA"],
+            row_count=10,
+            schema_status="ok",
+            schema_message=None,
+        )
+    )
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            execucao_sincronizacao_id=parent_execucao_id,
+            phase="promote",
+            status="running",
+            attempt=1,
+            lease_owner="task-parent",
+            task_id="task-parent",
+            started_at=agora,
+            heartbeat_at=agora - timedelta(hours=1),
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.api.routers.admin.celery_app.control.revoke",
+        lambda task_id, terminate, signal: revoked.append(task_id),
+    )
+
+    def _fake_replay(db: Session, run_id: uuid.UUID) -> dict[str, str]:
+        replay_calls.append(str(run_id))
+        return {"status": "replayed", "run_id": str(run_id)}
+
+    monkeypatch.setattr(
+        "app.api.routers.admin.replay_ingestion_run_service",
+        _fake_replay,
+    )
+
+    resposta_member_cancel = client.post(f"/ingestion/runs/{run_id}/members/{member_id}/cancel")
+    assert resposta_member_cancel.status_code == 200
+    assert resposta_member_cancel.json()["id_execucao"] == str(child_execucao_id)
+    assert "task-child" in revoked
+
+    resposta_run_cancel = client.post(f"/ingestion/runs/{run_id}/cancel")
+    assert resposta_run_cancel.status_code == 200
+    assert resposta_run_cancel.json()["id_execucao"] == str(parent_execucao_id)
+    assert "task-parent" in revoked
+
+    db_session.query(IngestionPhaseExecution).delete()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            execucao_sincronizacao_id=parent_execucao_id,
+            phase="promote",
+            status="running",
+            attempt=2,
+            lease_owner="task-parent",
+            task_id="task-parent",
+            started_at=agora,
+            heartbeat_at=agora - timedelta(hours=1),
+        )
+    )
+    run = db_session.get(IngestionRun, run_id)
+    assert run is not None
+    run.status = "em_execucao"
+    execucao = db_session.get(ExecucaoSincronizacao, parent_execucao_id)
+    assert execucao is not None
+    execucao.status = "em_execucao"
+    db_session.commit()
+
+    resposta_recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert resposta_recover.status_code == 200
+    assert replay_calls == [str(run_id)]
+    assert resposta_recover.json()["detalhe"]["status"] == "replayed"
 
 
 def test_admin_pre_processar_cadastro_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

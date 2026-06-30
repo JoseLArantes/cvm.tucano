@@ -446,6 +446,80 @@ class ListaIngestionRunPhaseExecutions(BaseModel):
     dados: list[IngestionRunPhaseExecutionResumo] = Field(description="Timeline de fases persistidas para a run.")
 
 
+class IngestionRunMemberResumo(BaseModel):
+    id: str = Field(description="ID do member em `ingestion_file_members`.")
+    ingestion_file_id: str = Field(description="ID do arquivo/pacote associado ao member.")
+    member_name: str = Field(description="Nome canonico do member CSV dentro do artefato processado.")
+    member_sha256: str = Field(description="Hash SHA-256 persistido para o payload bruto do member.")
+    member_size_bytes: int = Field(description="Tamanho bruto do member em bytes.")
+    row_count: int = Field(description="Quantidade de linhas de dados observada no member.")
+    encoding: str | None = Field(default=None, description="Encoding detectado/usado para o member.")
+    delimiter: str = Field(description="Delimitador CSV persistido para o member.")
+    header: list[str] | None = Field(default=None, description="Cabecalho observado no member, quando registrado.")
+    schema_status: str = Field(description="Status de schema persistido para o member.")
+    schema_message: str | None = Field(default=None, description="Mensagem complementar de schema, quando houver.")
+    row_kind: str | None = Field(default=None, description="Tipo interno de linha associado ao member, quando conhecido.")
+    destino_promovido: str | None = Field(
+        default=None,
+        description="Tabela ou entidade promovida a partir deste member, quando conhecida pelo snapshot.",
+    )
+    required_member: bool | None = Field(
+        default=None,
+        description="Indica se o member e obrigatorio dentro do pacote da fonte, quando conhecido pelo snapshot.",
+    )
+    lifecycle_status: str | None = Field(
+        default=None,
+        description="Status de lifecycle do member na run, por exemplo `processed` ou `member_skipped`.",
+    )
+    quarantine_total: int = Field(description="Quantidade de itens de quarentena ancorados neste member.")
+    delivery_total: int = Field(description="Quantidade de deliveries documentais capturadas para este member.")
+    state: str = Field(
+        description="Estado operacional sintetico do member: `processed`, `member_skipped`, `schema_invalid` ou `unknown`."
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para operacoes correlatas deste member dentro da run.",
+    )
+
+
+class ListaIngestionRunMembers(BaseModel):
+    dados: list[IngestionRunMemberResumo] = Field(description="Inventario paginado de members associados a uma run.")
+    paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
+
+
+class IngestionOperationRunPreview(BaseModel):
+    id: str = Field(description="ID da run.")
+    execucao_sincronizacao_id: str | None = Field(default=None, description="Execucao correlata, quando houver.")
+    tipo_fonte: str = Field(description="Fonte da run.")
+    ano: int | None = Field(default=None, description="Ano da run, quando aplicavel.")
+    status: str = Field(description="Status persistido da run.")
+    phase: str = Field(description="Fase persistida da run.")
+    state: str = Field(description="Estado operacional agregado desta run.")
+    next_action: str | None = Field(default=None, description="Acao recomendada para consumidor desacoplado.")
+    liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
+    blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
+
+
+class IngestionOperationsResumo(BaseModel):
+    generated_at: BrazilianDateTime = Field(description="Timestamp do snapshot operacional agregado.")
+    run_counts: dict[str, int] = Field(description="Contagens agregadas de runs por estado operacional.")
+    execution_counts: dict[str, int] = Field(description="Contagens agregadas de execucoes por status persistido.")
+    cancellation_counts: dict[str, int] = Field(description="Contagens agregadas de pedidos de cancelamento por status.")
+    task_counts: dict[str, int] = Field(
+        description="Snapshot resumido das tasks Celery observadas no cluster para filas relacionadas a ingestao."
+    )
+    materialization_gate: dict[str, Any] | None = Field(
+        default=None,
+        description="Estado consolidado atual do gate de materializacao visto do ponto de vista da ingestao.",
+    )
+    active_runs: list[IngestionOperationRunPreview] = Field(
+        description="Preview das runs atualmente ativas ou aguardando continuidade operacional."
+    )
+    recoverable_runs: list[IngestionOperationRunPreview] = Field(
+        description="Preview das runs que hoje pedem `recover` ou outra acao administrativa equivalente."
+    )
+
+
 class IngestionRunResumo(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={

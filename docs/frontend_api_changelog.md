@@ -1,5 +1,31 @@
 # Changelog de Contrato da API para Clientes
 
+## 2026-06-30 - Ingestao ganha inventario por member, snapshot consolidado de operacao e acoes diretas por run
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs/{run_id}/members`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/cancel`
+- `POST /ingestion/runs/{run_id}/members/{member_id}/cancel`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Mudanca de comportamento
+
+- o backend passa a expor inventario paginado de members por run, com `member_name`, `schema_status`, `lifecycle_status`, `delivery_total`, `quarantine_total`, `state` e `links`
+- consumidores desacoplados agora podem ler `GET /ingestion/operations` para obter um snapshot unico de runs ativas, runs recuperaveis, cancelamentos, sinais de fila Celery e estado do gate de materializacao
+- cancelamento direto por `run_id` deixa de exigir descoberta previa de `id_execucao`
+- cancelamento direto por `member_id` permite interromper apenas o CSV alvo quando existir execucao filha correspondente
+- recuperacao administrativa de run (`POST /ingestion/runs/{run_id}/recover`) reaplica o replay completo da run quando ela estiver `stale` ou com erro recuperavel
+
+### Leitura recomendada pelo frontend
+
+- para tabela de ZIP/member: usar `GET /ingestion/runs/{run_id}/members`
+- para toolbar operacional global: usar `GET /ingestion/operations`
+- para acao de parar ZIP: usar `POST /ingestion/runs/{run_id}/cancel`
+- para acao de parar CSV individual: usar `POST /ingestion/runs/{run_id}/members/{member_id}/cancel`
+- quando `next_action=recover` em uma run e a UI optar por acao automatizada de operador, usar `POST /ingestion/runs/{run_id}/recover`
+
 ## 2026-06-30 - Ingestao passa a expor estado operacional agregado e timeline de fases
 
 ### Endpoints e superficies com impacto operacional visivel

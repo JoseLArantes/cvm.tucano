@@ -9,6 +9,12 @@ sidebar_position: 3
 
 Endpoints para monitorar execuções de sincronização, runs do pipeline e obter dashboards consolidados.
 
+Além da listagem de runs e execuções, a superfície operacional atual passa a incluir:
+
+- `GET /ingestion/runs/{run_id}/members` para inventário paginado de CSVs/members de uma run;
+- `GET /ingestion/operations` para snapshot consolidado de runs ativas, cancelamentos, sinais de fila Celery e gate de materialização;
+- `POST /ingestion/runs/{run_id}/cancel`, `POST /ingestion/runs/{run_id}/members/{member_id}/cancel` e `POST /ingestion/runs/{run_id}/recover` para ação direta sem depender de navegação prévia por `id_execucao`.
+
 ---
 
 ## `GET /ingestion/sincronizacoes`
@@ -272,6 +278,69 @@ curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e
 **Schema:** `IngestionRunResumo`
 
 Use `state`, `liveness` e `next_action` como contrato primário para UX operacional. `quality_summary` continua sendo a fonte principal dos contadores de processamento; `liveness` responde se a run ainda parece viva; e `GET /ingestion/runs/{run_id}/phases` é o drill-down recomendado quando a UI precisar mostrar tentativas, heartbeat, falha por fase e o manifesto local de artifacts usados ou produzidos pela fase.
+
+---
+
+## `GET /ingestion/runs/{run_id}/members`
+
+Retorna o inventário paginado de members associados à run.
+
+Cada item combina:
+
+- metadados persistidos em `ingestion_file_members`;
+- status estrutural do snapshot (`schema_status`, `row_kind`, `destino_promovido`);
+- decisão de lifecycle (`lifecycle_status`, `state`);
+- volume de deliveries capturadas (`delivery_total`);
+- volume de quarentena ancorada no member (`quarantine_total`);
+- links relativos para drill-down e cancelamento direto do CSV.
+
+### Response 200
+
+**Schema:** `ListaIngestionRunMembers`
+
+---
+
+## `GET /ingestion/operations`
+
+Retorna um snapshot operacional consolidado para consumidores desacoplados.
+
+O payload agrega:
+
+- `run_counts`: distribuição das runs por estado operacional agregado;
+- `execution_counts`: contagem de execuções por status persistido;
+- `cancellation_counts`: distribuição dos pedidos de cancelamento;
+- `task_counts`: contagem total e contagem específica de tasks de ingestão em `active`, `reserved` e `scheduled`;
+- `materialization_gate`: estado atual do gate da materialização, incluindo blockers conhecidos;
+- `active_runs`: preview das runs atualmente em `queued`, `waiting`, `running` ou `stale`;
+- `recoverable_runs`: preview das runs cujo `next_action` atual é `recover`.
+
+### Response 200
+
+**Schema:** `IngestionOperationsResumo`
+
+---
+
+## `POST /ingestion/runs/{run_id}/cancel`
+
+Cancela diretamente uma run a partir do `run_id`.
+
+Use esta rota quando a UI já está posicionada no detalhe da run e não precisa fazer uma etapa extra para descobrir `id_execucao`.
+
+---
+
+## `POST /ingestion/runs/{run_id}/members/{member_id}/cancel`
+
+Cancela apenas o member/CSV informado dentro da run, quando existir execução filha correspondente.
+
+Este é o endpoint recomendado para ações de parar reprocessamento seletivo sem afetar siblings do mesmo ZIP.
+
+---
+
+## `POST /ingestion/runs/{run_id}/recover`
+
+Executa recuperação administrativa controlada de uma run marcada como `stale` ou com erro recuperável.
+
+Na implementação atual, a recuperação reaplica o replay completo da run a partir dos artefatos já retidos.
 
 ---
 

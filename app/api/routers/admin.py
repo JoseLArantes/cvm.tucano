@@ -8,7 +8,17 @@ from sqlalchemy import func, select
 
 from app.api.auth import validar_token_api
 from app.api.deps import DbSession
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun, QuarantineItem
+from app.models.ingestion import (
+    IngestionCancellationRequest,
+    IngestionFile,
+    IngestionFileMember,
+    IngestionRow,
+    IngestionRun,
+    QuarantineItem,
+    SourceArtifactSnapshot,
+    SourceDeliverySnapshot,
+    SourceMemberSnapshot,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.schemas.admin import (
     AnaliseArquivo,
@@ -25,11 +35,15 @@ from app.schemas.admin import (
     FonteDetalheResposta,
     FonteResumoResposta,
     HistoricoAlteracaoCampoResposta,
+    IngestionOperationRunPreview,
+    IngestionOperationsResumo,
+    IngestionRunMemberResumo,
     IngestionRunPhaseExecutionResumo,
     IngestionRunResumo,
     ListaExecucoesSincronizacao,
     ListaFontesResposta,
     ListaHistoricoAlteracoes,
+    ListaIngestionRunMembers,
     ListaIngestionRunPhaseExecutions,
     ListaIngestionRuns,
     ListaQuarantineItems,
@@ -293,6 +307,193 @@ def _build_execucao_operational_fields(
         ),
         "links": links,
     }
+
+
+def _serialize_run_resumo(db: DbSession, run: IngestionRun) -> IngestionRunResumo:
+    return IngestionRunResumo(
+        **{
+            "id": str(run.id),
+            "execucao_sincronizacao_id": None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
+            "tipo_fonte": run.tipo_fonte,
+            "ano": run.ano,
+            "status": run.status,
+            "phase": run.phase,
+            "remote_probe": run.remote_probe,
+            "change_summary": run.change_summary,
+            "quality_summary": run.quality_summary,
+            "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
+            "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
+            "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
+            "reconcile_summary": _reconcile_summary_from_run(run),
+            "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
+            "lifecycle_decision": _lifecycle_decision_from_run(run),
+            **_build_run_operational_fields(db, run),
+        }
+    )
+
+
+def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperationRunPreview:
+    operational = _build_run_operational_fields(db, run)
+    return IngestionOperationRunPreview(
+        id=str(run.id),
+        execucao_sincronizacao_id=None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
+        tipo_fonte=run.tipo_fonte,
+        ano=run.ano,
+        status=run.status,
+        phase=run.phase,
+        state=operational["state"],
+        next_action=operational["next_action"],
+        liveness=operational["liveness"],
+        blocking=operational["blocking"],
+    )
+
+
+def _count_ingestion_tasks(tasks_by_worker: dict[str, Any] | None) -> int:
+    if not tasks_by_worker:
+        return 0
+    task_names = {
+        "app.worker.tasks.sincronizar_cadastro_companhias_task",
+        "app.worker.tasks.sincronizar_member_task",
+        "app.worker.tasks.disparar_dependentes_task",
+        "app.worker.tasks.finalizar_sincronizacao_zip_task",
+        "app.worker.tasks.sincronizar_dfp_task",
+        "app.worker.tasks.sincronizar_itr_task",
+        "app.worker.tasks.sincronizar_fre_task",
+        "app.worker.tasks.sincronizar_fca_task",
+        "app.worker.tasks.sincronizar_ipe_task",
+        "app.worker.tasks.sincronizar_vlmo_task",
+        "app.worker.tasks.sincronizar_cgvn_task",
+        "app.worker.tasks.pre_processar_sincronizacao_task",
+        "app.worker.tasks.ingerir_sincronizacao_task",
+    }
+    total = 0
+    for worker_tasks in tasks_by_worker.values():
+        if not isinstance(worker_tasks, list):
+            continue
+        for task in worker_tasks:
+            if isinstance(task, dict) and task.get("name") in task_names:
+                total += 1
+    return total
+
+
+def _cancelar_sincronizacao_por_seletor(
+    *,
+    db: DbSession,
+    id_execucao: UUID | None,
+    id_tarefa: str | None,
+    terminar_imediatamente: bool,
+    motivo: str | None,
+) -> RespostaCancelamentoSincronizacao:
+    if bool(id_execucao) == bool(id_tarefa):
+        raise HTTPException(status_code=422, detail="Informe exatamente um seletor: id_execucao ou id_tarefa.")
+
+    execucao: ExecucaoSincronizacao | None
+    if id_execucao is not None:
+        execucao = db.get(ExecucaoSincronizacao, id_execucao)
+        if execucao is None:
+            raise HTTPException(status_code=404, detail="Execucao ou task nao encontrada.")
+        id_tarefa_efetivo = execucao.id_tarefa
+    else:
+        id_tarefa_efetivo = id_tarefa
+        execucao = db.scalar(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id_tarefa == id_tarefa_efetivo))
+
+    if execucao is not None and execucao.status in _STATUS_FINAL_EXECUCAO:
+        raise HTTPException(status_code=409, detail="Execucao nao esta em andamento e nao pode ser cancelada.")
+
+    execucoes_relacionadas = (
+        _execucoes_relacionadas_cancelamento(db, execucao=execucao) if execucao is not None else []
+    )
+    run_map = {
+        run.execucao_sincronizacao_id: run
+        for run in db.scalars(
+            select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id.in_([item.id for item in execucoes_relacionadas])
+            )
+        ).all()
+    }
+    cancellation_requests = []
+    for item in execucoes_relacionadas:
+        related_run = run_map.get(item.id)
+        cancellation_requests.append(
+            create_cancellation_request(
+                db,
+                scope_type="execucao_sincronizacao",
+                scope_id=str(item.id),
+                execucao_sincronizacao_id=item.id,
+                ingestion_run_id=related_run.id if related_run is not None else None,
+                requested_by="api_admin",
+                reason=motivo,
+                terminate_immediately=terminar_imediatamente,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        )
+    task_ids_para_revogar = _cancelar_execucoes_relacionadas(
+        db,
+        execucoes=execucoes_relacionadas,
+        motivo=motivo,
+    )
+    if id_tarefa_efetivo is not None:
+        task_ids_para_revogar = list(dict.fromkeys([*task_ids_para_revogar, id_tarefa_efetivo]))
+
+    revogacao_solicitada = False
+    for task_id in task_ids_para_revogar:
+        celery_app.control.revoke(task_id, terminate=terminar_imediatamente, signal="SIGTERM")
+        revogacao_solicitada = True
+    for request in cancellation_requests:
+        if revogacao_solicitada:
+            mark_cancellation_request_propagated(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        else:
+            mark_cancellation_request_completed(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+
+    if execucao is not None:
+        if revogacao_solicitada:
+            for request in cancellation_requests:
+                mark_cancellation_request_completed(
+                    request,
+                    affected_task_ids=task_ids_para_revogar,
+                    affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+                )
+        db.commit()
+        return RespostaCancelamentoSincronizacao(
+            id_execucao=str(execucao.id),
+            id_tarefa=id_tarefa_efetivo,
+            execucao_encontrada=True,
+            status_execucao=execucao.status,
+            revogacao_solicitada=revogacao_solicitada,
+            terminar_imediatamente=terminar_imediatamente,
+            mensagem=(
+                "Sincronizacao cancelada com sucesso."
+                if revogacao_solicitada
+                else "Execucao marcada como cancelada no banco sem revogacao remota."
+            ),
+        )
+
+    if cancellation_requests:
+        for request in cancellation_requests:
+            mark_cancellation_request_completed(
+                request,
+                affected_task_ids=task_ids_para_revogar,
+                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
+            )
+        db.commit()
+
+    return RespostaCancelamentoSincronizacao(
+        id_execucao=None,
+        id_tarefa=id_tarefa_efetivo,
+        execucao_encontrada=False,
+        status_execucao=None,
+        revogacao_solicitada=revogacao_solicitada,
+        terminar_imediatamente=terminar_imediatamente,
+        mensagem="Revogacao enviada para task sem execucao materializada no banco.",
+    )
 
 _DESC_SYNC_ANUAL = (
     "Agenda uma sincronizacao administrativa de uma fonte anual CVM. "
@@ -1041,115 +1242,12 @@ def cancelar_sincronizacao(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
 ) -> RespostaCancelamentoSincronizacao:
-    if bool(payload.id_execucao) == bool(payload.id_tarefa):
-        raise HTTPException(status_code=422, detail="Informe exatamente um seletor: id_execucao ou id_tarefa.")
-
-    execucao: ExecucaoSincronizacao | None
-    if payload.id_execucao is not None:
-        execucao = db.get(ExecucaoSincronizacao, payload.id_execucao)
-        if execucao is None:
-            raise HTTPException(status_code=404, detail="Execucao ou task nao encontrada.")
-        id_tarefa = execucao.id_tarefa
-    else:
-        id_tarefa = payload.id_tarefa
-        execucao = db.scalar(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id_tarefa == id_tarefa))
-
-    if execucao is not None and execucao.status in _STATUS_FINAL_EXECUCAO:
-        raise HTTPException(status_code=409, detail="Execucao nao esta em andamento e nao pode ser cancelada.")
-
-    execucoes_relacionadas = (
-        _execucoes_relacionadas_cancelamento(db, execucao=execucao) if execucao is not None else []
-    )
-    run_map = {
-        run.execucao_sincronizacao_id: run
-        for run in db.scalars(
-            select(IngestionRun).where(
-                IngestionRun.execucao_sincronizacao_id.in_([item.id for item in execucoes_relacionadas])
-            )
-        ).all()
-    }
-    cancellation_requests = []
-    for item in execucoes_relacionadas:
-        related_run = run_map.get(item.id)
-        cancellation_requests.append(
-            create_cancellation_request(
-                db,
-                scope_type="execucao_sincronizacao",
-                scope_id=str(item.id),
-                execucao_sincronizacao_id=item.id,
-                ingestion_run_id=related_run.id if related_run is not None else None,
-                requested_by="api_admin",
-                reason=payload.motivo,
-                terminate_immediately=payload.terminar_imediatamente,
-                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
-            )
-        )
-    task_ids_para_revogar = _cancelar_execucoes_relacionadas(
-        db,
-        execucoes=execucoes_relacionadas,
-        motivo=payload.motivo,
-    )
-    if id_tarefa is not None:
-        task_ids_para_revogar = list(dict.fromkeys([*task_ids_para_revogar, id_tarefa]))
-
-    revogacao_solicitada = False
-    for task_id in task_ids_para_revogar:
-        celery_app.control.revoke(task_id, terminate=payload.terminar_imediatamente, signal="SIGTERM")
-        revogacao_solicitada = True
-    for request in cancellation_requests:
-        if revogacao_solicitada:
-            mark_cancellation_request_propagated(
-                request,
-                affected_task_ids=task_ids_para_revogar,
-                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
-            )
-        else:
-            mark_cancellation_request_completed(
-                request,
-                affected_task_ids=task_ids_para_revogar,
-                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
-            )
-
-    if execucao is not None:
-        if revogacao_solicitada:
-            for request in cancellation_requests:
-                mark_cancellation_request_completed(
-                    request,
-                    affected_task_ids=task_ids_para_revogar,
-                    affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
-                )
-        db.commit()
-        return RespostaCancelamentoSincronizacao(
-            id_execucao=str(execucao.id),
-            id_tarefa=id_tarefa,
-            execucao_encontrada=True,
-            status_execucao=execucao.status,
-            revogacao_solicitada=revogacao_solicitada,
-            terminar_imediatamente=payload.terminar_imediatamente,
-            mensagem=(
-                "Sincronizacao cancelada com sucesso."
-                if revogacao_solicitada
-                else "Execucao marcada como cancelada no banco sem revogacao remota."
-            ),
-        )
-
-    if cancellation_requests:
-        for request in cancellation_requests:
-            mark_cancellation_request_completed(
-                request,
-                affected_task_ids=task_ids_para_revogar,
-                affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
-            )
-        db.commit()
-
-    return RespostaCancelamentoSincronizacao(
-        id_execucao=None,
-        id_tarefa=id_tarefa,
-        execucao_encontrada=False,
-        status_execucao=None,
-        revogacao_solicitada=revogacao_solicitada,
+    return _cancelar_sincronizacao_por_seletor(
+        db=db,
+        id_execucao=payload.id_execucao,
+        id_tarefa=payload.id_tarefa,
         terminar_imediatamente=payload.terminar_imediatamente,
-        mensagem="Revogacao enviada para task sem execucao materializada no banco.",
+        motivo=payload.motivo,
     )
 
 
@@ -1737,31 +1835,7 @@ def listar_ingestion_runs(
     )
     total = db.query(IngestionRun).count()
     return ListaIngestionRuns(
-        dados=[
-            IngestionRunResumo(
-                **{
-                    "id": str(run.id),
-                    "execucao_sincronizacao_id": None
-                    if run.execucao_sincronizacao_id is None
-                    else str(run.execucao_sincronizacao_id),
-                    "tipo_fonte": run.tipo_fonte,
-                    "ano": run.ano,
-                    "status": run.status,
-                    "phase": run.phase,
-                    "remote_probe": run.remote_probe,
-                    "change_summary": run.change_summary,
-                    "quality_summary": run.quality_summary,
-                    "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
-                    "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
-                    "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
-                    "reconcile_summary": _reconcile_summary_from_run(run),
-                    "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
-                    "lifecycle_decision": _lifecycle_decision_from_run(run),
-                    **_build_run_operational_fields(db, run),
-                }
-            )
-            for run in runs
-        ],
+        dados=[_serialize_run_resumo(db, run) for run in runs],
         paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
     )
 
@@ -1789,26 +1863,7 @@ def detalhar_ingestion_run(
     run = db.get(IngestionRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
-    return IngestionRunResumo(
-        **{
-            "id": str(run.id),
-            "execucao_sincronizacao_id": None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
-            "tipo_fonte": run.tipo_fonte,
-            "ano": run.ano,
-            "status": run.status,
-            "phase": run.phase,
-            "remote_probe": run.remote_probe,
-            "change_summary": run.change_summary,
-            "quality_summary": run.quality_summary,
-            "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
-            "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
-            "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
-            "reconcile_summary": _reconcile_summary_from_run(run),
-            "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
-            "lifecycle_decision": _lifecycle_decision_from_run(run),
-            **_build_run_operational_fields(db, run),
-        }
-    )
+    return _serialize_run_resumo(db, run)
 
 
 @router.get(
@@ -1857,6 +1912,353 @@ def listar_ingestion_run_phases(
             for item in phase_rows
         ]
     )
+
+
+@router.get(
+    "/runs/{run_id}/members",
+    response_model=ListaIngestionRunMembers,
+    summary="Listar members de uma run de ingestion",
+    description=(
+        "Retorna o inventario paginado de members associados a uma run. "
+        "A resposta combina metadados de `ingestion_file_members`, snapshots de lifecycle do artefato, "
+        "contagem de deliveries capturadas e volume de quarentena por member. "
+        "Use este endpoint para tabelas operacionais de ZIPs anuais e para drill-down do reprocessamento seletivo por CSV."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    operation_id="listarIngestionRunMembersAdmin",
+)
+def listar_ingestion_run_members(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    pagina: Annotated[int, Query(ge=1)] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> ListaIngestionRunMembers:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+
+    offset = (pagina - 1) * tamanho_pagina
+    members = list(
+        db.scalars(
+            select(IngestionFileMember)
+            .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
+            .where(IngestionFile.ingestion_run_id == run.id)
+            .order_by(IngestionFileMember.member_name.asc())
+            .offset(offset)
+            .limit(tamanho_pagina)
+        ).all()
+    )
+    total = int(
+        db.scalar(
+            select(func.count(IngestionFileMember.id))
+            .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
+            .where(IngestionFile.ingestion_run_id == run.id)
+        )
+        or 0
+    )
+    if not members:
+        return ListaIngestionRunMembers(
+            dados=[],
+            paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
+        )
+
+    member_ids = [member.id for member in members]
+    member_names = [member.member_name for member in members]
+    snapshots = list(
+        db.scalars(
+            select(SourceMemberSnapshot)
+            .where(
+                SourceMemberSnapshot.artifact_snapshot_id.in_(
+                    select(SourceMemberSnapshot.artifact_snapshot_id)
+                    .select_from(SourceMemberSnapshot)
+                    .join(SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id)
+                    .where(SourceArtifactSnapshot.ingestion_run_id == run.id)
+                ),
+                SourceMemberSnapshot.member_name.in_(member_names),
+            )
+        ).all()
+    )
+    snapshot_by_member_name = {item.member_name: item for item in snapshots}
+    quarantine_rows = db.execute(
+        select(IngestionFileMember.id, func.count(QuarantineItem.id))
+        .select_from(IngestionFileMember)
+        .join(IngestionRow, IngestionRow.ingestion_file_member_id == IngestionFileMember.id)
+        .join(QuarantineItem, QuarantineItem.ingestion_row_id == IngestionRow.id)
+        .where(IngestionFileMember.id.in_(member_ids))
+        .group_by(IngestionFileMember.id)
+    ).all()
+    quarantine_by_member_id = {member_id: int(total_quarantine) for member_id, total_quarantine in quarantine_rows}
+    delivery_rows = db.execute(
+        select(SourceDeliverySnapshot.ingestion_file_member_id, func.count(SourceDeliverySnapshot.id))
+        .where(SourceDeliverySnapshot.ingestion_file_member_id.in_(member_ids))
+        .group_by(SourceDeliverySnapshot.ingestion_file_member_id)
+    ).all()
+    delivery_by_member_id = {member_id: int(total_delivery) for member_id, total_delivery in delivery_rows}
+
+    dados = []
+    for member in members:
+        snapshot = snapshot_by_member_name.get(member.member_name)
+        state = "unknown"
+        if snapshot is not None and snapshot.lifecycle_status:
+            state = snapshot.lifecycle_status
+        elif member.schema_status == "invalid":
+            state = "schema_invalid"
+        links = {
+            "run_detail": f"/ingestion/runs/{run.id}",
+            "quarantine": f"/ingestion/quarentena?ingestion_run_id={run.id}&arquivo_origem={member.member_name}",
+            "cancel": f"/ingestion/runs/{run.id}/members/{member.id}/cancel",
+        }
+        dados.append(
+            IngestionRunMemberResumo(
+                id=str(member.id),
+                ingestion_file_id=str(member.ingestion_file_id),
+                member_name=member.member_name,
+                member_sha256=member.member_sha256,
+                member_size_bytes=member.member_size_bytes,
+                row_count=member.row_count,
+                encoding=member.encoding,
+                delimiter=member.delimiter,
+                header=member.header,
+                schema_status=member.schema_status,
+                schema_message=member.schema_message,
+                row_kind=None if snapshot is None else snapshot.row_kind,
+                destino_promovido=None if snapshot is None else snapshot.destino_promovido,
+                required_member=None if snapshot is None else snapshot.required_member,
+                lifecycle_status=None if snapshot is None else snapshot.lifecycle_status,
+                quarantine_total=quarantine_by_member_id.get(member.id, 0),
+                delivery_total=delivery_by_member_id.get(member.id, 0),
+                state=state,
+                links=links,
+            )
+        )
+
+    return ListaIngestionRunMembers(
+        dados=dados,
+        paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
+    )
+
+
+@router.get(
+    "/operations",
+    response_model=IngestionOperationsResumo,
+    summary="Snapshot operacional consolidado da ingestion",
+    description=(
+        "Retorna um snapshot consolidado para consumidores desacoplados, agregando runs, execucoes, "
+        "cancelamentos, sinais de fila Celery e o estado atual do gate de materializacao visto pela ingestao."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="obterIngestionOperationsAdmin",
+)
+def obter_ingestion_operations(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionOperationsResumo:
+    inspect = celery_app.control.inspect(timeout=1.0)
+    active = inspect.active() or {}
+    reserved = inspect.reserved() or {}
+    scheduled = inspect.scheduled() or {}
+
+    candidate_runs = list(
+        db.scalars(
+            select(IngestionRun)
+            .where(IngestionRun.status.in_(("agendada", "aguardando_ingestao", "em_execucao", "falha", "cancelada")))
+            .order_by(IngestionRun.started_at.desc())
+            .limit(50)
+        ).all()
+    )
+    run_counts: dict[str, int] = {}
+    active_runs: list[IngestionOperationRunPreview] = []
+    recoverable_runs: list[IngestionOperationRunPreview] = []
+    for run in candidate_runs:
+        preview = _serialize_run_preview(db, run)
+        run_counts[preview.state] = run_counts.get(preview.state, 0) + 1
+        if preview.state in {"queued", "waiting", "running", "stale"}:
+            active_runs.append(preview)
+        if preview.next_action == "recover":
+            recoverable_runs.append(preview)
+
+    execution_rows = db.execute(
+        select(ExecucaoSincronizacao.status, func.count(ExecucaoSincronizacao.id))
+        .group_by(ExecucaoSincronizacao.status)
+    ).all()
+    execution_counts = {status: int(total) for status, total in execution_rows}
+
+    cancellation_rows = db.execute(
+        select(IngestionCancellationRequest.status, func.count(IngestionCancellationRequest.id))
+        .group_by(IngestionCancellationRequest.status)
+    ).all()
+    cancellation_counts = {status: int(total) for status, total in cancellation_rows}
+
+    from app.services.analise import obter_estado_gate_materializacao
+
+    gate = obter_estado_gate_materializacao(db)
+    materialization_gate = {
+        "status": gate.status,
+        "reason_code": gate.reason_code,
+        "gate_enabled": gate.gate_enabled,
+        "manual_control": gate.manual_control,
+        "manual_reason": gate.manual_reason,
+        "blocking_ingestions": gate.blocking_ingestions,
+        "pending_ingestions": gate.pending_ingestions,
+        "next_check_at": gate.next_check_at,
+        "blockers": [
+            {
+                "tipo_fonte": item.source_type,
+                "execucao_sincronizacao_id": item.execution_id,
+                "ingestion_run_id": item.run_id,
+                "ano": item.year,
+                "status": item.status,
+                "phase": item.phase,
+                "started_at": item.started_at,
+            }
+            for item in gate.blockers
+        ],
+    }
+
+    return IngestionOperationsResumo(
+        generated_at=_agora(),
+        run_counts=run_counts,
+        execution_counts=execution_counts,
+        cancellation_counts=cancellation_counts,
+        task_counts={
+            "active_total": sum(len(items) for items in active.values() if isinstance(items, list)),
+            "reserved_total": sum(len(items) for items in reserved.values() if isinstance(items, list)),
+            "scheduled_total": sum(len(items) for items in scheduled.values() if isinstance(items, list)),
+            "ingestion_active": _count_ingestion_tasks(active),
+            "ingestion_reserved": _count_ingestion_tasks(reserved),
+            "ingestion_scheduled": _count_ingestion_tasks(scheduled),
+        },
+        materialization_gate=materialization_gate,
+        active_runs=active_runs[:10],
+        recoverable_runs=recoverable_runs[:10],
+    )
+
+
+@router.post(
+    "/runs/{run_id}/cancel",
+    response_model=RespostaCancelamentoSincronizacao,
+    summary="Cancelar uma run de ingestion",
+    description=(
+        "Cancela diretamente a run informada, resolvendo a execucao correlata quando existir. "
+        "O comportamento operacional e o mesmo do cancelamento administrativo geral, mas com seletor orientado a `run_id`."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    operation_id="cancelarIngestionRunAdmin",
+)
+def cancelar_ingestion_run(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    terminar_imediatamente: Annotated[bool, Query()] = True,
+    motivo: Annotated[str | None, Query(max_length=1000)] = None,
+) -> RespostaCancelamentoSincronizacao:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    return _cancelar_sincronizacao_por_seletor(
+        db=db,
+        id_execucao=run.execucao_sincronizacao_id,
+        id_tarefa=run.requested_by_task_id if run.execucao_sincronizacao_id is None else None,
+        terminar_imediatamente=terminar_imediatamente,
+        motivo=motivo,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/members/{member_id}/cancel",
+    response_model=RespostaCancelamentoSincronizacao,
+    summary="Cancelar member especifico de uma run de ingestion",
+    description=(
+        "Cancela apenas o processamento do member/CSV indicado dentro da run. "
+        "A operacao procura a execucao filha correlata quando a run representa um ZIP anual."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run, member ou execucao filha nao encontrados."},
+        409: {"description": "Member nao esta em andamento e nao pode ser cancelado."},
+    },
+    operation_id="cancelarIngestionRunMemberAdmin",
+)
+def cancelar_ingestion_run_member(
+    run_id: Annotated[UUID, Path()],
+    member_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    terminar_imediatamente: Annotated[bool, Query()] = True,
+    motivo: Annotated[str | None, Query(max_length=1000)] = None,
+) -> RespostaCancelamentoSincronizacao:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    member = db.scalar(
+        select(IngestionFileMember)
+        .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
+        .where(
+            IngestionFile.ingestion_run_id == run.id,
+            IngestionFileMember.id == member_id,
+        )
+    )
+    if member is None:
+        raise HTTPException(status_code=404, detail="Member nao encontrado para esta run.")
+
+    execucao_alvo: ExecucaoSincronizacao | None = None
+    if run.execucao_sincronizacao_id is not None:
+        parent_execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+        if parent_execucao is not None and parent_execucao.tipo_execucao == "arquivo_membro" and parent_execucao.arquivo == member.member_name:
+            execucao_alvo = parent_execucao
+        else:
+            execucao_alvo = db.scalar(
+                select(ExecucaoSincronizacao)
+                .where(
+                    ExecucaoSincronizacao.parent_execucao_id == run.execucao_sincronizacao_id,
+                    ExecucaoSincronizacao.arquivo == member.member_name,
+                )
+                .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+                .limit(1)
+            )
+    if execucao_alvo is None:
+        raise HTTPException(status_code=404, detail="Execucao filha nao encontrada para este member.")
+
+    return _cancelar_sincronizacao_por_seletor(
+        db=db,
+        id_execucao=execucao_alvo.id,
+        id_tarefa=None,
+        terminar_imediatamente=terminar_imediatamente,
+        motivo=motivo,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/recover",
+    response_model=ReplayResposta,
+    summary="Recuperar administrativamente uma run de ingestion",
+    description=(
+        "Executa recuperacao administrativa controlada de uma run marcada como stale ou falhada com erro recuperavel. "
+        "Na implementacao atual, a recuperacao reaplica o replay completo da run a partir dos artefatos retidos."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run nao encontrado."},
+        409: {"description": "Run nao esta em estado recuperavel."},
+    },
+    operation_id="recoverIngestionRunAdmin",
+)
+def recover_ingestion_run(
+    run_id: Annotated[UUID, Path()],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> ReplayResposta:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    operational = _build_run_operational_fields(db, run)
+    last_error = operational["last_error"]
+    is_retryable_failure = bool(last_error and last_error.get("retryable"))
+    if operational["state"] != "stale" and not is_retryable_failure:
+        raise HTTPException(status_code=409, detail="Run nao esta em estado recuperavel.")
+    resultado = replay_ingestion_run_service(db, run_id=run_id)
+    return ReplayResposta(status="sucesso", detalhe=resultado)
 
 
 @router.get(

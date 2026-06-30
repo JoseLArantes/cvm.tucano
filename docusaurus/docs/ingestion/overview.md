@@ -39,6 +39,8 @@ Os endpoints de **Administracao da Ingestao** permitem que operadores de backoff
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | `POST` | `/ingestion/sincronizacoes/cancelar` | Cancelar sincronização em andamento |
+| `POST` | `/ingestion/runs/{run_id}/cancel` | Cancelar uma run diretamente |
+| `POST` | `/ingestion/runs/{run_id}/members/{member_id}/cancel` | Cancelar um CSV/member específico da run |
 
 ### Monitoramento
 
@@ -49,6 +51,8 @@ Os endpoints de **Administracao da Ingestao** permitem que operadores de backoff
 | `GET` | `/ingestion/runs` | Listar runs do pipeline |
 | `GET` | `/ingestion/runs/{run_id}` | Detalhar run |
 | `GET` | `/ingestion/runs/{run_id}/phases` | Timeline de fases da run |
+| `GET` | `/ingestion/runs/{run_id}/members` | Inventário paginado de members da run |
+| `GET` | `/ingestion/operations` | Snapshot consolidado para consumidores desacoplados |
 | `GET` | `/ingestion/dashboard` | Dashboard consolidado |
 | `GET` | `/ingestion/alteracoes` | Histórico de alterações |
 
@@ -60,6 +64,7 @@ Os endpoints de **Administracao da Ingestao** permitem que operadores de backoff
 | `GET` | `/ingestion/quarentena/resumo` | Resumo analítico da quarentena |
 | `POST` | `/ingestion/replay/quarentena` | Reprocessar quarentena |
 | `POST` | `/ingestion/runs/{run_id}/replay` | Reprocessar run completa |
+| `POST` | `/ingestion/runs/{run_id}/recover` | Recuperar run `stale` ou falha recuperável via replay |
 
 ### Identidade e Auditoria
 
