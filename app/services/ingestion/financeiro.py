@@ -7,7 +7,7 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Any
 
 import httpx
-from sqlalchemy import case, insert, or_, select, tuple_
+from sqlalchemy import case, insert, or_, select, text, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -937,14 +937,238 @@ def _promote_financeiro_member_from_stage_postgresql(
     contadores: dict[str, int],
     chunk_size: int,
 ) -> None:
-    _promote_financeiro_member_from_stage_fallback(
-        db,
-        member_id=member_id,
-        run_id=run_id,
-        execucao_id=execucao_id,
-        contadores=contadores,
-        chunk_size=chunk_size,
+    row_kinds = list(
+        db.execute(
+            select(IngestionFinanceiroStageRow.row_kind)
+            .where(IngestionFinanceiroStageRow.ingestion_file_member_id == member_id)
+            .distinct()
+            .order_by(IngestionFinanceiroStageRow.row_kind.asc())
+        ).scalars()
     )
+    for row_kind in row_kinds:
+        stats = _promote_financeiro_stage_row_kind_postgresql(db, member_id=member_id, row_kind=row_kind)
+        contadores["inseridos"] += stats["inserted"]
+        contadores["atualizados"] += stats["updated"]
+        contadores["inalterados"] += stats["unchanged"]
+        if run_id is not None:
+            touch_run_heartbeat(
+                db,
+                run_id=run_id,
+                metrics={
+                    "rows_promoted": (
+                        contadores.get("inseridos", 0)
+                        + contadores.get("atualizados", 0)
+                        + contadores.get("inalterados", 0)
+                    ),
+                    "promote_row_kind": row_kind,
+                },
+            )
+
+
+def _quote_ident(identifier: str) -> str:
+    if not identifier.replace("_", "").isalnum():
+        raise ValueError(f"identificador_sql_invalido: {identifier}")
+    return f'"{identifier}"'
+
+
+def _financeiro_stage_target_columns(model: type[Any]) -> tuple[str, ...]:
+    if model is DocumentoFinanceiro:
+        return (
+            "companhia_id",
+            "tipo_formulario",
+            "cnpj_companhia",
+            "codigo_cvm",
+            "data_referencia",
+            "versao",
+            "denominacao_companhia",
+            "categoria_documento",
+            "id_documento",
+            "data_recebimento",
+            "link_documento",
+            "arquivo_origem",
+            "ano_origem",
+            "linha_origem",
+            "hash_origem",
+        )
+    if model is DemonstracaoFinanceira:
+        return (
+            "companhia_id",
+            "tipo_formulario",
+            "tipo_demonstracao",
+            "escopo_demonstracao",
+            "cnpj_companhia",
+            "codigo_cvm",
+            "data_referencia",
+            "versao",
+            "denominacao_companhia",
+            "grupo_demonstracao",
+            "moeda",
+            "escala_moeda",
+            "ordem_exercicio",
+            "data_inicio_exercicio",
+            "data_fim_exercicio",
+            "codigo_conta",
+            "coluna_df",
+            "descricao_conta",
+            "valor_conta",
+            "conta_fixa",
+            "arquivo_origem",
+            "ano_origem",
+            "linha_origem",
+            "hash_origem",
+        )
+    if model is ComposicaoCapital:
+        return (
+            "companhia_id",
+            "tipo_formulario",
+            "cnpj_companhia",
+            "codigo_cvm",
+            "data_referencia",
+            "versao",
+            "denominacao_companhia",
+            "quantidade_acoes_ordinarias_capital_integralizado",
+            "quantidade_acoes_preferenciais_capital_integralizado",
+            "quantidade_total_acoes_capital_integralizado",
+            "quantidade_acoes_ordinarias_tesouraria",
+            "quantidade_acoes_preferenciais_tesouraria",
+            "quantidade_total_acoes_tesouraria",
+            "arquivo_origem",
+            "ano_origem",
+            "linha_origem",
+            "hash_origem",
+        )
+    return (
+        "companhia_id",
+        "tipo_formulario",
+        "cnpj_companhia",
+        "codigo_cvm",
+        "data_referencia",
+        "versao",
+        "denominacao_companhia",
+        "tipo_relatorio_auditor",
+        "tipo_parecer_declaracao",
+        "numero_item_parecer_declaracao",
+        "texto_parecer_declaracao",
+        "arquivo_origem",
+        "ano_origem",
+        "linha_origem",
+        "hash_origem",
+    )
+
+
+def _promote_financeiro_stage_row_kind_postgresql(
+    db: Session,
+    *,
+    member_id: Any,
+    row_kind: str,
+) -> dict[str, int]:
+    model, _entidade, campos_chave, campos_negocio = _financeiro_promotion_spec(row_kind)
+    table_name = model.__tablename__
+    target_columns = _financeiro_stage_target_columns(model)
+    business_columns = tuple(campo for campo in sorted(campos_negocio) if campo in target_columns)
+    quoted_table = _quote_ident(table_name)
+    quoted_target_columns = ", ".join(_quote_ident(column) for column in target_columns)
+    insert_columns = ", ".join(
+        (
+            _quote_ident("id"),
+            quoted_target_columns,
+            _quote_ident("criado_em"),
+            _quote_ident("sincronizado_em"),
+            _quote_ident("alterado_em"),
+        )
+    )
+    source_select_columns = []
+    for column in target_columns:
+        if column == "coluna_df":
+            source_select_columns.append("coalesce(s.coluna_df, '') as coluna_df")
+        else:
+            quoted = _quote_ident(column)
+            source_select_columns.append(f"s.{quoted} as {quoted}")
+    source_columns_sql = ",\n                ".join(source_select_columns)
+    conflict_columns = ", ".join(_quote_ident(column) for column in campos_chave)
+    order_columns = ", ".join(_quote_ident(column) for column in (*campos_chave, "linha_origem"))
+    source_insert_values = ", ".join(
+        ("gen_random_uuid()", *(f"source.{_quote_ident(column)}" for column in target_columns), "now()", "now()", "now()")
+    )
+    update_columns = tuple(
+        dict.fromkeys((*business_columns, "arquivo_origem", "ano_origem", "linha_origem", "hash_origem", "sincronizado_em"))
+    )
+    set_columns = ",\n                ".join(
+        f"{_quote_ident(column)} = EXCLUDED.{_quote_ident(column)}" for column in update_columns
+    )
+    business_change_sql = " OR ".join(
+        f"{quoted_table}.{_quote_ident(column)} IS DISTINCT FROM EXCLUDED.{_quote_ident(column)}"
+        for column in business_columns
+    ) or "false"
+    existing_business_change_sql = " OR ".join(
+        f"target.{_quote_ident(column)} IS DISTINCT FROM source.{_quote_ident(column)}"
+        for column in business_columns
+    ) or "false"
+    key_join_sql = " AND ".join(
+        f"target.{_quote_ident(column)} IS NOT DISTINCT FROM source.{_quote_ident(column)}" for column in campos_chave
+    )
+    sql = f"""
+        WITH raw_source AS (
+            SELECT
+                {source_columns_sql}
+            FROM ingestion_financeiro_stage_rows s
+            WHERE s.ingestion_file_member_id = :member_id
+              AND s.row_kind = :row_kind
+        ),
+        source AS (
+            SELECT DISTINCT ON ({conflict_columns}) *
+            FROM raw_source
+            ORDER BY {order_columns} DESC
+        ),
+        existing AS (
+            SELECT
+                source.hash_origem AS source_hash_origem,
+                target.hash_origem AS target_hash_origem,
+                target.id AS target_id,
+                ({existing_business_change_sql}) AS business_changed
+            FROM source
+            LEFT JOIN {quoted_table} target ON {key_join_sql}
+        ),
+        stats AS (
+            SELECT
+                count(*) FILTER (WHERE target_id IS NULL) AS inserted,
+                count(*) FILTER (
+                    WHERE target_id IS NOT NULL
+                      AND target_hash_origem IS DISTINCT FROM source_hash_origem
+                ) AS updated,
+                count(*) FILTER (
+                    WHERE target_id IS NOT NULL
+                      AND target_hash_origem IS NOT DISTINCT FROM source_hash_origem
+                ) AS unchanged
+            FROM existing
+        ),
+        upsert AS (
+            INSERT INTO {quoted_table} ({insert_columns})
+            SELECT {source_insert_values}
+            FROM source
+            ON CONFLICT ({conflict_columns}) DO UPDATE SET
+                {set_columns},
+                alterado_em = CASE
+                    WHEN {business_change_sql} THEN EXCLUDED.alterado_em
+                    ELSE {quoted_table}.alterado_em
+                END
+            WHERE {quoted_table}.hash_origem IS DISTINCT FROM EXCLUDED.hash_origem
+            RETURNING 1
+        )
+        SELECT
+            coalesce(stats.inserted, 0) AS inserted,
+            coalesce(stats.updated, 0) AS updated,
+            coalesce(stats.unchanged, 0) AS unchanged,
+            (SELECT count(*) FROM upsert) AS affected
+        FROM stats
+    """
+    row = db.execute(text(sql), {"member_id": member_id, "row_kind": row_kind}).mappings().one()
+    db.flush()
+    return {
+        "inserted": int(row["inserted"] or 0),
+        "updated": int(row["updated"] or 0),
+        "unchanged": int(row["unchanged"] or 0),
+    }
 
 
 def _promote_financeiro_member_from_stage_fallback(
@@ -1474,6 +1698,8 @@ def process_financeiro_member_direct_from_disk(
             companhia = db.get(Companhia, resolver_result.companhia_id)
             if companhia is not None:
                 dados["codigo_cvm"] = companhia.codigo_cvm
+        model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
+        dados_promocao = _preparar_dados_promocao(_filtrar_payload_promocao_por_modelo(model, dados))
 
         writer = normalized_writers.get(resolved_row_kind)
         if writer is None:
@@ -1492,11 +1718,11 @@ def process_financeiro_member_direct_from_disk(
                 "ano_origem": ano,
                 "companhia_id": dados.get("companhia_id"),
                 "normalized_hash": gerar_hash_canonico(dados),
+                "hash_origem": dados_promocao["hash_origem"],
                 "natural_key": natural_key,
                 **dados,
             }
         )
-        model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
         current_row_kinds_by_model.setdefault(model, set()).add(resolved_row_kind)
         if resolved_row_kind.endswith("_documento") and resolver_result.companhia_id is not None:
             register_document_header(
