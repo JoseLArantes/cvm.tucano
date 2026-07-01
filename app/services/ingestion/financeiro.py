@@ -902,6 +902,7 @@ def _promote_financeiro_member_from_stage(
     db: Session,
     *,
     member_id: Any,
+    run_id: Any | None = None,
     execucao_id: Any,
     contadores: dict[str, int],
     chunk_size: int,
@@ -910,6 +911,7 @@ def _promote_financeiro_member_from_stage(
         _promote_financeiro_member_from_stage_postgresql(
             db,
             member_id=member_id,
+            run_id=run_id,
             execucao_id=execucao_id,
             contadores=contadores,
             chunk_size=chunk_size,
@@ -919,6 +921,7 @@ def _promote_financeiro_member_from_stage(
     _promote_financeiro_member_from_stage_fallback(
         db,
         member_id=member_id,
+        run_id=run_id,
         execucao_id=execucao_id,
         contadores=contadores,
         chunk_size=chunk_size,
@@ -929,6 +932,7 @@ def _promote_financeiro_member_from_stage_postgresql(
     db: Session,
     *,
     member_id: Any,
+    run_id: Any | None = None,
     execucao_id: Any,
     contadores: dict[str, int],
     chunk_size: int,
@@ -936,6 +940,7 @@ def _promote_financeiro_member_from_stage_postgresql(
     _promote_financeiro_member_from_stage_fallback(
         db,
         member_id=member_id,
+        run_id=run_id,
         execucao_id=execucao_id,
         contadores=contadores,
         chunk_size=chunk_size,
@@ -946,6 +951,7 @@ def _promote_financeiro_member_from_stage_fallback(
     db: Session,
     *,
     member_id: Any,
+    run_id: Any | None = None,
     execucao_id: Any,
     contadores: dict[str, int],
     chunk_size: int,
@@ -972,6 +978,19 @@ def _promote_financeiro_member_from_stage_fallback(
                 execucao_id=execucao_id,
                 contadores=contadores,
             )
+            if run_id is not None:
+                touch_run_heartbeat(
+                    db,
+                    run_id=run_id,
+                    metrics={
+                        "rows_promoted": (
+                            contadores.get("inseridos", 0)
+                            + contadores.get("atualizados", 0)
+                            + contadores.get("inalterados", 0)
+                        ),
+                        "promote_row_kind": row_kind,
+                    },
+                )
 
 
 def _process_financeiro_rows(
@@ -1337,6 +1356,7 @@ def process_financeiro_member_direct_from_disk(
         return execucao, run, member
 
     update_run_state(run, phase="normalize_artifact")
+    db.commit()
     for linha_origem, raw_data in row_iter:
         total_rows += 1
         contadores["lidas"] += 1
@@ -1509,6 +1529,7 @@ def process_financeiro_member_direct_from_disk(
         record_phase_artifact(db, run_id=run_id, direction="output", artifact=artifact)
 
     update_run_state(run, phase="load_typed_staging")
+    db.commit()
     for artifact in normalized_artifacts.values():
         load_result = load_financeiro_artifact_to_stage(
             db,
@@ -1535,9 +1556,11 @@ def process_financeiro_member_direct_from_disk(
 
     if promote_enabled:
         update_run_state(run, phase="promote")
+        db.commit()
         _promote_financeiro_member_from_stage(
             db,
             member_id=member_id,
+            run_id=run_id,
             execucao_id=execucao_id,
             contadores=contadores,
             chunk_size=chunk_size,
@@ -1550,6 +1573,7 @@ def process_financeiro_member_direct_from_disk(
 
     if promote_enabled and reconcile_required:
         update_run_state(run, phase="reconcile")
+        db.commit()
         for model, row_kinds in current_row_kinds_by_model.items():
             normalized_artifact_uri = None
             for current_row_kind in sorted(row_kinds):
@@ -1941,6 +1965,7 @@ def _process_financeiro_member(
             _promote_financeiro_member_from_stage(
                 db,
                 member_id=member.id,
+                run_id=run_id,
                 execucao_id=execucao_id,
                 contadores=contadores,
                 chunk_size=chunk_size,

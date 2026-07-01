@@ -381,6 +381,106 @@ def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
     assert resolution.codigo_cvm == 1234
 
 
+def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import celery
+
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2022,
+        arquivo="itr_cia_aberta_2022.zip",
+        url="http://exemplo/itr",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    child_names = [
+        "itr_cia_aberta_BPA_con_2022.csv",
+        "itr_cia_aberta_BPA_ind_2022.csv",
+        "itr_cia_aberta_BPP_con_2022.csv",
+    ]
+    children = []
+    for child_name in child_names:
+        child = ExecucaoSincronizacao(
+            parent_execucao_id=execucao_pai.id,
+            tipo_fonte="itr",
+            ano=2022,
+            arquivo=child_name,
+            url=f"http://exemplo/itr/{child_name}",
+            status="aguardando_ingestao",
+            iniciada_em=agora,
+        )
+        db_session.add(child)
+        db_session.flush()
+        children.append(child)
+        create_run(
+            db_session,
+            tipo_fonte="itr",
+            ano=2022,
+            execucao_sincronizacao_id=child.id,
+            status="aguardando_ingestao",
+            phase="stage",
+        )
+    db_session.commit()
+
+    class _SessionProxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(db_session, name)
+
+        def close(self) -> None:
+            pass
+
+    dispatched: dict[str, Any] = {}
+
+    class _Workflow:
+        def delay(self) -> None:
+            dispatched["delayed"] = True
+
+    def _fake_group(signatures: Any) -> list[Any]:
+        grouped = list(signatures)
+        dispatched["group_size"] = len(grouped)
+        return grouped
+
+    def _fake_chord(grouped: Any, callback: Any) -> _Workflow:
+        dispatched["callback"] = callback
+        dispatched["grouped"] = grouped
+        return _Workflow()
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_per_parent", 2)
+    monkeypatch.setattr(celery, "group", _fake_group)
+    monkeypatch.setattr(celery, "chord", _fake_chord)
+
+    resultado = worker_tasks.disparar_dependentes_task.run(str(execucao_pai.id))
+
+    db_session.expire_all()
+    statuses = {}
+    for child in children:
+        child_atual = db_session.get(ExecucaoSincronizacao, child.id)
+        assert child_atual is not None
+        statuses[child.arquivo] = child_atual.status
+    phase_statuses = {
+        child.arquivo: db_session.scalar(
+            select(IngestionPhaseExecution.status)
+            .join(IngestionRun, IngestionRun.id == IngestionPhaseExecution.ingestion_run_id)
+            .where(IngestionRun.execucao_sincronizacao_id == child.id)
+            .order_by(IngestionPhaseExecution.created_at.desc())
+            .limit(1)
+        )
+        for child in children
+    }
+
+    assert resultado["status"] == "dispatched"
+    assert dispatched["group_size"] == 2
+    assert list(statuses.values()).count("agendada") == 2
+    assert list(statuses.values()).count("aguardando_ingestao") == 1
+    assert set(phase_statuses.values()) == {"pending"}
+
+
 def test_finalizar_sincronizacao_zip_resume_quality_summary_explicit_reuse(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,

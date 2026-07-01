@@ -1254,7 +1254,7 @@ def ingerir_sincronizacao_zip(
                 select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
             )
             if child_run is not None:
-                update_run_state(child_run, status="em_execucao", phase="stage")
+                update_run_state(child_run, status="agendada", phase="stage")
 
             if c.arquivo == document_file:
                 doc_tasks_to_dispatch.append({
@@ -1764,7 +1764,9 @@ def disparar_dependentes_task(
     from sqlalchemy import select
 
     from app.db.session import SessionLocal
+    from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.staging import update_run_state
 
     db = SessionLocal()
     try:
@@ -1814,6 +1816,11 @@ def disparar_dependentes_task(
         dep_signatures = []
         for c in selected_children:
             c.status = "agendada"
+            child_run = db.scalar(
+                select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
+            )
+            if child_run is not None:
+                update_run_state(child_run, status="agendada", phase="stage")
 
             sig = sincronizar_member_task.si(
                 tipo_fonte=execucao.tipo_fonte,
