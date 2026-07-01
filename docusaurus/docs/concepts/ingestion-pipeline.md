@@ -140,7 +140,7 @@ As filas operacionais sao isoladas:
 - `ingestion_control`: coordenacao, finalizadores e recovery de ingestao;
 - `analise_materializacao`: materializacao analitica.
 
-Workers de materializacao nao devem consumir filas de ingestao. Workers de ingestao podem manter a fila historica `celery` apenas para drenar mensagens legadas ja publicadas.
+Workers de materializacao nao devem consumir filas de ingestao. Novas publicacoes usam `ingestion` e `ingestion_control`; workers de ingestao podem manter a fila historica `celery` apenas para compatibilidade operacional e drenagem de mensagens antigas.
 
 ## Gate de materializacao
 

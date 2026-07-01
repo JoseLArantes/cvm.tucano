@@ -502,19 +502,19 @@ O endpoint de reprocessamento seletivo continua existindo para recuperacao cirur
 3. Separa membros em duas categorias:
    - **Document headers**: arquivo principal `{fonte}_cia_aberta_{ano}.csv` (processado primeiro)
    - **Dependentes**: demais arquivos (processados apos os headers)
-4. Orquestracao via Celery: `chain(header_task, chord(dependent_tasks, finalize_task))`
+4. Orquestracao via Celery: o member de cabecalho e processado antes dos dependentes; os dependentes sao despachados respeitando `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`
 5. Dispara `sincronizar_member_task` para cada membro:
    - **Self-heal**: se arquivo CSV ausente do disco, reconstroi de `IngestionFileMemberPayload` ou re-extrai do ZIP
-   - **Stage**: CSV para `ingestion_rows` em chunks (default 5.000 linhas/chunk), usando PostgreSQL COPY protocol quando disponivel para performance
    - Determinacao do `row_kind` via `get_row_kind`
    - Reconstrucao do `header_map` para datasets dependentes
    - Processamento especifico por tipo de fonte:
-     - `dfp`/`itr`: `_process_financeiro_member`
+     - `dfp`/`itr`: `Financial Direct Path`, lendo o CSV do artefato bruto, normalizando linhas validas para artifact `typed_csv`, carregando `ingestion_financeiro_stage_rows` via COPY streaming no PostgreSQL e promovendo a partir do staging tipado
      - `fre`: `_process_fre_member`
      - `fca`: `_process_fca_rows`
      - `ipe`: `_process_ipe_rows`
      - `vlmo`: `_process_vlmo_rows`
      - `cgvn`: `_process_cgvn_rows`
+   - Para fontes fora do direct path financeiro, **Stage**: CSV para `ingestion_rows` em chunks, usando PostgreSQL COPY protocol quando disponivel para performance
    - **Promocao resiliente** (`safe_promote_chunk`): promove em chunks. Se o chunk inteiro falhar (ex: `NumericValueOutOfRange`), faz rollback do savepoint e promove linha a linha. Linhas com erro vao para quarentena com `normalizacao_invalida`; linhas OK sao salvas.
    - **Lookup leve antes do promote**: a camada de ingestao consulta primeiro apenas `id` + chave natural + `hash_origem`; a leitura completa dos campos de negocio so acontece para chaves cujo hash mudou.
    - **Insercao nova no PostgreSQL**: o caminho de insert usa `ON CONFLICT DO NOTHING` nas tabelas com chave natural estavel para reduzir custo de corrida e duplicidade intra-batch sem alterar a trilha de historico.
@@ -830,24 +830,24 @@ No modulo `bootstrap`: na inicializacao do scheduler, verifica se existem
 execucoes validas. Se nao, dispara tarefas para cadastro e todas as fontes/anos
 configurados via environment variables (`ANOS_INICIAIS_*`).
 
-### 11.3 Admin API (Endpoints de Ingestao)
+### 11.3 API Administrativa de Ingestao
 
-Endpoints no router `admin` (todos requerem autenticacao Bearer token):
+Endpoints sob o prefixo publico `/ingestion` (todos requerem autenticacao Bearer token):
 
 **Disparo de sincronizacoes:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/sincronizacoes/cadastro` | Dispara sincronizacao completa do cadastro |
-| `POST` | `/admin/sincronizacoes/dfp/{ano}` | Dispara sincronizacao DFP para o ano |
-| `POST` | `/admin/sincronizacoes/itr/{ano}` | Dispara sincronizacao ITR para o ano |
-| `POST` | `/admin/sincronizacoes/fre/{ano}` | Dispara sincronizacao FRE para o ano |
-| `POST` | `/admin/sincronizacoes/fca/{ano}` | Dispara sincronizacao FCA para o ano |
-| `POST` | `/admin/sincronizacoes/ipe/{ano}` | Dispara sincronizacao IPE para o ano |
-| `POST` | `/admin/sincronizacoes/vlmo/{ano}` | Dispara sincronizacao VLMO para o ano |
-| `POST` | `/admin/sincronizacoes/cgvn/{ano}` | Dispara sincronizacao CGVN para o ano |
-| `POST` | `/admin/sincronizacoes/tudo/{ano}` | Dispara todas as fontes para o ano de uma vez |
-| `POST` | `/admin/sincronizacoes/reprocessar-arquivo` | Reprocessamento seletivo por nome de arquivo CVM |
+| `POST` | `/ingestion/sincronizacoes/cadastro` | Dispara sincronizacao completa do cadastro |
+| `POST` | `/ingestion/sincronizacoes/dfp/{ano}` | Dispara sincronizacao DFP para o ano |
+| `POST` | `/ingestion/sincronizacoes/itr/{ano}` | Dispara sincronizacao ITR para o ano |
+| `POST` | `/ingestion/sincronizacoes/fre/{ano}` | Dispara sincronizacao FRE para o ano |
+| `POST` | `/ingestion/sincronizacoes/fca/{ano}` | Dispara sincronizacao FCA para o ano |
+| `POST` | `/ingestion/sincronizacoes/ipe/{ano}` | Dispara sincronizacao IPE para o ano |
+| `POST` | `/ingestion/sincronizacoes/vlmo/{ano}` | Dispara sincronizacao VLMO para o ano |
+| `POST` | `/ingestion/sincronizacoes/cgvn/{ano}` | Dispara sincronizacao CGVN para o ano |
+| `POST` | `/ingestion/sincronizacoes/tudo/{ano}` | Dispara todas as fontes para o ano de uma vez |
+| `POST` | `/ingestion/sincronizacoes/reprocessar-arquivo` | Reprocessamento seletivo por nome de arquivo CVM |
 
 Todas as rotas de disparo aceitam `?force_reimport=true` para ignorar o skip por hash e
 reprocessar integralmente.
@@ -873,29 +873,29 @@ chunk antes de avancar para o seguinte.
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/sincronizacoes/pre-processar/cadastro` | Fase 1 apenas do cadastro |
-| `POST` | `/admin/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | Fase 1 apenas para fonte anual |
-| `POST` | `/admin/sincronizacoes/{id_execucao}/ingerir` | Fase 2 a partir de execucao pre-processada |
-| `POST` | `/admin/sincronizacoes/cancelar` | Cancela sincronizacao em andamento |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/cadastro` | Fase 1 apenas do cadastro |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | Fase 1 apenas para fonte anual |
+| `POST` | `/ingestion/sincronizacoes/{id_execucao}/ingerir` | Fase 2 a partir de execucao pre-processada |
+| `POST` | `/ingestion/sincronizacoes/cancelar` | Cancela sincronizacao em andamento |
 
 **Monitoramento:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `GET` | `/admin/sincronizacoes` | Lista paginada de execucoes de sincronizacao |
-| `GET` | `/admin/sincronizacoes/{id_execucao}` | Detalhe de uma execucao |
-| `GET` | `/admin/runs` | Lista paginada de ingestion runs |
-| `GET` | `/admin/runs/{run_id}` | Detalhe de uma ingestion run |
-| `GET` | `/admin/quarentena` | Lista paginada da quarentena (filtros: motivo_codigo, arquivo_origem, status, ano_origem) |
-| `GET` | `/admin/quarentena/resumo` | Resumo analitico agregado da quarentena (totais, distribuicao, rankings) |
+| `GET` | `/ingestion/sincronizacoes` | Lista paginada de execucoes de sincronizacao |
+| `GET` | `/ingestion/sincronizacoes/{id_execucao}` | Detalhe de uma execucao |
+| `GET` | `/ingestion/runs` | Lista paginada de ingestion runs |
+| `GET` | `/ingestion/runs/{run_id}` | Detalhe de uma ingestion run |
+| `GET` | `/ingestion/quarentena` | Lista paginada da quarentena (filtros: motivo_codigo, arquivo_origem, status, ano_origem) |
+| `GET` | `/ingestion/quarentena/resumo` | Resumo analitico agregado da quarentena (totais, distribuicao, rankings) |
 
 **Replay e correcao:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/replay/quarentena` | Replay de itens da quarentena (filtros opcionais) |
-| `POST` | `/admin/runs/{run_id}/replay` | Replay de uma run completa a partir do payload bruto |
-| `POST` | `/admin/identity/rebuild` | Reconstroi o grafo de identidade reprocessando o cadastro |
+| `POST` | `/ingestion/replay/quarentena` | Replay de itens da quarentena (filtros opcionais) |
+| `POST` | `/ingestion/runs/{run_id}/replay` | Replay de uma run completa a partir do payload bruto |
+| `POST` | `/ingestion/identity/rebuild` | Reconstroi o grafo de identidade reprocessando o cadastro |
 
 ### 11.4 Tasks Celery
 
@@ -921,7 +921,7 @@ Configuracao: maximo de `INGESTION_MAX_RETRIES` tentativas (padrao 5), backoff m
 | `sincronizar_ipe_task` | `_coordenar_sincronizacao_zip("ipe", ano)` | Beat + Bootstrap + Admin API |
 | `sincronizar_vlmo_task` | `_coordenar_sincronizacao_zip("vlmo", ano)` | Beat + Bootstrap + Admin API |
 | `sincronizar_cgvn_task` | `_coordenar_sincronizacao_zip("cgvn", ano)` | Beat + Bootstrap + Admin API |
-| `sincronizar_member_task` | Processamento de membro individual | Disparada por `ingerir_sincronizacao_zip` via chord |
+| `sincronizar_member_task` | Processamento de membro individual | Disparada pela orquestracao de members da execucao ZIP |
 | `pre_processar_sincronizacao_task` | Fase 1 manual (qualquer fonte) | Admin API (pre-processar) |
 | `ingerir_sincronizacao_task` | Fase 2 manual | Admin API (ingerir) |
 

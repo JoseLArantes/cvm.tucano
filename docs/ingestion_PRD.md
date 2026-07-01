@@ -440,9 +440,9 @@ Se um worker morrer:
 
 Ingestao e materializacao devem continuar em filas separadas:
 
-- ingestao: fila `celery` ou fila dedicada `ingestion`, consumida apenas por workers de ingestao;
+- ingestao: filas dedicadas `ingestion` e `ingestion_control`, consumidas apenas por workers de ingestao;
 - materializacao: fila `analise_materializacao`, consumida apenas por workers de materializacao;
-- recovery/maintenance de ingestao: fila propria opcional `ingestion_control`, sem depender de workers de materializacao.
+- recovery/maintenance de ingestao: fila `ingestion_control`, sem depender de workers de materializacao.
 
 Remover workers de materializacao nao pode impedir progresso de ingestao. Remover workers de ingestao nao pode fazer materializacao iniciar quando o admission gate estiver vermelho por ingestao ativa ou pausa manual.
 

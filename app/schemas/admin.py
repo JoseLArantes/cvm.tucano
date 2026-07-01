@@ -203,12 +203,23 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
 class TarefaAgendadaResumo(BaseModel):
     tipo_fonte: str = Field(description='Tipo da fonte agendada (ex.: "cadastro", "dfp", "itr", "fre").')
     ano: int | None = Field(description="Ano da sincronizacao quando aplicavel.")
-    id_tarefa: str = Field(description="Identificador da task agendada no Celery.")
+    id_tarefa: str = Field(
+        description=(
+            "Identificador operacional da execucao assíncrona. "
+            "O valor e persistido em `execucoes_sincronizacao.id_tarefa` antes da publicacao Celery; "
+            "em lotes anuais, algumas execucoes podem ficar registradas como `agendada` ate o worker de cadastro publicar a fonte anual correspondente."
+        )
+    )
 
 
 class RespostaAgendamentoEmLote(BaseModel):
     status: str = Field(description='Status do disparo em lote. Valor esperado: "agendada".')
-    tarefas: list[TarefaAgendadaResumo] = Field(description="Lista das tarefas enfileiradas.")
+    tarefas: list[TarefaAgendadaResumo] = Field(
+        description=(
+            "Lista das execucoes registradas para o lote. "
+            "No lote anual, `cadastro` e publicado imediatamente; `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` ficam persistidos como `agendada` e sao publicados pelo worker apos o cadastro terminar com sucesso, `sem_alteracao` ou `skipped`."
+        )
+    )
 
 
 class SolicitacaoCancelamentoSincronizacao(BaseModel):

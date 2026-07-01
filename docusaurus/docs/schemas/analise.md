@@ -282,7 +282,7 @@ Além dos totais gerais de tasks, o snapshot atual expõe:
 
 | Campo | Tipo | Descrição |
 | --- | --- | --- |
-| `source_type` | string | Fonte de ingestão bloqueadora |
+| `source_type` | string | Fonte de ingestão associada ao bloqueio do gate |
 | `execution_id` | string | ID da execução de sincronização, quando houver |
 | `run_id` | string | ID da run de ingestão, quando houver |
 | `year` | integer | Ano da carga, quando aplicável |

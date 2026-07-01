@@ -202,7 +202,7 @@ Convencoes deste changelog:
 - o gate de materializacao deixa de atuar apenas dentro da execucao da campanha e passa a bloquear tambem o enfileiramento do dispatcher, o reenfileiramento de campanhas e o inicio de chunks
 - quando o gate esta `red`, campanhas podem continuar existindo em `pending`, mas novas tasks de dispatcher/campanha/chunk nao devem entrar em execucao efetiva
 - a task direta de materializacao por companhia tambem passa a respeitar o gate antes de iniciar trabalho
-- o roteamento Celery de ingestao e materializacao fica explicito: ingestao na fila `celery`, materializacao na fila dedicada `analise_materializacao`
+- o roteamento Celery de ingestao e materializacao fica explicito: ingestao nas filas `ingestion` e `ingestion_control`, materializacao na fila dedicada `analise_materializacao`
 
 ## 2026-06-29 - Worker de replay de member reduz footprint por chunk
 

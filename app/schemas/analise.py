@@ -278,7 +278,7 @@ class AnaliseMaterializacaoReativacaoSweepResposta(AnaliseMaterializacaoReativac
 
 
 class AnaliseMaterializacaoIngestionBlocker(BaseModel):
-    source_type: str = Field(description="Fonte de ingestão em execução que está bloqueando o gate.")
+    source_type: str = Field(description="Fonte de ingestão associada ao bloqueio atual do gate.")
     execution_id: str | None = Field(default=None, description="Identificador da execução de sincronização associada, quando houver.")
     run_id: str | None = Field(default=None, description="Identificador da run de ingestão associada, quando houver.")
     year: int | None = Field(default=None, description="Ano da execução quando aplicável.")
