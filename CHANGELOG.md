@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/JoseLArantes/cvm.tucano/compare/v1.1.0...v1.1.1) (2026-07-01)
+
+
+### Miscellaneous Chores
+
+* melhorias na ingestao ([#5](https://github.com/JoseLArantes/cvm.tucano/issues/5)) ([9467820](https://github.com/JoseLArantes/cvm.tucano/commit/94678205eca989032fd13b1afeb55d5107ab83d0))
+
 ## [1.1.0](https://github.com/JoseLArantes/cvm.tucano/compare/v1.0.1...v1.1.0) (2026-06-25)
 
 
