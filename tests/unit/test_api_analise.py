@@ -10,6 +10,7 @@ from app.models.analise import (
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
+    AnaliseMaterializacaoControle,
     AnaliseMaterializacaoExecucao,
 )
 from app.models.cgvn import CgvnDocumento, CgvnPratica
@@ -21,6 +22,27 @@ from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.vlmo import VlmoConsolidado
 from app.services.analise import materializar_analise_companhia
 from app.worker.celery_app import celery_app
+
+
+def _ops_headers(client: TestClient) -> dict[str, str]:
+    criado = client.post(
+        "/usuarios",
+        json={
+            "username": "operador-materializacao",
+            "password": "senha-operador",
+            "nome": "Operador Materializacao",
+            "is_admin": False,
+            "pode_operar_materializacao": True,
+            "ativo": True,
+        },
+    )
+    assert criado.status_code == 201
+    login = client.post(
+        "/auth/login",
+        json={"username": "operador-materializacao", "password": "senha-operador"},
+    )
+    assert login.status_code == 200
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}
 
 
 def _doc(
@@ -1144,9 +1166,24 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
             failed_items=0,
             skipped_items=0,
             summary={"wait_reason": "INGESTION_ACTIVE"},
-            updated_at=datetime.now(UTC),
-        )
+        updated_at=datetime.now(UTC),
+    )
+    campanha_presa = AnaliseMaterializacaoCampanha(
+        source="post_ingestion",
+        status="pending",
+        chunk_size=25,
+        total_items=1,
+        pending_items=1,
+        running_items=0,
+        success_items=0,
+        failed_items=0,
+        skipped_items=0,
+        summary={"recovery_state": "recoverable"},
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+        updated_at=datetime.now(UTC) - timedelta(minutes=5),
+    )
     db_session.add(campanha_bloqueada)
+    db_session.add(campanha_presa)
     db_session.flush()
     stale_chunk = _materializacao_chunk_execucao(
         campanha_bloqueada,
@@ -1170,6 +1207,18 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
         iniciada_em=datetime.now(UTC),
     )
     db_session.add(execucao_ingestao)
+    controle = db_session.get(AnaliseMaterializacaoControle, 1)
+    if controle is None:
+        controle = AnaliseMaterializacaoControle(id=1, mode="auto", summary={})
+        db_session.add(controle)
+    controle.summary = {
+        "pending_recovery": {
+            "triggered_at": datetime.now(UTC).isoformat(),
+            "status": "triggered",
+            "reason_code": "PENDING_UNDISPATCHED",
+            "requeued_campaigns": [str(campanha_presa.id)],
+        }
+    }
     db_session.commit()
 
     class FakeInspect:
@@ -1179,6 +1228,7 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
                     {"name": "app.worker.tasks.materializar_analise_companhia_task"},
                     {"name": "app.worker.tasks.materializar_analise_campanha_task"},
                     {"name": "app.worker.tasks.materializar_analise_chunk_task"},
+                    {"name": "app.worker.tasks.recuperar_materializacao_pendente_task"},
                 ]
             }
 
@@ -1194,7 +1244,7 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["fila"]["workers_reporting"] == 2
-    assert payload["fila"]["materialization_active_tasks"] == 3
+    assert payload["fila"]["materialization_active_tasks"] == 4
     assert payload["fila"]["materialization_reserved_tasks"] == 1
     assert payload["fila"]["materialization_scheduled_tasks"] == 1
     assert payload["fila"]["materialization_orchestrator_active_tasks"] == 1
@@ -1209,27 +1259,90 @@ def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
     assert payload["running_campaigns"] == 1
     assert payload["waiting_for_gate_campaigns"] == 1
     assert payload["recovering_campaigns"] == 0
-    assert payload["pending_items"] == 3
+    assert payload["recoverable_pending_campaigns"] >= 1
+    assert payload["undispatched_stuck_campaigns"] >= 1
+    assert str(campanha_presa.id) in payload["recoverable_campaign_ids"]
+    assert payload["last_pending_recovery_sweep_at"] is not None
+    assert payload["last_pending_recovery_sweep_summary"]["reason_code"] == "PENDING_UNDISPATCHED"
+    assert payload["pending_items"] == 4
     assert payload["running_items"] == 1
     assert payload["success_items"] == 1
     assert payload["failed_items"] == 1
     assert payload["queued_chunks"] == 0
     assert payload["running_chunks"] == 1
-    assert payload["stale_chunks"] == 1
+    assert payload["stale_chunks"] == 0
+    assert payload["stale_item_count"] == 0
     assert str(stale.id) in payload["stalled_incremental_execution_ids"]
+    assert payload["pending_recovery_active_tasks"] == 1
     execution_previews = {item["id"]: item for item in payload["running_execution_previews"]}
     assert execution_previews[str(stale.id)]["materialization_mode"] == "incremental"
     assert execution_previews[str(stale.id)]["invalidated_from"] == "2026-03-10"
     campaigns_by_id = {item["campanha_id"]: item for item in payload["campaigns"]}
     assert str(campanha.id) in campaigns_by_id
+    assert campaigns_by_id[str(campanha.id)]["active_chunks"] == 1
     assert campaigns_by_id[str(campanha.id)]["active_chunk_id"] == str(running_chunk.id)
+    assert campaigns_by_id[str(campanha.id)]["active_chunk_ids_preview"] == [str(running_chunk.id)]
+    assert campaigns_by_id[str(campanha_presa.id)]["recovery_state"] == "recoverable"
     assert payload["running_items_preview"][0]["campanha_id"] == str(campanha.id)
     assert payload["running_items_preview"][0]["materialization_mode"] == "incremental"
     assert payload["running_items_preview"][0]["chunk_execucao_id"] == str(running_chunk.id)
     assert payload["pending_items_preview"][0]["campanha_id"] == str(campanha.id)
     assert payload["pending_items_preview"][0]["invalidated_from"] == "2026-03-10"
-    assert payload["stale_chunk_preview"][0]["chunk_execucao_id"] == str(stale_chunk.id)
+    assert payload["stale_chunk_preview"] == []
     assert str(stale.id) in payload["stalled_execution_ids"]
+
+
+def test_analise_materializacoes_monitoramento_conta_apenas_stale_acionavel(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, running_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    stale_chunk = _materializacao_chunk_execucao(
+        campanha,
+        status="stale",
+        lease_expires_at=datetime.now(UTC) - timedelta(minutes=10),
+        heartbeat_at=datetime.now(UTC) - timedelta(minutes=10),
+        item_count=1,
+        updated_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    db_session.add(stale_chunk)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="running",
+            ordem=1,
+            chunk_execucao_id=stale_chunk.id,
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+        )
+    )
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, dict[str, str]]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    resp = client.get("/analise/materializacoes/monitoramento")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["stale_chunks"] == 1
+    assert payload["stale_item_count"] == 1
+    assert payload["stale_chunk_preview"][0]["chunk_execucao_id"] == str(stale_chunk.id)
 
 
 def test_analise_materializacoes_controle_pause_resume(client: TestClient, db_session: Session) -> None:
@@ -1250,6 +1363,49 @@ def test_analise_materializacoes_controle_pause_resume(client: TestClient, db_se
     resume_payload = resume.json()
     assert resume_payload["gate"]["manual_control"] == "auto"
     assert resume_payload["gate"]["reason_code"] in {"NO_BLOCKERS", "INGESTION_ACTIVE"}
+
+
+def test_monitoramento_nao_conta_campanha_recem_reativada_como_recoverable(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(
+        status="pending",
+        total_items=1,
+        pending_items=1,
+        summary={
+            "recovery_state": "requeued",
+            "last_recovery_action": "requeued",
+            "last_recovery_reason_code": "PENDING_UNDISPATCHED",
+            "last_recovery_check_at": datetime.now(UTC).isoformat(),
+        },
+    )
+    db_session.add(campanha)
+    db_session.flush()
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.add(_materializacao_campanha_item(campanha, cia, escopo="consolidated", status="pending", ordem=1))
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, dict[str, str]]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    resp = client.get("/analise/materializacoes/monitoramento")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["recoverable_pending_campaigns"] == 0
+    assert str(campanha.id) not in payload["recoverable_campaign_ids"]
 
 
 def test_analise_materializacoes_recuperar_stale_endpoints(client: TestClient, db_session: Session) -> None:
@@ -1317,6 +1473,102 @@ def test_analise_materializacoes_recuperar_stale_endpoints(client: TestClient, d
     assert payload_campaign["affected_campaigns"] == [str(campanha.id)]
 
 
+def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+        )
+    )
+    db_session.commit()
+
+    resp = client.post(
+        f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+        headers=_ops_headers(client),
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "triggered"
+    assert payload["reason_code"] == "PENDING_UNDISPATCHED"
+    assert payload["requeued_campaigns"] == [str(campanha.id)]
+    assert payload["dispatcher_enqueued"] is True
+
+
+def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+        )
+    )
+    db_session.commit()
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+
+    resp = client.post(
+        "/analise/materializacoes/recuperacao/trigger",
+        headers=_ops_headers(client),
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "triggered"
+    assert payload["reason_code"] == "PENDING_UNDISPATCHED"
+    assert payload["scanned_campaigns"] >= 1
+    assert payload["recoverable_campaigns"] >= 1
+    assert str(campanha.id) in payload["requeued_campaigns"]
+
+
+def test_analise_materializacoes_operador_endpoints_exigem_permissao_de_usuario_ou_token_sistema(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
+    db_session.add(campanha)
+    db_session.commit()
+
+    com_token_invalido = client.post(
+        f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+        headers={"Authorization": "Bearer token-invalido"},
+    )
+    assert com_token_invalido.status_code == 401
+
+    com_token_sistema = client.post(
+        f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+        headers={"Authorization": "Bearer token-teste"},
+    )
+    assert com_token_sistema.status_code == 200
+
+    criado = client.post(
+        "/usuarios",
+        json={"username": "leitor", "password": "senha-leitor", "nome": "Leitor", "ativo": True},
+    )
+    assert criado.status_code == 201
+    login = client.post("/auth/login", json={"username": "leitor", "password": "senha-leitor"})
+    assert login.status_code == 200
+    com_usuario_sem_permissao = client.post(
+        f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+        headers={"Authorization": f"Bearer {login.json()['access_token']}"},
+    )
+    assert com_usuario_sem_permissao.status_code == 403
+    assert com_usuario_sem_permissao.json()["detail"] == "Permissao de operacao de materializacao requerida."
+
+
 def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> None:
     resp = client.get("/openapi.json")
     assert resp.status_code == 200
@@ -1333,6 +1585,8 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         "/analise/materializacoes/controle/resume",
         "/analise/materializacoes/recuperar-stale",
         "/analise/materializacoes/campanhas/{campanha_id}/recuperar",
+        "/analise/materializacoes/campanhas/{campanha_id}/reativar",
+        "/analise/materializacoes/recuperacao/trigger",
         "/analise/materializacoes/{execucao_id}",
         "/analise/companhias/{codigo_cvm}",
         "/analise/companhias/{codigo_cvm}/series",
@@ -1384,8 +1638,21 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert "lowest_running_invalidated_from" in monitor_schema
     assert "waiting_for_gate_campaigns" in monitor_schema
     assert "recovering_campaigns" in monitor_schema
+    assert "recoverable_pending_campaigns" in monitor_schema
+    assert "undispatched_stuck_campaigns" in monitor_schema
+    assert "recoverable_campaign_ids" in monitor_schema
+    assert "last_pending_recovery_sweep_at" in monitor_schema
+    assert "pending_recovery_active_tasks" in monitor_schema
     assert "stale_chunks" in monitor_schema
     assert "stale_chunk_preview" in monitor_schema
     assert "running_execution_previews" in monitor_schema
     assert "campaigns" in monitor_schema
+    campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]
+    assert "active_chunks" in campanha_schema
+    assert "active_chunk_ids_preview" in campanha_schema
     assert "running_items_preview" in monitor_schema
+    campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]
+    assert "recovery_state" in campanha_schema
+    assert "last_recovery_check_at" in campanha_schema
+    assert "last_recovery_action" in campanha_schema
+    assert "last_recovery_reason_code" in campanha_schema

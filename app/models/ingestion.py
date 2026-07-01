@@ -1,8 +1,22 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    Numeric,
+    String,
+    Text,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -10,6 +24,15 @@ from app.db.base import Base
 
 class IngestionRun(Base):
     __tablename__ = "ingestion_runs"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_runs_tipo_fonte_ano_status_started_at",
+            "tipo_fonte",
+            "ano",
+            "status",
+            "started_at",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -32,8 +55,95 @@ class IngestionRun(Base):
     )
 
 
+class IngestionPhaseExecution(Base):
+    __tablename__ = "ingestion_phase_executions"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_phase_executions_run_phase_attempt",
+            "ingestion_run_id",
+            "phase",
+            "attempt",
+        ),
+        Index(
+            "ix_ingestion_phase_executions_status_heartbeat_at",
+            "status",
+            "heartbeat_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), index=True
+    )
+    phase: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    task_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    error_type: Mapped[str | None] = mapped_column(String(120))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    error_retryable: Mapped[bool | None] = mapped_column(Boolean)
+    input_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    output_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    metrics: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
+class IngestionCancellationRequest(Base):
+    __tablename__ = "ingestion_cancellation_requests"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_cancellation_requests_scope_type_scope_id",
+            "scope_type",
+            "scope_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope_type: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    execucao_sincronizacao_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), index=True
+    )
+    ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL"), index=True
+    )
+    requested_by: Mapped[str | None] = mapped_column(String(120))
+    reason: Mapped[str | None] = mapped_column(Text)
+    terminate_immediately: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    propagated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    affected_task_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    affected_execution_ids: Mapped[list[str] | None] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class SourceArtifactSnapshot(Base):
     __tablename__ = "source_artifact_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_artifact_snapshots_tipo_fonte_ano_ingestion_run_id",
+            "tipo_fonte",
+            "ano",
+            "ingestion_run_id",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -43,6 +153,10 @@ class SourceArtifactSnapshot(Base):
     ano: Mapped[int | None] = mapped_column(Integer, index=True)
     resource_url: Mapped[str] = mapped_column(String(1000), nullable=False)
     source_filename: Mapped[str | None] = mapped_column(String(255))
+    storage_uri: Mapped[str | None] = mapped_column(String(1000))
+    storage_role: Mapped[str | None] = mapped_column(String(64))
+    storage_content_type: Mapped[str | None] = mapped_column(String(255))
+    storage_size_bytes: Mapped[int | None] = mapped_column(Integer)
     content_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     remote_etag: Mapped[str | None] = mapped_column(String(255))
     remote_last_modified: Mapped[str | None] = mapped_column(String(255))
@@ -63,6 +177,13 @@ class SourceArtifactSnapshot(Base):
 
 class IngestionFile(Base):
     __tablename__ = "ingestion_files"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_files_source_url_content_sha256",
+            "source_url",
+            "content_sha256",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -86,6 +207,19 @@ class IngestionFile(Base):
 
 class IngestionFileMember(Base):
     __tablename__ = "ingestion_file_members"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_file_members_ingestion_file_id_member_name",
+            "ingestion_file_id",
+            "member_name",
+        ),
+        Index(
+            "ix_ing_file_members_name_sha_file_id",
+            "member_name",
+            "member_sha256",
+            "ingestion_file_id",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_file_id: Mapped[uuid.UUID] = mapped_column(
@@ -108,6 +242,13 @@ class IngestionFileMember(Base):
 
 class SourceMemberSnapshot(Base):
     __tablename__ = "source_member_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_member_snapshots_artifact_snapshot_id_member_name",
+            "artifact_snapshot_id",
+            "member_name",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     artifact_snapshot_id: Mapped[uuid.UUID] = mapped_column(
@@ -118,6 +259,13 @@ class SourceMemberSnapshot(Base):
     )
     member_name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     member_sha256: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    raw_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    raw_artifact_content_type: Mapped[str | None] = mapped_column(String(255))
+    raw_artifact_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    normalized_artifact_uri: Mapped[str | None] = mapped_column(String(1000))
+    normalized_artifact_format: Mapped[str | None] = mapped_column(String(32))
+    normalized_artifact_content_sha256: Mapped[str | None] = mapped_column(String(64))
+    normalized_artifact_size_bytes: Mapped[int | None] = mapped_column(Integer)
     row_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     header_hash: Mapped[str | None] = mapped_column(String(64))
     header: Mapped[list[str] | None] = mapped_column(JSON)
@@ -136,6 +284,13 @@ class SourceMemberSnapshot(Base):
 
 class SourceDeliverySnapshot(Base):
     __tablename__ = "source_delivery_snapshots"
+    __table_args__ = (
+        Index(
+            "ix_source_delivery_snapshots_member_snapshot_id_identity_hash",
+            "member_snapshot_id",
+            "identity_hash",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     artifact_snapshot_id: Mapped[uuid.UUID] = mapped_column(
@@ -155,7 +310,7 @@ class SourceDeliverySnapshot(Base):
     protocolo_entrega: Mapped[str | None] = mapped_column(String(128), index=True)
     data_referencia: Mapped[str | None] = mapped_column(String(32))
     data_entrega: Mapped[str | None] = mapped_column(String(32))
-    versao: Mapped[str | None] = mapped_column(String(32))
+    versao: Mapped[str | None] = mapped_column(String(32), index=True)
     raw_identity: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -166,6 +321,13 @@ class SourceDeliverySnapshot(Base):
 
 class IngestionRow(Base):
     __tablename__ = "ingestion_rows"
+    __table_args__ = (
+        Index(
+            "ix_ingestion_rows_ingestion_file_member_id_linha_origem",
+            "ingestion_file_member_id",
+            "linha_origem",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
@@ -230,34 +392,6 @@ class IngestionAttempt(Base):
     )
 
 
-class IngestionReconcileHash(Base):
-    __tablename__ = "ingestion_reconcile_hashes"
-    __table_args__ = (
-        Index(
-            "ix_ingestion_reconcile_hashes_scope_hash",
-            "ingestion_run_id",
-            "ingestion_file_member_id",
-            "target_table",
-            "arquivo_origem",
-            "ano_origem",
-            "hash_origem",
-        ),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid, ForeignKey("ingestion_runs.id"), index=True, nullable=False
-    )
-    ingestion_file_member_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid, ForeignKey("ingestion_file_members.id"), index=True
-    )
-    target_table: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
-    arquivo_origem: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
-    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
-    hash_origem: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-
 class QuarantineItem(Base):
     __tablename__ = "quarantine_items"
 
@@ -296,3 +430,86 @@ class IngestionFileMemberPayload(Base):
         Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="CASCADE"), primary_key=True
     )
     payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+
+
+class IngestionFinanceiroStageRow(Base):
+    __tablename__ = "ingestion_financeiro_stage_rows"
+    __table_args__ = (
+        Index(
+            "ix_ing_fin_stage_run_member_row_kind_line",
+            "ingestion_run_id",
+            "ingestion_file_member_id",
+            "row_kind",
+            "linha_origem",
+        ),
+        Index(
+            "ix_ing_fin_stage_member_hash",
+            "ingestion_file_member_id",
+            "normalized_hash",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    ingestion_run_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("ingestion_runs.id"), index=True, nullable=False)
+    ingestion_file_member_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("ingestion_file_members.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    artifact_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
+    row_kind: Mapped[str] = mapped_column(String(80), index=True, nullable=False)
+    arquivo_origem: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
+    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
+    linha_origem: Mapped[int] = mapped_column(Integer, nullable=False)
+    normalized_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    hash_origem: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
+    natural_key: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+    tipo_formulario: Mapped[str | None] = mapped_column(String(10), index=True)
+    cnpj_companhia: Mapped[str | None] = mapped_column(String(14), index=True)
+    codigo_cvm: Mapped[int | None] = mapped_column(Integer, index=True)
+    data_referencia: Mapped[date | None] = mapped_column(Date, index=True)
+    versao: Mapped[int | None] = mapped_column(Integer, index=True)
+    denominacao_companhia: Mapped[str | None] = mapped_column(String(255))
+
+    categoria_documento: Mapped[str | None] = mapped_column(String(255))
+    id_documento: Mapped[int | None] = mapped_column(Integer, index=True)
+    data_recebimento: Mapped[date | None] = mapped_column(Date)
+    link_documento: Mapped[str | None] = mapped_column(String(1000))
+
+    tipo_demonstracao: Mapped[str | None] = mapped_column(String(80), index=True)
+    escopo_demonstracao: Mapped[str | None] = mapped_column(String(20), index=True)
+    grupo_demonstracao: Mapped[str | None] = mapped_column(String(255))
+    moeda: Mapped[str | None] = mapped_column(String(20))
+    escala_moeda: Mapped[str | None] = mapped_column(String(50))
+    ordem_exercicio: Mapped[str | None] = mapped_column(String(20))
+    data_inicio_exercicio: Mapped[date | None] = mapped_column(Date)
+    data_fim_exercicio: Mapped[date | None] = mapped_column(Date)
+    codigo_conta: Mapped[str | None] = mapped_column(String(40), index=True)
+    coluna_df: Mapped[str | None] = mapped_column(Text)
+    descricao_conta: Mapped[str | None] = mapped_column(Text)
+    valor_conta: Mapped[Any | None] = mapped_column(Numeric(38, 10))
+    conta_fixa: Mapped[bool | None] = mapped_column(Boolean)
+
+    quantidade_acoes_ordinarias_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_preferenciais_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_total_acoes_capital_integralizado: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_ordinarias_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_acoes_preferenciais_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+    quantidade_total_acoes_tesouraria: Mapped[Any | None] = mapped_column(Numeric(30, 6))
+
+    tipo_relatorio_auditor: Mapped[str | None] = mapped_column(String(255))
+    tipo_parecer_declaracao: Mapped[str | None] = mapped_column(String(255))
+    numero_item_parecer_declaracao: Mapped[str | None] = mapped_column(String(100))
+    texto_parecer_declaracao: Mapped[str | None] = mapped_column(Text)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

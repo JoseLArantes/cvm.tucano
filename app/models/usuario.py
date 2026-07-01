@@ -15,6 +15,7 @@ class Usuario(Base):
     nome: Mapped[str | None] = mapped_column(String(255))
     senha_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    pode_operar_materializacao: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     ativo: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     alterado_em: Mapped[datetime] = mapped_column(

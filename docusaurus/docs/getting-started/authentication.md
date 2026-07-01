@@ -51,6 +51,8 @@ curl -X POST "http://localhost:8007/usuarios" \
   }'
 ```
 
+Para delegar apenas a operação de recuperação da materialização analítica, crie ou atualize usuários com `pode_operar_materializacao=true` e mantenha `is_admin=false` quando não houver necessidade de administração ampla.
+
 ## Realizando Login
 
 Para obter um token de acesso:
@@ -152,6 +154,7 @@ curl -X GET "http://localhost:8007/auth/me" \
   "username": "admin",
   "nome": "Administrador",
   "is_admin": true,
+  "pode_operar_materializacao": true,
   "ativo": true,
   "criado_em": "2026-01-15T10:30:00Z",
   "alterado_em": "2026-01-15T10:30:00Z"
@@ -208,6 +211,7 @@ curl -X DELETE "http://localhost:8007/usuarios/{usuario_id}" \
 2. **Usuário Ativo**: O usuário precisa existir e estar com `ativo=true`
 3. **Token Expira**: Tokens expiram conforme `ACCESS_TOKEN_TTL_MINUTES` (padrão: 480 minutos)
 4. **Usuário Desativado**: Se o usuário for desativado depois do login, tokens já emitidos deixam de ser aceitos
+5. **Capacidades Persistidas**: O token expõe as capacidades do usuário, incluindo `is_admin` e `pode_operar_materializacao`
 
 ## Códigos de Erro Comuns
 
@@ -246,7 +250,8 @@ curl -X DELETE "http://localhost:8007/usuarios/{usuario_id}" \
 2. **Renove Tokens**: Tokens expiram; implemente renovação automática
 3. **Use HTTPS**: Em produção, sempre use HTTPS para proteger tokens em trânsito
 4. **Limite Permissões**: Use `is_admin=false` para usuários que não precisam administrar
-5. **Monitore Uso**: Acompanhe logs de autenticação para detectar uso indevido
+5. **Delegue Operação sem Admin**: Use `pode_operar_materializacao=true` para recovery operacional de materialização
+6. **Monitore Uso**: Acompanhe logs de autenticação para detectar uso indevido
 
 ## Próximos Passos
 

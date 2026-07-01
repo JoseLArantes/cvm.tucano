@@ -92,3 +92,17 @@ For the frontend changelog, record the correct session date and highlight endpoi
 5. Update openapi documentation with very detailed information
 6. Run the Docusaurus build when applicable.
 7. Update `docs/frontend_api_changelog.md` if the frontend is affected.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked as local markdown files under `.scratch/`; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The default five-label triage vocabulary is used: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repo uses a multi-context domain documentation layout. See `docs/agents/domain.md`.

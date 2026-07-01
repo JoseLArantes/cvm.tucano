@@ -152,3 +152,17 @@ def exigir_admin_api(
         return
     if autenticacao.usuario is None or not autenticacao.usuario.is_admin:
         raise HTTPException(status_code=403, detail="Permissao administrativa requerida.")
+
+
+def exigir_operador_materializacao_api(
+    autenticacao: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+) -> None:
+    if autenticacao.token_sistema:
+        return
+    if autenticacao.usuario is not None and (
+        autenticacao.usuario.is_admin or autenticacao.usuario.pode_operar_materializacao
+    ):
+        return
+    if autenticacao.usuario is None:
+        raise HTTPException(status_code=401, detail="Token de acesso invalido.")
+    raise HTTPException(status_code=403, detail="Permissao de operacao de materializacao requerida.")

@@ -7,9 +7,11 @@ from sqlalchemy.pool import StaticPool
 from app.db.base import Base
 from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
 from app.models.ingestion import IngestionRowEvent
+from app.services.ingestion.normalizers import gerar_hash_canonico
 from app.services.ingestion.quarantine import _normalizar_reason_code
 from app.services.ingestion.staging import create_run, register_file, stage_csv_payload
 from app.services.ingestion.validation import (
+    DiskBackedDuplicateClassifier,
     ValidationResult,
     build_duplicate_comparison_data,
     build_natural_key,
@@ -255,6 +257,71 @@ def test_classify_duplicate_financeiro_prefers_non_zero_over_zero_shadow() -> No
     assert second.details["duplicate_status"] == "ignored_zero_shadow"
 
 
+def test_disk_backed_duplicate_classifier_matches_core_duplicate_semantics() -> None:
+    classifier = DiskBackedDuplicateClassifier()
+    try:
+        natural_key = {"id_documento": 10, "versao": 1}
+        first = classifier.classify(
+            row_kind="fca_documento",
+            natural_key=natural_key,
+            normalized_hash="hash-a",
+            normalized_data={"id_documento": 10, "versao": 1, "valor": "A"},
+        )
+        duplicate = classifier.classify(
+            row_kind="fca_documento",
+            natural_key=natural_key,
+            normalized_hash="hash-a",
+            normalized_data={"id_documento": 10, "versao": 1, "valor": "A"},
+        )
+        conflict = classifier.classify(
+            row_kind="fca_documento",
+            natural_key=natural_key,
+            normalized_hash="hash-b",
+            normalized_data={"id_documento": 10, "versao": 1, "valor": "B"},
+        )
+    finally:
+        classifier.close()
+
+    assert first.status == "valid"
+    assert duplicate.status == "ignored_duplicate"
+    assert conflict.status == "valid"
+    assert conflict.details["duplicate_status"] == "updated"
+
+
+def test_disk_backed_duplicate_classifier_preserves_financeiro_zero_shadow_rule() -> None:
+    classifier = DiskBackedDuplicateClassifier()
+    try:
+        natural_key = {"tipo_formulario": "ITR", "codigo_conta": "5.04", "coluna_df": "Reservas"}
+        first = classifier.classify(
+            row_kind="itr_demonstracao",
+            natural_key=natural_key,
+            normalized_hash="hash-a",
+            normalized_data={
+                "tipo_formulario": "ITR",
+                "codigo_conta": "5.04",
+                "coluna_df": "Reservas",
+                "valor_conta": "-2.0000000000",
+            },
+        )
+        second = classifier.classify(
+            row_kind="itr_demonstracao",
+            natural_key=natural_key,
+            normalized_hash="hash-b",
+            normalized_data={
+                "tipo_formulario": "ITR",
+                "codigo_conta": "5.04",
+                "coluna_df": "Reservas",
+                "valor_conta": "0.0000000000",
+            },
+        )
+    finally:
+        classifier.close()
+
+    assert first.status == "valid"
+    assert second.status == "ignored_duplicate"
+    assert second.details["duplicate_status"] == "ignored_zero_shadow"
+
+
 def test_write_validation_result_updates_row_and_event_and_member_schema() -> None:
     session = _session()
     try:
@@ -286,6 +353,41 @@ def test_write_validation_result_updates_row_and_event_and_member_schema() -> No
         assert member.schema_status == "valid"
         event = session.query(IngestionRowEvent).one()
         assert event.event_type == "quarantined"
+    finally:
+        session.close()
+
+
+def test_write_validation_result_persists_valid_row_metadata() -> None:
+    session = _session()
+    try:
+        _member, row = _staged_row(session)
+        result = ValidationResult(
+            status="valid",
+            reason_code=None,
+            severity="info",
+            details={"duplicate_status": "new"},
+            repairable=False,
+        )
+        normalized_data = {"tipo_formulario": "DFP", "id_documento": 10}
+        natural_key = {"tipo_formulario": "DFP", "id_documento": 10}
+
+        write_validation_result(
+            session,
+            ingestion_row=row,
+            result=result,
+            normalized_data=normalized_data,
+            natural_key=natural_key,
+        )
+        session.commit()
+        session.refresh(row)
+
+        assert row.validation_status == "valid"
+        assert row.validation_reason_code is None
+        assert row.normalized_data == normalized_data
+        assert row.natural_key == natural_key
+        assert row.normalized_hash == gerar_hash_canonico(normalized_data, campos_ignorados={"linha_origem"})
+        event = session.query(IngestionRowEvent).one()
+        assert event.event_type == "validated"
     finally:
         session.close()
 

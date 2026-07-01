@@ -10,11 +10,13 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import delete, insert, select
-from sqlalchemy.orm import Session, load_only
+from sqlalchemy import and_, delete, insert, or_, select
+from sqlalchemy.orm import Session, aliased, load_only, object_session
 
+from app.core.config import get_settings
 from app.models.ingestion import (
     IngestionAttempt,
+    IngestionCancellationRequest,
     IngestionFile,
     IngestionFileMember,
     IngestionFileMemberPayload,
@@ -23,12 +25,26 @@ from app.models.ingestion import (
     IngestionRun,
     QuarantineItem,
 )
+from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.artifact_store import (
+    delete_member_artifact,
+    member_artifact_exists,
+    read_member_artifact,
+    save_member_artifact,
+)
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
+from app.services.ingestion.operational import (
+    register_cancellation_request,
+    sync_phase_execution,
+    touch_run_heartbeat,
+    update_cancellation_request,
+)
 
 DEFAULT_CSV_DELIMITER = ";"
 DEFAULT_ROW_VALIDATION_STATUS = "pending"
 DEFAULT_MEMBER_SCHEMA_STATUS = "ok"
 _ROW_KINDS_WITH_LINE_FALLBACK = {"fre_relacao_familiar"}
+_settings = get_settings()
 
 
 def _agora() -> datetime:
@@ -149,6 +165,15 @@ def create_run(
     )
     db.add(run)
     db.flush()
+    sync_phase_execution(
+        db,
+        run=run,
+        previous_phase=None,
+        previous_status=None,
+        message=message,
+        quality_summary=quality_summary,
+        force_create=True,
+    )
     return run
 
 
@@ -163,6 +188,8 @@ def update_run_state(
     change_summary: dict[str, Any] | None = None,
     finished_at: datetime | None = None,
 ) -> IngestionRun:
+    previous_phase = run.phase
+    previous_status = run.status
     if status is not None:
         run.status = status
     if phase is not None:
@@ -177,7 +204,73 @@ def update_run_state(
         run.change_summary = change_summary
     if finished_at is not None:
         run.finished_at = finished_at
+    db = object_session(run)
+    if db is not None:
+        sync_phase_execution(
+            db,
+            run=run,
+            previous_phase=previous_phase,
+            previous_status=previous_status,
+            message=message,
+            quality_summary=quality_summary,
+        )
     return run
+
+
+def create_cancellation_request(
+    db: Session,
+    *,
+    scope_type: str,
+    scope_id: str,
+    execucao_sincronizacao_id: Any = None,
+    ingestion_run_id: Any = None,
+    requested_by: str | None = None,
+    reason: str | None = None,
+    terminate_immediately: bool = True,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return register_cancellation_request(
+        db,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        execucao_sincronizacao_id=execucao_sincronizacao_id,
+        ingestion_run_id=ingestion_run_id,
+        requested_by=requested_by,
+        reason=reason,
+        terminate_immediately=terminate_immediately,
+        status="requested",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
+
+
+def mark_cancellation_request_propagated(
+    request: IngestionCancellationRequest,
+    *,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return update_cancellation_request(
+        request,
+        status="propagated",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
+
+
+def mark_cancellation_request_completed(
+    request: IngestionCancellationRequest,
+    *,
+    affected_task_ids: list[str] | None = None,
+    affected_execution_ids: list[str] | None = None,
+) -> IngestionCancellationRequest:
+    return update_cancellation_request(
+        request,
+        status="completed",
+        affected_task_ids=affected_task_ids,
+        affected_execution_ids=affected_execution_ids,
+    )
 
 
 def register_file(
@@ -306,7 +399,14 @@ def register_member(
     return member
 
 
-def save_member_payload(db: Session, execution_id: Any, payload: bytes) -> None:
+def save_member_payload(db: Session, execution_id: Any, payload: bytes, *, member_name: str) -> None:
+    save_member_artifact(
+        execution_id=str(execution_id),
+        member_name=member_name,
+        payload=payload,
+    )
+    if not _settings.ingestion_member_payload_db_fallback_enabled:
+        return
     member_payload = db.scalar(
         select(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
@@ -323,7 +423,9 @@ def save_member_payload(db: Session, execution_id: Any, payload: bytes) -> None:
     db.flush()
 
 
-def get_member_payload(db: Session, execution_id: Any) -> bytes:
+def get_member_payload(db: Session, execution_id: Any, *, member_name: str) -> bytes:
+    if member_artifact_exists(execution_id=str(execution_id), member_name=member_name):
+        return read_member_artifact(execution_id=str(execution_id), member_name=member_name)
     payload_obj = db.scalar(
         select(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
@@ -334,7 +436,8 @@ def get_member_payload(db: Session, execution_id: Any) -> bytes:
     return payload_obj.payload
 
 
-def delete_member_payload(db: Session, execution_id: Any) -> None:
+def delete_member_payload(db: Session, execution_id: Any, *, member_name: str) -> None:
+    delete_member_artifact(execution_id=str(execution_id), member_name=member_name)
     db.execute(
         delete(IngestionFileMemberPayload).where(
             IngestionFileMemberPayload.id == execution_id
@@ -352,22 +455,79 @@ def member_has_successful_match(
     member_sha256: str,
     current_run_id: uuid.UUID,
 ) -> bool:
-    existing_member = db.scalar(
+    return find_reusable_member_match(
+        db,
+        tipo_fonte=tipo_fonte,
+        ano=ano,
+        member_name=member_name,
+        member_sha256=member_sha256,
+        current_run_id=current_run_id,
+    ) is not None
+
+
+def find_reusable_member_match(
+    db: Session,
+    *,
+    tipo_fonte: str,
+    ano: int | None,
+    member_name: str,
+    member_sha256: str,
+    current_run_id: uuid.UUID,
+) -> dict[str, Any] | None:
+    parent_execucao = aliased(ExecucaoSincronizacao)
+    child_execucao = aliased(ExecucaoSincronizacao)
+    existing_member = db.execute(
         select(IngestionFileMember)
+        .add_columns(
+            IngestionRun.status.label("parent_run_status"),
+            parent_execucao.status.label("parent_execucao_status"),
+            child_execucao.id.label("child_execucao_id"),
+            child_execucao.status.label("child_execucao_status"),
+        )
         .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
         .join(IngestionRun, IngestionRun.id == IngestionFile.ingestion_run_id)
+        .outerjoin(parent_execucao, parent_execucao.id == IngestionRun.execucao_sincronizacao_id)
+        .outerjoin(
+            child_execucao,
+            and_(
+                child_execucao.parent_execucao_id == parent_execucao.id,
+                child_execucao.tipo_execucao == "arquivo_membro",
+                child_execucao.arquivo == IngestionFileMember.member_name,
+                child_execucao.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
+            ),
+        )
         .where(
             IngestionRun.tipo_fonte == tipo_fonte,
             IngestionRun.ano == ano,
-            IngestionRun.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
             IngestionRun.id != current_run_id,
             IngestionFileMember.member_name == member_name,
             IngestionFileMember.member_sha256 == member_sha256,
+            or_(
+                IngestionRun.status.in_(STATUSS_REAPROVEITAVEIS_EXECUCAO),
+                child_execucao.id.is_not(None),
+            ),
         )
         .order_by(IngestionRun.started_at.desc())
         .limit(1)
+    ).first()
+    if existing_member is None:
+        return None
+
+    member, parent_run_status, parent_execucao_status, child_execucao_id, child_execucao_status = existing_member
+    matched_via = (
+        "parent_run"
+        if parent_run_status in STATUSS_REAPROVEITAVEIS_EXECUCAO
+        else "child_execution"
     )
-    return existing_member is not None
+    return {
+        "member_id": str(member.id),
+        "parent_run_status": parent_run_status,
+        "parent_execucao_status": parent_execucao_status,
+        "child_execucao_id": None if child_execucao_id is None else str(child_execucao_id),
+        "child_execucao_status": child_execucao_status,
+        "matched_via": matched_via,
+        "reused_from_failed_parent": matched_via == "child_execution" and parent_execucao_status == "falha",
+    }
 
 
 def _build_ingestion_row_payload(
@@ -678,6 +838,11 @@ def stage_csv_payload_streaming(
                 fetch_inserted_rows=False,
                 use_copy=use_copy,
             )
+            touch_run_heartbeat(
+                db,
+                run_id=ingestion_run.id,
+                metrics={"staged_rows": total_rows},
+            )
             chunk = []
     if chunk:
         insert_rows(
@@ -690,6 +855,11 @@ def stage_csv_payload_streaming(
             rows=chunk,
             fetch_inserted_rows=False,
             use_copy=use_copy,
+        )
+        touch_run_heartbeat(
+            db,
+            run_id=ingestion_run.id,
+            metrics={"staged_rows": total_rows},
         )
     member.row_count = total_rows
     _log_file_analysis(member)
@@ -742,24 +912,11 @@ def iter_staged_member_chunks(
                 load_only(
                     IngestionRow.id,
                     IngestionRow.ingestion_run_id,
-                    IngestionRow.ingestion_file_member_id,
                     IngestionRow.arquivo_origem,
                     IngestionRow.ano_origem,
                     IngestionRow.linha_origem,
                     IngestionRow.raw_data,
-                    IngestionRow.raw_hash,
                     IngestionRow.row_kind,
-                    IngestionRow.validation_status,
-                    IngestionRow.validation_reason_code,
-                    IngestionRow.validation_details,
-                    IngestionRow.normalized_data,
-                    IngestionRow.normalized_hash,
-                    IngestionRow.natural_key,
-                    IngestionRow.resolved_companhia_id,
-                    IngestionRow.resolution_method,
-                    IngestionRow.resolution_confidence,
-                    IngestionRow.promoted_entity,
-                    IngestionRow.promoted_entity_id,
                 )
             )
             .where(IngestionRow.ingestion_file_member_id == member_id)
@@ -771,8 +928,15 @@ def iter_staged_member_chunks(
         rows = list(db.execute(query).scalars())
         if not rows:
             break
+        touch_run_heartbeat(
+            db,
+            run_id=rows[0].ingestion_run_id,
+            metrics={"promote_last_line": rows[-1].linha_origem},
+        )
         yield rows
         last_line = rows[-1].linha_origem
+        for row in rows:
+            db.expunge(row)
 
 
 def iter_zip_csv_members(payload: bytes) -> list[tuple[str, bytes]]:
@@ -881,6 +1045,11 @@ def stage_csv_payload_streaming_from_disk(
                 fetch_inserted_rows=False,
                 use_copy=use_copy,
             )
+            touch_run_heartbeat(
+                db,
+                run_id=ingestion_run.id,
+                metrics={"staged_rows": total_rows},
+            )
             chunk = []
     if chunk:
         insert_rows(
@@ -893,6 +1062,11 @@ def stage_csv_payload_streaming_from_disk(
             rows=chunk,
             fetch_inserted_rows=False,
             use_copy=use_copy,
+        )
+        touch_run_heartbeat(
+            db,
+            run_id=ingestion_run.id,
+            metrics={"staged_rows": total_rows},
         )
     member.row_count = total_rows
     _log_file_analysis(member)

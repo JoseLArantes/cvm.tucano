@@ -229,8 +229,8 @@ Representa uma execução do pipeline com metadados ricos.
 | `remote_probe` | JSON | Resultado da sondagem remota |
 | `change_summary` | JSON | Mudanças estruturais detectadas |
 | `quality_summary` | JSON | Resumo de qualidade |
-| `artifact_snapshot` | JSON | Snapshot do artefato CVM |
-| `member_snapshot_summary` | JSON | Inventário de membros |
+| `artifact_snapshot` | JSON | Snapshot do artefato CVM com metadados remotos e ponteiro do artifact local |
+| `member_snapshot_summary` | JSON | Inventário de membros com ponteiros para artifact bruto e normalizado |
 | `delivery_snapshot_summary` | JSON | Índice documental capturado |
 | `reconcile_summary` | JSON | Remoções aplicadas |
 
@@ -263,11 +263,10 @@ Linhas rejeitadas por erro real.
 
 | Tabela | Descrição |
 |--------|-----------|
-| `source_artifact_snapshots` | Snapshot do artefato CVM (ZIP/CSV) |
-| `source_member_snapshots` | Snapshot de cada membro CSV |
+| `source_artifact_snapshots` | Snapshot do artefato CVM (ZIP/CSV), incluindo `storage_uri`, papel e tamanho do artifact persistido |
+| `source_member_snapshots` | Snapshot de cada membro CSV, incluindo URIs do artifact bruto e do artifact normalizado |
 | `source_delivery_snapshots` | Índice documental extraído |
 | `ingestion_file_member_payloads` | Payload bruto do membro (self-heal) |
-| `ingestion_reconcile_hashes` | Hashes para reconcile set-based |
 
 ## Relacionamentos
 

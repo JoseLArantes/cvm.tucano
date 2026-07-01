@@ -1,536 +1,258 @@
 ---
-title: Monitoramento de Sincronizações
+title: Monitoramento de Sincronizacoes
 sidebar_position: 3
 ---
 
-# Monitoramento de Sincronizações
+# Monitoramento de Sincronizacoes
 
-## Visão Geral
+## Leitura recomendada
 
-Endpoints para monitorar execuções de sincronização, runs do pipeline e obter dashboards consolidados.
+Para cada tipo de tela:
 
----
-
-## `GET /ingestion/sincronizacoes`
-
-Lista paginada das execuções registradas no sistema.
-
-### Query Parameters
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `pagina` | integer | `1` | Número da página |
-| `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |
-| `tipo_execucao` | string | - | Filtrar por tipo: `arquivo_zip`, `arquivo_membro`, `arquivo_simples` |
-| `id_execucao_pai` | UUID | - | Filtrar por ID da execução pai |
-| `somente_filhos` | boolean | `false` | Retorna apenas execuções filhas (membros) |
-| `somente_pais` | boolean | `false` | Retorna apenas execuções pais (ZIP ou simples) |
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/ingestion/sincronizacoes?pagina=1&tamanho_pagina=50" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Response 200
-
-**Schema:** `ListaExecucoesSincronizacao`
-
-```json
-{
-  "dados": [
-    {
-      "id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-      "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
-      "tipo_fonte": "dfp",
-      "arquivo": "dfp_cia_aberta_2025.zip",
-      "status": "sucesso",
-      "iniciada_em": "2026-06-15T08:00:00Z",
-      "finalizada_em": "2026-06-15T08:15:30Z",
-      "total_linhas_lidas": 125000,
-      "total_inseridos": 124500,
-      "total_atualizados": 300,
-      "total_inalterados": 150,
-      "total_rejeitados": 50,
-      "analise_arquivos": [...],
-      "id_execucao_pai": null,
-      "tipo_execucao": "arquivo_zip",
-      "filhos_total": 15,
-      "filhos_concluidos": 15,
-      "filhos_falha": 0,
-      "filhos_em_andamento": 0
-    }
-  ],
-  "paginacao": {
-    "pagina": 1,
-    "tamanho_pagina": 50,
-    "total": 1
-  }
-}
-```
-
----
-
-## `GET /ingestion/sincronizacoes/{id_execucao}`
-
-Retorna detalhamento completo de uma execução.
-
-### Path Parameters
-
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `id_execucao` | UUID | ID da execução |
-
-### Exemplo
-
-```bash
-curl -X GET "http://localhost:8007/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-87db-7e6a8e196999" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Response 200
-
-**Schema:** `ExecucaoSincronizacaoDetalhe`
-
-```json
-{
-  "id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-  "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
-  "tipo_fonte": "dfp",
-  "ano": 2025,
-  "arquivo": "dfp_cia_aberta_2025.zip",
-  "url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip",
-  "hash_arquivo": "abc123...",
-  "status": "sucesso",
-  "iniciada_em": "2026-06-15T08:00:00Z",
-  "finalizada_em": "2026-06-15T08:15:30Z",
-  "total_linhas_lidas": 125000,
-  "total_inseridos": 124500,
-  "total_atualizados": 300,
-  "total_inalterados": 150,
-  "total_rejeitados": 50,
-  "mensagem_erro": null,
-  "analise_arquivos": [
-    {
-      "file_name": "dfp_cia_aberta_DRE_con_2025.csv",
-      "file_size": "2.5 MB",
-      "rows_count": 8500,
-      "columns_count": 15,
-      "header_columns": ["CNPJ_CIA", "DT_REFER", "VERSAO", ...],
-      "encoding": "utf-8-sig",
-      "delimiter": ";"
-    }
-  ],
-  "id_execucao_pai": null,
-  "tipo_execucao": "arquivo_zip",
-  "arquivo_principal": null,
-  "filhos_total": 15,
-  "filhos_concluidos": 15,
-  "filhos_falha": 0,
-  "filhos_em_andamento": 0,
-  "execucoes_filhas": [...]
-}
-```
-
-### Campos Importantes
-
-| Campo | Descrição |
-|-------|-----------|
-| `status` | Status atual da execução |
-| `total_rejeitados` | Linhas enviadas para quarentena |
-| `analise_arquivos` | Análise detalhada dos arquivos processados |
-| `filhos_*` | Contadores de execuções filhas (para ZIP) |
-| `execucoes_filhas` | Lista detalhada de execuções filhas |
-
----
+| Tela | Endpoint principal |
+| --- | --- |
+| lista operacional de runs | `GET /ingestion/runs` |
+| detalhe de run | `GET /ingestion/runs/{run_id}` |
+| timeline de fases | `GET /ingestion/runs/{run_id}/phases` |
+| inventario de members | `GET /ingestion/runs/{run_id}/members` |
+| auditoria do disparo | `GET /ingestion/sincronizacoes` |
+| detalhe da execucao administrativa | `GET /ingestion/sincronizacoes/{id_execucao}` |
+| snapshot global do cluster | `GET /ingestion/operations` |
+| limpeza transitoria de run cancelada/falha | `POST /ingestion/runs/{run_id}/cleanup-transient-state` |
 
 ## `GET /ingestion/runs`
 
-Lista paginada das runs do pipeline de ingestão.
+Visao principal do pipeline.
 
-### Query Parameters
+Cada run traz:
 
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `pagina` | integer | `1` | Número da página |
-| `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |
+- identidade do escopo (`id`, `tipo_fonte`, `ano`);
+- estado persistido (`status`, `phase`);
+- estado agregado (`state`);
+- progresso (`progress`);
+- snapshots estruturais (`remote_probe`, `change_summary`, `artifact_snapshot`, `member_snapshot_summary`, `delivery_snapshot_summary`, `reconcile_summary`, `lifecycle_decision`);
+- sinais operacionais (`liveness`, `blocking`, `cancellation`, `last_error`, `next_action`);
+- links relativos (`links`).
 
-### Exemplo
+Campos mais importantes para UI:
+
+| Campo | Uso |
+| --- | --- |
+| `state` | badge operacional |
+| `progress` | contadores rápidos |
+| `quality_summary` | cards de linhas, members, quarentena e staging |
+| `liveness` | detectar stale |
+| `blocking` | explicar espera |
+| `cancellation` | exibir pedido de cancelamento |
+| `last_error` | exibir erro mais recente |
+| `next_action` | habilitar ação de operador |
+
+Exemplo:
 
 ```bash
 curl -X GET "http://localhost:8007/ingestion/runs?pagina=1&tamanho_pagina=50" \
   -H "Authorization: Bearer <token-admin>"
 ```
 
-### Response 200
-
-**Schema:** `ListaIngestionRuns`
-
-```json
-{
-  "dados": [
-    {
-      "id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-      "execucao_sincronizacao_id": "02be26d3-8db8-48a1-bcd0-4737b8157116",
-      "tipo_fonte": "dfp",
-      "ano": 2025,
-      "status": "sucesso_com_alerta",
-      "phase": "complete",
-      "remote_probe": {...},
-      "change_summary": {...},
-      "quality_summary": {...},
-      "artifact_snapshot": {...},
-      "member_snapshot_summary": {...},
-      "delivery_snapshot_summary": {...},
-      "reconcile_summary": {...},
-      "rows_reconciled_deleted": 4,
-      "lifecycle_decision": {...}
-    }
-  ],
-  "paginacao": {
-    "pagina": 1,
-    "tamanho_pagina": 50,
-    "total": 1
-  }
-}
-```
-
----
-
 ## `GET /ingestion/runs/{run_id}`
 
-Retorna uma run específica do pipeline com todos os metadados operacionais.
+Drill-down completo da run.
 
-### Path Parameters
+Use quando a UI precisar:
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `run_id` | UUID | ID da run |
+- explicar a decisao de download ou `sem_alteracao`;
+- mostrar contadores detalhados;
+- mostrar reuso de members;
+- abrir troubleshooting de erro;
+- decidir entre replay, recover, cancelamento ou investigacao de quarentena.
 
-### Exemplo
+Leitura recomendada do rerun anual:
 
-```bash
-curl -X GET "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999" \
-  -H "Authorization: Bearer <token-admin>"
-```
+- `quality_summary.members_reprocessed`
+- `quality_summary.members_reused_from_previous`
+- `quality_summary.members_reused_from_failed_parent`
+- `artifact_snapshot.storage_uri`
+- `artifact_snapshot.storage_role`
+- `member_snapshot_summary.by_status`
+- `member_snapshot_summary.members[].raw_artifact_uri`
+- `member_snapshot_summary.members[].normalized_artifact_uri`
+- `lifecycle_decision`
 
-### Response 200
+## `GET /ingestion/runs/{run_id}/phases`
 
-**Schema:** `IngestionRunResumo`
+Timeline persistida das fases da run.
 
-```json
-{
-  "id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-  "execucao_sincronizacao_id": "02be26d3-8db8-48a1-bcd0-4737b8157116",
-  "tipo_fonte": "dfp",
-  "ano": 2025,
-  "status": "sucesso_com_alerta",
-  "phase": "complete",
-  "remote_probe": {
-    "dataset_url": "https://dados.cvm.gov.br/dataset/cia_aberta-doc-dfp",
-    "decision": "changed",
-    "decision_reason": "metadata_changed:resource_last_modified",
-    "probe_sources": ["ckan", "head"],
-    "resource_last_modified": "Mon, 09 Jun 2026 08:03:41 GMT",
-    "resource_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip"
-  },
-  "change_summary": {
-    "member_added": [],
-    "member_removed": ["dfp_cia_aberta_DVA_ind_2025.csv"],
-    "required_member_missing": [],
-    "optional_member_missing": [],
-    "header_changed": [
-      {
-        "member_name": "dfp_cia_aberta_DRE_ind_2025.csv",
-        "before": ["CNPJ_CIA", "DT_REFER", "VERSAO"],
-        "after": ["CNPJ_CIA", "DT_REFER", "VERSAO", "COLUNA_DF"]
-      }
-    ],
-    "schema_changed": [],
-    "row_count_changed": [
-      {
-        "member_name": "dfp_cia_aberta_DRE_ind_2025.csv",
-        "before": 12034,
-        "after": 12080
-      }
-    ],
-    "delivery_index_changed": [
-      {
-        "member_name": "dfp_cia_aberta_2025.csv",
-        "before_count": 1200,
-        "after_count": 1204,
-        "added": 4,
-        "removed": 0
-      }
-    ]
-  },
-  "quality_summary": {
-    "members_total": 14,
-    "members_processados": 13,
-    "members_skipped": 1,
-    "row_status_counts": {
-      "valid": 1200,
-      "invalid": 3
-    },
-    "reason_counts": {
-      "companhia_nao_encontrada": 2,
-      "schema_inesperado": 1
-    },
-    "resolver_methods": {
-      "codigo_cvm_identificador_alta": 1180,
-      "repair_rule": 20
-    },
-    "quarantine_total": 3,
-    "staged_rows_purged": 1197,
-    "reconciled_deleted": 4
-  },
-  "artifact_snapshot": {
-    "resource_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip",
-    "source_filename": "dfp_cia_aberta_2025.zip",
-    "content_sha256": "abc123...",
-    "probe_decision": "changed",
-    "probe_confidence": "medium",
-    "sha_confirmation_result": "different",
-    "status": "sucesso_com_alerta"
-  },
-  "member_snapshot_summary": {
-    "total": 14,
-    "by_status": {
-      "processed": 13,
-      "member_skipped": 1
-    },
-    "by_schema_status": {
-      "ok": 13,
-      "reused": 1
-    }
-  },
-  "delivery_snapshot_summary": {
-    "total": 1204,
-    "by_status": {
-      "captured": 1204
-    },
-    "by_member": {
-      "dfp_cia_aberta_2025.csv": 1204
-    }
-  },
-  "reconcile_summary": {
-    "scope": "member_replace",
-    "target_tables": ["demonstracoes_financeiras"],
-    "rows_reconciled_deleted": 4
-  },
-  "rows_reconciled_deleted": 4,
-  "lifecycle_decision": {
-    "remote_probe": "download_required",
-    "artifact_sha": "changed",
-    "members_processed": 13,
-    "members_skipped_by_sha": 1
-  }
-}
-```
+Cada item inclui:
 
-### Campos Importantes
+- `phase`
+- `status`
+- `attempt`
+- `task_id`
+- `lease_owner`
+- `started_at`
+- `heartbeat_at`
+- `finished_at`
+- `cancel_requested_at`
+- `cancelled_at`
+- `error_type`
+- `error_message`
+- `error_retryable`
+- `input_artifact_uri`
+- `output_artifact_uri`
+- `metrics`
 
-| Campo | Descrição |
-|-------|-----------|
-| `remote_probe` | Decisão de preflight remoto antes do download |
-| `change_summary` | Drift estrutural entre pacotes |
-| `quality_summary` | Contadores de processamento e quarentena |
-| `artifact_snapshot` | Evidência remota/local usada para skip/download |
-| `member_snapshot_summary` | Inventário de members processados/reaproveitados |
-| `delivery_snapshot_summary` | Índice documental capturado |
-| `reconcile_summary` | Remoções feitas no reconcile |
-| `lifecycle_decision` | Resumo da decisão do lifecycle engine |
+Use este endpoint para:
 
----
+- diagnosticar stale;
+- diferenciar falha recuperavel e falha final;
+- entender retentativas;
+- auditar artifacts de entrada e saida por fase.
 
-## `GET /ingestion/dashboard`
+Fases esperadas para members financeiros DFP/ITR:
 
-Retorna consolidado simples para operação: status, rejeições e últimas execuções.
+| Fase | Sinal principal |
+| --- | --- |
+| `profile` | CSV identificado e schema validado |
+| `normalize_artifact` | linhas lidas e normalizadas para artifact |
+| `load_typed_staging` | artifact carregado no staging tipado |
+| `promote` | linhas promovidas para tabelas canonicas |
+| `reconcile` | registros obsoletos removidos no escopo do member |
+| `complete` | execucao estabilizada |
 
-### Exemplo
+Metricas comuns em `metrics` ou `quality_summary`:
 
-```bash
-curl -X GET "http://localhost:8007/ingestion/dashboard" \
-  -H "Authorization: Bearer <token-admin>"
-```
+- `rows_read`
+- `rows_normalized`
+- `rows_loaded_to_stage`
+- `rows_reconciled_deleted`
+- `typed_stage_rows_loaded`
+- `typed_stage_bytes_loaded`
+- `typed_stage_rows_replaced`
+- `typed_stage_rows_purged`
+- `typed_stage_copy_loads`
 
-### Response 200
+Para DFP/ITR, linhas validas nao aparecem em `ingestion_rows`; a leitura operacional deve usar fases, counters e snapshots de artifacts.
 
-**Schema:** `DashboardExecucoesResposta`
+## `GET /ingestion/runs/{run_id}/members`
 
-```json
-{
-  "total_execucoes": 150,
-  "total_sucesso": 145,
-  "total_sem_alteracao": 3,
-  "total_falha": 2,
-  "total_rejeitados": 42,
-  "ultimas_execucoes": [
-    {
-      "id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-      "tipo_fonte": "dfp",
-      "arquivo": "dfp_cia_aberta_2025.zip",
-      "status": "sucesso",
-      "iniciada_em": "2026-06-15T08:00:00Z",
-      "finalizada_em": "2026-06-15T08:15:30Z",
-      "total_linhas_lidas": 125000,
-      "total_inseridos": 124500,
-      "total_rejeitados": 50
-    }
-  ]
-}
-```
+Inventario paginado dos CSVs de uma run.
 
----
+Cada member inclui:
 
-## `GET /ingestion/alteracoes`
+- identificacao (`id`, `ingestion_file_id`, `member_name`);
+- metadados do payload (`member_sha256`, `member_size_bytes`, `row_count`, `encoding`, `delimiter`, `header`);
+- status de schema (`schema_status`, `schema_message`);
+- metadados do snapshot (`row_kind`, `destino_promovido`, `required_member`, `lifecycle_status`);
+- contadores por member (`quarantine_total`, `delivery_total`);
+- estado sintetico (`state`);
+- links de operacao (`links`).
 
-Lista paginada de alterações campo a campo registradas nas sincronizações.
+Estados sinteticos hoje:
 
-### Query Parameters
+- `processed`
+- `member_skipped`
+- `schema_invalid`
+- `unknown`
 
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `pagina` | integer | `1` | Número da página |
-| `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |
-| `entidade` | string | - | Filtrar por entidade alterada (ex: `documentos_financeiros`) |
+## `GET /ingestion/sincronizacoes`
 
-### Exemplo
+Lista paginada das execucoes administrativas.
 
-```bash
-curl -X GET "http://localhost:8007/ingestion/alteracoes?entidade=companhias&pagina=1" \
-  -H "Authorization: Bearer <token-admin>"
-```
+Use quando precisar:
 
-### Response 200
+- auditar o disparo original;
+- navegar pela arvore pai/filho;
+- localizar execucao administrativa correlata de uma run;
+- acompanhar o preprocessamento manual.
 
-**Schema:** `ListaHistoricoAlteracoes`
+Campos operacionais relevantes:
 
-```json
-{
-  "dados": [
-    {
-      "id": "alter-uuid-1",
-      "entidade": "companhias",
-      "entidade_id": "comp-uuid-1",
-      "companhia_id": "comp-uuid-1",
-      "campo": "situacao_registro",
-      "valor_anterior": "ATIVO",
-      "valor_novo": "SUSPENSO(A) - DECISAO ADM",
-      "alterado_em": "2026-06-15T08:10:00Z",
-      "execucao_sincronizacao_id": "exec-uuid-1",
-      "arquivo_origem": "cad_cia_aberta.csv",
-      "ano_origem": 2026
-    }
-  ],
-  "paginacao": {
-    "pagina": 1,
-    "tamanho_pagina": 100,
-    "total": 1
-  }
-}
-```
+- `tipo_execucao`
+- `id_execucao_pai`
+- `filhos_total`
+- `filhos_concluidos`
+- `filhos_falha`
+- `filhos_em_andamento`
+- `state`
+- `liveness`
+- `blocking`
+- `cancellation`
+- `last_error`
+- `next_action`
 
----
+## `GET /ingestion/sincronizacoes/{id_execucao}`
 
-## Casos de Uso
+Detalhe da execucao administrativa, inclusive:
 
-### Caso 1: Monitorar Sincronização em Andamento
+- URL e hash do artefato;
+- analise de arquivos (`analise_arquivos`);
+- counters agregados;
+- execucoes filhas quando aplicavel;
+- sinais operacionais agregados.
 
-```bash
-# 1. Disparar sincronização
-POST /ingestion/sincronizacoes/dfp/2025
+## `GET /ingestion/operations`
 
-# 2. Listar execuções recentes
-GET /ingestion/sincronizacoes?pagina=1&tamanho_pagina=10
+Snapshot consolidado do cluster para consumidores desacoplados.
 
-# 3. Detalhar execução específica
-GET /ingestion/sincronizacoes/{id_execucao}
-```
+O retorno agrega:
 
-### Caso 2: Dashboard Operacional
+- `run_counts`
+- `execution_counts`
+- `cancellation_counts`
+- `task_counts`
+- `materialization_gate`
+- `active_runs`
+- `recoverable_runs`
 
-```bash
-# Obter visão consolidada
-GET /ingestion/dashboard
+## Filas e independencia operacional
 
-# Verificar últimas execuções
-GET /ingestion/sincronizacoes?pagina=1&tamanho_pagina=20
-```
+Ingestao e materializacao usam filas separadas:
 
-### Caso 3: Auditoria de Mudanças
+| Fila | Responsabilidade |
+| --- | --- |
+| `ingestion` | processamento pesado de members |
+| `ingestion_control` | coordenacao, finalizacao e recovery de ingestao |
+| `analise_materializacao` | chunks e campanhas de materializacao |
 
-```bash
-# Listar alterações de companhias
-GET /ingestion/alteracoes?entidade=companhias
+O gate de materializacao bloqueia a execucao de novos chunks de materializacao quando ha ingestao ativa ou pausa manual. Ele nao bloqueia workers de ingestao.
 
-# Listar alterações de documentos financeiros
-GET /ingestion/alteracoes?entidade=documentos_financeiros
-```
+## Limpeza transitoria
 
-### Caso 4: Python - Monitoramento Automatizado
+`POST /ingestion/runs/{run_id}/cleanup-transient-state` prepara uma run `cancelada` ou `falha` para reconstrução operacional.
 
-```python
-import httpx
-from datetime import datetime, timedelta
+O endpoint:
 
-def verificar_falhas_recentes(base_url, token):
-    """Verifica execuções com falha nas últimas 24 horas."""
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    response = httpx.get(
-        f"{base_url}/ingestion/sincronizacoes",
-        params={"pagina": 1, "tamanho_pagina": 100},
-        headers=headers
-    )
-    response.raise_for_status()
-    
-    execucoes = response.json()["dados"]
-    limite = datetime.now() - timedelta(hours=24)
-    
-    falhas = [
-        e for e in execucoes
-        if e["status"] in ["falha", "falha_qualidade"]
-        and datetime.fromisoformat(e["iniciada_em"].replace("Z", "+00:00")) > limite
-    ]
-    
-    if falhas:
-        print(f"⚠️ {len(falhas)} execuções com falha nas últimas 24h")
-        for f in falhas:
-            print(f"  - {f['tipo_fonte']} {f.get('ano', '')}: {f['status']}")
-    
-    return falhas
+- remove staging generico (`ingestion_rows`) e eventos/quarentena associados a linhas da run;
+- remove staging tipado financeiro;
+- fecha fases ainda abertas como `cancelled`;
+- marca execucoes relacionadas nao finais como `cancelada`;
+- retorna contadores do que foi removido ou fechado.
 
-# Uso
-falhas = verificar_falhas_recentes("http://localhost:8007", "seu-token")
-```
+Ele nao remove dados canonicos promovidos.
 
----
+Uso recomendado:
 
-## Notas para Usuários
+- barra global de operacao;
+- automacoes de suporte;
+- paineis de NOC;
+- alertas de stale, gate e backlog.
 
-### Para Operadores de Backoffice
+## Interpretacao de `next_action`
 
-- Use `/dashboard` para visão rápida do status operacional
-- Monitore `total_rejeitados` para identificar problemas
-- Use `/sincronizacoes/{id}` para drill-down em execuções específicas
+| Valor | Significado |
+| --- | --- |
+| `wait` | run em andamento ou aguardando continuidade normal |
+| `recover` | run stale ou falha recuperavel |
+| `inspect_error` | erro impeditivo sem recover direto |
+| `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |
+| `none` | sem acao sugerida |
 
-### Para Auditores
+## Recover e stale
 
-- Use `/runs/{run_id}` para inspeção detalhada de drift estrutural
-- Monitore `change_summary` para detectar mudanças de schema
-- Use `/alteracoes` para rastrear mudanças campo a campo
+O sistema executa recovery sweep sobre fases stale.
 
-### Para Compliance
+Efeitos esperados:
 
-- Monitore `quality_summary` para validar quality gates
-- Use `remote_probe` para auditar decisões de download
-- Documente `reconcile_summary` para auditoria de remoções
-
----
-
-## Próximos Passos
-
-- [Quarentena e Replay](./quarantine.md) - Tratar erros
-- [Identidade e Auditoria](./identity.md) - Reconstrução e auditoria
+- uma run stale pode continuar em `state=stale` e `next_action=recover`;
+- uma run pode sair de stale para `state=failed`, mas manter `last_error.retryable=true` e `next_action=recover`;
+- cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.

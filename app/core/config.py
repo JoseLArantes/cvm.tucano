@@ -1,6 +1,7 @@
 import csv
 import sys
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -78,6 +79,11 @@ class Settings(BaseSettings):
         ge=1,
         alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS",
     )
+    analise_materializacao_max_active_chunks_per_campaign: int = Field(
+        default=1,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN",
+    )
     analise_materializacao_queue_name: str = Field(
         default="analise_materializacao",
         alias="ANALISE_MATERIALIZACAO_QUEUE_NAME",
@@ -111,12 +117,69 @@ class Settings(BaseSettings):
         ge=0,
         alias="ANALISE_MATERIALIZACAO_STALE_GRACE_SECONDS",
     )
+    analise_materializacao_pending_recovery_enabled: bool = Field(
+        default=True,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_ENABLED",
+    )
+    analise_materializacao_pending_recovery_sweep_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_SWEEP_SECONDS",
+    )
+    analise_materializacao_pending_recovery_max_campaigns: int = Field(
+        default=25,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS",
+    )
+    analise_materializacao_pending_recovery_max_requeues: int = Field(
+        default=10,
+        ge=1,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_REQUEUES",
+    )
+    analise_materializacao_pending_recovery_min_age_seconds: int = Field(
+        default=120,
+        ge=0,
+        alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MIN_AGE_SECONDS",
+    )
     analise_materializacao_blocking_sync_statuses: str = Field(
-        default="em_execucao,agendada",
+        default="agendada,em_execucao,aguardando_ingestao",
         alias="ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES",
     )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
+    ingestion_phase_stale_after_seconds: int = Field(
+        default=1800,
+        ge=1,
+        alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
+    )
+    ingestion_recovery_sweep_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="INGESTION_RECOVERY_SWEEP_SECONDS",
+    )
+    ingestion_financeiro_typed_staging_enabled: bool = Field(
+        default=True,
+        alias="INGESTION_FINANCEIRO_TYPED_STAGING_ENABLED",
+    )
+    ingestion_financeiro_direct_path_enabled: bool = Field(
+        default=True,
+        alias="INGESTION_FINANCEIRO_DIRECT_PATH_ENABLED",
+    )
+    ingestion_max_active_members_per_parent: int = Field(
+        default=2,
+        ge=1,
+        alias="INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT",
+    )
+    ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
+    ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
+    ingestion_normalized_artifact_format: Literal["typed_csv", "parquet"] = Field(
+        default="typed_csv",
+        alias="INGESTION_NORMALIZED_ARTIFACT_FORMAT",
+    )
+    ingestion_member_payload_db_fallback_enabled: bool = Field(
+        default=False,
+        alias="INGESTION_MEMBER_PAYLOAD_DB_FALLBACK_ENABLED",
+    )
     storage_dir: str = Field(default="data/storage", alias="STORAGE_DIR")
     updates_service_enabled: bool = Field(default=True, alias="UPDATES_SERVICE_ENABLED")
     auto_trigger_updates: bool = Field(default=False, alias="AUTO_TRIGGER_UPDATES")

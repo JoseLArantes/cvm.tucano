@@ -1,36 +1,142 @@
 ---
-title: Disparo de Sincronizações
+title: Disparo de Sincronizacoes
 sidebar_position: 2
 ---
 
-# Disparo de Sincronizações
+# Disparo de Sincronizacoes
 
-## Visão Geral
+## Regras gerais
 
-Endpoints para disparar sincronizações administrativas de fontes CVM. Todos exigem permissão administrativa.
+Todos os endpoints desta pagina:
 
----
+- exigem token administrativo;
+- respondem com `RespostaAgendamentoSincronizacao` ou `RespostaAgendamentoEmLote`;
+- aceitam `force_reimport` nos cenarios de disparo;
+- persistem uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task Celery;
+- fecham automaticamente o gate de materializacao enquanto a execucao estiver em `agendada`, `em_execucao` ou `aguardando_ingestao`;
+- apenas enfileiram o trabalho pesado; o acompanhamento deve ser feito pelos endpoints de monitoramento.
 
-## `POST /ingestion/sincronizacoes/cadastro`
+O `id_tarefa` retornado e o mesmo valor persistido em `execucoes_sincronizacao.id_tarefa`.
+Use esse identificador para cancelamento, auditoria e correlacao com logs Celery.
 
-Dispara sincronização completa do cadastro de companhias abertas.
+## `force_reimport`
 
-### Query Parameters
+Use `force_reimport=true` quando o objetivo for obrigar novo processamento do escopo inteiro.
 
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `force_reimport` | boolean | `false` | Força reprocessamento mesmo se hash já existir |
+Sem `force_reimport`, o lifecycle atual pode:
 
-### Exemplo
+- encerrar como `sem_alteracao` quando o artefato remoto nao mudou;
+- reaproveitar members por `member_sha256` em reruns anuais;
+- limitar o trabalho aos members que realmente precisam voltar ao hot path.
+
+## Disparo por fonte
+
+### Cadastro
+
+`POST /ingestion/sincronizacoes/cadastro`
+
+Exemplo:
 
 ```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/cadastro" \
+curl -X POST "http://localhost:8007/ingestion/sincronizacoes/cadastro?force_reimport=false" \
   -H "Authorization: Bearer <token-admin>"
 ```
 
-### Response 200
+### Fontes anuais
 
-**Schema:** `RespostaAgendamentoSincronizacao`
+| Rota | Ano minimo |
+| --- | --- |
+| `POST /ingestion/sincronizacoes/dfp/{ano}` | `2010` |
+| `POST /ingestion/sincronizacoes/itr/{ano}` | `2010` |
+| `POST /ingestion/sincronizacoes/fre/{ano}` | `2010` |
+| `POST /ingestion/sincronizacoes/fca/{ano}` | `2010` |
+| `POST /ingestion/sincronizacoes/ipe/{ano}` | `2003` |
+| `POST /ingestion/sincronizacoes/vlmo/{ano}` | `2018` |
+| `POST /ingestion/sincronizacoes/cgvn/{ano}` | `2018` |
+
+Exemplo:
+
+```bash
+curl -X POST "http://localhost:8007/ingestion/sincronizacoes/itr/2025?force_reimport=false" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+## Disparo em lote anual
+
+`POST /ingestion/sincronizacoes/tudo/{ano}`
+
+Este endpoint agenda:
+
+1. `cadastro`
+2. `dfp`
+3. `itr`
+4. `fre`
+5. `fca`
+6. `ipe`
+7. `vlmo`
+8. `cgvn`
+
+O ano usado nas fontes anuais e exatamente o valor do path.
+Todas as execucoes do lote sao registradas como `agendada` antes da primeira publicacao Celery.
+O endpoint publica `cadastro` e retorna; quando `cadastro` termina com sucesso, `sem_alteracao` ou `skipped`, o worker publica `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` ja registrados para o ano.
+Isso impede que materializacao continue iniciando novos chunks enquanto a ingestao ainda esta apenas na fila, sem manter o request HTTP preso na montagem do workflow completo.
+
+Exemplo:
+
+```bash
+curl -X POST "http://localhost:8007/ingestion/sincronizacoes/tudo/2025?force_reimport=false" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+## Reprocessamento seletivo
+
+`POST /ingestion/sincronizacoes/reprocessar-arquivo`
+
+Use quando o escopo correto for um arquivo especifico, seja ZIP principal ou member CSV.
+
+Exemplo de body:
+
+```json
+{
+  "arquivo": "itr_cia_aberta_BPA_con_2026.csv",
+  "ano": 2026,
+  "force_reimport": true
+}
+```
+
+Regras importantes:
+
+- a validacao do nome do arquivo e case-insensitive;
+- o nome canonico do member e preservado internamente;
+- o replay isolado usa o artefato retido do escopo correspondente;
+- para falha parcial de uma run anual, o caminho principal continua sendo o rerun anual da mesma fonte/ano.
+
+## Preprocessamento manual em duas etapas
+
+### Etapa 1 do cadastro
+
+`POST /ingestion/sincronizacoes/pre-processar/cadastro`
+
+### Etapa 1 de fonte anual
+
+`POST /ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}`
+
+Esta chamada baixa o artefato, extrai members, registra snapshots e deixa a execucao em `aguardando_ingestao`.
+
+### Etapa 2 de uma execucao preprocessada
+
+`POST /ingestion/sincronizacoes/{id_execucao}/ingerir`
+
+Use apenas quando a execucao administrativa estiver em `aguardando_ingestao`.
+
+Exemplo:
+
+```bash
+curl -X POST "http://localhost:8007/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/ingerir?force_reimport=false" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+## Resposta de agendamento simples
 
 ```json
 {
@@ -39,290 +145,14 @@ curl -X POST "http://localhost:8007/ingestion/sincronizacoes/cadastro" \
 }
 ```
 
----
-
-## `POST /ingestion/sincronizacoes/dfp/{ano}`
-
-Dispara sincronização DFP para um ano específico.
-
-### Path Parameters
-
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `ano` | integer | Ano do pacote DFP (mín: 2010) |
-
-### Query Parameters
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `force_reimport` | boolean | `false` | Força reprocessamento |
-
-### Exemplo
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/dfp/2025" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Response 200
-
-```json
-{
-  "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
-  "status": "agendada"
-}
-```
-
----
-
-## Endpoints Similares para Outras Fontes
-
-Os seguintes endpoints seguem o mesmo padrão do DFP:
-
-| Endpoint | Ano Mínimo | Descrição |
-|----------|------------|-----------|
-| `POST /ingestion/sincronizacoes/itr/{ano}` | 2010 | Informações Trimestrais |
-| `POST /ingestion/sincronizacoes/fre/{ano}` | 2010 | Formulário de Referência |
-| `POST /ingestion/sincronizacoes/fca/{ano}` | 2010 | Formulário Cadastral |
-| `POST /ingestion/sincronizacoes/ipe/{ano}` | 2003 | Informações Periódicas e Eventuais |
-| `POST /ingestion/sincronizacoes/vlmo/{ano}` | 2018 | Valores Mobiliários |
-| `POST /ingestion/sincronizacoes/cgvn/{ano}` | 2018 | Governança Corporativa |
-
-### Exemplo: Sincronizar ITR 2024
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/itr/2024" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
----
-
-## `POST /ingestion/sincronizacoes/tudo/{ano}`
-
-Dispara sincronização completa de todas as fontes para um ano específico.
-
-### Comportamento
-
-1. Dispara primeiro a sincronização de `cadastro`
-2. Na sequência, agenda `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` para o mesmo ano
-3. **Não usa** `ANOS_INICIAIS_*` do ambiente: o ano processado é exclusivamente o argumento recebido
-
-### Path Parameters
-
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `ano` | integer | Ano para todas as sincronizações (mín: 2003) |
-
-### Query Parameters
-
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `force_reimport` | boolean | `false` | Força reprocessamento |
-
-### Exemplo
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/tudo/2025" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Response 200
-
-**Schema:** `RespostaAgendamentoEmLote`
+## Resposta de agendamento em lote
 
 ```json
 {
   "status": "agendada",
   "tarefas": [
-    {
-      "tipo_fonte": "cadastro",
-      "ano": null,
-      "id_tarefa": "task-1-uuid"
-    },
-    {
-      "tipo_fonte": "dfp",
-      "ano": 2025,
-      "id_tarefa": "task-2-uuid"
-    },
-    {
-      "tipo_fonte": "itr",
-      "ano": 2025,
-      "id_tarefa": "task-3-uuid"
-    }
+    {"tipo_fonte": "cadastro", "ano": null, "id_tarefa": "task-1"},
+    {"tipo_fonte": "dfp", "ano": 2025, "id_tarefa": "task-2"}
   ]
 }
 ```
-
----
-
-## `POST /ingestion/sincronizacoes/reprocessar-arquivo`
-
-Dispara reprocessamento seletivo por nome de arquivo CVM.
-
-### Request Body
-
-```json
-{
-  "arquivo": "dfp_cia_aberta_2025.zip",
-  "ano": 2025,
-  "force_reimport": true
-}
-```
-
-### Arquivos Aceitos
-
-- `cad_cia_aberta.csv`
-- `dfp_cia_aberta_*`
-- `itr_cia_aberta_*`
-- `fre_cia_aberta_*`
-- `fca_cia_aberta_*`
-- `ipe_cia_aberta_*`
-- `vlmo_cia_aberta_*`
-- `cgvn_cia_aberta_*`
-
-### Exemplo
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/reprocessar-arquivo" \
-  -H "Authorization: Bearer <token-admin>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "arquivo": "fre_cia_aberta_2025.csv",
-    "ano": 2025,
-    "force_reimport": true
-  }'
-```
-
-### Response 200
-
-```json
-{
-  "status": "agendada",
-  "tarefas": [...]
-}
-```
-
----
-
-## Execução em Duas Fases (Manual)
-
-### `POST /ingestion/sincronizacoes/pre-processar/cadastro`
-
-Executa apenas a **Fase 1** (download, extração e análise de metadados) do cadastro.
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/pre-processar/cadastro" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### `POST /ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}`
-
-Executa apenas a **Fase 1** para uma fonte anual específica.
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/pre-processar/dfp/2025" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### `POST /ingestion/sincronizacoes/{id_execucao}/ingerir`
-
-Dispara a **Fase 2** (ingestão dos dados) para uma execução que está no status `aguardando_ingestao`.
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/ingerir" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Códigos de Erro
-
-| Status | Descrição |
-|--------|-----------|
-| `400` | Execução não está no status `aguardando_ingestao` |
-| `404` | Execução não encontrada |
-
----
-
-## Casos de Uso
-
-### Caso 1: Sincronização Diária Rotineira
-
-```bash
-# Sincronizar cadastro (diário)
-POST /ingestion/sincronizacoes/cadastro
-
-# Sincronizar DFP do ano corrente
-POST /ingestion/sincronizacoes/dfp/2025
-```
-
-### Caso 2: Backfill de Anos Históricos
-
-```bash
-# Sincronizar todos os anos de 2010 a 2025
-for ano in {2010..2025}; do
-  curl -X POST "http://localhost:8007/ingestion/sincronizacoes/dfp/$ano" \
-    -H "Authorization: Bearer <token-admin>"
-done
-```
-
-### Caso 3: Reprocessamento Após Correção de Bug
-
-```bash
-# 1. Corrigir bug no normalizador
-# 2. Deploy
-# 3. Forçar reprocessamento
-curl -X POST "http://localhost:8007/ingestion/sincronizacoes/dfp/2025?force_reimport=true" \
-  -H "Authorization: Bearer <token-admin>"
-```
-
-### Caso 4: Python - Sincronização Automatizada
-
-```python
-import httpx
-
-def sincronizar_ano(base_url, token, ano):
-    """Sincroniza todas as fontes para um ano."""
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    response = httpx.post(
-        f"{base_url}/ingestion/sincronizacoes/tudo/{ano}",
-        headers=headers
-    )
-    response.raise_for_status()
-    
-    tarefas = response.json()["tarefas"]
-    print(f"Disparadas {len(tarefas)} tarefas para {ano}")
-    
-    return tarefas
-
-# Uso
-tarefas = sincronizar_ano("http://localhost:8007", "seu-token", 2025)
-```
-
----
-
-## Notas para Usuários
-
-### Para Operadores de Backoffice
-
-- Use `/tudo/{ano}` para sincronizações completas
-- Monitore o dashboard após o disparo
-- Use `force_reimport=true` apenas quando necessário
-
-### Para Auditores
-
-- Prefira execução em duas fases para inspeção intermediária
-- Use `/pre-processar` para validar metadados antes da ingestão
-- Monitore `change_summary` para detectar drift estrutural
-
-### Para Compliance
-
-- Documente todos os disparos com `force_reimport=true`
-- Use `/reprocessar-arquivo` para correções pontuais
-- Monitore quarentena após reprocessamentos
-
----
-
-## Próximos Passos
-
-- [Monitoramento](./monitoring.md) - Acompanhar execuções
-- [Quarentena e Replay](./quarantine.md) - Tratar erros

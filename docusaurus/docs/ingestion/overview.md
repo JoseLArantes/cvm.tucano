@@ -5,153 +5,171 @@ sidebar_position: 1
 
 # Administracao da Ingestao - Visao Geral
 
-## Visão Geral
+## Escopo
 
-Os endpoints de **Administracao da Ingestao** permitem que operadores de backoffice, auditores e gerentes de compliance disparem, monitorem, cancelem e corrijam sincronizacoes de dados da CVM. Todos os endpoints desta secao exigem **permissao administrativa** (`is_admin=true` ou token de sistema).
+A superficie `/ingestion/*` concentra as operacoes administrativas e o monitoramento operacional do pipeline de ingestao.
 
-## Endpoints Disponíveis
+Esta documentacao cobre o comportamento atual do sistema:
 
-### Disparo de Sincronizações
+- disparo de sincronizacoes anuais e de cadastro;
+- preprocessamento manual em duas etapas;
+- monitoramento de execucoes administrativas e runs tecnicas;
+- cancelamento de run inteira ou de member individual;
+- replay de run, replay de quarentena e recover administrativo;
+- inventario de members, fases, quarentena e snapshot consolidado de operacao.
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `POST` | `/ingestion/sincronizacoes/cadastro` | Disparar sincronização do cadastro |
-| `POST` | `/ingestion/sincronizacoes/dfp/{ano}` | Disparar sincronização DFP |
-| `POST` | `/ingestion/sincronizacoes/itr/{ano}` | Disparar sincronização ITR |
-| `POST` | `/ingestion/sincronizacoes/fre/{ano}` | Disparar sincronização FRE |
-| `POST` | `/ingestion/sincronizacoes/fca/{ano}` | Disparar sincronização FCA |
-| `POST` | `/ingestion/sincronizacoes/ipe/{ano}` | Disparar sincronização IPE |
-| `POST` | `/ingestion/sincronizacoes/vlmo/{ano}` | Disparar sincronização VLMO |
-| `POST` | `/ingestion/sincronizacoes/cgvn/{ano}` | Disparar sincronização CGVN |
-| `POST` | `/ingestion/sincronizacoes/tudo/{ano}` | Disparar todas as fontes para um ano |
-| `POST` | `/ingestion/sincronizacoes/reprocessar-arquivo` | Reprocessamento seletivo por arquivo |
+Todos os endpoints desta area exigem token administrativo.
 
-### Execução em Duas Fases
+## Modelo operacional
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `POST` | `/ingestion/sincronizacoes/pre-processar/cadastro` | Fase 1 do cadastro |
-| `POST` | `/ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | Fase 1 de fonte anual |
-| `POST` | `/ingestion/sincronizacoes/{id_execucao}/ingerir` | Fase 2 de execução pré-processada |
+O pipeline trabalha com dois niveis de observabilidade:
 
-### Cancelamento
+1. `ExecucaoSincronizacao`
+   - representa o escopo administrativo disparado pela API ou pelo scheduler;
+   - e a melhor fonte para auditoria do pedido original, tipo de execucao e agregacao pai/filho.
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `POST` | `/ingestion/sincronizacoes/cancelar` | Cancelar sincronização em andamento |
+2. `IngestionRun`
+   - representa a execucao tecnica do pipeline;
+   - e a melhor fonte para progresso, fase, liveness, erros, reconcile, inventario de members e snapshots operacionais.
+
+Regra pratica:
+
+- para listagens de operador, prefira `GET /ingestion/runs`;
+- para auditoria de disparo e arvore pai/filho, prefira `GET /ingestion/sincronizacoes`;
+- para drill-down de uma run, combine `GET /ingestion/runs/{run_id}`, `/phases` e `/members`;
+- para visao consolidada do cluster, use `GET /ingestion/operations`.
+
+## Fases da run
+
+As runs expõem `phase` com o seguinte significado:
+
+| Fase | Significado |
+| --- | --- |
+| `acquire` | probe remoto, decisão de download e captura do artefato |
+| `stage` | extração de members, análise de header/schema, snapshots e carga operacional intermediária |
+| `promote` | normalização, resolução de companhia, deduplicação e escrita nas tabelas canônicas |
+| `reconcile` | remoção de linhas promovidas que ficaram obsoletas para o escopo reprocessado |
+| `complete` | encerramento final da run |
+
+## Estados operacionais agregados
+
+Runs e execuções administrativas expõem `state` para consumo direto por UI e automações:
+
+| `state` | Uso |
+| --- | --- |
+| `queued` | aguardando worker ou continuidade de fase |
+| `waiting` | aguardando ingestão manual da fase 2 ou outra continuidade normal |
+| `running` | trabalho ativo em andamento |
+| `stale` | heartbeat expirado para uma fase que deveria estar ativa |
+| `succeeded` | encerrada com sucesso |
+| `skipped` | encerrada sem processamento adicional |
+| `failed` | encerrada com erro |
+| `cancelled` | encerrada por cancelamento |
+
+Campos complementares:
+
+- `liveness`: heartbeat, task atual, lease owner e `is_stale`;
+- `blocking`: motivo compacto de espera;
+- `cancellation`: último pedido de cancelamento persistido;
+- `last_error`: erro operacional mais recente;
+- `next_action`: ação recomendada para consumidor desacoplado.
+
+## Endpoints principais
+
+### Disparo
+
+| Metodo | Rota | Uso |
+| --- | --- | --- |
+| `POST` | `/ingestion/sincronizacoes/cadastro` | sincronizar cadastro |
+| `POST` | `/ingestion/sincronizacoes/{fonte}/{ano}` | sincronizar fonte anual |
+| `POST` | `/ingestion/sincronizacoes/tudo/{ano}` | sincronizar cadastro + todas as fontes anuais |
+| `POST` | `/ingestion/sincronizacoes/reprocessar-arquivo` | reprocessar ZIP ou member especifico |
+
+### Duas etapas
+
+| Metodo | Rota | Uso |
+| --- | --- | --- |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/cadastro` | executar apenas preprocessamento do cadastro |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | executar apenas preprocessamento da fonte anual |
+| `POST` | `/ingestion/sincronizacoes/{id_execucao}/ingerir` | iniciar a fase 2 de uma execucao em `aguardando_ingestao` |
 
 ### Monitoramento
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `GET` | `/ingestion/sincronizacoes` | Listar execuções de sincronização |
-| `GET` | `/ingestion/sincronizacoes/{id_execucao}` | Detalhar execução |
-| `GET` | `/ingestion/runs` | Listar runs do pipeline |
-| `GET` | `/ingestion/runs/{run_id}` | Detalhar run |
-| `GET` | `/ingestion/dashboard` | Dashboard consolidado |
-| `GET` | `/ingestion/alteracoes` | Histórico de alterações |
+| Metodo | Rota | Uso |
+| --- | --- | --- |
+| `GET` | `/ingestion/sincronizacoes` | auditoria administrativa e arvore pai/filho |
+| `GET` | `/ingestion/sincronizacoes/{id_execucao}` | detalhe de execucao administrativa |
+| `GET` | `/ingestion/runs` | monitoramento principal das runs |
+| `GET` | `/ingestion/runs/{run_id}` | detalhe completo da run |
+| `GET` | `/ingestion/runs/{run_id}/phases` | timeline persistida de fases |
+| `GET` | `/ingestion/runs/{run_id}/members` | inventario paginado de members |
+| `GET` | `/ingestion/operations` | snapshot consolidado do cluster |
 
-### Quarentena e Replay
+### Cancelamento e recuperacao
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `GET` | `/ingestion/quarentena` | Listar itens em quarentena |
-| `GET` | `/ingestion/quarentena/resumo` | Resumo analítico da quarentena |
-| `POST` | `/ingestion/replay/quarentena` | Reprocessar quarentena |
-| `POST` | `/ingestion/runs/{run_id}/replay` | Reprocessar run completa |
+| Metodo | Rota | Uso |
+| --- | --- | --- |
+| `POST` | `/ingestion/sincronizacoes/cancelar` | cancelamento administrativo por seletor |
+| `POST` | `/ingestion/runs/{run_id}/cancel` | cancelar a run inteira |
+| `POST` | `/ingestion/runs/{run_id}/members/{member_id}/cancel` | cancelar somente um member |
+| `POST` | `/ingestion/runs/{run_id}/recover` | recuperar run stale ou com erro recuperavel |
+| `POST` | `/ingestion/runs/{run_id}/replay` | replay completo da run |
 
-### Identidade e Auditoria
+### Quarentena
 
-| Método | Rota | Descrição |
-|--------|------|-----------|
-| `POST` | `/ingestion/identity/rebuild` | Reconstruir grafo de identidade |
-| `GET` | `/ingestion/fontes` | Listar fontes registradas |
-| `GET` | `/ingestion/fontes/{fonte}` | Detalhar fonte |
-| `POST` | `/ingestion/fontes/auditar` | Auditar fontes |
+| Metodo | Rota | Uso |
+| --- | --- | --- |
+| `GET` | `/ingestion/quarentena` | listar fila de reparo |
+| `GET` | `/ingestion/quarentena/resumo` | métricas agregadas |
+| `POST` | `/ingestion/replay/quarentena` | replay de itens pendentes |
 
----
+## Rerun anual
 
-## Parâmetro Universal: `force_reimport`
+Para fontes anuais, o rerun compara o ZIP corrente e o inventario de members da mesma fonte/ano.
 
-Todos os endpoints de disparo aceitam o parâmetro `?force_reimport=true`:
+Cada member pode seguir um de dois caminhos:
 
-| Valor | Comportamento |
-|-------|---------------|
-| `false` (padrão) | Usa otimização por hash: se o hash do arquivo já foi processado com sucesso, o reprocessamento é pulado |
-| `true` | Força re-ingestão total: ignora checagem de hash, faz limpeza atômica de dados antigos e re-executa a ingestão |
+- `reprocessado`: entra novamente em `stage -> promote -> reconcile`;
+- `reaproveitado`: permanece fora do hot path quando o `member_sha256` permite reutilizacao segura.
 
-### Quando usar `force_reimport=true`
+Os campos centrais para explicar essa decisao sao:
 
-- Após correção de bug no normalizador
-- Após aplicação de novas regras de reparo
-- Quando o pipeline v1 legado precisa ser migrado
-- Para garantir idempotência após falhas parciais
+- `quality_summary.members_reprocessed`
+- `quality_summary.members_reused_from_previous`
+- `quality_summary.members_reused_from_failed_parent`
+- `member_snapshot_summary.by_status`
+- `lifecycle_decision`
 
-### Quando NÃO usar
+## Staging tipado e artifact normalizado
 
-- Sincronizações rotineiras (desperdiça recursos)
-- Quando o hash já indica processamento bem-sucedido
+O pipeline usa artifact normalizado por member e staging tipado para parte do processamento volumoso.
 
----
+Formato atual do artifact normalizado:
 
-## Status de Execução
+- default: `typed_csv`
+- opcional: `parquet`
 
-| Status | Descrição |
-|--------|-----------|
-| `agendada` | Task enfileirada no Celery |
-| `em_execucao` | Processamento ativo |
-| `aguardando_ingestao` | Fase 1 concluída, aguardando Fase 2 |
-| `sucesso` | Ingestão finalizada sem erros |
-| `sucesso_com_alerta` | Concluída com alertas (ex: erros de schema) |
-| `sem_alteracao` | Arquivo fonte não mudou |
-| `skipped` | Ignorado por hash idêntico |
-| `falha` | Erro durante processamento |
-| `falha_qualidade` | Violação do quality gate |
-| `cancelada` | Abortada manualmente |
+Decisao atual do projeto:
 
----
+- manter `typed_csv` como default;
+- usar `parquet` apenas em benchmarks e medições específicas por fonte/member.
 
-## Fases do Pipeline
+Benchmark oficial no ambiente Docker:
 
-| Fase | Descrição |
-|------|-----------|
-| `acquire` | Sondagem remota + download do arquivo |
-| `stage` | Parsing CSV → `ingestion_rows` |
-| `validate` | Validação de header e schema |
-| `resolve` | Resolução de identidade da companhia |
-| `promote` | Escrita nas tabelas de domínio |
-| `reconcile` | Remoção de linhas obsoletas |
-| `complete` | Pipeline finalizado |
+```bash
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000 --output json"
+```
 
----
+Resultado registrado em `2026-06-30` no container `cvm_api`:
 
-## Arquitetura em Duas Fases
+- `typed_csv`: escrita `5.56s`, leitura `1.87s`, pico `26.90 MB`, tamanho `26.76 MB`
+- `parquet`: escrita `5.09s`, leitura `6.36s`, pico `219.16 MB`, tamanho `3.93 MB`
 
-O pipeline é dividido em duas fases para garantir resiliência:
+Decisao operacional atual: `typed_csv` continua sendo o formato default.
 
-### Fase 1: Pré-processamento (`acquire` + `stage`)
+## Proximos guias
 
-1. **Sondagem remota** (CKAN/HEAD) para evitar downloads desnecessários
-2. **Download com SHA-256** on-the-fly
-3. **Extração de membros** do ZIP
-4. **Persistência de payloads** brutos para self-healing
-5. **Change tracking** estrutural
-
-### Fase 2: Ingestão (`promote` + `reconcile`)
-
-1. **Stage** com COPY protocol (5.000 linhas/chunk)
-2. **Validação** de schema
-3. **Normalização** e resolução de identidade
-4. **Promoção** resiliente (`safe_promote_chunk`)
-5. **Reconcile** set-based
-
-> **Self-healing:** Os payloads brutos são persistidos em `IngestionFileMemberPayload`. Se um worker reiniciar entre fases, o CSV pode ser reconstruído do banco sem redownload.
-
----
-
-## Próximos Passos
-
-- [Disparo de Sincronizações](./dispatch.md) - Como disparar sincronizações
-- [Monitoramento](./monitoring.md) - Como acompanhar execuções
-- [Quarentena e Replay](./quarantine.md) - Como tratar erros
-- [Identidade e Auditoria](./identity.md) - Reconstrução e auditoria
+- [Disparo de Sincronizações](./dispatch.md)
+- [Monitoramento](./monitoring.md)
+- [Quarentena e Replay](./quarantine.md)
+- [Identidade e Auditoria](./identity.md)

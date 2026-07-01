@@ -86,9 +86,9 @@ graph TD
         A["Inicio: Trigger Cadastro"] --> B["Remote Probe: ETag / CKAN"]
         B --> C["Download Cia Aberta & Estrangeira (SHA-256 on-the-fly)"]
         C --> D["Calcular Hash Composto"]
-        D --> E{"Hash ja Processado?"}
-        E -- Sim --> F["Status: skipped / Limpar Disco"]
-        E -- Nao --> G["Criar IngestionRun & IngestionFile"]
+        D --> E{"Hash composto mudou?"}
+        E -- Nao --> F["Status: sem_alteracao / Limpar Disco"]
+        E -- Sim --> G["Criar IngestionRun & IngestionFile"]
         G --> H["Detectar Encodings & Delimiters"]
         H --> I["Persistir Payloads Brutos"]
         I --> J["Status: aguardando_ingestao"]
@@ -404,15 +404,6 @@ Linhas rejeitadas por erro real de linha. Falhas de schema em nivel de membro sa
 
 Armazenamento binario duravel do payload bruto do membro (`LargeBinary`). E a base para self-healing e replay de runs/membros sem depender da permanencia das linhas bem-sucedidas em staging. Se um worker reiniciar entre as fases e o arquivo CSV em disco for perdido, o sistema reconstroi o arquivo a partir deste payload.
 
-### `IngestionReconcileHash`
-
-Tabela transitória de apoio ao `reconcile`.
-
-Ela armazena, por run/member/tabela-alvo, o conjunto de `hash_origem` promovidos com sucesso no member atual.
-O `reconcile` usa esse conjunto em SQL para remover linhas antigas por anti-join, sem loop Python por registro.
-
----
-
 ## 5. Pipeline de Ingestao
 
 O pipeline opera em **duas fases** para todas as fontes. A separacao permite que o sistema
@@ -431,7 +422,7 @@ de forma integrada.
 2. Download de `cad_cia_aberta.csv` e `cad_cia_estrang.csv` do portal CVM, com SHA-256 computado on-the-fly
 3. Computacao de hash composto
 4. Verificacao de duplicidade via `buscar_execucao_hash_existente`
-5. Se ja processado (hash igual): status = `skipped`, limpeza de disco
+5. Se o hash composto for igual ao baseline anterior: status = `sem_alteracao`, limpeza de disco
 6. Se novo: criacao de `IngestionRun`, `IngestionFile` (2), `IngestionFileMember` (2)
 7. Deteccao de encoding/delimiter, leitura de header e contagem de linhas
 8. Persistencia dos payloads brutos em `IngestionFileMemberPayload`
@@ -463,6 +454,7 @@ Isso produz tres efeitos importantes no pipeline:
 1. O mesmo ZIP anual pode mudar sem trocar o nome do arquivo.
 2. Dentro de um ZIP alterado, alguns members podem permanecer identicos e ser reaproveitados por `member_sha256`.
 3. Um member alterado pode remover linhas antes publicadas; por isso a promocao precisa ser seguida de `reconcile`.
+4. Se uma execucao anual falhar depois que alguns members ja foram promovidos com sucesso, esses members bem-sucedidos continuam sendo baseline valido de reaproveitamento em reruns futuros do mesmo ano, desde que o `member_sha256` permaneça igual.
 
 O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, todas as versoes recebidas da CVM continuam retidas nas tabelas de dominio; o lifecycle corrige apenas o espelho local do member corrente, removendo linhas que desapareceram do artefato atual.
 
@@ -481,6 +473,7 @@ O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, 
    - Se ja foi processado com sucesso antes (`member_has_successful_match`):
      - O member nao entra em `stage -> promote`
      - Registra `SourceMemberSnapshot` com `lifecycle_status=member_skipped`
+     - Em reruns de recuperacao, o reaproveitamento pode vir de um member bem-sucedido pertencente a uma execucao anual pai que terminou em `falha`
    - Se novo:
      - Cria `ExecucaoSincronizacao` filho com `tipo_execucao="arquivo_membro"` e `status=aguardando_ingestao`
      - Cria `IngestionRun` filho
@@ -491,6 +484,17 @@ O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, 
 8. Change tracking: compara membros atuais com a ultima run de sucesso (adicoes, remocoes, alteracoes de header/schema, mudanca de row_count e drift do delivery index)
 9. Pai atualizado para `aguardando_ingestao`
 
+#### Semantica de rerun parcial
+
+Quando um ZIP anual falha em apenas alguns members, o rerun normal da mesma fonte/ano deve ser entendido como **rerun de recuperacao**:
+
+1. o artefato anual ainda passa por probe remoto e, se necessario, download
+2. cada member do ZIP atual e comparado por `member_sha256` contra resultados anteriores reaproveitaveis
+3. members ja bem-sucedidos e inalterados sao reaproveitados, com `lifecycle_status=member_skipped` e counters especificos de recovery
+4. apenas members falhados, interrompidos, ausentes ou com SHA alterado seguem para `stage -> promote -> reconcile`
+
+O endpoint de reprocessamento seletivo continua existindo para recuperacao cirurgica, mas nao deve ser necessario para o caso comum de "3 arquivos falharam em 19".
+
 #### Fase 2 — Ingestao (`ingerir_sincronizacao_zip`)
 
 1. Carrega caches do resolver de identidade
@@ -498,24 +502,26 @@ O sistema nao colapsa `VERSAO` no momento da ingestao. Para fontes documentais, 
 3. Separa membros em duas categorias:
    - **Document headers**: arquivo principal `{fonte}_cia_aberta_{ano}.csv` (processado primeiro)
    - **Dependentes**: demais arquivos (processados apos os headers)
-4. Orquestracao via Celery: `chain(header_task, chord(dependent_tasks, finalize_task))`
+4. Orquestracao via Celery: o member de cabecalho e processado antes dos dependentes; os dependentes sao despachados respeitando `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`
 5. Dispara `sincronizar_member_task` para cada membro:
    - **Self-heal**: se arquivo CSV ausente do disco, reconstroi de `IngestionFileMemberPayload` ou re-extrai do ZIP
-   - **Stage**: CSV para `ingestion_rows` em chunks (default 5.000 linhas/chunk), usando PostgreSQL COPY protocol quando disponivel para performance
    - Determinacao do `row_kind` via `get_row_kind`
    - Reconstrucao do `header_map` para datasets dependentes
    - Processamento especifico por tipo de fonte:
-     - `dfp`/`itr`: `_process_financeiro_member`
+     - `dfp`/`itr`: `Financial Direct Path`, lendo o CSV do artefato bruto, normalizando linhas validas para artifact `typed_csv`, carregando `ingestion_financeiro_stage_rows` via COPY streaming no PostgreSQL e promovendo a partir do staging tipado
      - `fre`: `_process_fre_member`
      - `fca`: `_process_fca_rows`
      - `ipe`: `_process_ipe_rows`
      - `vlmo`: `_process_vlmo_rows`
      - `cgvn`: `_process_cgvn_rows`
+   - Para fontes fora do direct path financeiro, **Stage**: CSV para `ingestion_rows` em chunks, usando PostgreSQL COPY protocol quando disponivel para performance
    - **Promocao resiliente** (`safe_promote_chunk`): promove em chunks. Se o chunk inteiro falhar (ex: `NumericValueOutOfRange`), faz rollback do savepoint e promove linha a linha. Linhas com erro vao para quarentena com `normalizacao_invalida`; linhas OK sao salvas.
+   - **Lookup leve antes do promote**: a camada de ingestao consulta primeiro apenas `id` + chave natural + `hash_origem`; a leitura completa dos campos de negocio so acontece para chaves cujo hash mudou.
+   - **Insercao nova no PostgreSQL**: o caminho de insert usa `ON CONFLICT DO NOTHING` nas tabelas com chave natural estavel para reduzir custo de corrida e duplicidade intra-batch sem alterar a trilha de historico.
    - Para linhas bem-sucedidas: atualizacao de contadores
    - Para excecoes de linha: persistencia de quarentena e diagnostico
    - Ao final do membro: purge das linhas staged bem-sucedidas
-   - **Reconcile**: carrega `hash_origem` promovidos com sucesso em `ingestion_reconcile_hashes` e executa delete set-based por anti-join, removendo do dominio as linhas ausentes no member atual
+   - **Reconcile**: carrega `id` + `hash_origem` do escopo atual (`arquivo_origem`/`ano_origem`), compara com os hashes promovidos com sucesso no member atual e remove em lotes apenas os IDs obsoletos
 6. Agregacao dos resultados filhos no pai
 7. Quality gate: se algum filho falhou, pai falha
 8. Limpeza dos arquivos em disco
@@ -558,7 +564,8 @@ self-heal (reconstruir CSV se ausente)
 | `aguardando_ingestao` | Pre-processo concluido, aguardando ingestao |
 | `sucesso` | Processado com sucesso |
 | `sucesso_com_alerta` | Processado com alertas (ex: erros de schema) |
-| `skipped` | Ignorado (arquivo ja processado, hash identico) |
+| `sem_alteracao` | Artefato remoto ou hash final confirmaram igualdade com o baseline anterior |
+| `skipped` | Skip operacional legado ou decisao administrativa explicita |
 | `falha` | Falha no processamento |
 | `falha_qualidade` | Falha no quality gate (ex: muitas companhias nao encontradas) |
 
@@ -778,8 +785,24 @@ para a mesma fonte/ano. Sao rastreadas as seguintes mudancas:
 
 Apos a promocao, o sistema remove das tabelas de dominio os registros que estavam presentes
 na run anterior mas nao aparecem no pacote atual. Isso garante que dados obsoletos (ex:
-empresas que deixaram de ser listadas) sejam removidos. A operacao usa batches de 5.000
-IDs por vez para evitar statements SQL excessivamente grandes.
+empresas que deixaram de ser listadas) sejam removidos. A operacao le `id` + `hash_origem`
+do escopo atual, identifica os registros ausentes no conjunto promovido e executa `DELETE`
+em batches de 5.000 IDs para evitar statements SQL excessivamente grandes.
+
+### Otimizacoes Atuais do Promote
+
+O hot path atual de promote segue esta ordem:
+
+1. lookup leve por chave natural com `hash_origem`
+2. classificacao local entre `inserido`, `inalterado` e `potencialmente alterado`
+3. lookup completo apenas das chaves realmente alteradas
+4. insert em lote
+5. update em lote das colunas operacionais e dos campos alterados
+6. persistencia de historico campo a campo apenas quando houve mudanca real
+
+No PostgreSQL, os inserts novos usam `ON CONFLICT DO NOTHING` quando a chave natural ja esta
+fechada e testada. Isso reduz round-trips e falhas por unicidade sem mudar o contrato de
+`alterado_em`, historico ou contadores.
 
 ---
 
@@ -807,55 +830,72 @@ No modulo `bootstrap`: na inicializacao do scheduler, verifica se existem
 execucoes validas. Se nao, dispara tarefas para cadastro e todas as fontes/anos
 configurados via environment variables (`ANOS_INICIAIS_*`).
 
-### 11.3 Admin API (Endpoints de Ingestao)
+### 11.3 API Administrativa de Ingestao
 
-Endpoints no router `admin` (todos requerem autenticacao Bearer token):
+Endpoints sob o prefixo publico `/ingestion` (todos requerem autenticacao Bearer token):
 
 **Disparo de sincronizacoes:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/sincronizacoes/cadastro` | Dispara sincronizacao completa do cadastro |
-| `POST` | `/admin/sincronizacoes/dfp/{ano}` | Dispara sincronizacao DFP para o ano |
-| `POST` | `/admin/sincronizacoes/itr/{ano}` | Dispara sincronizacao ITR para o ano |
-| `POST` | `/admin/sincronizacoes/fre/{ano}` | Dispara sincronizacao FRE para o ano |
-| `POST` | `/admin/sincronizacoes/fca/{ano}` | Dispara sincronizacao FCA para o ano |
-| `POST` | `/admin/sincronizacoes/ipe/{ano}` | Dispara sincronizacao IPE para o ano |
-| `POST` | `/admin/sincronizacoes/vlmo/{ano}` | Dispara sincronizacao VLMO para o ano |
-| `POST` | `/admin/sincronizacoes/cgvn/{ano}` | Dispara sincronizacao CGVN para o ano |
-| `POST` | `/admin/sincronizacoes/tudo/{ano}` | Dispara todas as fontes para o ano de uma vez |
-| `POST` | `/admin/sincronizacoes/reprocessar-arquivo` | Reprocessamento seletivo por nome de arquivo CVM |
+| `POST` | `/ingestion/sincronizacoes/cadastro` | Dispara sincronizacao completa do cadastro |
+| `POST` | `/ingestion/sincronizacoes/dfp/{ano}` | Dispara sincronizacao DFP para o ano |
+| `POST` | `/ingestion/sincronizacoes/itr/{ano}` | Dispara sincronizacao ITR para o ano |
+| `POST` | `/ingestion/sincronizacoes/fre/{ano}` | Dispara sincronizacao FRE para o ano |
+| `POST` | `/ingestion/sincronizacoes/fca/{ano}` | Dispara sincronizacao FCA para o ano |
+| `POST` | `/ingestion/sincronizacoes/ipe/{ano}` | Dispara sincronizacao IPE para o ano |
+| `POST` | `/ingestion/sincronizacoes/vlmo/{ano}` | Dispara sincronizacao VLMO para o ano |
+| `POST` | `/ingestion/sincronizacoes/cgvn/{ano}` | Dispara sincronizacao CGVN para o ano |
+| `POST` | `/ingestion/sincronizacoes/tudo/{ano}` | Dispara todas as fontes para o ano de uma vez |
+| `POST` | `/ingestion/sincronizacoes/reprocessar-arquivo` | Reprocessamento seletivo por nome de arquivo CVM |
 
 Todas as rotas de disparo aceitam `?force_reimport=true` para ignorar o skip por hash e
 reprocessar integralmente.
+Cada disparo persiste uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task
+Celery. O `id_tarefa` retornado pela API e o mesmo valor persistido no banco e enviado ao
+Celery. Enquanto uma execucao estiver em `agendada`, `em_execucao` ou
+`aguardando_ingestao`, o gate automatico de materializacao fica fechado por
+`INGESTION_ACTIVE`. Estados finais, incluindo `cancelada` e `falha`, nao bloqueiam o gate.
+No lote anual, a API publica `cadastro` e retorna; quando `cadastro` termina com sucesso,
+`sem_alteracao` ou `skipped`, o worker publica as fontes anuais ja registradas para o ano.
+No reprocessamento seletivo por `arquivo`, a comparacao do nome e case-insensitive para
+aceitar members CVM com siglas em maiusculas no nome do CSV. Depois da validacao, o
+backend preserva o nome canonico do arquivo para persistencia da execucao filha e para
+extracao do member no ZIP.
+Durante o replay isolado de um member, a resolucao por cabecalho de documento e semeada
+pelas tabelas canonicas de documentos ja promovidos, evitando reconstruir em memoria o
+historico cumulativo de staging de siblings do mesmo ano.
+O promote por member tambem processa os chunks de staging de forma estritamente incremental:
+o worker carrega apenas os campos minimos por `ingestion_row` e desaloca os rows de cada
+chunk antes de avancar para o seguinte.
 
 **Execucao em duas fases (manual):**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/sincronizacoes/pre-processar/cadastro` | Fase 1 apenas do cadastro |
-| `POST` | `/admin/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | Fase 1 apenas para fonte anual |
-| `POST` | `/admin/sincronizacoes/{id_execucao}/ingerir` | Fase 2 a partir de execucao pre-processada |
-| `POST` | `/admin/sincronizacoes/cancelar` | Cancela sincronizacao em andamento |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/cadastro` | Fase 1 apenas do cadastro |
+| `POST` | `/ingestion/sincronizacoes/pre-processar/{tipo_fonte}/{ano}` | Fase 1 apenas para fonte anual |
+| `POST` | `/ingestion/sincronizacoes/{id_execucao}/ingerir` | Fase 2 a partir de execucao pre-processada |
+| `POST` | `/ingestion/sincronizacoes/cancelar` | Cancela sincronizacao em andamento |
 
 **Monitoramento:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `GET` | `/admin/sincronizacoes` | Lista paginada de execucoes de sincronizacao |
-| `GET` | `/admin/sincronizacoes/{id_execucao}` | Detalhe de uma execucao |
-| `GET` | `/admin/runs` | Lista paginada de ingestion runs |
-| `GET` | `/admin/runs/{run_id}` | Detalhe de uma ingestion run |
-| `GET` | `/admin/quarentena` | Lista paginada da quarentena (filtros: motivo_codigo, arquivo_origem, status, ano_origem) |
-| `GET` | `/admin/quarentena/resumo` | Resumo analitico agregado da quarentena (totais, distribuicao, rankings) |
+| `GET` | `/ingestion/sincronizacoes` | Lista paginada de execucoes de sincronizacao |
+| `GET` | `/ingestion/sincronizacoes/{id_execucao}` | Detalhe de uma execucao |
+| `GET` | `/ingestion/runs` | Lista paginada de ingestion runs |
+| `GET` | `/ingestion/runs/{run_id}` | Detalhe de uma ingestion run |
+| `GET` | `/ingestion/quarentena` | Lista paginada da quarentena (filtros: motivo_codigo, arquivo_origem, status, ano_origem) |
+| `GET` | `/ingestion/quarentena/resumo` | Resumo analitico agregado da quarentena (totais, distribuicao, rankings) |
 
 **Replay e correcao:**
 
 | Metodo | Rota | Descricao |
 |---|---|---|
-| `POST` | `/admin/replay/quarentena` | Replay de itens da quarentena (filtros opcionais) |
-| `POST` | `/admin/runs/{run_id}/replay` | Replay de uma run completa a partir do payload bruto |
-| `POST` | `/admin/identity/rebuild` | Reconstroi o grafo de identidade reprocessando o cadastro |
+| `POST` | `/ingestion/replay/quarentena` | Replay de itens da quarentena (filtros opcionais) |
+| `POST` | `/ingestion/runs/{run_id}/replay` | Replay de uma run completa a partir do payload bruto |
+| `POST` | `/ingestion/identity/rebuild` | Reconstroi o grafo de identidade reprocessando o cadastro |
 
 ### 11.4 Tasks Celery
 
@@ -881,7 +921,7 @@ Configuracao: maximo de `INGESTION_MAX_RETRIES` tentativas (padrao 5), backoff m
 | `sincronizar_ipe_task` | `_coordenar_sincronizacao_zip("ipe", ano)` | Beat + Bootstrap + Admin API |
 | `sincronizar_vlmo_task` | `_coordenar_sincronizacao_zip("vlmo", ano)` | Beat + Bootstrap + Admin API |
 | `sincronizar_cgvn_task` | `_coordenar_sincronizacao_zip("cgvn", ano)` | Beat + Bootstrap + Admin API |
-| `sincronizar_member_task` | Processamento de membro individual | Disparada por `ingerir_sincronizacao_zip` via chord |
+| `sincronizar_member_task` | Processamento de membro individual | Disparada pela orquestracao de members da execucao ZIP |
 | `pre_processar_sincronizacao_task` | Fase 1 manual (qualquer fonte) | Admin API (pre-processar) |
 | `ingerir_sincronizacao_task` | Fase 2 manual | Admin API (ingerir) |
 
@@ -1069,6 +1109,12 @@ Anos iniciais por fonte (environment vars):
 |---|---|
 | `config` | `Settings` com variaveis de ambiente prefixadas `INGESTION_` e `CELERY_` |
 
+Configuracoes relevantes do artifact normalizado:
+
+- `INGESTION_NORMALIZED_ARTIFACT_FORMAT=typed_csv` por default;
+- `INGESTION_NORMALIZED_ARTIFACT_FORMAT=parquet` apenas quando a dependencia opcional `pyarrow` estiver disponivel;
+- o formato `parquet` continua opcional e deve ser habilitado por evidencia de benchmark, nao por preferencia.
+
 ### Docker
 
 | Arquivo | Servicos |
@@ -1088,4 +1134,43 @@ Migracoes do pipeline de ingestion:
 
 ### Testes
 
-Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`) e por componente transversal (`validation`, `staging`, `resolver`, `hierarchy`, `audit`, `quarantine_replay`, `ops`, `retry`, `two_phase_ingestion`), mais benchmark de stage.
+Testes unitarios por fonte (`cadastro`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`) e por componente transversal (`validation`, `staging`, `resolver`, `hierarchy`, `audit`, `quarantine_replay`, `ops`, `retry`, `two_phase_ingestion`), mais:
+
+- benchmark de stage: `tests/scripts/benchmark_ingestion_stage.py`
+- benchmark ponta a ponta por member: `tests/scripts/benchmark_ingestion_member.py`
+- benchmark de artifact normalizado: `tests/scripts/benchmark_normalized_artifacts.py`
+
+Para avaliar `parquet` com dependencia opcional instalada usando o mesmo ambiente Docker da aplicacao:
+
+```bash
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000"
+docker compose run --rm cvm_api sh -lc "pip install --no-cache-dir -e '.[parquet]' && python -m tests.scripts.benchmark_normalized_artifacts --rows 100000 --output json"
+```
+
+Leitura operacional do resultado:
+
+- se `parquet` estiver `unavailable`, o ambiente nao tem `pyarrow` e a decisao continua sendo `typed_csv`;
+- se `parquet` for menor em disco, nao piorar memoria pico e reduzir o tempo agregado de escrita + leitura, ele vira candidato real para default;
+- caso contrario, `typed_csv` continua sendo o formato recomendado.
+
+Benchmark atual executado em `2026-06-30` via `docker compose` com `100000` linhas:
+
+- `typed_csv`: escrita `5.56s`, leitura `1.87s`, memoria pico `26.90 MB`, artifact `26.76 MB`;
+- `parquet`: escrita `5.09s`, leitura `6.36s`, memoria pico `219.16 MB`, artifact `3.93 MB`.
+
+Conclusao operacional atual:
+
+- `parquet` ganhou apenas em tamanho de artifact;
+- `typed_csv` continua melhor default para este projeto no ambiente Docker atual, por leitura bem mais rapida e memoria muito menor;
+- `parquet` segue opcional para novas medicoes por fonte/member antes de qualquer troca de default.
+
+### Tuning operacional atual
+
+As queries mais quentes do pipeline contam com indices compostos dedicados para:
+
+- varredura ordenada de `ingestion_rows` por `ingestion_file_member_id` + `linha_origem`;
+- lookup de runs por `tipo_fonte` + `ano` + `status` + `started_at`;
+- lookup de arquivos por `source_url` + `content_sha256`;
+- lookup e upsert de snapshots por artifact/member e delivery hash.
+
+Esses indices existem para reduzir custo de stage incremental, reuso por `member_sha256`, comparacao de snapshots e leitura chunked do staging. Eles nao mudam o contrato funcional da ingestao.

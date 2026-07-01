@@ -50,7 +50,15 @@ const sidebars = {
         'api-endpoints/common-patterns',
         'api-endpoints/companhias',
         'api-endpoints/fontes',
-        'api-endpoints/analise',
+        {
+          type: 'category',
+          label: 'Analise',
+          items: [
+            'api-endpoints/analise',
+            'api-endpoints/analise-companhias',
+            'api-endpoints/analise-materializacoes',
+          ],
+        },
         'api-endpoints/financeiro',
         'api-endpoints/fre',
         'api-endpoints/fca',

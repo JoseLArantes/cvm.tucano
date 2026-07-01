@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 from uuid import UUID
 
@@ -34,15 +36,10 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     arquivo: str = Field(description="Nome do arquivo (CSV ou ZIP) associado à execução.")
     status: str = Field(
         description=(
-            "Status atual ou final da execução. Estados possíveis incluem: "
-            '"agendada" (tarefa enfileirada no Celery), '
-            '"em_execucao" (processamento ativo), '
-            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
-            '"sucesso" (ingestão finalizada com sucesso), '
-            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
-            '"skipped" (ignorado por hash de arquivo já existente), '
-            '"falha" (erro durante qualquer fase de processamento), '
-            '"cancelada" (execução abortada manualmente).'
+            "Status persistido da execucao. "
+            "Valores operacionais esperados incluem: "
+            "`agendada`, `em_execucao`, `aguardando_ingestao`, `sucesso`, `sucesso_com_alerta`, "
+            "`sem_alteracao`, `falha`, `falha_qualidade` e `cancelada`."
         )
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início da execução, em `DD/MM/AAAA HH:MM:SS`.")
@@ -78,6 +75,37 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     filhos_em_andamento: int | None = Field(
         default=None, description="Quantidade de arquivos membros/filhos em andamento."
     )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado desta execucao para consumo direto por UI/CLI.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Liveness agregado da run associada a esta execucao, quando existir run correlata.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo de espera/bloqueio agregado desta execucao, quando houver.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para esta execucao, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para esta execucao, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description=(
+            "Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`. "
+            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+        ),
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para detalhe desta execucao, run associada e rotas operacionais relacionadas.",
+    )
 
 
 class ListaExecucoesSincronizacao(BaseModel):
@@ -101,15 +129,10 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     hash_arquivo: str | None = Field(description="Hash SHA-256 do arquivo processado.")
     status: str = Field(
         description=(
-            "Status atual ou final da execução. Estados possíveis incluem: "
-            '"agendada" (tarefa enfileirada no Celery), '
-            '"em_execucao" (processamento ativo), '
-            '"aguardando_ingestao" (Phase 1 / Pre-processamento concluído com sucesso; arquivo baixado, unzippado e metadados registrados em banco, aguardando início da Phase 2 / Ingestão), '
-            '"sucesso" (ingestão finalizada com sucesso), '
-            '"sem_alteracao" (nenhuma modificação no arquivo fonte), '
-            '"skipped" (ignorado por hash de arquivo já existente), '
-            '"falha" (erro durante qualquer fase de processamento), '
-            '"cancelada" (execução abortada manualmente).'
+            "Status persistido da execucao. "
+            "Valores operacionais esperados incluem: "
+            "`agendada`, `em_execucao`, `aguardando_ingestao`, `sucesso`, `sucesso_com_alerta`, "
+            "`sem_alteracao`, `falha`, `falha_qualidade` e `cancelada`."
         )
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início, em `DD/MM/AAAA HH:MM:SS`.")
@@ -147,17 +170,56 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     execucoes_filhas: list[ExecucaoSincronizacaoResumo] | None = Field(
         default=None, description="Resumo das execuções filhas, caso aplicável."
     )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado desta execucao para consumo direto por UI/CLI.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Liveness agregado da run associada a esta execucao, quando existir run correlata.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo de espera/bloqueio agregado desta execucao, quando houver.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para esta execucao, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para esta execucao, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description="Acao recomendada para esta execucao: `wait`, `recover`, `inspect_error` ou `none`.",
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para detalhe desta execucao, run associada e rotas operacionais relacionadas.",
+    )
 
 
 class TarefaAgendadaResumo(BaseModel):
     tipo_fonte: str = Field(description='Tipo da fonte agendada (ex.: "cadastro", "dfp", "itr", "fre").')
     ano: int | None = Field(description="Ano da sincronizacao quando aplicavel.")
-    id_tarefa: str = Field(description="Identificador da task agendada no Celery.")
+    id_tarefa: str = Field(
+        description=(
+            "Identificador operacional da execucao assíncrona. "
+            "O valor e persistido em `execucoes_sincronizacao.id_tarefa` antes da publicacao Celery; "
+            "em lotes anuais, algumas execucoes podem ficar registradas como `agendada` ate o worker de cadastro publicar a fonte anual correspondente."
+        )
+    )
 
 
 class RespostaAgendamentoEmLote(BaseModel):
     status: str = Field(description='Status do disparo em lote. Valor esperado: "agendada".')
-    tarefas: list[TarefaAgendadaResumo] = Field(description="Lista das tarefas enfileiradas.")
+    tarefas: list[TarefaAgendadaResumo] = Field(
+        description=(
+            "Lista das execucoes registradas para o lote. "
+            "No lote anual, `cadastro` e publicado imediatamente; `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` ficam persistidos como `agendada` e sao publicados pelo worker apos o cadastro terminar com sucesso, `sem_alteracao` ou `skipped`."
+        )
+    )
 
 
 class SolicitacaoCancelamentoSincronizacao(BaseModel):
@@ -302,6 +364,177 @@ class DashboardExecucoesResposta(BaseModel):
     )
 
 
+class IngestionOperationalLiveness(BaseModel):
+    heartbeat_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Ultimo heartbeat persistido para a fase atual, quando a execucao publica esse sinal.",
+    )
+    lease_owner: str | None = Field(default=None, description="Identificador do owner atual do lease operacional.")
+    task_id: str | None = Field(default=None, description="ID da task Celery associada ao lease/fase atual.")
+    phase_status: str | None = Field(
+        default=None,
+        description="Status da fase atual no ledger operacional, por exemplo `pending`, `running`, `succeeded`, `failed_retryable`, `failed_final`, `cancel_requested`, `cancelled` ou `stale`.",
+    )
+    is_stale: bool = Field(description="Indica se o heartbeat ficou velho demais para uma execucao que deveria estar rodando.")
+    stale_after_seconds: int = Field(description="Threshold usado para classificar stale.")
+    heartbeat_age_seconds: int | None = Field(
+        default=None,
+        description="Idade do heartbeat atual em segundos, quando houver heartbeat persistido.",
+    )
+
+
+class IngestionOperationalBlocking(BaseModel):
+    reason_code: str = Field(
+        description="Motivo compacto de espera ou bloqueio: `none`, `queued`, `awaiting_ingestion`, `stale` ou `manual_cancel`."
+    )
+    detail: str | None = Field(default=None, description="Explicacao curta para UI operacional.")
+
+
+class IngestionOperationalCancellation(BaseModel):
+    status: str = Field(
+        description="Status do pedido de cancelamento mais recente para este escopo: `none`, `requested`, `propagated` ou `completed`."
+    )
+    requested_by: str | None = Field(default=None, description="Identificador do originador do cancelamento, quando conhecido.")
+    reason: str | None = Field(default=None, description="Motivo livre informado no cancelamento.")
+    terminate_immediately: bool | None = Field(
+        default=None,
+        description="Se `true`, o pedido pediu revogacao imediata com encerramento do worker.",
+    )
+    requested_at: BrazilianDateTime | None = Field(default=None, description="Timestamp de criacao do pedido de cancelamento.")
+    propagated_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Timestamp em que a API marcou a revogacao como propagada para tasks conhecidas.",
+    )
+    completed_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Timestamp em que o pedido foi encerrado do ponto de vista administrativo.",
+    )
+    affected_task_ids: list[str] | None = Field(default=None, description="Tasks afetadas pelo pedido mais recente.")
+
+
+class IngestionOperationalError(BaseModel):
+    error_type: str | None = Field(default=None, description="Classificacao curta do erro mais recente.")
+    error_message: str | None = Field(default=None, description="Mensagem do erro mais recente.")
+    retryable: bool | None = Field(default=None, description="Indica se o erro mais recente foi classificado como recuperavel.")
+    phase: str | None = Field(default=None, description="Fase em que o erro mais recente foi registrado.")
+
+
+class IngestionRunPhaseExecutionResumo(BaseModel):
+    id: str = Field(description="ID do registro de fase.")
+    phase: str = Field(
+        description=(
+            "Nome da fase operacional. Para DFP/ITR financeiro, valores esperados incluem "
+            "`profile`, `normalize_artifact`, `load_typed_staging`, `promote`, `reconcile` e `complete`."
+        )
+    )
+    status: str = Field(description="Status da fase no ledger operacional.")
+    attempt: int = Field(description="Numero da tentativa desta fase para a mesma run.")
+    task_id: str | None = Field(default=None, description="Task Celery associada a esta fase, quando conhecida.")
+    lease_owner: str | None = Field(default=None, description="Owner do lease desta fase, quando conhecido.")
+    started_at: BrazilianDateTime | None = Field(default=None, description="Inicio da fase.")
+    heartbeat_at: BrazilianDateTime | None = Field(default=None, description="Ultimo heartbeat da fase.")
+    finished_at: BrazilianDateTime | None = Field(default=None, description="Fim da fase.")
+    cancel_requested_at: BrazilianDateTime | None = Field(default=None, description="Quando o cancelamento foi solicitado para a fase.")
+    cancelled_at: BrazilianDateTime | None = Field(default=None, description="Quando a fase foi marcada como cancelada.")
+    cancel_reason: str | None = Field(default=None, description="Motivo de cancelamento associado a esta fase.")
+    error_type: str | None = Field(default=None, description="Tipo do erro associado a esta fase.")
+    error_message: str | None = Field(default=None, description="Mensagem do erro associado a esta fase.")
+    error_retryable: bool | None = Field(default=None, description="Se o erro de fase foi classificado como retryable.")
+    input_artifact_uri: str | None = Field(
+        default=None,
+        description="URI local do artifact de entrada usado pela fase, quando registrado no manifesto operacional.",
+    )
+    output_artifact_uri: str | None = Field(
+        default=None,
+        description="URI local do artifact de saida produzido pela fase, quando registrado no manifesto operacional.",
+    )
+    metrics: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Snapshot resumido de metricas persistidas para a fase. Pode incluir `rows_read`, "
+            "`rows_normalized`, `rows_loaded_to_stage`, `rows_reconciled_deleted` e `artifacts`."
+        ),
+    )
+
+
+class ListaIngestionRunPhaseExecutions(BaseModel):
+    dados: list[IngestionRunPhaseExecutionResumo] = Field(description="Timeline de fases persistidas para a run.")
+
+
+class IngestionRunMemberResumo(BaseModel):
+    id: str = Field(description="ID do member em `ingestion_file_members`.")
+    ingestion_file_id: str = Field(description="ID do arquivo/pacote associado ao member.")
+    member_name: str = Field(description="Nome canonico do member CSV dentro do artefato processado.")
+    member_sha256: str = Field(description="Hash SHA-256 persistido para o payload bruto do member.")
+    member_size_bytes: int = Field(description="Tamanho bruto do member em bytes.")
+    row_count: int = Field(description="Quantidade de linhas de dados observada no member.")
+    encoding: str | None = Field(default=None, description="Encoding detectado/usado para o member.")
+    delimiter: str = Field(description="Delimitador CSV persistido para o member.")
+    header: list[str] | None = Field(default=None, description="Cabecalho observado no member, quando registrado.")
+    schema_status: str = Field(description="Status de schema persistido para o member.")
+    schema_message: str | None = Field(default=None, description="Mensagem complementar de schema, quando houver.")
+    row_kind: str | None = Field(default=None, description="Tipo interno de linha associado ao member, quando conhecido.")
+    destino_promovido: str | None = Field(
+        default=None,
+        description="Tabela ou entidade promovida a partir deste member, quando conhecida pelo snapshot.",
+    )
+    required_member: bool | None = Field(
+        default=None,
+        description="Indica se o member e obrigatorio dentro do pacote da fonte, quando conhecido pelo snapshot.",
+    )
+    lifecycle_status: str | None = Field(
+        default=None,
+        description="Status de lifecycle do member na run, por exemplo `processed` ou `member_skipped`.",
+    )
+    quarantine_total: int = Field(description="Quantidade de itens de quarentena ancorados neste member.")
+    delivery_total: int = Field(description="Quantidade de deliveries documentais capturadas para este member.")
+    state: str = Field(
+        description="Estado operacional sintetico do member: `processed`, `member_skipped`, `schema_invalid` ou `unknown`."
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para operacoes correlatas deste member dentro da run.",
+    )
+
+
+class ListaIngestionRunMembers(BaseModel):
+    dados: list[IngestionRunMemberResumo] = Field(description="Inventario paginado de members associados a uma run.")
+    paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
+
+
+class IngestionOperationRunPreview(BaseModel):
+    id: str = Field(description="ID da run.")
+    execucao_sincronizacao_id: str | None = Field(default=None, description="Execucao correlata, quando houver.")
+    tipo_fonte: str = Field(description="Fonte da run.")
+    ano: int | None = Field(default=None, description="Ano da run, quando aplicavel.")
+    status: str = Field(description="Status persistido da run.")
+    phase: str = Field(description="Fase persistida da run.")
+    state: str = Field(description="Estado operacional agregado desta run.")
+    next_action: str | None = Field(default=None, description="Acao recomendada para consumidor desacoplado.")
+    liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
+    blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
+
+
+class IngestionOperationsResumo(BaseModel):
+    generated_at: BrazilianDateTime = Field(description="Timestamp do snapshot operacional agregado.")
+    run_counts: dict[str, int] = Field(description="Contagens agregadas de runs por estado operacional.")
+    execution_counts: dict[str, int] = Field(description="Contagens agregadas de execucoes por status persistido.")
+    cancellation_counts: dict[str, int] = Field(description="Contagens agregadas de pedidos de cancelamento por status.")
+    task_counts: dict[str, int] = Field(
+        description="Snapshot resumido das tasks Celery observadas no cluster para filas relacionadas a ingestao."
+    )
+    materialization_gate: dict[str, Any] | None = Field(
+        default=None,
+        description="Estado consolidado atual do gate de materializacao visto do ponto de vista da ingestao.",
+    )
+    active_runs: list[IngestionOperationRunPreview] = Field(
+        description="Preview das runs atualmente ativas ou aguardando continuidade operacional."
+    )
+    recoverable_runs: list[IngestionOperationRunPreview] = Field(
+        description="Preview das runs que hoje pedem `recover` ou outra acao administrativa equivalente."
+    )
+
+
 class IngestionRunResumo(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -357,12 +590,24 @@ class IngestionRunResumo(BaseModel):
                     "members_total": 14,
                     "members_processados": 13,
                     "members_skipped": 1,
+                    "members_reprocessed": 13,
+                    "members_reused_from_previous": 1,
+                    "members_reused_from_failed_parent": 1,
                     "staged_rows_purged": 1197,
+                    "typed_stage_rows_loaded": 1198,
+                    "typed_stage_bytes_loaded": 845231,
+                    "typed_stage_rows_replaced": 0,
+                    "typed_stage_rows_purged": 1198,
+                    "typed_stage_copy_loads": 14,
                     "reconciled_deleted": 4,
                 },
                 "artifact_snapshot": {
                     "resource_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/DFP/DADOS/dfp_cia_aberta_2025.zip",
                     "source_filename": "dfp_cia_aberta_2025.zip",
+                    "storage_uri": "/tmp/artifacts/dfp_cia_aberta_2025.zip",
+                    "storage_role": "raw_zip",
+                    "storage_content_type": "application/zip",
+                    "storage_size_bytes": 845231,
                     "content_sha256": "abc123",
                     "probe_decision": "changed",
                     "probe_confidence": "medium",
@@ -373,6 +618,14 @@ class IngestionRunResumo(BaseModel):
                     "total": 14,
                     "by_status": {"processed": 13, "member_skipped": 1},
                     "by_schema_status": {"ok": 13, "reused": 1},
+                    "members": [
+                        {
+                            "member_name": "dfp_cia_aberta_BPA_con_2025.csv",
+                            "raw_artifact_uri": "/tmp/artifacts/dfp_cia_aberta_BPA_con_2025.csv",
+                            "normalized_artifact_uri": "/tmp/artifacts/normalized/dfp_cia_aberta_BPA_con_2025.csv",
+                            "normalized_artifact_format": "typed_csv",
+                        }
+                    ],
                 },
                 "delivery_snapshot_summary": {
                     "total": 1204,
@@ -390,6 +643,8 @@ class IngestionRunResumo(BaseModel):
                     "artifact_sha": "changed",
                     "members_skipped_by_sha": 1,
                     "members_processed": 13,
+                    "members_reused_from_previous": 1,
+                    "members_reused_from_failed_parent": 1,
                 },
             }
         }
@@ -412,7 +667,7 @@ class IngestionRunResumo(BaseModel):
             "`sucesso_com_alerta` indica ingestao concluida com drift estrutural ou outro alerta operacional; "
             "`falha` indica erro impeditivo; "
             "`sem_alteracao` indica que o recurso CVM foi considerado igual a referencia anterior, seja por probe remoto forte sem download, seja por download seguido de confirmacao de SHA igual; "
-            "`skipped` indica reaproveitamento administrativo legado e permanece aceito por compatibilidade historica, mas a arquitetura atual prefere `sem_alteracao` para igualdade confirmada do artefato; "
+            "`skipped` indica encerramento sem processamento adicional para o escopo da run; "
             "`cancelada` indica interrupcao administrativa."
         )
     )
@@ -420,7 +675,7 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Fase atual ou final da run. "
             "`acquire` cobre o preflight remoto (CKAN/HEAD) e, quando necessario, o download do arquivo; "
-            "`stage` cobre extracao de membros, captura de header, contagem de linhas, hash de membros e verificacoes de schema/presenca; "
+            "`stage` cobre extracao de members, captura de header, contagem de linhas, hash de members, artifacts normalizados e carregamento do staging operacional; "
             "`promote` cobre normalizacao, resolucao de companhia, deduplicacao e escrita nas tabelas de dominio; "
             "`reconcile` representa a remocao de linhas promovidas que ficaram obsoletas apos um member alterado ser reprocessado; "
             "`complete` indica encerramento da run."
@@ -449,11 +704,29 @@ class IngestionRunResumo(BaseModel):
         default=None,
         description=(
             "Resumo agregado e orientado a progresso. "
-            "Na arquitetura simplificada, a API nao garante retencao de linhas staged bem-sucedidas apos a conclusao; "
-            "o frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
+            "O frontend deve tratar `quality_summary` como fonte principal para progresso, contagens por status, "
             "motivos de rejeicao, metodos de resolucao, retries, membros processados/skipped, total real de quarentena, "
-            "quantidade de staging purgado com sucesso (`staged_rows_purged`) e remocoes aplicadas no reconcile (`reconciled_deleted`). "
-            "Este objeto e um resumo operacional por contadores; ele nao substitui um ledger duravel de sucesso por linha."
+            "quantidade de staging purgado com sucesso (`staged_rows_purged`), sinais do staging tipado financeiro "
+            "(`typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged`, `typed_stage_copy_loads`) "
+            "e remocoes aplicadas no reconcile (`reconciled_deleted`). "
+            "`members_reused_from_previous` informa quantos members foram reaproveitados sem nova promocao, "
+            "e `members_reused_from_failed_parent` destaca o subconjunto desses members cuja ultima execucao anual pai havia terminado em `falha`. "
+            "O contrato esperado para consumo de frontend inclui, quando disponivel: "
+            "`members_total` (quantidade total de members avaliados no ZIP atual), "
+            "`members_processados` (members que entraram no fluxo normal da run atual), "
+            "`members_skipped` (members pulados no fechamento desta run, normalmente por igualdade), "
+            "`members_reprocessed` (members que realmente voltaram para `stage -> promote -> reconcile`), "
+            "`members_reused_from_previous` (members reaproveitados por SHA a partir de resultado anterior) e "
+            "`members_reused_from_failed_parent` (subset reaproveitado cuja execucao anual pai anterior falhou). "
+            "Para diagnostico de custo do staging tipado financeiro, consumidores podem ler "
+            "`typed_stage_rows_loaded` (linhas carregadas no staging tipado), "
+            "`typed_stage_bytes_loaded` (bytes lidos dos artifacts normalizados), "
+            "`typed_stage_rows_replaced` (linhas antigas removidas antes de recarga do mesmo member), "
+            "`typed_stage_rows_purged` (linhas removidas apos promote/reconcile) e "
+            "`typed_stage_copy_loads` (quantas cargas usaram o caminho PostgreSQL `COPY`). "
+            "Para cards e resumos operacionais, o frontend deve considerar `members_reprocessed` como trabalho efetivamente executado e "
+            "`members_reused_from_previous` como trabalho economizado pelo mecanismo de recuperacao. "
+            "Este objeto e um resumo operacional por contadores."
         ),
     )
     artifact_snapshot: dict[str, Any] | None = Field(
@@ -461,7 +734,8 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Snapshot duravel do artefato remoto considerado pela run. "
             "Resume o recurso CVM avaliado nesta execucao: URL, nome do arquivo, SHA final quando houve download, "
-            "metadados remotos observados, confianca do probe e status operacional persistido. "
+            "metadados remotos observados, ponteiro do artifact local persistido (`storage_uri`, `storage_role`, `storage_content_type`, `storage_size_bytes`), "
+            "confianca do probe e status operacional persistido. "
             "Use este campo quando o frontend precisar explicar por que houve skip, download, reuso ou reconcile."
         ),
     )
@@ -470,7 +744,11 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Resumo duravel do inventario de members avaliados na run. "
             "Explicita quantos members foram processados, reaproveitados por `member_sha256`, marcados com schema invalido ou tratados como obrigatorios/opcionais. "
-            "Ao contrario de `ingestion_rows`, este objeto foi desenhado para permanecer disponivel apos limpeza do staging bem-sucedido."
+            "O frontend deve esperar pelo menos `total`, `by_status`, `by_schema_status` e `members`. "
+            "Em `by_status`, valores como `processed` e `member_skipped` permitem separar members realmente executados de members apenas reaproveitados. "
+            "Em `by_schema_status`, `reused` identifica skip por `member_sha256`; `ok` identifica members que passaram pelo fluxo normal; "
+            "outros valores podem sinalizar schema invalido ou warning estrutural. "
+            "Quando disponivel, cada item de `members` tambem inclui os ponteiros de artifact bruto e normalizado para rebuild, replay e troubleshooting operacional."
         ),
     )
     delivery_snapshot_summary: dict[str, Any] | None = Field(
@@ -499,8 +777,46 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Resumo de decisao do lifecycle engine. "
             "Explica em formato compacto se o probe remoto levou a download, se o SHA final confirmou alteracao ou igualdade, "
-            "quantos members foram pulados por igualdade e quantos precisaram de `stage -> promote -> reconcile`."
+            "quantos members foram pulados por igualdade e quantos precisaram de `stage -> promote -> reconcile`. "
+            "Em reruns de recuperacao, este bloco tambem resume quantos members foram reaproveitados a partir de resultados anteriores e quantos desses reaproveitamentos vieram de uma execucao anual pai que falhou. "
+            "Chaves relevantes para frontend: `remote_probe`, `artifact_sha`, `members_skipped_by_sha`, `members_processed`, `members_reused_from_previous` e `members_reused_from_failed_parent`. "
+            "Este bloco serve como explicacao compacta da decisao de lifecycle; para inventario detalhado por member, o frontend deve cruzar com `member_snapshot_summary`."
         ),
+    )
+    state: str | None = Field(
+        default=None,
+        description="Estado operacional agregado e pronto para consumo por API/CLI/UI: `queued`, `waiting`, `running`, `stale`, `succeeded`, `skipped`, `failed` ou `cancelled`.",
+    )
+    progress: dict[str, Any] | None = Field(
+        default=None,
+        description="Contadores agregados de progresso para a run atual, derivados de `quality_summary` e dos snapshots operacionais.",
+    )
+    liveness: IngestionOperationalLiveness | None = Field(
+        default=None,
+        description="Snapshot de liveness da fase atual, incluindo heartbeat, lease e classificacao `stale`.",
+    )
+    blocking: IngestionOperationalBlocking | None = Field(
+        default=None,
+        description="Motivo agregado pelo qual a run esta parada, aguardando ou marcada como stale.",
+    )
+    cancellation: IngestionOperationalCancellation | None = Field(
+        default=None,
+        description="Ultimo pedido de cancelamento persistido para a run, quando houver.",
+    )
+    last_error: IngestionOperationalError | None = Field(
+        default=None,
+        description="Erro operacional mais recente conhecido para a run, quando houver.",
+    )
+    next_action: str | None = Field(
+        default=None,
+        description=(
+            "Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
+            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+        ),
+    )
+    links: dict[str, str] | None = Field(
+        default=None,
+        description="Links relativos para drill-down desta run, incluindo detalhe, fases, replay e quarentena correlata.",
     )
 
 
@@ -690,8 +1006,7 @@ class ReplayResposta(BaseModel):
             "Payload operacional devolvido pelo servico de replay ou rebuild. "
             "Para runs ou membros completos, o replay pode reconstruir o processamento a partir do payload bruto retido do membro; "
             "para quarentena, o retorno resume apenas os itens excepcionais reprocessados. "
-            "O replay nao depende da permanencia de linhas staged bem-sucedidas; a fonte de verdade para rebuild e o payload bruto retido do member/arquivo, "
-            "com nova execucao das fases `stage`, `promote` e `reconcile`."
+            "A fonte de verdade para replay e o artefato retido do member ou da run, com nova execucao das fases operacionais aplicaveis."
         ),
     )
 

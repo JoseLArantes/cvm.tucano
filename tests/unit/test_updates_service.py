@@ -9,7 +9,13 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.auth import gerar_hash_senha
-from app.models.ingestion import IngestionFile, IngestionRun
+from app.models.ingestion import (
+    IngestionFile,
+    IngestionFileMember,
+    IngestionRun,
+    SourceArtifactSnapshot,
+    SourceMemberSnapshot,
+)
 from app.models.usuario import Usuario
 from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateScanRun, UpdateSessionItem
 from app.updates.service import (
@@ -309,6 +315,365 @@ def test_deep_analyzer_processes_members(
         assert members[0].member_name == "dfp_cia_aberta_2025.csv"
         assert members[0].change_category == "added"
         assert members[0].is_required is True
+
+
+@patch("app.updates.service.download_file_to_disk")
+@patch("app.updates.service.detect_encoding_and_delimiter")
+@patch("app.updates.service.get_csv_header")
+@patch("app.updates.service.count_csv_rows")
+@patch("app.updates.service.listar_datasets")
+@patch("app.updates.service.compute_file_sha256")
+def test_deep_analysis_prefers_source_member_snapshot_baseline(
+    mock_compute_sha: MagicMock,
+    mock_listar_datasets: MagicMock,
+    mock_count_rows: MagicMock,
+    mock_get_header: MagicMock,
+    mock_detect_enc: MagicMock,
+    mock_download: MagicMock,
+    db_session: Session,
+) -> None:
+    previous_run = IngestionRun(tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+    db_session.add(previous_run)
+    db_session.flush()
+    ingestion_file = IngestionFile(
+        ingestion_run_id=previous_run.id,
+        source_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        source_filename="dfp_2025.zip",
+        content_sha256="artifact-sha",
+        content_length_bytes=100,
+        is_zip=True,
+    )
+    db_session.add(ingestion_file)
+    db_session.flush()
+    db_session.add(
+        IngestionFileMember(
+            ingestion_file_id=ingestion_file.id,
+            member_name="dfp_cia_aberta_2025.csv",
+            member_sha256="file-member-sha",
+            member_size_bytes=100,
+            encoding="utf-8",
+            delimiter=";",
+            header=["COL_A"],
+            row_count=10,
+            schema_status="ok",
+            schema_message=None,
+        )
+    )
+    artifact_snapshot = SourceArtifactSnapshot(
+        ingestion_run_id=previous_run.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        resource_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        source_filename="dfp_2025.zip",
+        status="sucesso",
+    )
+    db_session.add(artifact_snapshot)
+    db_session.flush()
+    db_session.add(
+        SourceMemberSnapshot(
+            artifact_snapshot_id=artifact_snapshot.id,
+            member_name="dfp_cia_aberta_2025.csv",
+            member_sha256="snapshot-sha",
+            row_count=12,
+            header_hash="snapshot-header-hash",
+            header=["COL_A", "COL_B"],
+            row_kind="dfp_documento",
+            required_member=True,
+            schema_status="ok",
+            schema_message=None,
+            delivery_index_role="header",
+            lifecycle_status="processed",
+        )
+    )
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="change_detected",
+        artifact_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        last_successful_run_id=previous_run.id,
+    )
+    db_session.add(pending)
+    db_session.commit()
+
+    mock_download.return_value = "ignored"
+    mock_compute_sha.return_value = "snapshot-sha"
+    mock_detect_enc.return_value = ("utf-8", ";")
+    mock_get_header.return_value = ["COL_A", "COL_B"]
+    mock_count_rows.return_value = 12
+    dataset_mock = MagicMock()
+    dataset_mock.render_member_name.return_value = "dfp_cia_aberta_2025.csv"
+    dataset_mock.obrigatorio = True
+    dataset_mock.row_kind = "dfp_documento"
+    dataset_mock.delivery_index_role = "header"
+    mock_listar_datasets.return_value = [dataset_mock]
+
+    with patch("zipfile.ZipFile") as mock_zip:
+        mock_zip.return_value.__enter__.return_value.namelist.return_value = ["dfp_cia_aberta_2025.csv"]
+        analyzed = run_deep_analysis(db_session, pending.id)
+
+    assert analyzed.status == "ready_for_ingestion"
+    members = db_session.scalars(
+        select(PendingUpdateMember).where(PendingUpdateMember.pending_update_id == pending.id)
+    ).all()
+    assert len(members) == 1
+    assert members[0].change_category == "unchanged"
+    assert members[0].status == "unchanged"
+    assert members[0].previous_member_sha256 == "snapshot-sha"
+    assert members[0].previous_header_hash == "snapshot-header-hash"
+
+
+@patch("app.updates.service.download_file_to_disk")
+@patch("app.updates.service.detect_encoding_and_delimiter")
+@patch("app.updates.service.get_csv_header")
+@patch("app.updates.service.count_csv_rows")
+@patch("app.updates.service.listar_datasets")
+@patch("app.updates.service.compute_file_sha256")
+def test_deep_analysis_falls_back_to_ingestion_file_member_when_snapshot_absent(
+    mock_compute_sha: MagicMock,
+    mock_listar_datasets: MagicMock,
+    mock_count_rows: MagicMock,
+    mock_get_header: MagicMock,
+    mock_detect_enc: MagicMock,
+    mock_download: MagicMock,
+    db_session: Session,
+) -> None:
+    previous_run = IngestionRun(tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+    db_session.add(previous_run)
+    db_session.flush()
+    ingestion_file = IngestionFile(
+        ingestion_run_id=previous_run.id,
+        source_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        source_filename="dfp_2025.zip",
+        content_sha256="artifact-sha",
+        content_length_bytes=100,
+        is_zip=True,
+    )
+    db_session.add(ingestion_file)
+    db_session.flush()
+    db_session.add(
+        IngestionFileMember(
+            ingestion_file_id=ingestion_file.id,
+            member_name="dfp_cia_aberta_2025.csv",
+            member_sha256="fallback-sha",
+            member_size_bytes=100,
+            encoding="utf-8",
+            delimiter=";",
+            header=["COL_A", "COL_B"],
+            row_count=12,
+            schema_status="ok",
+            schema_message=None,
+        )
+    )
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="change_detected",
+        artifact_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        last_successful_run_id=previous_run.id,
+    )
+    db_session.add(pending)
+    db_session.commit()
+
+    mock_download.return_value = "ignored"
+    mock_compute_sha.return_value = "fallback-sha"
+    mock_detect_enc.return_value = ("utf-8", ";")
+    mock_get_header.return_value = ["COL_A", "COL_B"]
+    mock_count_rows.return_value = 12
+    dataset_mock = MagicMock()
+    dataset_mock.render_member_name.return_value = "dfp_cia_aberta_2025.csv"
+    dataset_mock.obrigatorio = True
+    dataset_mock.row_kind = "dfp_documento"
+    dataset_mock.delivery_index_role = "header"
+    mock_listar_datasets.return_value = [dataset_mock]
+
+    with patch("zipfile.ZipFile") as mock_zip:
+        mock_zip.return_value.__enter__.return_value.namelist.return_value = ["dfp_cia_aberta_2025.csv"]
+        analyzed = run_deep_analysis(db_session, pending.id)
+
+    assert analyzed.status == "ready_for_ingestion"
+    member = db_session.scalar(select(PendingUpdateMember).where(PendingUpdateMember.pending_update_id == pending.id))
+    assert member is not None
+    assert member.change_category == "unchanged"
+    assert member.previous_member_sha256 == "fallback-sha"
+    assert member.previous_header_hash is not None
+
+
+@patch("app.updates.service.download_file_to_disk")
+@patch("app.updates.service.detect_encoding_and_delimiter")
+@patch("app.updates.service.get_csv_header")
+@patch("app.updates.service.count_csv_rows")
+@patch("app.updates.service.listar_datasets")
+@patch("app.updates.service.compute_file_sha256")
+def test_deep_analysis_removed_members_preserve_previous_snapshot_metadata(
+    mock_compute_sha: MagicMock,
+    mock_listar_datasets: MagicMock,
+    mock_count_rows: MagicMock,
+    mock_get_header: MagicMock,
+    mock_detect_enc: MagicMock,
+    mock_download: MagicMock,
+    db_session: Session,
+) -> None:
+    previous_run = IngestionRun(tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+    db_session.add(previous_run)
+    db_session.flush()
+    artifact_snapshot = SourceArtifactSnapshot(
+        ingestion_run_id=previous_run.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        resource_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        source_filename="dfp_2025.zip",
+        status="sucesso",
+    )
+    db_session.add(artifact_snapshot)
+    db_session.flush()
+    db_session.add(
+        SourceMemberSnapshot(
+            artifact_snapshot_id=artifact_snapshot.id,
+            member_name="dfp_cia_aberta_old_2025.csv",
+            member_sha256="old-sha",
+            row_count=9,
+            header_hash="old-header-hash",
+            header=["A", "B"],
+            row_kind="dfp_documento",
+            required_member=False,
+            schema_status="ok",
+            schema_message=None,
+            delivery_index_role="dependent",
+            lifecycle_status="processed",
+        )
+    )
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="change_detected",
+        artifact_url="http://fake-cvm.gov.br/dfp_2025.zip",
+        last_successful_run_id=previous_run.id,
+    )
+    db_session.add(pending)
+    db_session.commit()
+
+    mock_download.return_value = "ignored"
+    mock_compute_sha.return_value = "current-sha"
+    mock_detect_enc.return_value = ("utf-8", ";")
+    mock_get_header.return_value = ["A", "B"]
+    mock_count_rows.return_value = 5
+    dataset_mock = MagicMock()
+    dataset_mock.render_member_name.return_value = "dfp_cia_aberta_new_2025.csv"
+    dataset_mock.obrigatorio = True
+    dataset_mock.row_kind = "dfp_documento"
+    dataset_mock.delivery_index_role = "header"
+    mock_listar_datasets.return_value = [dataset_mock]
+
+    with patch("zipfile.ZipFile") as mock_zip:
+        mock_zip.return_value.__enter__.return_value.namelist.return_value = ["dfp_cia_aberta_new_2025.csv"]
+        run_deep_analysis(db_session, pending.id)
+
+    removed_member = db_session.scalar(
+        select(PendingUpdateMember).where(PendingUpdateMember.member_name == "dfp_cia_aberta_old_2025.csv")
+    )
+    assert removed_member is not None
+    assert removed_member.change_category == "removed"
+    assert removed_member.member_role == "dependent"
+    assert removed_member.row_kind == "dfp_documento"
+    assert removed_member.previous_member_sha256 == "old-sha"
+    assert removed_member.previous_header_hash == "old-header-hash"
+
+
+@patch("app.updates.service.download_file_to_disk")
+@patch("app.updates.service.detect_encoding_and_delimiter")
+@patch("app.updates.service.get_csv_header")
+@patch("app.updates.service.count_csv_rows")
+@patch("app.updates.service.listar_datasets")
+def test_deep_analysis_cadastro_uses_previous_snapshot_without_false_added(
+    mock_listar_datasets: MagicMock,
+    mock_count_rows: MagicMock,
+    mock_get_header: MagicMock,
+    mock_detect_enc: MagicMock,
+    mock_download: MagicMock,
+    db_session: Session,
+) -> None:
+    previous_run = IngestionRun(tipo_fonte="cadastro", ano=None, status="sucesso", phase="complete")
+    db_session.add(previous_run)
+    db_session.flush()
+    artifact_snapshot = SourceArtifactSnapshot(
+        ingestion_run_id=previous_run.id,
+        tipo_fonte="cadastro",
+        ano=None,
+        resource_url="http://fake-cvm.gov.br/a|http://fake-cvm.gov.br/b",
+        source_filename="cad_cia_aberta.csv+cad_cia_estrang.csv",
+        status="sucesso",
+    )
+    db_session.add(artifact_snapshot)
+    db_session.flush()
+    db_session.add_all(
+        [
+            SourceMemberSnapshot(
+                artifact_snapshot_id=artifact_snapshot.id,
+                member_name="cad_cia_aberta.csv",
+                member_sha256="sha-aberta",
+                row_count=2675,
+                header_hash="hash-aberta",
+                header=["CNPJ_CIA", "CD_CVM"],
+                row_kind="cadastro_registro_cvm",
+                required_member=True,
+                schema_status="ok",
+                schema_message=None,
+                delivery_index_role="none",
+                lifecycle_status="processed",
+            ),
+            SourceMemberSnapshot(
+                artifact_snapshot_id=artifact_snapshot.id,
+                member_name="cad_cia_estrang.csv",
+                member_sha256="sha-estrang",
+                row_count=26,
+                header_hash="hash-estrang",
+                header=["CNPJ", "CD_CVM"],
+                row_kind="cadastro_registro_cvm",
+                required_member=True,
+                schema_status="ok",
+                schema_message=None,
+                delivery_index_role="none",
+                lifecycle_status="processed",
+            ),
+        ]
+    )
+    pending = PendingUpdate(
+        fonte="cadastro",
+        ano=None,
+        status="change_detected",
+        artifact_url="http://fake-cvm.gov.br/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv|http://fake-cvm.gov.br/CIA_ESTRANG/CAD/DADOS/cad_cia_estrang.csv",
+        last_successful_run_id=previous_run.id,
+    )
+    db_session.add(pending)
+    db_session.commit()
+
+    mock_download.side_effect = ["sha-aberta", "sha-estrang"]
+    mock_detect_enc.return_value = ("utf-8", ";")
+    mock_get_header.side_effect = [["CNPJ_CIA", "CD_CVM"], ["CNPJ", "CD_CVM"]]
+    mock_count_rows.side_effect = [2675, 26]
+    aberta_dataset = MagicMock()
+    aberta_dataset.render_member_name.side_effect = lambda ano=None: "cad_cia_aberta.csv"
+    aberta_dataset.obrigatorio = True
+    aberta_dataset.row_kind = "cadastro_registro_cvm"
+    aberta_dataset.delivery_index_role = "none"
+    estrang_dataset = MagicMock()
+    estrang_dataset.render_member_name.side_effect = lambda ano=None: "cad_cia_estrang.csv"
+    estrang_dataset.obrigatorio = True
+    estrang_dataset.row_kind = "cadastro_registro_cvm"
+    estrang_dataset.delivery_index_role = "none"
+    mock_listar_datasets.return_value = [aberta_dataset, estrang_dataset]
+
+    analyzed = run_deep_analysis(db_session, pending.id)
+
+    assert analyzed.status == "ready_for_ingestion"
+    assert analyzed.change_summary is not None
+    assert analyzed.change_summary["members_added"] == []
+    members = db_session.scalars(
+        select(PendingUpdateMember)
+        .where(PendingUpdateMember.pending_update_id == pending.id)
+        .order_by(PendingUpdateMember.member_name.asc())
+    ).all()
+    assert [member.change_category for member in members] == ["unchanged", "unchanged"]
 
 
 @patch("app.worker.tasks.sincronizar_dfp_task.delay")

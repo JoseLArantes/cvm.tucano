@@ -5,151 +5,98 @@ sidebar_position: 4
 
 # Quarentena e Replay
 
-## Visão Geral
+## Escopo
 
-Endpoints para gerenciar a fila de reparo da quarentena e reprocessar itens rejeitados.
+A quarentena e a fila de reparo de excecoes persistidas da ingestao.
 
----
+Cada item da quarentena representa uma linha que nao conseguiu ser promovida com sucesso e ficou registrada com:
+
+- `motivo_codigo`
+- `status`
+- `severidade`
+- `reparavel`
+- `tentativas_reprocessamento`
+- `diagnostico`
+
+Quando `status` nao e enviado nos endpoints de listagem e resumo, o filtro implicito e `pendente`.
 
 ## `GET /ingestion/quarentena`
 
-Lista paginada da fila de reparo da quarentena.
+Lista paginada da fila de reparo.
 
-Quando `status` não é informado, o endpoint retorna apenas itens `pendente`. Para consultar histórico completo, envie `status=all`.
+Filtros:
 
-### Query Parameters
+| Parametro | Uso |
+| --- | --- |
+| `motivo_codigo` | filtrar por motivo |
+| `arquivo_origem` | filtrar por member/arquivo |
+| `status` | `pendente` por default; use `all` para historico |
+| `ano_origem` | filtrar por ano |
 
-| Parâmetro | Tipo | Padrão | Descrição |
-|-----------|------|--------|-----------|
-| `pagina` | integer | `1` | Número da página |
-| `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |
-| `motivo_codigo` | string | - | Filtrar por código do motivo |
-| `arquivo_origem` | string | - | Filtrar por arquivo de origem |
-| `status` | string | `pendente` implícito | Filtrar por status. Use `all` para não aplicar filtro |
-| `ano_origem` | integer | - | Filtrar por ano de origem |
+Campos centrais por item:
 
-### Códigos de Motivo (`motivo_codigo`)
+| Campo | Uso |
+| --- | --- |
+| `motivo_codigo` | chave de agrupamento e filtro |
+| `status` | fila aberta ou historico resolvido/ignorado |
+| `reparavel` | habilitar replay automatico ou assistido |
+| `tentativas_reprocessamento` | exibir insistencia do replay |
+| `diagnostico` | payload tecnico para suporte |
 
-| Código | Descrição | Reparável |
-|--------|-----------|-----------|
-| `normalizacao_invalida` | Erro de conversão/parse ou falha de BD | Não |
-| `companhia_nao_encontrada` | Empresa não encontrada no grafo | Sim |
-| `companhia_ambigua` | CNPJ e CVM conflitantes | Sim |
-| `chave_natural_duplicada_conflitante` | Chave duplicada com dados divergentes | Sim |
-| `schema_inesperado` | Colunas obrigatórias ausentes | Sim* |
-| `denominacao_social_ausente` | Não foi possível extrair denominação | Não |
-| `identidade_ausente` | Nem CNPJ nem CVM disponíveis | Não |
-
-*`schema_inesperado` é tratado em nível de membro, não explode em milhares de itens.
-
-### Exemplo
+Exemplo:
 
 ```bash
-curl -X GET "http://localhost:8007/ingestion/quarentena?motivo_codigo=companhia_nao_encontrada&status=pendente" \
+curl -X GET "http://localhost:8007/ingestion/quarentena?motivo_codigo=companhia_nao_encontrada" \
   -H "Authorization: Bearer <token-admin>"
 ```
 
-### Response 200
+## Motivos mais comuns
 
-**Schema:** `ListaQuarantineItems`
-
-```json
-{
-  "dados": [
-    {
-      "id": "0ebc5c67-25a4-4e0c-ab25-66eaf4af4ced",
-      "ingestion_run_id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-      "ingestion_row_id": "9b3a4f45-b7ab-4de6-a93d-95f85913df71",
-      "arquivo_origem": "itr_cia_aberta_2021.csv",
-      "ano_origem": 2021,
-      "linha_origem": 1692,
-      "row_kind": "itr_documento",
-      "status": "pendente",
-      "motivo_codigo": "companhia_nao_encontrada",
-      "severidade": "error",
-      "reparavel": true,
-      "tentativas_reprocessamento": 1,
-      "diagnostico": {
-        "codigo_cvm": 3,
-        "denominacao_companhia": "EMPRESA FINANCEIRA",
-        "resolution_method": "none"
-      }
-    }
-  ],
-  "paginacao": {
-    "pagina": 1,
-    "tamanho_pagina": 100,
-    "total": 1
-  }
-}
-```
-
----
+| `motivo_codigo` | Significado |
+| --- | --- |
+| `normalizacao_invalida` | erro de parse, validacao ou promote individual |
+| `companhia_nao_encontrada` | nao foi possivel resolver a companhia |
+| `companhia_ambigua` | mais de uma companhia elegivel para a linha |
+| `chave_natural_duplicada_conflitante` | conflito entre linhas com a mesma chave natural |
+| `schema_inesperado` | header/schema do member nao bateu com o esperado |
+| `denominacao_social_ausente` | faltou informacao minima de denominacao |
+| `identidade_ausente` | faltaram identificadores minimos para resolucao |
 
 ## `GET /ingestion/quarentena/resumo`
 
-Retorna métricas agregadas e consolidadas de erros na quarentena.
+Agregado da fila de reparo.
 
-Quando `status` não é informado, `total`, `por_erro`, `por_arquivo` e `por_arquivo_e_erro` refletem apenas a fila aberta (`pendente`). Os campos `total_pendentes`, `total_resolvidos` e `total_historico` continuam expondo a visão operacional completa.
+Campos principais:
 
-### Query Parameters
+- `total`
+- `por_status`
+- `por_erro`
+- `por_arquivo`
+- `por_arquivo_e_erro`
+- `total_pendentes`
+- `total_resolvidos`
+- `total_historico`
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `status` | string | Filtrar por status específico |
-| `ingestion_run_id` | UUID | Filtrar por ID de run |
-| `execucao_sincronizacao_id` | UUID | Filtrar por ID de execução |
+Filtros:
 
-### Exemplo
+| Parametro | Uso |
+| --- | --- |
+| `status` | `pendente` por default; use `all` para historico |
+| `ingestion_run_id` | drill-down por run |
+| `execucao_sincronizacao_id` | drill-down por execucao administrativa |
+
+Exemplo:
 
 ```bash
-curl -X GET "http://localhost:8007/ingestion/quarentena/resumo" \
+curl -X GET "http://localhost:8007/ingestion/quarentena/resumo?status=all" \
   -H "Authorization: Bearer <token-admin>"
 ```
 
-### Response 200
-
-**Schema:** `QuarentenaResumoResposta`
-
-```json
-{
-  "total": 42,
-  "total_pendentes": 42,
-  "total_resolvidos": 18,
-  "total_historico": 60,
-  "por_status": {
-    "pendente": 35,
-    "resolvido_auto": 5,
-    "resolvido_manual": 2
-  },
-  "por_erro": [
-    {"motivo_codigo": "companhia_nao_encontrada", "quantidade": 28},
-    {"motivo_codigo": "normalizacao_invalida", "quantidade": 10},
-    {"motivo_codigo": "chave_natural_duplicada_conflitante", "quantidade": 4}
-  ],
-  "por_arquivo": [
-    {"arquivo_origem": "itr_cia_aberta_2021.csv", "quantidade": 15},
-    {"arquivo_origem": "dfp_cia_aberta_2022.csv", "quantidade": 12}
-  ],
-  "por_arquivo_e_erro": [
-    {
-      "arquivo_origem": "itr_cia_aberta_2021.csv",
-      "motivo_codigo": "companhia_nao_encontrada",
-      "quantidade": 10
-    }
-  ]
-}
-```
-
----
-
 ## `POST /ingestion/replay/quarentena`
 
-Executa replay sobre itens pendentes da quarentena.
+Replay de itens pendentes da quarentena.
 
-### Request Body
-
-**Schema:** `ReplayQuarantineRequisicao`
+Body aceito:
 
 ```json
 {
@@ -159,191 +106,60 @@ Executa replay sobre itens pendentes da quarentena.
 }
 ```
 
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `reason_code` | string | Filtrar por motivo (opcional) |
-| `arquivo_origem` | string | Filtrar por arquivo (opcional) |
-| `ano` | integer | Filtrar por ano (opcional) |
+Regras:
 
-> **Nota:** Quando nenhum filtro é enviado, todos os itens `pendente` são considerados.
-
-### Exemplo
-
-```bash
-curl -X POST "http://localhost:8007/ingestion/replay/quarentena" \
-  -H "Authorization: Bearer <token-admin>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason_code": "companhia_nao_encontrada"
-  }'
-```
-
-### Response 200
-
-**Schema:** `ReplayResposta`
-
-```json
-{
-  "status": "sucesso",
-  "detalhe": {
-    "total": 10,
-    "promovidos": 8,
-    "inalterados": 1,
-    "falhas": 1,
-    "items": [
-      {"row_id": "...", "status": "promovido"},
-      {"row_id": "...", "status": "falha", "erro": "..."}
-    ]
-  }
-}
-```
-
-### Comportamento Resiliente
-
-O replay é resiliente no nível da linha individual:
-- Se uma linha falhar, registra erro mas continua processando as demais
-- Erros de BD capturados por `safe_promote_chunk` mantêm o item na quarentena com erro atualizado
-- Não aborta o lote por falha individual
-
----
+- quando nenhum filtro e enviado, o replay considera todos os itens `pendente`;
+- cada linha e reprocessada de forma independente;
+- se uma linha falhar novamente, ela permanece na quarentena com diagnostico atualizado.
 
 ## `POST /ingestion/runs/{run_id}/replay`
 
-Executa replay administrativo de uma run completa.
+Replay completo da run.
 
-### Path Parameters
+Use quando:
 
-| Parâmetro | Tipo | Descrição |
-|-----------|------|-----------|
-| `run_id` | UUID | ID da run |
+- houve correcao de regra de negocio;
+- houve correcao de parser;
+- houve correcao de identidade;
+- o escopo correto e a run inteira, nao apenas a fila de excecoes.
 
-### Exemplo
+O replay da run reavalia o artefato retido da run, passa novamente pelas fases operacionais aplicaveis e pode produzir:
 
-```bash
-curl -X POST "http://localhost:8007/ingestion/runs/6a31c7f8-1c89-4f3d-87db-7e6a8e196999/replay" \
-  -H "Authorization: Bearer <token-admin>"
-```
+- novos itens de quarentena;
+- novos promotes;
+- novo reconcile;
+- novo reuso de members elegiveis.
 
-### Response 200
+## `POST /ingestion/runs/{run_id}/recover`
 
-```json
-{
-  "status": "sucesso",
-  "detalhe": {...}
-}
-```
+Recover administrativo de run stale ou com erro recuperavel.
 
-### Comportamento
+Quando usar:
 
-- Reconstrói processamento a partir do payload bruto retido (`IngestionFileMemberPayload`)
-- Não depende da permanência das linhas bem-sucedidas em staging
-- Passa novamente por `stage`, `promote` e `reconcile`
-- Útil quando correção de parser ou regra de reparo precisa ser aplicada em lote
+- `state=stale`;
+- `state=failed` com `last_error.retryable=true`;
+- `next_action=recover`.
 
----
+## Fluxo operacional recomendado
 
-## Casos de Uso
+### Caso 1: erro de identidade
 
-### Caso 1: Resolver Companhias Não Encontradas
+1. consultar `GET /ingestion/quarentena/resumo`
+2. identificar volume de `companhia_nao_encontrada`
+3. sincronizar cadastro se necessario
+4. executar `POST /ingestion/identity/rebuild`
+5. executar `POST /ingestion/replay/quarentena`
 
-```bash
-# 1. Ver resumo da quarentena
-GET /ingestion/quarentena/resumo
+### Caso 2: problema em um member especifico
 
-# 2. Sincronizar cadastro (se desatualizado)
-POST /ingestion/sincronizacoes/cadastro
+1. localizar a run em `GET /ingestion/runs`
+2. abrir `GET /ingestion/runs/{run_id}/members`
+3. confirmar o member alvo
+4. decidir entre `POST /ingestion/sincronizacoes/reprocessar-arquivo` e `POST /ingestion/runs/{run_id}/replay`
 
-# 3. Reconstruir grafo de identidade
-POST /ingestion/identity/rebuild
+### Caso 3: run stale
 
-# 4. Replay da quarentena
-POST /ingestion/replay/quarentena
-{
-  "reason_code": "companhia_nao_encontrada"
-}
-
-# 5. Verificar resultado
-GET /ingestion/quarentena/resumo
-```
-
-### Caso 2: Corrigir Erros de Normalização
-
-```bash
-# 1. Identificar padrões
-GET /ingestion/quarentena?motivo_codigo=normalizacao_invalida
-
-# 2. Analisar diagnóstico
-# (Ver campo "diagnostico" de cada item)
-
-# 3. Se for bug no normalizador:
-#    - Corrigir código
-#    - Deploy
-#    - Replay de run completa
-POST /ingestion/runs/{run_id}/replay
-```
-
-### Caso 3: Python - Monitoramento de Quarentena
-
-```python
-import httpx
-
-def monitorar_quarentena(base_url, token):
-    """Monitora quarentena e alerta se acumular muitos itens."""
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    response = httpx.get(
-        f"{base_url}/ingestion/quarentena/resumo",
-        headers=headers
-    )
-    response.raise_for_status()
-    
-    resumo = response.json()
-    
-    if resumo["total"] > 100:
-        print(f"⚠️ Quarentena acumulando: {resumo['total']} itens")
-        
-        # Top 3 erros
-        for erro in resumo["por_erro"][:3]:
-            print(f"  - {erro['motivo_codigo']}: {erro['quantidade']}")
-    
-    return resumo
-
-# Uso
-resumo = monitorar_quarentena("http://localhost:8007", "seu-token")
-```
-
----
-
-## Notas para Usuários
-
-### Para Operadores de Backoffice
-
-- Monitore `/quarentena/resumo` diariamente
-- Priorize erros com `reparavel=true`
-- Use replay seletivo por `reason_code`
-
-### Para Auditores
-
-- Analise `diagnostico` para entender causa raiz
-- Documente replay de quarentena para auditoria
-- Use `/runs/{run_id}/replay` para correções em lote
-
-### Para Compliance
-
-- Monitore `normalizacao_invalida` para detectar bugs
-
-Alguns padrões reais da CVM tratados atualmente de forma tolerante pelo backend:
-
-- `fre_relacao_subordinacao`: `Nome_Pessoa_Relacionada` pode vir vazio sem invalidar a linha;
-- `fre_relacao_subordinacao`: `Nome_Administrador` também pode vir vazio quando a linha ainda identifica a pessoa relacionada e mantém conteúdo material suficiente;
-- `fre_relacao_familiar`: quando a CVM publica `Cargo_Pessoa_Relacionada` com aspas desbalanceadas, o staging faz fallback por linha física para preservar as 17 colunas esperadas;
-- `fre_participacao_sociedade`: `CNPJ` zerado (`0000000000000`) é tratado como ausente;
-- `DFP` e `ITR`: quando a linha documental traz identidade suficiente mas a companhia não existe no cadastro local, o backend pode criar companhia provisória em vez de quarentenar a linha.
-- Valide `companhia_nao_encontrada` após sincronização de cadastro
-- Documente todos os replays para rastreabilidade
-
----
-
-## Próximos Passos
-
-- [Identidade e Auditoria](./identity.md) - Reconstrução e auditoria
+1. localizar a run em `GET /ingestion/runs`
+2. confirmar `next_action=recover`
+3. abrir `GET /ingestion/runs/{run_id}/phases`
+4. executar `POST /ingestion/runs/{run_id}/recover`

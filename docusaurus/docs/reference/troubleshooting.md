@@ -335,14 +335,25 @@ response.raise_for_status()
    ```bash
    docker compose ps cvm_redis
    ```
-2. Verifique os logs do worker:
+2. Verifique se o worker de ingestão consome as filas corretas:
+   ```bash
+   docker compose logs cvm_worker | grep -E "ingestion|ingestion_control|received"
+   ```
+3. Confirme que a execução foi persistida antes da publicação Celery:
+   ```bash
+   curl -H "Authorization: Bearer <token-admin>" \
+     "http://localhost:8007/ingestion/sincronizacoes?status=agendada"
+   ```
+4. Verifique os logs do worker:
    ```bash
    docker compose logs cvm_worker
    ```
-3. Reinicie o worker:
+5. Reinicie o worker:
    ```bash
    docker compose restart cvm_worker
    ```
+
+Enquanto houver execução em `agendada`, `em_execucao` ou `aguardando_ingestao`, o gate automático da materialização permanece fechado. Esse bloqueio protege a ingestão e não deve impedir o worker de ingestão de consumir `ingestion` e `ingestion_control`.
 
 ### Worker consome muita memória
 

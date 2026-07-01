@@ -13,7 +13,13 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun
+from app.models.ingestion import (
+    IngestionFile,
+    IngestionFileMember,
+    IngestionRun,
+    SourceArtifactSnapshot,
+    SourceMemberSnapshot,
+)
 from app.services.ingestion.acquisition import _head_remote_resource, probe_remote_source
 from app.services.ingestion.file_manager import (
     compute_file_sha256,
@@ -22,7 +28,7 @@ from app.services.ingestion.file_manager import (
     download_file_to_disk,
     get_csv_header,
 )
-from app.services.ingestion.source_registry import listar_datasets, listar_fontes
+from app.services.ingestion.source_registry import DatasetFonte, listar_datasets, listar_fontes
 from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateScanRun, UpdateSession, UpdateSessionItem
 
 
@@ -34,6 +40,68 @@ def _header_hash(header: list[str] | None) -> str | None:
     if not header:
         return None
     return hashlib.sha256("|".join(header).encode("utf-8")).hexdigest()
+
+
+def _dataset_for_member_name(fonte: str, ano: int | None, member_name: str) -> DatasetFonte | None:
+    for dataset in listar_datasets(fonte):
+        try:
+            rendered_name = dataset.render_member_name(ano=ano)
+        except ValueError:
+            continue
+        if rendered_name == member_name:
+            return dataset
+    return None
+
+
+def _load_previous_member_baselines(
+    db: Session,
+    *,
+    fonte: str,
+    ano: int | None,
+    run_id: uuid.UUID | None,
+) -> dict[str, dict[str, Any]]:
+    if run_id is None:
+        return {}
+
+    baselines: dict[str, dict[str, Any]] = {}
+    snapshots = list(
+        db.scalars(
+            select(SourceMemberSnapshot)
+            .join(SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id)
+            .where(SourceArtifactSnapshot.ingestion_run_id == run_id)
+        ).all()
+    )
+    for snapshot in snapshots:
+        baselines[snapshot.member_name] = {
+            "member_name": snapshot.member_name,
+            "member_sha256": snapshot.member_sha256,
+            "row_count": snapshot.row_count,
+            "header_hash": snapshot.header_hash,
+            "header": snapshot.header,
+            "row_kind": snapshot.row_kind,
+            "is_required": snapshot.required_member,
+            "member_role": snapshot.delivery_index_role,
+            "baseline_source": "source_member_snapshot",
+        }
+
+    previous_members = get_successful_members(db, run_id)
+    for member in previous_members:
+        if member.member_name in baselines:
+            continue
+        dataset = _dataset_for_member_name(fonte, ano, member.member_name)
+        baselines[member.member_name] = {
+            "member_name": member.member_name,
+            "member_sha256": member.member_sha256,
+            "row_count": member.row_count,
+            "header_hash": _header_hash(member.header),
+            "header": member.header,
+            "row_kind": None if dataset is None else dataset.row_kind,
+            "is_required": False if dataset is None else dataset.obrigatorio,
+            "member_role": "none" if dataset is None else dataset.delivery_index_role,
+            "baseline_source": "ingestion_file_member",
+        }
+
+    return baselines
 
 
 def get_last_successful_run(db: Session, tipo_fonte: str, ano: int | None) -> IngestionRun | None:
@@ -466,12 +534,12 @@ def run_deep_analysis(db: Session, pending_update_id: uuid.UUID) -> PendingUpdat
             m_info["row_kind"] = row_kinds.get(name)
             m_info["role"] = roles.get(name, "none")
 
-        # Load previous successful members
-        prev_members_by_name = {}
-        if pending.last_successful_run_id:
-            prev_members = get_successful_members(db, pending.last_successful_run_id)
-            for pm in prev_members:
-                prev_members_by_name[pm.member_name] = pm
+        prev_members_by_name = _load_previous_member_baselines(
+            db,
+            fonte=pending.fonte,
+            ano=pending.ano,
+            run_id=pending.last_successful_run_id,
+        )
 
         # Clear existing members
         db.execute(delete(PendingUpdateMember).where(PendingUpdateMember.pending_update_id == pending.id))
@@ -496,11 +564,11 @@ def run_deep_analysis(db: Session, pending_update_id: uuid.UUID) -> PendingUpdat
                 prev_rows = None
                 prev_hdr_hash = None
             else:
-                prev_sha = prev.member_sha256
-                prev_rows = prev.row_count
-                prev_hdr_hash = _header_hash(prev.header)
+                prev_sha = prev["member_sha256"]
+                prev_rows = prev["row_count"]
+                prev_hdr_hash = prev["header_hash"]
 
-                if prev.member_sha256 == m_info["sha256"]:
+                if prev_sha == m_info["sha256"]:
                     change_cat = "unchanged"
                     status_member = "unchanged"
                 else:
@@ -532,7 +600,7 @@ def run_deep_analysis(db: Session, pending_update_id: uuid.UUID) -> PendingUpdat
         # Check for removed members
         for prev_name, prev_member in prev_members_by_name.items():
             if prev_name not in seen_current:
-                is_req = prev_name in required_names
+                is_req = bool(prev_member["is_required"])
                 status_member = "required_missing" if is_req else "removed"
                 
                 if is_req:
@@ -543,15 +611,15 @@ def run_deep_analysis(db: Session, pending_update_id: uuid.UUID) -> PendingUpdat
                 db.add(PendingUpdateMember(
                     pending_update_id=pending.id,
                     member_name=prev_name,
-                    member_role=prev_member.delimiter, # reuse
-                    previous_member_sha256=prev_member.member_sha256,
+                    member_role=prev_member["member_role"],
+                    previous_member_sha256=prev_member["member_sha256"],
                     current_member_sha256=None,
-                    previous_row_count=prev_member.row_count,
+                    previous_row_count=prev_member["row_count"],
                     current_row_count=None,
-                    previous_header_hash=_header_hash(prev_member.header),
+                    previous_header_hash=prev_member["header_hash"],
                     current_header_hash=None,
                     change_category="removed",
-                    row_kind=prev_member.encoding, # reuse
+                    row_kind=prev_member["row_kind"],
                     is_required=is_req,
                     status=status_member,
                 ))

@@ -1,16 +1,21 @@
 import io
+import tempfile
 import uuid
 import zipfile
+from pathlib import Path
 
-from sqlalchemy import create_engine
+import pytest
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.models.ingestion import (
     IngestionAttempt,
     IngestionFile,
     IngestionFileMember,
+    IngestionFileMemberPayload,
     IngestionRow,
     IngestionRowEvent,
     QuarantineItem,
@@ -209,15 +214,106 @@ def test_stage_csv_payload_streaming_persists_rows_and_chunk_iteration() -> None
         session.close()
 
 
-def test_member_payload_is_upserted_and_readable() -> None:
+def test_iter_staged_member_chunks_carrega_payload_minimo_e_expunge_chunks() -> None:
     session = _session()
     try:
-        execution_id = uuid.uuid4()
-        save_member_payload(session, execution_id, b"primeiro")
-        save_member_payload(session, execution_id, b"segundo")
+        run = create_run(session, tipo_fonte="itr", ano=2022)
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/itr.zip",
+            source_filename="itr.zip",
+            payload=b"fake",
+        )
+
+        member = stage_csv_payload_streaming(
+            session,
+            ingestion_run=run,
+            ingestion_file=ingestion_file,
+            payload=b"col_a;col_b\n1;2\n3;4\n5;6\n",
+            member_name="itr_cia_aberta_2022.csv",
+            arquivo_origem="itr_cia_aberta_2022.csv",
+            ano_origem=2022,
+            row_kind="itr_documento",
+            chunk_size=2,
+        )
         session.commit()
 
-        assert get_member_payload(session, execution_id) == b"segundo"
+        chunks = iter_staged_member_chunks(session, member_id=member.id, chunk_size=2)
+        first_chunk = next(chunks)
+
+        first_state = inspect(first_chunk[0])
+        assert "validation_status" in first_state.unloaded
+        assert "normalized_data" in first_state.unloaded
+        assert "resolved_companhia_id" in first_state.unloaded
+
+        second_chunk = next(chunks)
+        assert [row.linha_origem for row in second_chunk] == [4]
+        assert inspect(first_chunk[0]).detached is True
+        assert inspect(first_chunk[1]).detached is True
+    finally:
+        session.close()
+
+
+def test_member_payload_is_upserted_and_readable(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", True)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
+
+            save_member_payload(session, execution_id, b"primeiro", member_name=member_name)
+            save_member_payload(session, execution_id, b"segundo", member_name=member_name)
+            session.commit()
+
+            artifact_path = (
+                Path(tmp_dir)
+                / "artifacts"
+                / "member_payloads"
+                / str(execution_id)
+                / member_name
+            )
+
+            assert artifact_path.read_bytes() == b"segundo"
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"segundo"
+    finally:
+        session.close()
+
+
+def test_member_payload_falls_back_to_database_when_artifact_is_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", True)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
+            payload = IngestionFileMemberPayload(id=execution_id, payload=b"fallback-db")
+            session.add(payload)
+            session.commit()
+
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"fallback-db"
+    finally:
+        session.close()
+
+
+def test_member_payload_skips_database_fallback_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            monkeypatch.setattr(get_settings(), "ingestion_member_payload_db_fallback_enabled", False)
+            execution_id = uuid.uuid4()
+            member_name = "itr_cia_aberta_BPA_con_2026.csv"
+
+            save_member_payload(session, execution_id, b"artifact-only", member_name=member_name)
+            session.commit()
+
+            persisted = session.get(IngestionFileMemberPayload, execution_id)
+            assert persisted is None
+            assert get_member_payload(session, execution_id, member_name=member_name) == b"artifact-only"
     finally:
         session.close()
 

@@ -16,11 +16,15 @@ from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro
 from app.models.ingestion import IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.analise import (
+    campanha_tem_requeue_em_transito,
     claim_materializacao_campanha_chunk,
+    classificar_recuperacao_materializacao_campanha,
     criar_materializacao_campanha,
     obter_estado_gate_materializacao,
     pausar_controle_materializacao,
+    reativar_materializacao_campanha,
     recuperar_chunks_materializacao_stale,
+    recuperar_materializacao_pendente,
 )
 from app.worker import tasks as worker_tasks
 
@@ -283,6 +287,7 @@ def test_finalizar_sincronizacao_zip_cria_campanha_e_dispara_dispatcher(
         captured["queue"] = queue
 
     monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", _fake_apply_async)
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
     resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
@@ -300,6 +305,8 @@ def test_materializar_analise_campanha_reagenda_sem_consumir_retry_quando_sem_sl
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
     campanha_running = AnaliseMaterializacaoCampanha(
         source="post_ingestion",
         status="running",
@@ -328,6 +335,19 @@ def test_materializar_analise_campanha_reagenda_sem_consumir_retry_quando_sem_sl
         updated_at=datetime.now(UTC),
     )
     db_session.add_all([campanha_running, campanha_pending])
+    db_session.flush()
+    db_session.add(
+        AnaliseMaterializacaoCampanhaItem(
+            campanha_id=campanha_pending.id,
+            codigo_cvm=cia.codigo_cvm,
+            companhia_id=cia.id,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+            attempts=0,
+            updated_at=datetime.now(UTC),
+        )
+    )
     db_session.commit()
 
     captured: dict[str, object] = {}
@@ -373,6 +393,75 @@ def test_obter_estado_gate_materializacao_detecta_ingestao_ativa(db_session: Ses
     assert gate.reason_code == "INGESTION_ACTIVE"
     assert gate.blocking_ingestions == 1
     assert gate.blockers[0].source_type == "itr"
+
+
+def test_obter_estado_gate_materializacao_bloqueia_execucao_agendada(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    monkeypatch.setattr(
+        "app.services.analise._settings.analise_materializacao_blocking_sync_statuses",
+        "em_execucao,agendada,cancelada",
+    )
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                tipo_fonte="itr",
+                ano=2025,
+                arquivo="itr_2025.zip",
+                url="http://exemplo/itr",
+                status="cancelada",
+                iniciada_em=agora,
+            ),
+            ExecucaoSincronizacao(
+                tipo_fonte="dfp",
+                ano=2025,
+                arquivo="dfp_2025.zip",
+                url="http://exemplo/dfp",
+                status="agendada",
+                iniciada_em=agora,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    gate = obter_estado_gate_materializacao(db_session)
+
+    assert gate.status == "red"
+    assert gate.reason_code == "INGESTION_ACTIVE"
+    assert gate.blocking_ingestions == 1
+    assert gate.blockers[0].source_type == "dfp"
+    assert gate.blockers[0].status == "agendada"
+
+
+def test_obter_estado_gate_materializacao_ignora_execucao_cancelada(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    monkeypatch.setattr(
+        "app.services.analise._settings.analise_materializacao_blocking_sync_statuses",
+        "em_execucao,agendada,cancelada",
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2025,
+            arquivo="itr_2025.zip",
+            url="http://exemplo/itr",
+            status="cancelada",
+            iniciada_em=agora,
+        )
+    )
+    db_session.commit()
+
+    gate = obter_estado_gate_materializacao(db_session)
+
+    assert gate.status == "green"
+    assert gate.reason_code == "NO_BLOCKERS"
+    assert gate.blocking_ingestions == 0
+    assert gate.blockers == ()
 
 
 def test_obter_estado_gate_materializacao_respeita_pausa_manual(db_session: Session) -> None:
@@ -440,6 +529,32 @@ def test_materializar_analise_campanha_aguarda_gate_vermelho(
     assert campanha_atualizada.summary["wait_reason"] == "INGESTION_ACTIVE"
 
 
+def test_materializar_analise_companhia_task_nao_executa_com_gate_vermelho(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="dfp",
+            ano=2025,
+            arquivo="dfp_2025.zip",
+            url="http://exemplo/dfp",
+            status="em_execucao",
+            iniciada_em=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+
+    resultado = worker_tasks.materializar_analise_companhia_task.run(cia.codigo_cvm)
+
+    assert resultado["status"] == "waiting_for_gate"
+    assert resultado["reason_code"] == "INGESTION_ACTIVE"
+
+
 def test_despachar_materializacao_pendente_nao_enfileira_quando_gate_vermelho(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -479,6 +594,57 @@ def test_despachar_materializacao_pendente_nao_enfileira_quando_gate_vermelho(
     assert called is False
 
 
+def test_materializar_analise_chunk_task_nao_processa_itens_quando_gate_ja_esta_vermelho(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="dfp",
+            ano=2025,
+            arquivo="dfp_2025.zip",
+            url="http://exemplo/dfp",
+            status="em_execucao",
+            iniciada_em=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    called = False
+
+    def _fake_materializar(*args: object, **kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks, "materializar_analise_companhia", _fake_materializar, raising=False)
+
+    resultado = worker_tasks.materializar_analise_chunk_task.run(str(campanha.id), str(chunk.id))
+
+    item_atualizado = db_session.get(AnaliseMaterializacaoCampanhaItem, item.id)
+    chunk_atualizado = db_session.get(AnaliseMaterializacaoChunkExecucao, chunk.id)
+
+    assert resultado["status"] == "waiting_for_gate"
+    assert resultado["reason_code"] == "INGESTION_ACTIVE"
+    assert called is False
+    assert item_atualizado is not None
+    assert item_atualizado.status == "pending"
+    assert chunk_atualizado is not None
+    assert chunk_atualizado.status == "cancelled"
+
+
 def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -511,6 +677,162 @@ def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
     assert campanha_atualizada is not None
     assert campanha_atualizada.running_items == 1
     assert campanha_atualizada.pending_items == 1
+
+
+def test_finalizar_sincronizacao_zip_nao_enfileira_dispatcher_quando_gate_vermelho(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agora = datetime.now(UTC)
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    execucao = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    db_session.add(
+        IngestionRun(
+            execucao_sincronizacao_id=execucao.id,
+            tipo_fonte="dfp",
+            ano=2025,
+            status="em_execucao",
+            phase="ingest",
+            started_at=agora,
+        )
+    )
+    db_session.add(
+        DemonstracaoFinanceira(
+            companhia_id=cia.id,
+            tipo_formulario="DFP",
+            tipo_demonstracao="demonstracao_resultado",
+            escopo_demonstracao="consolidado",
+            cnpj_companhia=cia.cnpj_companhia,
+            codigo_cvm=cia.codigo_cvm,
+            data_referencia=datetime(2025, 12, 31, tzinfo=UTC).date(),
+            versao=1,
+            codigo_conta="3.01",
+            valor_conta=Decimal("1"),
+            escala_moeda="MIL",
+            ordem_exercicio="ULTIMO",
+            coluna_df="VALOR",
+            arquivo_origem="dfp.csv",
+            hash_origem="dfp-row",
+            ano_origem=2025,
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2025,
+            arquivo="itr_2025.zip",
+            url="http://exemplo/itr",
+            status="em_execucao",
+            iniciada_em=agora,
+        )
+    )
+    db_session.commit()
+
+    called = False
+
+    def _fake_apply_async(*, countdown: int, queue: str) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", _fake_apply_async)
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
+
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
+
+    assert resultado["status"] == "sucesso"
+    assert campanha is not None
+    assert campanha.source == "post_ingestion"
+    assert called is False
+
+
+def test_materializar_analise_campanha_enfileira_multiplos_chunks_quando_habilitado(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    codigo_cvm_secundario = cia.codigo_cvm + 1
+    _companhia(db_session, codigo_cvm=codigo_cvm_secundario)
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm, codigo_cvm_secundario],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    captured: list[tuple[str, str]] = []
+
+    def _fake_delay(campanha_id: str, chunk_execucao_id: str) -> None:
+        captured.append((campanha_id, chunk_execucao_id))
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        worker_tasks._settings,
+        "analise_materializacao_max_active_chunks_per_campaign",
+        2,
+    )
+    monkeypatch.setattr(worker_tasks.materializar_analise_chunk_task, "delay", _fake_delay)
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "enqueued"
+    assert resultado["chunk_count"] == 2
+    assert resultado["claimed_items"] == 2
+    assert len(resultado["chunk_execucao_ids"]) == 2
+    assert len(captured) == 2
+    assert {campanha_id for campanha_id, _chunk_id in captured} == {str(campanha.id)}
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.running_items == 2
+    assert campanha_atualizada.pending_items == 2
+
+
+def test_materializar_analise_campanha_aguarda_slot_de_chunk_por_campanha(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(
+        worker_tasks._settings,
+        "analise_materializacao_max_active_chunks_per_campaign",
+        1,
+    )
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "waiting_for_chunk_slot"
+    assert resultado["active_chunks"] == 1
+    assert resultado["max_active_chunks_per_campaign"] == 1
+    assert resultado["active_chunk_ids_preview"] == [str(chunk.id)]
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["wait_reason"] == "MAX_ACTIVE_CHUNKS_PER_CAMPAIGN_REACHED"
 
 
 def test_recuperar_chunks_materializacao_stale_devolve_itens_para_pending(db_session: Session) -> None:
@@ -562,6 +884,8 @@ def test_recuperar_chunks_materializacao_stale_devolve_itens_para_pending(db_ses
     assert item_atualizado is not None
     assert item_atualizado.status == "pending"
     assert item_atualizado.chunk_execucao_id is None
+    assert item_atualizado.started_at is None
+    assert item_atualizado.finished_at is None
     assert chunk_atualizado is not None
     assert chunk_atualizado.status == "stale"
     assert execucao_atualizada is not None
@@ -635,6 +959,59 @@ def test_recuperar_chunks_materializacao_stale_preserva_itens_ja_concluidos(db_s
     assert chunk_atualizado.status == "stale"
 
 
+def test_materializar_analise_campanha_recupera_stale_inline_e_reenfileira(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+    chunk.status = "running"
+    chunk.lease_expires_at = datetime.now(UTC) - timedelta(seconds=120)
+    chunk.heartbeat_at = datetime.now(UTC) - timedelta(seconds=120)
+    item.status = "running"
+    db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+
+    chunk_atualizado = db_session.get(AnaliseMaterializacaoChunkExecucao, chunk.id)
+    item_atualizado = db_session.get(AnaliseMaterializacaoCampanhaItem, item.id)
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado["status"] == "recovered_stale_and_requeued"
+    assert resultado["recovered_chunks"] == 1
+    assert resultado["recovered_items"] == 1
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
+    assert captured["queue"] == "analise_materializacao"
+    assert chunk_atualizado is not None
+    assert chunk_atualizado.status == "stale"
+    assert item_atualizado is not None
+    assert item_atualizado.status == "pending"
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["wait_reason"] == "STALE_CHUNK_RECOVERED"
+
+
 def test_reconciliar_materializacao_stale_task_reagenda_campanha(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -668,5 +1045,221 @@ def test_reconciliar_materializacao_stale_task_reagenda_campanha(
     assert resultado["status"] == "recovered"
     assert resultado["recovered_chunks"] == 1
     assert captured["args"] == (str(campanha.id),)
-    assert captured["countdown"] == 60
+    assert captured["countdown"] == 0
+    assert captured["queue"] == "analise_materializacao"
+
+
+def test_materializar_analise_chunk_reagenda_quando_chunk_ja_foi_recuperado(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+    chunk.status = "stale"
+    db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.materializar_analise_chunk_task.run(str(campanha.id), str(chunk.id))
+
+    assert resultado["status"] == "ignored_chunk"
+    assert resultado["chunk_status"] == "stale"
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
+    assert captured["queue"] == "analise_materializacao"
+
+
+def test_classificar_recuperacao_materializacao_campanha_detecta_pending_undispatched(db_session: Session) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+
+    classificacao = classificar_recuperacao_materializacao_campanha(
+        db_session,
+        campanha,
+    )
+
+    assert classificacao.reason_code == "PENDING_UNDISPATCHED"
+    assert classificacao.recoverable is True
+
+
+def test_reativar_materializacao_campanha_recupera_stale_e_reenfileira(db_session: Session) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+    chunk.lease_expires_at = datetime.now(UTC) - timedelta(seconds=120)
+    db_session.commit()
+
+    resultado = reativar_materializacao_campanha(db_session, campanha.id)
+
+    assert resultado.status == "recovered"
+    assert resultado.reason_code == "STALE_CHUNK"
+    assert resultado.recovered_chunks == 1
+    assert str(campanha.id) in resultado.requeued_campaigns
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.summary is not None
+    assert campanha_atualizada.summary["recovery_state"] == "requeued"
+    assert campanha_tem_requeue_em_transito(campanha_atualizada) is True
+
+
+def test_recuperar_materializacao_pendente_reenfileira_pending_undispatched_com_wait_reason_antigo(
+    db_session: Session,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha_recuperavel = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    campanha_bloqueada = AnaliseMaterializacaoCampanha(
+        source="post_ingestion",
+        status="pending",
+        chunk_size=25,
+        total_items=1,
+        pending_items=1,
+        running_items=0,
+        success_items=0,
+        failed_items=0,
+        skipped_items=0,
+        summary={"wait_reason": "INGESTION_ACTIVE"},
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(campanha_bloqueada)
+    db_session.flush()
+    db_session.add(
+        AnaliseMaterializacaoCampanhaItem(
+            campanha_id=campanha_bloqueada.id,
+            codigo_cvm=cia.codigo_cvm,
+            companhia_id=cia.id,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+            attempts=0,
+            updated_at=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+
+    resultado = recuperar_materializacao_pendente(
+        db_session,
+        max_campaigns=10,
+        max_requeues=10,
+        min_age_seconds=0,
+    )
+
+    assert resultado.status == "triggered"
+    assert resultado.reason_code == "PENDING_UNDISPATCHED"
+    assert set(resultado.requeued_campaigns) == {str(campanha_recuperavel.id), str(campanha_bloqueada.id)}
+
+
+def test_recuperar_materializacao_pendente_recalcula_contadores_obsoletos(
+    db_session: Session,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+
+    item.status = "pending"
+    item.chunk_execucao_id = None
+    item.enqueued_at = None
+    chunk.status = "cancelled"
+    chunk.lease_expires_at = datetime.now(UTC)
+    campanha.status = "pending"
+    campanha.pending_items = 0
+    campanha.running_items = 1
+    campanha.summary = {
+        **(campanha.summary or {}),
+        "wait_reason": "INGESTION_ACTIVE",
+    }
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+
+    resultado = recuperar_materializacao_pendente(
+        db_session,
+        max_campaigns=10,
+        max_requeues=10,
+        min_age_seconds=0,
+    )
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado.status == "triggered"
+    assert resultado.reason_code == "PENDING_UNDISPATCHED"
+    assert resultado.requeued_campaigns == (str(campanha.id),)
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.pending_items == 2
+    assert campanha_atualizada.running_items == 0
+
+
+def test_recuperar_materializacao_pendente_task_reenfileira_campanhas(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.recuperar_materializacao_pendente_task.run()
+
+    assert resultado["status"] == "triggered"
+    assert resultado["reason_code"] == "PENDING_UNDISPATCHED"
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
     assert captured["queue"] == "analise_materializacao"

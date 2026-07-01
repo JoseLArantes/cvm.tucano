@@ -1,5 +1,553 @@
 # Changelog de Contrato da API para Clientes
 
+Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
+
+Convencoes deste changelog:
+
+- cada entrada lista endpoints ou superficies afetadas;
+- descreve o comportamento atual entregue ao cliente;
+- documentacao editorial sem mudanca de contrato nao entra aqui;
+- a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
+
+## 2026-07-01 - Disparo de ingestao passa a acionar o gate de materializacao imediatamente
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/cadastro`
+- `POST /ingestion/sincronizacoes/dfp/{ano}`
+- `POST /ingestion/sincronizacoes/itr/{ano}`
+- `POST /ingestion/sincronizacoes/fre/{ano}`
+- `POST /ingestion/sincronizacoes/fca/{ano}`
+- `POST /ingestion/sincronizacoes/ipe/{ano}`
+- `POST /ingestion/sincronizacoes/vlmo/{ano}`
+- `POST /ingestion/sincronizacoes/cgvn/{ano}`
+- `POST /ingestion/sincronizacoes/tudo/{ano}`
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/operations`
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+
+### Mudanca de comportamento
+
+- os endpoints de disparo de ingestao agora persistem `ExecucaoSincronizacao.status=agendada` antes de publicar a task Celery
+- o `id_tarefa` retornado pela API e o mesmo valor persistido no banco e enviado ao Celery
+- em `POST /ingestion/sincronizacoes/tudo/{ano}`, a API publica apenas `cadastro` no request HTTP; as fontes anuais ja registradas sao publicadas pelo worker quando `cadastro` termina com sucesso, `sem_alteracao` ou `skipped`
+- o gate automatico de materializacao passa a considerar `agendada`, `em_execucao` e `aguardando_ingestao` como bloqueadores
+- estados finais como `sucesso`, `sem_alteracao`, `skipped`, `falha` e `cancelada` continuam sem bloquear o gate
+- quando uma ingestao e disparada durante materializacao, a UI deve esperar `gate.status=red` com `reason_code=INGESTION_ACTIVE` mesmo antes do worker iniciar a task
+- `GET /analise/materializacoes/monitoramento` tolera falha/timeout de inspeção Celery e limita a deteccao detalhada de campanhas pendentes recuperaveis pela janela operacional de recovery
+
+### Leitura recomendada pelo frontend
+
+- apos disparar uma sincronizacao, usar `id_tarefa` para correlacionar a linha em `GET /ingestion/sincronizacoes`
+- quando `gate.status=red`, pausar expectativas de progresso de novas campanhas/chunks de materializacao
+- tratar execucoes `agendada` como trabalho aceito e aguardando worker, nao como chamada perdida
+
+## 2026-06-30 - Direct path financeiro expoe fases e contadores mais precisos para DFP/ITR
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/runs/{run_id}/phases`
+- `GET /ingestion/runs/{run_id}/members`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/cleanup-transient-state`
+
+### Mudanca de comportamento
+
+- members financeiros DFP/ITR passam a reportar fases especificas: `profile`, `normalize_artifact`, `load_typed_staging`, `promote`, `reconcile` e `complete`
+- linhas validas de DFP/ITR nao sao persistidas em `ingestion_rows`; a UI deve usar fases, counters e snapshots de artifacts para progresso operacional
+- `quality_summary` e `metrics` podem incluir `rows_read`, `rows_normalized`, `rows_loaded_to_stage`, `rows_reconciled_deleted`, `typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged` e `typed_stage_copy_loads`
+- a coordenacao de ZIP financeiro limita members ativos por pai, entao uma run ITR/DFP pode permanecer em execucao com poucos filhos ativos por vez; isso e esperado e reduz pressao no worker/banco
+- as filas de ingestion ficam separadas em `ingestion` e `ingestion_control`; materializacao permanece em `analise_materializacao`
+- novo endpoint administrativo `POST /ingestion/runs/{run_id}/cleanup-transient-state` limpa staging transitorio de run `cancelada` ou `falha`, fecha fases/execucoes presas e retorna contadores do que foi removido
+
+### Leitura recomendada pelo frontend
+
+- para progresso de ITR/DFP, priorizar `GET /ingestion/runs/{run_id}/phases` e os counters de `quality_summary`
+- para tela de filhos/members, tratar filhos aguardando como fila pendente normal quando a janela ativa do pai estiver cheia
+- para diagnostico de stuck, considerar `heartbeat_at` e evolucao dos counters da fase atual, nao apenas o status `em_execucao`
+- oferecer limpeza transitoria apenas para operadores e apenas depois de cancelamento/falha, pois o endpoint prepara a run para reconstrução a partir dos artifacts/dados remotos
+
+## 2026-06-30 - Snapshots operacionais de ingestao passam a expor ponteiros duraveis para artifacts locais
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+
+### Mudanca de comportamento
+
+- `artifact_snapshot` passa a expor `storage_uri`, `storage_role`, `storage_content_type` e `storage_size_bytes` quando a run persistiu o artifact local correspondente
+- `member_snapshot_summary.members[]` passa a poder expor `raw_artifact_uri`, `raw_artifact_content_type`, `raw_artifact_size_bytes`, `normalized_artifact_uri`, `normalized_artifact_format`, `normalized_artifact_content_sha256` e `normalized_artifact_size_bytes`
+- esses campos tornam explicito, no contrato da API, qual artifact bruto foi usado no replay e qual artifact normalizado foi produzido para staging e promocao
+
+### Leitura recomendada pelo frontend
+
+- para drill-down operacional de run, usar `artifact_snapshot.storage_uri` como ponteiro primario do artifact persistido da run
+- para troubleshooting de member, usar `member_snapshot_summary.members[].raw_artifact_uri` para replay bruto e `member_snapshot_summary.members[].normalized_artifact_uri` para rastrear o artifact que alimentou o staging tipado
+- a mudanca e aditiva; consumidores que ignoram esses campos continuam compativeis
+
+## 2026-06-30 - Ingestao ganha recovery sweep para runs stale e `next_action=recover` em falhas recuperaveis
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o backend passa a executar recovery sweep periodico sobre fases de ingestao com heartbeat stale
+- quando o sweep encontra run presa sem cancelamento pendente, a run pode sair de `state=stale` para `state=failed`, mas com `last_error.retryable=true` e `next_action=recover`
+- quando o sweep encontra cancelamento propagado em uma run stale, ele conclui o cancelamento e estabiliza o estado final como `cancelled`
+- `next_action=recover` deixa de significar apenas `state=stale`; agora tambem cobre falha recuperavel marcada pelo sweep
+
+### Leitura recomendada pelo frontend
+
+- usar `next_action` como sinal primario de recuperacao administrativa, em vez de depender apenas de `state=stale`
+- quando `state=failed` e `last_error.retryable=true`, oferecer a mesma acao de recuperacao usada para stale
+- para troubleshooting fino, ler `liveness`, `last_error` e `cancellation` em conjunto
+
+## 2026-06-30 - Ingestao expande telemetria de staging tipado financeiro no resumo operacional
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o backend passa a expor no `quality_summary` e no `progress` das runs os sinais `typed_stage_rows_loaded`, `typed_stage_bytes_loaded`, `typed_stage_rows_replaced`, `typed_stage_rows_purged` e `typed_stage_copy_loads`
+- esses campos permitem separar custo de carga no staging tipado, recarga de member e limpeza pos-promocao sem depender de logs de worker
+- o staging tipado financeiro passa a ser purgado explicitamente ao final do processamento do member, mantendo replay baseado em artifact normalizado e reduzindo residuo operacional
+
+### Leitura recomendada pelo frontend
+
+- para cards de progresso por run: ler `progress.typed_stage_rows_loaded`, `progress.typed_stage_bytes_loaded` e `progress.typed_stage_copy_loads`
+- para troubleshooting de custo ou loops de recarga: ler `quality_summary.typed_stage_rows_replaced` e `quality_summary.typed_stage_rows_purged`
+- para consumidores que ja usam `quality_summary`, a mudanca e aditiva e nao exige remocao de campos antigos
+
+## 2026-06-30 - Ingestao ganha inventario por member, snapshot consolidado de operacao e acoes diretas por run
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/runs/{run_id}/members`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/cancel`
+- `POST /ingestion/runs/{run_id}/members/{member_id}/cancel`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Mudanca de comportamento
+
+- o backend passa a expor inventario paginado de members por run, com `member_name`, `schema_status`, `lifecycle_status`, `delivery_total`, `quarantine_total`, `state` e `links`
+- consumidores desacoplados agora podem ler `GET /ingestion/operations` para obter um snapshot unico de runs ativas, runs recuperaveis, cancelamentos, sinais de fila Celery e estado do gate de materializacao
+- cancelamento direto por `run_id` deixa de exigir descoberta previa de `id_execucao`
+- cancelamento direto por `member_id` permite interromper apenas o CSV alvo quando existir execucao filha correspondente
+- recuperacao administrativa de run (`POST /ingestion/runs/{run_id}/recover`) reaplica o replay completo da run quando ela estiver `stale` ou com erro recuperavel
+
+### Leitura recomendada pelo frontend
+
+- para tabela de ZIP/member: usar `GET /ingestion/runs/{run_id}/members`
+- para toolbar operacional global: usar `GET /ingestion/operations`
+- para acao de parar ZIP: usar `POST /ingestion/runs/{run_id}/cancel`
+- para acao de parar CSV individual: usar `POST /ingestion/runs/{run_id}/members/{member_id}/cancel`
+- quando `next_action=recover` em uma run e a UI optar por acao automatizada de operador, usar `POST /ingestion/runs/{run_id}/recover`
+
+## 2026-06-30 - Ingestao passa a expor estado operacional agregado e timeline de fases
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/runs/{run_id}/phases`
+- `POST /ingestion/sincronizacoes/cancelar`
+
+### Mudanca de comportamento
+
+- execucoes administrativas e runs tecnicas passam a expor `state`, `liveness`, `blocking`, `cancellation`, `last_error`, `next_action` e `links`
+- `state` deixa explicito se o escopo esta `queued`, `waiting`, `running`, `stale`, `succeeded`, `skipped`, `failed` ou `cancelled`
+- `liveness` passa a refletir heartbeat, owner do lease, task ativa e classificacao `is_stale`, evitando depender de logs para diagnostico de run presa
+- `blocking` resume por que a execucao esta parada ou aguardando, com codigos como `queued`, `awaiting_ingestion`, `stale` e `manual_cancel`
+- `cancellation` passa a refletir o ultimo pedido de cancelamento persistido, inclusive `requested`, `propagated` e `completed`
+- o backend agora persiste a timeline operacional de fases da run e a expõe em `GET /ingestion/runs/{run_id}/phases`
+
+### Leitura recomendada pelo frontend
+
+- para listagem operacional: consumir `GET /ingestion/runs` e `GET /ingestion/sincronizacoes`
+- para detalhe de run: consumir `GET /ingestion/runs/{run_id}` e `GET /ingestion/runs/{run_id}/phases`
+- para detalhe de execucao ZIP/member: consumir `GET /ingestion/sincronizacoes/{id_execucao}`
+- quando `state=stale`, tratar `next_action=recover` como sinal de recuperacao administrativa ou investigacao operacional
+- quando `status=aguardando_ingestao`, tratar `blocking.reason_code=awaiting_ingestion` como espera normal da fase 2
+
+## 2026-06-29 - Gate de materializacao passa a bloquear tambem o despacho e o inicio de tasks
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+- `POST /analise/materializacoes/controle/pause`
+- `POST /analise/materializacoes/controle/resume`
+- campanhas automaticas de materializacao disparadas por pos-ingestao
+
+### Mudanca de comportamento
+
+- o gate de materializacao deixa de atuar apenas dentro da execucao da campanha e passa a bloquear tambem o enfileiramento do dispatcher, o reenfileiramento de campanhas e o inicio de chunks
+- quando o gate esta `red`, campanhas podem continuar existindo em `pending`, mas novas tasks de dispatcher/campanha/chunk nao devem entrar em execucao efetiva
+- a task direta de materializacao por companhia tambem passa a respeitar o gate antes de iniciar trabalho
+- o roteamento Celery de ingestao e materializacao fica explicito: ingestao nas filas `ingestion` e `ingestion_control`, materializacao na fila dedicada `analise_materializacao`
+
+## 2026-06-29 - Worker de replay de member reduz footprint por chunk
+
+### Superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o worker de replay de member deixa de materializar todos os chunks restantes de `fre` em memoria de uma vez
+- a leitura de `ingestion_rows` por chunk passa a carregar apenas os campos minimos necessarios ao promote e expunge os rows processados da sessao antes de seguir para o proximo chunk
+- isso reduz crescimento do identity map por member e diminui o risco de `SIGKILL` em workers durante promote de CSVs volumosos
+
+## 2026-06-27 - Replay de member deixa de reconstruir estado cumulativo do ano
+
+### Superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+
+### Mudanca de comportamento
+
+- o replay de member isolado para `dfp`, `itr`, `fre` e `fca` deixa de reconstruir em memoria o historico completo de staging de siblings ja processados no mesmo ano
+- a task passa a semear a resolucao por cabecalho a partir das tabelas canonicas de documentos ja promovidos, com footprint por task limitado e previsivel
+- isso reduz o risco de degradacao progressiva, `SIGKILL` por pressao de memoria e reruns interminaveis do mesmo CSV durante reprocessamentos seletivos
+
+## 2026-06-26 - Gate de materializacao bloqueia apenas ingestao em execucao
+
+### Endpoints com ajuste operacional visivel
+
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+- `POST /analise/materializacoes/controle/resume`
+
+### Mudanca de comportamento
+
+- o admission gate da materializacao deixa de considerar execucoes apenas `agendada` ou `cancelada` como bloqueadoras
+- somente execucoes de ingestao realmente em `em_execucao` mantem o gate em `red` por `INGESTION_ACTIVE`
+- com isso, telas operacionais deixam de exibir bloqueio vermelho indevido quando nao ha ingestao rodando de fato
+
+## 2026-06-26 - Reprocessamento seletivo aceita nomes de arquivos com maiusculas
+
+### Endpoint com correcao de validacao
+
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+
+### Mudanca de comportamento
+
+- o backend agora valida `arquivo` de forma case-insensitive no reprocessamento seletivo
+- nomes de members CVM com siglas em maiusculas, como `BPA`, `BPP`, `BPR`, `DRE`, `DVA` e similares, deixam de falhar com `422 Unprocessable Entity`
+- o backend passa a preservar o nome canonico do arquivo ao persistir a execucao filha e ao despachar a task de member; o valor nao e mais regravado em minusculas
+- nao houve mudanca de payload nem de shape da resposta; a correcao e apenas de aceitacao do nome informado
+
+## 2026-06-26 - Rerun anual de ingestion reaproveita members bem-sucedidos de execucao pai falhada
+
+### Endpoints com semantica operacional atualizada
+
+- `POST /ingestion/sincronizacoes/dfp/{ano}`
+- `POST /ingestion/sincronizacoes/itr/{ano}`
+- `POST /ingestion/sincronizacoes/fre/{ano}`
+- `POST /ingestion/sincronizacoes/fca/{ano}`
+- `POST /ingestion/sincronizacoes/ipe/{ano}`
+- `POST /ingestion/sincronizacoes/vlmo/{ano}`
+- `POST /ingestion/sincronizacoes/cgvn/{ano}`
+- `POST /ingestion/sincronizacoes/tudo/{ano}`
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+
+### Mudanca de comportamento
+
+- um rerun anual da mesma fonte/ano agora funciona como rerun de recuperacao
+- se a execucao anual anterior falhou, members que ja tinham sido concluídos com sucesso continuam elegiveis para reaproveitamento por `member_sha256`
+- o rerun passa a reprocessar apenas members falhados, ausentes, interrompidos ou com SHA alterado
+- `force_reimport=true` continua sendo o override explicito para reprocessar tudo
+- `/ingestion/sincronizacoes/reprocessar-arquivo` permanece para recuperacao cirurgica, mas nao e mais o caminho normal exigido para falha parcial em ZIP anual
+
+### Leitura recomendada pelo frontend
+
+Para qualquer tela que mostre uma run anual:
+
+1. ler `GET /ingestion/runs` para listagem, cards e badges resumidos
+2. ler `GET /ingestion/runs/{run_id}` para detalhe operacional
+3. tratar `quality_summary` como fonte principal de contadores
+4. tratar `member_snapshot_summary` como inventario duravel por member
+5. tratar `lifecycle_decision` como explicacao compacta da decisao de reaproveitamento
+
+### Campos novos ou agora operacionalmente relevantes
+
+#### Em `quality_summary`
+
+- `members_reused_from_previous`
+- `members_reused_from_failed_parent`
+- `members_reprocessed`
+- `members_processados`
+- `members_skipped`
+
+#### Em `lifecycle_decision`
+
+- `members_skipped_by_sha`
+- `members_processed`
+- `members_reused_from_previous`
+- `members_reused_from_failed_parent`
+
+#### Em `member_snapshot_summary`
+
+- `by_status.processed`
+- `by_status.member_skipped`
+- `by_schema_status.ok`
+- `by_schema_status.reused`
+- `members[]`
+
+### Semantica exata para UI
+
+#### `quality_summary.members_reprocessed`
+
+- representa quantos members realmente voltaram para o fluxo `stage -> promote -> reconcile`
+- este e o numero correto para mostrar como "members executados neste rerun"
+- nao deve ser somado com `members_reused_from_previous` para representar falha; o reaproveitamento e comportamento esperado
+
+#### `quality_summary.members_reused_from_previous`
+
+- representa quantos members foram reaproveitados por igualdade de `member_sha256`
+- este e o numero correto para mostrar como "members reaproveitados" ou "members pulados por igualdade"
+- pode incluir reaproveitamento vindo de uma run anual anterior bem-sucedida ou falha
+
+#### `quality_summary.members_reused_from_failed_parent`
+
+- representa o subconjunto de `members_reused_from_previous` cuja execucao anual pai anterior terminou em `falha`
+- use este campo para explicar o caso operacional que motivou a mudanca: rerun anual apos falha parcial
+- este campo nao substitui `members_reused_from_previous`; ele apenas detalha sua origem
+
+#### `quality_summary.members_processados`
+
+- continua significando members que entraram no fluxo normal da run atual
+- em reruns de recuperacao, tende a acompanhar `members_reprocessed`
+- para frontend novo, prefira exibir `members_reprocessed` como label principal e manter `members_processados` como compatibilidade/apoio
+
+#### `quality_summary.members_skipped`
+
+- continua sendo o total de members encerrados como `skipped` nesta run
+- inclui principalmente skip por igualdade
+- para explicar a causa do skip, o frontend deve cruzar com `lifecycle_decision.members_skipped_by_sha` e `member_snapshot_summary.by_schema_status.reused`
+
+#### `lifecycle_decision.members_skipped_by_sha`
+
+- resumo compacto da decisao de lifecycle
+- serve bem para badges pequenos e listagens
+- para drill-down por member, nao use sozinho; complemente com `member_snapshot_summary`
+
+#### `member_snapshot_summary.by_status.member_skipped`
+
+- inventario duravel por status de member
+- e o melhor campo para tabelas por member e dashboards que precisem mostrar distribuicao por status
+
+#### `member_snapshot_summary.by_schema_status.reused`
+
+- identifica members reaproveitados por `member_sha256`
+- em telas detalhadas, pode ser apresentado como motivo tecnico do skip
+
+### Exemplo de leitura de uma run de recuperacao
+
+Se uma resposta vier com:
+
+- `quality_summary.members_total = 19`
+- `quality_summary.members_reprocessed = 3`
+- `quality_summary.members_reused_from_previous = 16`
+- `quality_summary.members_reused_from_failed_parent = 16`
+
+o frontend deve comunicar algo como:
+
+- "19 members avaliados"
+- "3 members reprocessados neste rerun"
+- "16 members reaproveitados por igualdade"
+- "os 16 reaproveitados vieram de members bem-sucedidos de uma execucao anual anterior que terminou em falha"
+
+### O que muda no comportamento de botoes e fluxos
+
+#### Fluxo recomendado para falha parcial em ZIP anual
+
+- manter o botao normal de rerun anual
+- nao forcar o operador a escolher manualmente os CSVs que falharam
+- apos o rerun, mostrar no detalhe da run quantos members foram reaproveitados e quantos realmente rodaram
+
+#### Fluxo recomendado para `/ingestion/sincronizacoes/reprocessar-arquivo`
+
+- manter como acao especializada
+- usar quando o operador quer agir sobre um member/arquivo especifico
+- nao sugerir esse endpoint como fluxo principal para "3 arquivos falharam em 19", porque o rerun anual agora ja resolve isso de forma inteligente
+
+### Impacto esperado no frontend
+
+- telas operacionais de runs devem diferenciar members reaproveitados de members efetivamente reprocessados
+- badges ou resumos de recuperacao podem usar `members_reused_from_failed_parent` para explicar por que um rerun anual nao rodou todos os CSVs novamente
+- o frontend deve continuar tratando `/ingestion/sincronizacoes/reprocessar-arquivo` como acao especializada, nao como fluxo padrao para recuperar falha parcial em ZIP anual
+- tabelas detalhadas podem mostrar:
+  - status da run
+  - total de members
+  - members reprocessados
+  - members reaproveitados
+  - members reaproveitados de pai falhado
+  - members skipped
+
+### Compatibilidade
+
+- nao houve remocao de endpoint
+- nao houve quebra de rota
+- a mudanca e de semantica operacional e de campos resumidos que agora devem ser priorizados pela UI
+- clientes antigos continuam funcionando, mas nao aproveitam a nova explicacao de recuperacao se ignorarem os novos campos
+
+## 2026-06-25 - Updates Service usa baseline canônico de members para cadastro e demais fontes
+
+### Endpoints com semântica corrigida
+
+- `GET /updates/pending/{id}`
+- `GET /updates/pending/{id}/members`
+
+### Mudança de comportamento
+
+- a análise detalhada de updates passa a priorizar o baseline canônico de lifecycle (`SourceMemberSnapshot`) da última run bem-sucedida
+- `IngestionFileMember` permanece apenas como fallback de compatibilidade quando o snapshot canônico ainda não existir
+- o fluxo de `cadastro` agora persiste o mesmo baseline estrutural de members já usado nas fontes anuais em ZIP
+
+### Impacto esperado no frontend
+
+- redução de falsos `added` em updates de `cadastro`
+- maior confiabilidade em `change_summary.members_added`, `members_modified` e no detalhamento retornado por `/updates/pending/{id}/members`
+- members removidos passam a preservar metadados anteriores corretos no payload de comparação
+
+## 2026-06-25 - Autorizacao consistente para operacoes delegadas de materializacao
+
+### Endpoints impactados
+
+- `GET /auth/me`
+- `GET /usuarios`
+- `GET /usuarios/{usuario_id}`
+- `POST /usuarios`
+- `PATCH /usuarios/{usuario_id}`
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+- `POST /analise/materializacoes/recuperacao/trigger`
+
+### Mudanca de autorizacao
+
+- os endpoints delegados de recuperacao da materializacao deixam de usar token dedicado
+- a autorizacao agora aceita:
+  - token de sistema
+  - usuario com `is_admin=true`
+  - usuario com `pode_operar_materializacao=true`
+
+### Campos novos em contratos de usuario
+
+- `pode_operar_materializacao` em:
+  - `GET /auth/me`
+  - itens de `GET /usuarios`
+  - `GET /usuarios/{usuario_id}`
+  - resposta de `POST /usuarios`
+  - resposta de `PATCH /usuarios/{usuario_id}`
+  - payloads de `POST /usuarios`
+  - payloads de `PATCH /usuarios/{usuario_id}`
+
+### Impacto esperado no frontend
+
+- telas administrativas podem conceder ou revogar a capacidade operacional de materializacao sem promover o usuario a admin
+- o frontend pode usar `GET /auth/me` para habilitar ou ocultar acoes de reativacao e sweep sem depender de configuracao externa
+- clientes que usavam token dedicado para os endpoints delegados devem migrar para login de usuario ou token de sistema
+- `is_admin` continua implicando acesso operacional, mas a UI nao precisa mais acoplar retry de materializacao a perfil administrativo amplo
+
+## 2026-06-25 - Self-healing delegado para materializacao presa
+
+### Endpoints novos
+
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+- `POST /analise/materializacoes/recuperacao/trigger`
+
+### Modelo de autenticacao
+
+- os endpoints acima usam o mesmo modelo geral da API
+- autorizacao valida token de sistema, usuario admin ou usuario com `pode_operar_materializacao=true`
+
+### Campos novos em `/analise/materializacoes/monitoramento`
+
+- `recoverable_pending_campaigns`
+- `undispatched_stuck_campaigns`
+- `oldest_undispatched_campaign_created_at`
+- `oldest_undispatched_campaign_elapsed_seconds`
+- `recoverable_campaign_ids`
+- `last_pending_recovery_sweep_at`
+- `last_pending_recovery_sweep_summary`
+- `pending_recovery_active_tasks`
+
+### Campos novos em `campaigns[]`
+
+- `recovery_state`
+- `last_recovery_check_at`
+- `last_recovery_action`
+- `last_recovery_reason_code`
+
+### Contrato de resposta dos endpoints delegados
+
+- `status`: `triggered`, `recovered`, `noop` ou `rejected`
+- `reason_code`: um entre `PENDING_UNDISPATCHED`, `STALE_CHUNK`, `WAITING_FOR_GATE`, `WAITING_FOR_SLOT`, `CHUNK_IN_PROGRESS`, `NO_PENDING_ITEMS`, `CAMPAIGN_NOT_FOUND`, `NOT_PENDING`, `PENDING_RECOVERY_DISABLED`
+- `affected_campaigns`
+- `requeued_campaigns`
+- `recovered_chunks`
+- `recovered_items`
+- `dispatcher_enqueued`
+- `triggered_at`
+
+Campos adicionais do sweep global:
+
+- `scanned_campaigns`
+- `recoverable_campaigns`
+
+### Semantica operacional atual
+
+- `PENDING_UNDISPATCHED` representa campanha pendente com itens pendentes, sem chunk ativo, sem execucao canônica `running` e sem bloqueio operacional explícito
+- `STALE_CHUNK` continua significando campanha com chunk stale ou recuperável
+- quando o worker de campanha encontra chunks stale ativos, ele tenta recuperar e reenfileirar inline antes de permanecer em espera operacional
+- quando uma campanha e efetivamente reativada ou reenfileirada, o backend a registra temporariamente como `requeued`; durante essa janela curta ela sai de `recoverable_pending_campaigns` e de `recoverable_campaign_ids`
+- a reativacao delegada nao ignora gate vermelho, nao ignora saturacao de slots e nao interrompe chunk vivo
+- o trigger global executa apenas uma varredura limitada, respeitando os limites configurados de sweep e reenfileiramento
+- o backend agora persiste o resumo do ultimo sweep automatico, usado pelo monitoramento
+
+### Impacto esperado no frontend
+
+- paineis operacionais podem oferecer acao de retry sem exigir acesso administrativo amplo
+- campanhas pendentes agora podem ser distinguidas entre bloqueadas, recuperaveis e efetivamente presas
+- a UI deve tratar `noop` como resposta operacional válida, nao como erro tecnico
+- `recoverable_campaign_ids` e `campaigns[].recovery_state` passam a ser os sinais recomendados para habilitar botao de reativacao
+- campanhas marcadas como `requeued` nao devem continuar sendo exibidas pela UI como "ainda recuperaveis agora"; elas ja estao em janela de retry em transito
+
+### Guia rapido de uso dos endpoints
+
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+  - retry operacional suportado para uma campanha conhecida
+- `POST /analise/materializacoes/recuperacao/trigger`
+  - sweep limitado para encontrar e recuperar campanhas pendentes elegiveis
+- `POST /analise/materializacoes/recuperar-stale`
+  - operacao administrativa de baixo nivel para recuperar stale em lote
+- `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+  - operacao administrativa de baixo nivel para recuperar stale em uma campanha especifica
+
 ## 2026-06-24 - Exclusao padrao de companhias canceladas na materializacao
 
 ### Superficie impactada
@@ -146,8 +694,10 @@
 
 ### Campos novos em resumo de campanha
 
+- `active_chunks`
 - `active_chunk_id`
 - `active_chunk_lease_expires_at`
+- `active_chunk_ids_preview`
 - `stale_chunks`
 - `wait_reason`
 
@@ -157,6 +707,12 @@
 - Cada chunk possui lease e heartbeat persistidos.
 - Chunks `queued` ou `running` com lease expirado entram no fluxo de recuperação.
 - A recuperação devolve itens inacabados para `pending` e preserva itens já concluídos.
+- `stale_chunks`, `stale_item_count` e `stale_chunk_preview` passaram a representar apenas stale ainda acionável no snapshot operacional.
+- Chunks stale históricos de campanhas já concluídas não devem mais ser tratados pelo frontend como itens bloqueados ou pendências de recuperação.
+- A materialização agora distingue concorrência entre campanhas e concorrência de chunks dentro da mesma campanha.
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS` limita campanhas simultâneas.
+- `ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN` limita chunks simultâneos dentro da mesma campanha.
+- `active_chunks` e `active_chunk_ids_preview` devem ser usados quando a UI precisar refletir paralelismo intra-campanha.
 - Campanhas em `pending` por gate vermelho não ficam mais se auto-reagendando continuamente.
 - A retomada do processamento pendente acontece por dispatcher explícito quando o sistema volta a verde.
 - O frontend pode distinguir:
@@ -527,6 +1083,37 @@ type AnaliseMaterializacaoProgress = {
   context_revisions: number | null;
   fact_revisions: number | null;
 };
+
+## 2026-06-29 - Manifesto de artifacts por fase de ingestao
+
+Impacto para frontend/admin: **sim**. O endpoint operacional `GET /ingestion/runs/{run_id}/phases` passou a expor metadados duraveis sobre os artifacts locais efetivamente usados e produzidos por cada fase.
+
+### Alteracoes de contrato
+
+- Schema `IngestionRunPhaseExecutionResumo`:
+  - novo campo `input_artifact_uri: string | null`
+  - novo campo `output_artifact_uri: string | null`
+- Campo existente `metrics`:
+  - pode incluir `artifacts: Array<{
+      uri: string;
+      role: string;
+      content_type: string;
+      logical_name: string;
+      size_bytes: number;
+      content_sha256: string;
+    }>`
+
+### Uso esperado no consumidor
+
+- Usar `input_artifact_uri` para explicar qual artifact de entrada foi realmente consumido pela fase.
+- Usar `output_artifact_uri` para drill-down de replay e troubleshooting operacional.
+- Usar `metrics.artifacts` para exibir manifesto resumido por fase sem depender de logs do worker.
+- O nome logico do member preserva o case original em `logical_name`.
+
+### Compatibilidade
+
+- Campos novos sao aditivos.
+- Consumidores atuais continuam funcionando se ignorarem `input_artifact_uri`, `output_artifact_uri` e `metrics.artifacts`.
 
 type AnaliseMaterializacaoExecucaoResumo = {
   id: string;

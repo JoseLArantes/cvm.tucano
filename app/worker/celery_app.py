@@ -21,27 +21,53 @@ celery_app.conf.task_reject_on_worker_lost = True
 celery_app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
 celery_app.conf.worker_max_tasks_per_child = settings.celery_worker_max_tasks_per_child
 celery_app.conf.worker_max_memory_per_child = settings.celery_worker_max_memory_per_child_kb
-celery_app.conf.task_default_queue = "celery"
+celery_app.conf.task_default_queue = settings.ingestion_queue_name
 celery_app.conf.task_queues = (
     Queue("celery"),
+    Queue(settings.ingestion_queue_name),
+    Queue(settings.ingestion_control_queue_name),
     Queue(settings.analise_materializacao_queue_name),
 )
 celery_app.conf.task_routes = {
+    "app.worker.tasks.sincronizar_cadastro_companhias_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_member_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.disparar_dependentes_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.finalizar_sincronizacao_zip_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_dfp_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_itr_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_fre_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_fca_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_ipe_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_vlmo_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_cgvn_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.ingerir_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.reconciliar_ingestion_stale_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.materializar_analise_companhia_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_campanha_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_chunk_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.despachar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.reconciliar_materializacao_stale_task": {"queue": settings.analise_materializacao_queue_name},
+    "app.worker.tasks.recuperar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
 }
 
 
 def construir_beat_schedule() -> dict[str, dict[str, Any]]:
     beat_schedule: dict[str, dict[str, Any]] = {
+        "ingestion-stale-recovery": {
+            "task": "app.worker.tasks.reconciliar_ingestion_stale_task",
+            "schedule": timedelta(seconds=settings.ingestion_recovery_sweep_seconds),
+        },
         "analise-materializacao-stale-recovery": {
             "task": "app.worker.tasks.reconciliar_materializacao_stale_task",
             "schedule": timedelta(seconds=settings.analise_materializacao_recovery_sweep_seconds),
         }
     }
+    if settings.analise_materializacao_pending_recovery_enabled:
+        beat_schedule["analise-materializacao-pending-recovery"] = {
+            "task": "app.worker.tasks.recuperar_materializacao_pendente_task",
+            "schedule": timedelta(seconds=settings.analise_materializacao_pending_recovery_sweep_seconds),
+        }
     
     if settings.auto_trigger_updates:
         beat_schedule["sincronizar-cadastro-diario"] = {

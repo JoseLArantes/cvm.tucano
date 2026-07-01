@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, select, true
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionReconcileHash, IngestionRun
+from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRow, IngestionRun
 from app.services.ingestion.dedup import STATUSS_REAPROVEITAVEIS_EXECUCAO
+from app.services.ingestion.normalized_artifacts import read_normalized_hashes
 
 
 def empty_change_summary() -> dict[str, Any]:
@@ -134,57 +135,41 @@ def reconcile_promoted_rows(
     ingestion_file_member_id: Any,
     arquivo_origem: str,
     ano_origem: int | None,
-    current_hashes: set[str],
+    row_kinds: set[str],
+    normalized_artifact_uri: str | None = None,
 ) -> int:
     db.flush()
-    db.execute(
-        delete(IngestionReconcileHash).where(
-            IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-            IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-            IngestionReconcileHash.target_table == model.__tablename__,
-            IngestionReconcileHash.arquivo_origem == arquivo_origem,
-            IngestionReconcileHash.ano_origem == ano_origem,
-        )
-    )
-    if current_hashes:
-        db.add_all(
-            [
-                IngestionReconcileHash(
-                    ingestion_run_id=ingestion_run_id,
-                    ingestion_file_member_id=ingestion_file_member_id,
-                    target_table=model.__tablename__,
-                    arquivo_origem=arquivo_origem,
-                    ano_origem=ano_origem,
-                    hash_origem=item,
-                )
-                for item in current_hashes
-            ]
-        )
-        db.flush()
-    stale_stmt = (
-        delete(model)
-        .where(model.arquivo_origem == arquivo_origem, model.ano_origem == ano_origem)
-        .where(
-            ~exists(
-                select(IngestionReconcileHash.id).where(
-                    IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-                    IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-                    IngestionReconcileHash.target_table == model.__tablename__,
-                    IngestionReconcileHash.arquivo_origem == arquivo_origem,
-                    IngestionReconcileHash.ano_origem == ano_origem,
-                    IngestionReconcileHash.hash_origem == model.hash_origem,
-                )
+    if normalized_artifact_uri is not None:
+        current_hashes = read_normalized_hashes(artifact_uri=normalized_artifact_uri)
+        deleted = db.execute(
+            delete(model).where(
+                model.arquivo_origem == arquivo_origem,
+                model.ano_origem == ano_origem,
+                model.hash_origem.not_in(sorted(current_hashes)) if current_hashes else true(),
             )
         )
+        rowcount = getattr(deleted, "rowcount", None)
+        return int(rowcount if rowcount is not None else 0)
+
+    current_hashes_subquery = (
+        select(IngestionRow.normalized_hash)
+        .where(
+            IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
+            IngestionRow.validation_status == "valid",
+            IngestionRow.normalized_hash.is_not(None),
+        )
+        .distinct()
     )
-    deleted = db.execute(stale_stmt)
-    db.execute(
-        delete(IngestionReconcileHash).where(
-            IngestionReconcileHash.ingestion_run_id == ingestion_run_id,
-            IngestionReconcileHash.ingestion_file_member_id == ingestion_file_member_id,
-            IngestionReconcileHash.target_table == model.__tablename__,
-            IngestionReconcileHash.arquivo_origem == arquivo_origem,
-            IngestionReconcileHash.ano_origem == ano_origem,
+    if row_kinds:
+        current_hashes_subquery = current_hashes_subquery.where(
+            IngestionRow.row_kind.in_(sorted(row_kinds))
+        )
+
+    deleted = db.execute(
+        delete(model).where(
+            model.arquivo_origem == arquivo_origem,
+            model.ano_origem == ano_origem,
+            model.hash_origem.not_in(current_hashes_subquery),
         )
     )
     rowcount = getattr(deleted, "rowcount", None)

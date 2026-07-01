@@ -1,12 +1,15 @@
 import io
+import tempfile
+import uuid
 import zipfile
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.config import get_settings
 from app.db.base import Base
 from app.models import (  # noqa: F401
     cgvn,
@@ -22,7 +25,9 @@ from app.models import (  # noqa: F401
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador
 from app.models.ingestion import (
-    IngestionReconcileHash,
+    IngestionFileMember,
+    IngestionPhaseExecution,
+    IngestionRow,
     SourceArtifactSnapshot,
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
@@ -31,7 +36,8 @@ from app.models.ipe import IpeDocumento
 from app.services.ingestion.acquisition import probe_remote_source
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.ipe import sincronizar_ipe
-from app.services.ingestion.staging import create_run, register_file
+from app.services.ingestion.normalized_artifacts import NormalizedArtifactWriter
+from app.services.ingestion.staging import create_run, register_file, stage_csv_payload_streaming
 
 
 def _session() -> Session:
@@ -164,13 +170,94 @@ def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch: p
         session.close()
 
 
-def test_reconcile_promoted_rows_uses_transient_hash_set_and_deletes_stale_rows() -> None:
+def test_stage_csv_payload_streaming_atualiza_heartbeat_em_fronteiras_de_chunk() -> None:
+    session = _session()
+    try:
+        run = create_run(session, tipo_fonte="ipe", ano=2025, status="em_execucao", phase="stage")
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/ipe.zip",
+            source_filename="ipe_cia_aberta_2025.zip",
+            payload=b"fake",
+            is_zip=True,
+        )
+        session.flush()
+        phase = session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+        assert phase is not None
+        heartbeat_anterior = datetime.now(UTC) - timedelta(hours=1)
+        phase.heartbeat_at = heartbeat_anterior
+        session.commit()
+
+        payload = (
+            "CNPJ_Companhia;Nome_Companhia;Codigo_CVM\n"
+            "00.000.000/0001-91;Banco do Brasil;1023\n"
+            "00.000.000/0001-91;Banco do Brasil;1023\n"
+        ).encode("latin1")
+        stage_csv_payload_streaming(
+            session,
+            ingestion_run=run,
+            ingestion_file=ingestion_file,
+            payload=payload,
+            member_name="ipe_cia_aberta_2025.csv",
+            arquivo_origem="ipe_cia_aberta_2025.csv",
+            ano_origem=2025,
+            row_kind="ipe_documento",
+            chunk_size=1,
+        )
+
+        phase_atualizada = session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
+        assert phase_atualizada is not None
+        assert phase_atualizada.heartbeat_at is not None
+        assert phase_atualizada.heartbeat_at > heartbeat_anterior
+        assert phase_atualizada.metrics is not None
+        assert phase_atualizada.metrics["staged_rows"] == 2
+    finally:
+        session.close()
+
+
+def test_reconcile_promoted_rows_deletes_stale_rows_without_persisting_transient_hashes() -> None:
     session = _session()
     try:
         run = create_run(session, tipo_fonte="ipe", ano=2025)
+        ingestion_file = register_file(
+            session,
+            ingestion_run=run,
+            source_url="https://example.test/ipe.zip",
+            source_filename="ipe_cia_aberta_2025.zip",
+            payload=b"fake",
+            is_zip=True,
+        )
+        member = IngestionFileMember(
+            ingestion_file_id=ingestion_file.id,
+            member_name="ipe_cia_aberta_2025.csv",
+            member_sha256="member-hash",
+            member_size_bytes=123,
+            encoding="utf-8",
+            delimiter=";",
+            header=["COLUNA"],
+            row_count=1,
+            schema_status="ok",
+        )
+        session.add(member)
         company = _companhia()
         session.add(company)
         session.flush()
+        session.add(
+            IngestionRow(
+                id=uuid.uuid4(),
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=2,
+                raw_data={"COLUNA": "valor"},
+                raw_hash="raw-hash",
+                row_kind="ipe_documento",
+                validation_status="valid",
+                normalized_hash="hash-a",
+            )
+        )
         current = IpeDocumento(
             companhia_id=company.id,
             cnpj_companhia="00000000000191",
@@ -218,17 +305,123 @@ def test_reconcile_promoted_rows_uses_transient_hash_set_and_deletes_stale_rows(
             session,
             model=IpeDocumento,
             ingestion_run_id=run.id,
-            ingestion_file_member_id=None,
+            ingestion_file_member_id=member.id,
             arquivo_origem="ipe_cia_aberta_2025.csv",
             ano_origem=2025,
-            current_hashes={"hash-a"},
+            row_kinds={"ipe_documento"},
         )
         session.commit()
 
         assert deleted == 1
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-a")) is not None
         assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-b")) is None
-        assert session.scalar(select(IngestionReconcileHash)) is None
+    finally:
+        session.close()
+
+
+def test_reconcile_promoted_rows_can_use_normalized_artifact_hashes(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = _session()
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            monkeypatch.setattr(get_settings(), "storage_dir", tmp_dir)
+            run = create_run(session, tipo_fonte="ipe", ano=2025)
+            ingestion_file = register_file(
+                session,
+                ingestion_run=run,
+                source_url="https://example.test/ipe.zip",
+                source_filename="ipe_cia_aberta_2025.zip",
+                payload=b"fake",
+                is_zip=True,
+            )
+            member = IngestionFileMember(
+                ingestion_file_id=ingestion_file.id,
+                member_name="ipe_cia_aberta_2025.csv",
+                member_sha256="member-hash",
+                member_size_bytes=123,
+                encoding="utf-8",
+                delimiter=";",
+                header=["COLUNA"],
+                row_count=1,
+                schema_status="ok",
+            )
+            session.add(member)
+            company = _companhia()
+            session.add(company)
+            session.flush()
+
+            writer = NormalizedArtifactWriter(
+                run_id=str(run.id),
+                member_id=str(member.id),
+                member_name=member.member_name,
+                row_kind="ipe_documento",
+            )
+            writer.write_row(
+                {
+                    "normalized_hash": "hash-a",
+                    "arquivo_origem": "ipe_cia_aberta_2025.csv",
+                    "linha_origem": 2,
+                }
+            )
+            artifact = writer.close()
+
+            current = IpeDocumento(
+                companhia_id=company.id,
+                cnpj_companhia="00000000000191",
+                codigo_cvm=1023,
+                nome_companhia="Banco do Brasil",
+                data_referencia=date(2025, 1, 1),
+                categoria="Categoria X",
+                tipo="Tipo X",
+                especie="Especie X",
+                assunto="Atual",
+                data_entrega=date(2025, 1, 15),
+                tipo_apresentacao="Apresentacao",
+                protocolo_entrega="123",
+                versao=1,
+                link_download="http://ipe/1",
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=2,
+                hash_origem="hash-a",
+            )
+            stale = IpeDocumento(
+                companhia_id=company.id,
+                cnpj_companhia="00000000000191",
+                codigo_cvm=1023,
+                nome_companhia="Banco do Brasil",
+                data_referencia=date(2025, 1, 1),
+                categoria="Categoria X",
+                tipo="Tipo Y",
+                especie="Especie X",
+                assunto="Obsoleto",
+                data_entrega=date(2025, 1, 15),
+                tipo_apresentacao="Apresentacao",
+                protocolo_entrega="456",
+                versao=1,
+                link_download="http://ipe/2",
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                linha_origem=3,
+                hash_origem="hash-b",
+            )
+            session.add_all([current, stale])
+            session.commit()
+
+            deleted = reconcile_promoted_rows(
+                session,
+                model=IpeDocumento,
+                ingestion_run_id=run.id,
+                ingestion_file_member_id=member.id,
+                arquivo_origem="ipe_cia_aberta_2025.csv",
+                ano_origem=2025,
+                row_kinds={"ipe_documento"},
+                normalized_artifact_uri=str(artifact["uri"]),
+            )
+            session.commit()
+
+            assert deleted == 1
+            assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-a")) is not None
+            assert session.scalar(select(IpeDocumento).where(IpeDocumento.hash_origem == "hash-b")) is None
     finally:
         session.close()
 

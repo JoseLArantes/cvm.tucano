@@ -1,357 +1,127 @@
 ---
-title: API Analitica
+title: Analise
 sidebar_position: 7
 ---
 
-# API Analitica
-
-A API analítica é composta por um catálogo global de métricas e por blocos por companhia em `/analise/companhias/{codigo_cvm}`. O backend resolve períodos canônicos, unidades, comparabilidade, qualidade e evidências a partir de fatos CVM normalizados, com leitura preferencial da camada canônica persistida e fallback controlado para resolução em tempo de execução.
-
-A materialização canônica usa uma fila dedicada, campanhas agregadas, processamento em chunks, lease persistido por chunk, dispatcher de campanhas pendentes e um gate de admissão. Quando a ingestão está ativa, a materialização permanece pendente e só retoma novos chunks quando o sistema volta a verde. Por padrão, campanhas automáticas e fluxos operacionais padrão não incluem companhias com `situacao_registro=CANCELADA`. A materialização pontual de uma companhia cancelada exige override explícito no disparo manual.
-
-## Endpoints
-
-| Método | Rota | Descrição |
-| --- | --- | --- |
-| `GET` | `/analise/metricas` | Catálogo versionado de métricas analíticas |
-| `GET` | `/analise/materializacoes` | Listagem de execuções de materialização analítica |
-| `GET` | `/analise/materializacoes/monitoramento` | Snapshot operacional da fila e dos workers de materialização |
-| `GET` | `/analise/materializacoes/controle` | Estado atual do gate de materialização |
-| `POST` | `/analise/materializacoes/controle/pause` | Pausa manual do gate de materialização |
-| `POST` | `/analise/materializacoes/controle/resume` | Retorno ao modo automático do gate |
-| `POST` | `/analise/materializacoes/recuperar-stale` | Recuperação imediata de chunks stale |
-| `POST` | `/analise/materializacoes/campanhas/{campanha_id}/recuperar` | Recuperação imediata de chunks stale de uma campanha |
-| `GET` | `/analise/materializacoes/{execucao_id}` | Detalhe de uma execução de materialização |
-| `GET` | `/analise/companhias/{codigo_cvm}` | Manifesto analítico da companhia |
-| `GET` | `/analise/companhias/{codigo_cvm}/series` | Séries normalizadas por métrica e período |
-| `GET` | `/analise/companhias/{codigo_cvm}/comparacoes` | Comparações prontas sobre as séries |
-| `GET` | `/analise/companhias/{codigo_cvm}/qualidade` | Diagnóstico de qualidade analítica |
-| `GET` | `/analise/companhias/{codigo_cvm}/sinais` | Sinais determinísticos com evidências |
-| `GET` | `/analise/companhias/{codigo_cvm}/eventos` | Timeline analítica de eventos |
-| `GET` | `/analise/companhias/{codigo_cvm}/restatements` | Histórico de reapresentações |
-| `GET` | `/analise/companhias/{codigo_cvm}/governanca` | Observações temporais anuais de governança |
-| `GET` | `/analise/companhias/{codigo_cvm}/pessoas` | Observações temporais anuais de pessoas e remuneração |
-| `GET` | `/analise/companhias/{codigo_cvm}/brief` | Brief analítico consolidado da companhia |
-
-## Convenções do contrato
-
-- Datas e datetimes usam ISO 8601.
-- Valores decimais são serializados como string decimal canônica.
-- Razões usam `unit=ratio` e o valor decimal correspondente.
-- Variações em pontos percentuais usam `unit=percentage_point`.
-- O escopo societário é explícito: `consolidated` ou `individual`.
-- Para fluxo trimestral, `base_periodo=quarter` significa trimestre isolado. `base_periodo=ytd` significa acumulado no exercício.
-- As respostas analíticas expõem `resolution` para indicar se o payload veio da camada canônica persistida (`canonical`) ou do resolvedor em tempo de execução (`runtime_fallback`).
-- O parâmetro `as_of` representa o que era conhecido na data informada, usando `data_recebimento` do documento quando disponível.
-
-## `GET /analise/metricas`
-
-Retorna o catálogo oficial de métricas com identificador estável, tipo, unidade, fórmula, contas CVM candidatas, estratégia de resolução, bases temporais e limitações metodológicas.
-
-```bash
-curl -X GET "http://localhost:8007/analise/metricas" \
-  -H "Authorization: Bearer <token>"
-```
-
-## `GET /analise/materializacoes`
-
-Lista execuções da camada canônica com status, modo de materialização, janela efetivamente recomposta, progresso parcial, tempo decorrido, estimativa de conclusão e vínculo opcional com campanhas, itens e chunks de materialização.
-
-Cada execução pode ser:
-
-- `full`: recompõe toda a linha do tempo canônica da companhia/escopo
-- `incremental`: recompõe apenas o sufixo a partir de `invalidated_from`, preservando o prefixo canônico anterior
-
-Regra operacional atual:
-
-- campanhas automáticas e fluxos padrão excluem companhias com `situacao_registro=CANCELADA`
-- se uma execução pontual for disparada sem override para uma companhia cancelada, a execução é registrada e concluída sem produzir revisões, com sinalização de skip operacional no `summary`
-- a materialização pontual de canceladas só ocorre quando o operador informa explicitamente o override de inclusão
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `status` | string | `running`, `success` ou `failed` |
-| `codigo_cvm` | integer | Filtra por companhia |
-| `escopo` | string | `consolidated` ou `individual` |
-| `source` | string | Origem do disparo, como `post_ingestion`, `manual` ou `backfill` |
-| `campanha_id` | string | Filtra por campanha de materialização |
-| `pagina` | integer | Página da listagem |
-| `tamanho_pagina` | integer | Quantidade de itens por página |
-
-```bash
-curl -X GET "http://localhost:8007/analise/materializacoes?status=running" \
-  -H "Authorization: Bearer <token>"
-```
-
-## `GET /analise/materializacoes/monitoramento`
+# Analise
 
-Retorna um snapshot operacional das filas e campanhas de materialização, combinando:
+A superficie `/analise` mistura dois tipos de informacao:
 
-- quantidade de execuções `running` persistidas no banco;
-- quantidade de execuções `running` em modo `full` versus `incremental`;
-- quantidade de tasks ativas, reservadas e agendadas nos workers Celery;
-- estado atual do gate de admissão da materialização;
-- quantidade de campanhas pendentes e em andamento;
-- quantidade de campanhas em recuperação por chunk stale;
-- quantidade de campanhas pendentes especificamente porque o gate está fechado;
-- quantidade de itens pendentes, em andamento, com sucesso, falha e skipped;
-- quantidade de chunks `queued`, `running` e `stale`;
-- quantidade de tasks orquestradoras e de chunk em execução;
-- previews dos itens correntes, da fila pendente e de chunks stale já recuperáveis;
-- previews das execuções correntes, incluindo modo, cutoff incremental e contadores de revisões afetadas;
-- exclusão padrão de companhias canceladas nas campanhas automáticas;
-- execução em andamento mais antiga;
-- execuções com `updated_at` sem heartbeat recente.
+1. informacao orientada ao usuario final de analise financeira:
+   - leituras por companhia
+   - series historicas
+   - comparacoes
+   - sinais
+   - qualidade
+   - eventos
+   - brief analitico
 
-O snapshot distingue:
+2. informacao meta e operacional do proprio sistema:
+   - materializacao canonica
+   - filas, chunks e campanhas
+   - gate operacional
+   - retries e self-healing
+   - observabilidade de processamento interno
 
-- gate automático por ingestão ativa versus pausa manual;
-- campanha aguardando recuperação automática de chunk stale;
-- campanha aguardando dispatcher após liberação do gate;
-- task orquestradora da campanha;
-- tasks de chunk;
-- execuções canônicas por companhia;
-- profundidade observada da fila dedicada `analise_materializacao`, quando disponível;
-- worker da fila dedicada versus workers da fila padrão `celery`.
+Para evitar mistura entre consumo analitico e operacao da plataforma, a documentacao de analise foi separada em tres blocos.
 
-```bash
-curl -X GET "http://localhost:8007/analise/materializacoes/monitoramento" \
-  -H "Authorization: Bearer <token>"
-```
+## Estrutura desta secao
 
-Campos operacionais principais do gate:
+### 1. Visao geral de analise
 
-- `gate.status`: `green` ou `red`
-- `gate.reason_code`: `NO_BLOCKERS`, `INGESTION_ACTIVE`, `MANUAL_PAUSE` ou `GATE_DISABLED`
-- `gate.blocking_ingestions`: quantidade de execuções/runs que mantêm o gate fechado
-- `gate.pending_ingestions`: quantidade de execuções em `aguardando_ingestao`, expostas para contexto
-- `gate.blockers`: preview das execuções/runs que estão bloqueando novos chunks
-- `waiting_for_gate_campaigns`: campanhas pendentes especificamente por bloqueio do gate
-- `recovering_campaigns`: campanhas pendentes aguardando recuperação de chunk stale
-- `running_full_executions`, `running_incremental_executions`: divisão das execuções correntes por modo
-- `lowest_running_invalidated_from`: menor cutoff incremental observado entre as execuções correntes
-- `queued_chunks`, `running_chunks`, `stale_chunks`: contadores globais por estado do chunk
-- `stale_item_count`: itens ainda associados a chunks marcados como `stale`
-- `stale_chunk_preview`: preview dos chunks já identificados como `stale`
-- `stalled_incremental_execution_ids`: subset stalled apenas do modo incremental
-- `running_execution_previews`: previews das execuções correntes com `materialization_mode`, `invalidated_from` e progresso
+Esta pagina explica a divisao conceitual da superficie `/analise`.
 
-Comportamento operacional importante:
+### 2. Analise por companhia
 
-- o gate vermelho impede progresso material da campanha;
-- o orquestrador não fica mais em polling contínuo por campanha enquanto o gate está fechado;
-- novas campanhas pendentes são retomadas por um dispatcher específico quando a ingestão termina ou quando o controle volta ao modo liberado.
+Use esta documentacao quando o interesse principal for o dado analitico consumido por usuarios de negocio, produtos financeiros ou telas de leitura.
 
-## `GET /analise/materializacoes/controle`
+Pagina:
 
-Retorna o estado consolidado do gate de materialização e do modo manual persistido.
+- [Análise por Companhia](./analise-companhias.md)
 
-## `POST /analise/materializacoes/controle/pause`
+Endpoints cobertos:
 
-Ativa pausa manual. Novos chunks deixam de iniciar, mas a companhia já em processamento termina antes da pausa efetiva.
+- `GET /analise/metricas`
+- `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/companhias/{codigo_cvm}/comparacoes`
+- `GET /analise/companhias/{codigo_cvm}/qualidade`
+- `GET /analise/companhias/{codigo_cvm}/sinais`
+- `GET /analise/companhias/{codigo_cvm}/eventos`
+- `GET /analise/companhias/{codigo_cvm}/restatements`
+- `GET /analise/companhias/{codigo_cvm}/governanca`
+- `GET /analise/companhias/{codigo_cvm}/pessoas`
+- `GET /analise/companhias/{codigo_cvm}/brief`
 
-Parâmetros:
+### 3. Materializacoes e operacao
 
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `reason` | string | Motivo textual opcional para a pausa manual |
+Use esta documentacao quando o interesse principal for o funcionamento interno do sistema, monitoramento, retries operacionais, campanha/chunk, gate e observabilidade.
 
-```bash
-curl -X POST "http://localhost:8007/analise/materializacoes/controle/pause?reason=janela-de-carga" \
-  -H "Authorization: Bearer <token>"
-```
+Pagina:
 
-## `POST /analise/materializacoes/controle/resume`
+- [Materializações Analíticas](./analise-materializacoes.md)
 
-Remove a pausa manual e devolve o gate ao modo automático. Se ainda houver ingestão ativa, o gate continua vermelho por `INGESTION_ACTIVE`.
+Endpoints cobertos:
 
-## `POST /analise/materializacoes/recuperar-stale`
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+- `POST /analise/materializacoes/controle/pause`
+- `POST /analise/materializacoes/controle/resume`
+- `POST /analise/materializacoes/recuperar-stale`
+- `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+- `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
+- `POST /analise/materializacoes/recuperacao/trigger`
+- `GET /analise/materializacoes/{execucao_id}`
 
-Executa a recuperação imediata de chunks com lease expirado e já classificados como stale pelo backend. Os itens ainda não concluídos retornam para `pending` e a campanha volta a poder progredir.
+## Como escolher a documentacao certa
 
-Retorna:
+### Se o foco for analise financeira
 
-- `recovered_chunks`
-- `recovered_items`
-- `affected_campaigns`
-- `chunk_ids`
+Leia:
 
-## `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
+- [Análise por Companhia](./analise-companhias.md)
 
-Executa a mesma recuperação, mas limitada a uma campanha específica.
+Esse bloco cobre payloads orientados ao usuario e respostas com valor direto para leitura, comparacao e interpretacao financeira.
 
-## `GET /analise/materializacoes/{execucao_id}`
+### Se o foco for processo interno do backend
 
-Retorna o detalhe de uma execução específica, incluindo `summary` bruto persistido pela materialização para auditoria operacional, o modo da execução (`full` ou `incremental`), o cutoff `invalidated_from` quando aplicável, os contadores de revisões inseridas/encerradas/removidas e os vínculos opcionais `campanha_id`, `campanha_item_id`, `chunk_execucao_id`, `queue_name` e `position_in_chunk`.
+Leia:
 
-Quando uma companhia estiver com `situacao_registro=CANCELADA` e não houver override explícito de inclusão, o `summary` pode trazer:
+- [Materializações Analíticas](./analise-materializacoes.md)
 
-- `skipped_reason=COMPANHIA_CANCELADA`
-- `company_status=CANCELADA`
-- contadores de revisões em zero
+Esse bloco cobre o que o sistema usa internamente para persistir, organizar, recuperar, monitorar e reprocessar a camada canonica.
 
-## `GET /analise/companhias/{codigo_cvm}`
+## Distincao pratica
 
-Retorna o manifesto analítico da companhia: contexto padrão, períodos disponíveis, resumo de qualidade e links para os demais blocos.
+### Informacao orientada ao usuario
 
-Parâmetros:
+Exemplos:
 
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `codigo_cvm` | integer | Código CVM da companhia |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-
-```bash
-curl -X GET "http://localhost:8007/analise/companhias/9512?escopo=consolidated" \
-  -H "Authorization: Bearer <token>"
-```
-
-## `GET /analise/companhias/{codigo_cvm}/series`
-
-Resolve observações analíticas normalizadas.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `metricas` | string | Lista CSV de métricas estáveis |
-| `periodicidade` | string | `annual` ou `quarterly` |
-| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-| `horizonte_anos` | integer | Horizonte anual máximo quando `periodicidade=annual` e `base_periodo=fy` |
-
-```bash
-curl -X GET "http://localhost:8007/analise/companhias/9512/series?metricas=receita_liquida,lucro_liquido&periodicidade=quarterly&base_periodo=quarter&escopo=consolidated" \
-  -H "Authorization: Bearer <token>"
-```
-
-Cada resposta de série inclui:
-
-- `resolution.mode`: `canonical` ou `runtime_fallback`
-- `resolution.materialization_execution_id`: UUID da materialização canônica usada, quando houver
-- `resolution.materialized_at`: instante de conclusão da materialização
-- `resolution.as_of`: data de corte informacional efetivamente aplicada
-- `horizonte_anos`: horizonte anual efetivamente aplicado em consultas históricas FY
-
-## `GET /analise/companhias/{codigo_cvm}/comparacoes`
-
-Retorna comparações analíticas prontas sobre as séries resolvidas. O backend produz YoY, QoQ, CAGR, análise vertical e índice base 100 quando matematicamente definidos. Quando uma comparação não puder ser produzida, a resposta traz `status=unavailable` e `reason_code`.
-
-As comparações reutilizam a mesma origem de resolução declarada em `resolution`.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `metricas` | string | Lista CSV de métricas estáveis |
-| `periodicidade` | string | `annual` ou `quarterly` |
-| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-| `horizonte_anos` | integer | Horizonte anual máximo quando `periodicidade=annual` e `base_periodo=fy` |
-
-Cada comparação expõe:
-
-- `metric_unit`: unidade dos valores `current_value` e `comparable_value`
-- `comparison_unit`: unidade do resultado comparativo, como `ratio`, `percentage_point` ou `index`
-- `horizonte_anos`: horizonte anual efetivamente aplicado em consultas históricas FY
-
-## `GET /analise/companhias/{codigo_cvm}/qualidade`
-
-Executa verificações auditáveis de completude, comparabilidade, consistência e reapresentações.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `periodicidade` | string | `annual` ou `quarterly` |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-
-## `GET /analise/companhias/{codigo_cvm}/sinais`
-
-Avalia regras determinísticas do backend e retorna o sinal com threshold, valor observado e evidências.
-
-Os sinais são calculados sobre as séries e comparáveis corretos para o `as_of` informado.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-
-## `GET /analise/companhias/{codigo_cvm}/eventos`
-
-Retorna a timeline analítica atual unificando IPE, reapresentações financeiras, alterações de capital e negociações relevantes.
-
-Cada evento expõe `event_id`, identificador estável adequado para chave de renderização, paginação incremental e deep links.
-
-## `GET /analise/companhias/{codigo_cvm}/restatements`
-
-Compara versões consecutivas de DFP e ITR no escopo solicitado e informa as contas alteradas, com valores antes/depois e impacto absoluto/relativo.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-
-## `GET /analise/companhias/{codigo_cvm}/governanca`
-
-Retorna observações temporais anuais de governança, com corte `as_of` e horizonte histórico explícito.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-| `horizonte_anos` | integer | Horizonte anual máximo a retornar |
-
-O contrato atual expõe, entre outras observações:
-
-- `governanca_praticas_adotadas_ratio`
-- `governanca_praticas_com_explicacao`
-
-## `GET /analise/companhias/{codigo_cvm}/pessoas`
-
-Retorna observações temporais anuais de pessoas e remuneração, com corte `as_of` e horizonte histórico explícito.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-| `horizonte_anos` | integer | Horizonte anual máximo a retornar |
-
-O contrato atual expõe, entre outras observações:
-
-- `pessoas_remuneracao_total_orgao`
-- `pessoas_empregados_total`
-
-## `GET /analise/companhias/{codigo_cvm}/brief`
-
-Retorna um brief analítico com:
-
-- trimestre corrente;
-- trimestre anterior;
-- mesmo trimestre do ano anterior;
-- exercício corrente;
-- exercício anterior;
-- métricas, comparações, sinais, qualidade e eventos recentes.
-
-Parâmetros:
-
-| Nome | Tipo | Descrição |
-| --- | --- | --- |
-| `escopo` | string | `consolidated` ou `individual` |
-| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
-| `metricas` | string | Lista CSV opcional de métricas a priorizar |
-| `incluir_eventos` | boolean | Controla a inclusão dos eventos recentes |
+- receita liquida, lucro liquido e margem
+- comparacoes YoY, QoQ e CAGR
+- sinais deterministas
+- timeline de eventos
+- observacoes de governanca
+- brief analitico consolidado
+
+### Informacao meta e operacional
+
+Exemplos:
+
+- campaign id
+- chunk execucao id
+- fila dedicada de materializacao
+- stale chunk
+- gate vermelho
+- pending recovery
+- self-healing
+- retries operacionais
+
+## Convencoes do contrato analitico
+
+- datas e datetimes usam ISO 8601
+- valores decimais sao serializados como string decimal canonica
+- o escopo societario e explicito: `consolidated` ou `individual`
+- `resolution.mode` distingue leitura canonica persistida de fallback em tempo de execucao
+- `as_of` representa a data de corte informacional efetivamente aplicada

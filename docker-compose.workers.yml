@@ -1,22 +1,28 @@
 services:
   cvm_worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q celery
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
     env_file:
       - .env
+    mem_limit: ${WORKER_MEM_LIMIT:-4g}
+    mem_reservation: ${WORKER_MEM_RESERVATION:-2g}
+    cpus: ${WORKER_CPUS:-2.0}
     volumes:
       - .:/app
     deploy:
-      replicas: ${WORKER_REPLICAS:-4}
+      replicas: ${WORKER_REPLICAS:-6}
     depends_on:
       cvm_redis:
         condition: service_healthy
 
   cvm_analise_materializacao_worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q analise_materializacao
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Ofair -Q analise_materializacao
     env_file:
       - .env
+    mem_limit: ${ANALISE_MATERIALIZACAO_WORKER_MEM_LIMIT:-2g}
+    mem_reservation: ${ANALISE_MATERIALIZACAO_WORKER_MEM_RESERVATION:-1g}
+    cpus: ${ANALISE_MATERIALIZACAO_WORKER_CPUS:-2.0}
     volumes:
       - .:/app
     deploy:

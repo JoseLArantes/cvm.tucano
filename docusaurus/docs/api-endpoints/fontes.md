@@ -401,7 +401,8 @@ O endpoint de exportação usa **streaming HTTP** para transmitir grandes volume
 
 ---
 
-## Próximos Passos
+## Proximos Passos
 
-- [Análise](./analise.md) - Endpoints estratégicos de análise consolidada
-- [Ingestion](../ingestion/monitoring.md) - Monitoramento de sincronizações
+- [Analise](./analise.md) - Visao geral da superficie analitica
+- [Analise por Companhia](./analise-companhias.md) - Endpoints estrategicos de analise consolidada
+- [Ingestion](../ingestion/monitoring.md) - Monitoramento de sincronizacoes
