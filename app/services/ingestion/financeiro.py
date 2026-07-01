@@ -1100,13 +1100,6 @@ def _promote_financeiro_stage_row_kind_postgresql(
         f"{quoted_table}.{_quote_ident(column)} IS DISTINCT FROM EXCLUDED.{_quote_ident(column)}"
         for column in business_columns
     ) or "false"
-    existing_business_change_sql = " OR ".join(
-        f"target.{_quote_ident(column)} IS DISTINCT FROM source.{_quote_ident(column)}"
-        for column in business_columns
-    ) or "false"
-    key_join_sql = " AND ".join(
-        f"target.{_quote_ident(column)} IS NOT DISTINCT FROM source.{_quote_ident(column)}" for column in campos_chave
-    )
     sql = f"""
         WITH raw_source AS (
             SELECT
@@ -1120,28 +1113,6 @@ def _promote_financeiro_stage_row_kind_postgresql(
             FROM raw_source
             ORDER BY {order_columns} DESC
         ),
-        existing AS (
-            SELECT
-                source.hash_origem AS source_hash_origem,
-                target.hash_origem AS target_hash_origem,
-                target.id AS target_id,
-                ({existing_business_change_sql}) AS business_changed
-            FROM source
-            LEFT JOIN {quoted_table} target ON {key_join_sql}
-        ),
-        stats AS (
-            SELECT
-                count(*) FILTER (WHERE target_id IS NULL) AS inserted,
-                count(*) FILTER (
-                    WHERE target_id IS NOT NULL
-                      AND target_hash_origem IS DISTINCT FROM source_hash_origem
-                ) AS updated,
-                count(*) FILTER (
-                    WHERE target_id IS NOT NULL
-                      AND target_hash_origem IS NOT DISTINCT FROM source_hash_origem
-                ) AS unchanged
-            FROM existing
-        ),
         upsert AS (
             INSERT INTO {quoted_table} ({insert_columns})
             SELECT {source_insert_values}
@@ -1153,14 +1124,25 @@ def _promote_financeiro_stage_row_kind_postgresql(
                     ELSE {quoted_table}.alterado_em
                 END
             WHERE {quoted_table}.hash_origem IS DISTINCT FROM EXCLUDED.hash_origem
-            RETURNING 1
+            RETURNING (xmax = 0) AS inserted
+        ),
+        upsert_stats AS (
+            SELECT
+                count(*) FILTER (WHERE inserted) AS inserted,
+                count(*) FILTER (WHERE NOT inserted) AS updated,
+                count(*) AS affected
+            FROM upsert
+        ),
+        source_stats AS (
+            SELECT count(*) AS source_total FROM source
         )
         SELECT
-            coalesce(stats.inserted, 0) AS inserted,
-            coalesce(stats.updated, 0) AS updated,
-            coalesce(stats.unchanged, 0) AS unchanged,
-            (SELECT count(*) FROM upsert) AS affected
-        FROM stats
+            coalesce(upsert_stats.inserted, 0) AS inserted,
+            coalesce(upsert_stats.updated, 0) AS updated,
+            greatest(coalesce(source_stats.source_total, 0) - coalesce(upsert_stats.affected, 0), 0) AS unchanged,
+            coalesce(upsert_stats.affected, 0) AS affected
+        FROM source_stats
+        CROSS JOIN upsert_stats
     """
     row = db.execute(text(sql), {"member_id": member_id, "row_kind": row_kind}).mappings().one()
     db.flush()
