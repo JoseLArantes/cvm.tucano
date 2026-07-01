@@ -884,6 +884,8 @@ def test_recuperar_chunks_materializacao_stale_devolve_itens_para_pending(db_ses
     assert item_atualizado is not None
     assert item_atualizado.status == "pending"
     assert item_atualizado.chunk_execucao_id is None
+    assert item_atualizado.started_at is None
+    assert item_atualizado.finished_at is None
     assert chunk_atualizado is not None
     assert chunk_atualizado.status == "stale"
     assert execucao_atualizada is not None
@@ -1043,7 +1045,44 @@ def test_reconciliar_materializacao_stale_task_reagenda_campanha(
     assert resultado["status"] == "recovered"
     assert resultado["recovered_chunks"] == 1
     assert captured["args"] == (str(campanha.id),)
-    assert captured["countdown"] == 60
+    assert captured["countdown"] == 0
+    assert captured["queue"] == "analise_materializacao"
+
+
+def test_materializar_analise_chunk_reagenda_quando_chunk_ja_foi_recuperado(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, _items = claimed
+    chunk.status = "stale"
+    db_session.commit()
+
+    captured: dict[str, object] = {}
+
+    def _fake_apply_async(*, args: tuple[str], countdown: int, queue: str) -> None:
+        captured["args"] = args
+        captured["countdown"] = countdown
+        captured["queue"] = queue
+
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.materializar_analise_campanha_task, "apply_async", _fake_apply_async)
+
+    resultado = worker_tasks.materializar_analise_chunk_task.run(str(campanha.id), str(chunk.id))
+
+    assert resultado["status"] == "ignored_chunk"
+    assert resultado["chunk_status"] == "stale"
+    assert captured["args"] == (str(campanha.id),)
+    assert captured["countdown"] == 0
     assert captured["queue"] == "analise_materializacao"
 
 

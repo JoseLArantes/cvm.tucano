@@ -4008,6 +4008,8 @@ def reverter_itens_materializacao_para_pending(
         item.last_error = None
         item.updated_at = now
         item.enqueued_at = None
+        item.started_at = None
+        item.finished_at = None
         item.chunk_execucao_id = None
         campanhas_afetadas.add(item.campanha_id)
     for campanha_id in campanhas_afetadas:

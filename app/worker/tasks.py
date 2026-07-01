@@ -443,6 +443,8 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
         if chunk is None:
             return {"status": "missing_chunk", "campanha_id": campanha_id, "chunk_execucao_id": chunk_execucao_id}
         if chunk.status in {"stale", "cancelled", "success", "failed"}:
+            if chunk.status in {"stale", "cancelled"}:
+                _reagendar_campanha_materializacao(campanha_id, countdown=0)
             return {
                 "status": "ignored_chunk",
                 "campanha_id": campanha_id,
@@ -497,6 +499,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
         for position, item_id in enumerate(item_ids, start=1):
             chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
             if chunk is None or chunk.status in {"stale", "cancelled"}:
+                _reagendar_campanha_materializacao(campanha_id, countdown=0)
                 return {
                     "status": "aborted_chunk",
                     "campanha_id": campanha_id,
@@ -631,7 +634,7 @@ def reconciliar_materializacao_stale_task(self: Any, campanha_id: str | None = N
         for campanha_afetada in resultado.affected_campaigns:
             _reagendar_campanha_materializacao(
                 campanha_afetada,
-                countdown=_settings.analise_materializacao_recovery_sweep_seconds,
+                countdown=0,
             )
         return {
             "status": "recovered" if resultado.recovered_chunks > 0 else "noop",
