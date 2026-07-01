@@ -2,7 +2,6 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
-from celery import chain, group
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from sqlalchemy import delete, func, select
 
@@ -1137,9 +1136,10 @@ def disparar_sincronizacao_cgvn(
     summary="Disparar Sincronizacao Completa por Ano",
     description=(
         "Agenda um lote administrativo para um ano especifico. "
-        "O workflow sempre dispara primeiro a sincronizacao de `cadastro` e, na sequencia, agenda `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` para o mesmo ano. "
+        "O backend registra `cadastro`, `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` como `agendada` e publica primeiro a task de `cadastro`. "
+        "Quando `cadastro` termina com sucesso, skip ou sem alteracao, o worker publica as fontes anuais ja registradas para o mesmo ano. "
         "Este endpoint nao usa `ANOS_INICIAIS_*` do ambiente: o ano processado eh exclusivamente o argumento recebido em `/{ano}`. "
-        "Todas as execucoes do lote sao persistidas como `agendada` antes do workflow Celery ser publicado, e esses registros ja fecham o gate de materializacao. "
+        "Todas as execucoes do lote sao persistidas como `agendada` antes da primeira publicacao Celery, e esses registros ja fecham o gate de materializacao. "
         "Cada fonte anual executa o mesmo mecanismo: preflight remoto em `acquire`, possivel skip sem download quando os metadados remotos permanecem inalterados, "
         "download apenas quando necessario, `stage` orientado a headers/row counts/member hashes, promocao apenas dos members alterados e `reconcile` para exclusao de linhas promovidas obsoletas do mesmo member. "
         "Se uma execucao anual anterior tiver terminado em `falha`, members que ja haviam sido concluidos com sucesso continuam elegiveis para reaproveitamento por `member_sha256` no rerun do mesmo ano, salvo quando `force_reimport=true`. "
@@ -1160,35 +1160,23 @@ def disparar_sincronizacao_tudo(
 
     cadastro_id = novo_task_id()
     criar_execucao_sincronizacao_agendada(db, tipo_fonte="cadastro", ano=None, task_id=cadastro_id)
-    s_cadastro = sincronizar_cadastro_companhias_task.si(force_reimport=force_reimport).set(task_id=cadastro_id)
     tarefas.append(TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=cadastro_id))
 
-    outras_sigs = []
-
-    for tipo_fonte, task in (
-        ("dfp", sincronizar_dfp_task),
-        ("itr", sincronizar_itr_task),
-        ("fre", sincronizar_fre_task),
-        ("fca", sincronizar_fca_task),
-        ("ipe", sincronizar_ipe_task),
-        ("vlmo", sincronizar_vlmo_task),
-        ("cgvn", sincronizar_cgvn_task),
-    ):
+    for tipo_fonte in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
         tid = novo_task_id()
         criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=tid)
-        sig = task.si(ano, force_reimport=force_reimport).set(task_id=tid)
-        outras_sigs.append(sig)
         tarefas.append(TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano, id_tarefa=tid))
-
-    if outras_sigs:
-        workflow = chain(s_cadastro, group(outras_sigs))
-    else:
-        workflow = chain(s_cadastro)
 
     task_ids = [tarefa.id_tarefa for tarefa in tarefas]
     db.commit()
     try:
-        workflow.apply_async()
+        sincronizar_cadastro_companhias_task.apply_async(
+            kwargs={
+                "force_reimport": force_reimport,
+                "dispatch_year_after_success": ano,
+            },
+            task_id=cadastro_id,
+        )
     except Exception as exc:
         marcar_agendamento_com_falha(db, task_ids=task_ids, erro=str(exc))
         db.commit()

@@ -32,6 +32,7 @@ Convencoes deste changelog:
 
 - os endpoints de disparo de ingestao agora persistem `ExecucaoSincronizacao.status=agendada` antes de publicar a task Celery
 - o `id_tarefa` retornado pela API e o mesmo valor persistido no banco e enviado ao Celery
+- em `POST /ingestion/sincronizacoes/tudo/{ano}`, a API publica apenas `cadastro` no request HTTP; as fontes anuais ja registradas sao publicadas pelo worker quando `cadastro` termina com sucesso, `sem_alteracao` ou `skipped`
 - o gate automatico de materializacao passa a considerar `agendada`, `em_execucao` e `aguardando_ingestao` como bloqueadores
 - estados finais como `sucesso`, `sem_alteracao`, `skipped`, `falha` e `cancelada` continuam sem bloquear o gate
 - quando uma ingestao e disparada durante materializacao, a UI deve esperar `gate.status=red` com `reason_code=INGESTION_ACTIVE` mesmo antes do worker iniciar a task

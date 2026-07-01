@@ -38,6 +38,48 @@ def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
     return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
 
 
+def _publicar_fontes_anuais_agendadas(
+    db: Any,
+    *,
+    ano: int,
+    force_reimport: bool,
+) -> list[str]:
+    from app.models.sincronizacao import ExecucaoSincronizacao
+
+    task_map = {
+        "dfp": sincronizar_dfp_task,
+        "itr": sincronizar_itr_task,
+        "fre": sincronizar_fre_task,
+        "fca": sincronizar_fca_task,
+        "ipe": sincronizar_ipe_task,
+        "vlmo": sincronizar_vlmo_task,
+        "cgvn": sincronizar_cgvn_task,
+    }
+    rows = db.scalars(
+        select(ExecucaoSincronizacao)
+        .where(
+            ExecucaoSincronizacao.ano == ano,
+            ExecucaoSincronizacao.tipo_execucao == "arquivo_zip",
+            ExecucaoSincronizacao.tipo_fonte.in_(task_map.keys()),
+            ExecucaoSincronizacao.status == "agendada",
+            ExecucaoSincronizacao.parent_execucao_id.is_(None),
+            ExecucaoSincronizacao.id_tarefa.is_not(None),
+        )
+        .order_by(ExecucaoSincronizacao.tipo_fonte.asc())
+    ).all()
+    published: list[str] = []
+    for execucao in rows:
+        if execucao.id_tarefa is None:
+            continue
+        task_map[execucao.tipo_fonte].apply_async(
+            args=(ano,),
+            kwargs={"force_reimport": force_reimport},
+            task_id=execucao.id_tarefa,
+        )
+        published.append(execucao.id_tarefa)
+    return published
+
+
 @celery_app.task(bind=True, name="app.worker.tasks.reconciliar_ingestion_stale_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def reconciliar_ingestion_stale_task(self: Any) -> dict[str, Any]:
     from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
@@ -630,6 +672,7 @@ def sincronizar_cadastro_companhias_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    dispatch_year_after_success: int | None = None,
 ) -> dict[str, str]:
     import uuid
 
@@ -663,6 +706,19 @@ def sincronizar_cadastro_companhias_task(
                     if run:
                         pending.last_successful_run_id = run.id
                 db.commit()
+            if dispatch_year_after_success is not None:
+                published = _publicar_fontes_anuais_agendadas(
+                    db,
+                    ano=dispatch_year_after_success,
+                    force_reimport=force_reimport,
+                )
+                _logger.info(
+                    "ingestion.batch_annual_sources_published",
+                    extra={
+                        "dispatch_year": dispatch_year_after_success,
+                        "published_tasks": published,
+                    },
+                )
 
         return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
     finally:

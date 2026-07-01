@@ -61,15 +61,14 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    wf_applied = False
+    scheduled: dict[str, object] = {}
 
-    class FakeWorkflow:
-        def apply_async(self) -> None:
-            nonlocal wf_applied
-            wf_applied = True
+    def fake_apply_async(*, kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
+        scheduled["kwargs"] = kwargs
+        scheduled["task_id"] = task_id
+        return SimpleNamespace(id=task_id)
 
-    monkeypatch.setattr("app.api.routers.admin.chain", lambda *args, **kwargs: FakeWorkflow())
-    monkeypatch.setattr("app.api.routers.admin.group", lambda *args, **kwargs: FakeWorkflow())
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_cadastro_companhias_task.apply_async", fake_apply_async)
 
     resposta = client.post("/ingestion/sincronizacoes/tudo/2025?force_reimport=true")
     assert resposta.status_code == 200
@@ -88,7 +87,8 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert len(execucoes) == 8
     assert {execucao.status for execucao in execucoes} == {"agendada"}
     assert {execucao.tipo_execucao for execucao in execucoes} == {"arquivo_simples", "arquivo_zip"}
-    assert wf_applied is True
+    assert scheduled["task_id"] == payload["tarefas"][0]["id_tarefa"]
+    assert scheduled["kwargs"] == {"force_reimport": True, "dispatch_year_after_success": 2025}
 
 
 def test_admin_fontes_endpoints_expoem_registry(client: TestClient) -> None:

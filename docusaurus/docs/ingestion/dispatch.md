@@ -77,8 +77,9 @@ Este endpoint agenda:
 8. `cgvn`
 
 O ano usado nas fontes anuais e exatamente o valor do path.
-Todas as execucoes do lote sao registradas como `agendada` antes do workflow ser enviado para o Celery.
-Isso impede que materializacao continue iniciando novos chunks enquanto a ingestao ainda esta apenas na fila.
+Todas as execucoes do lote sao registradas como `agendada` antes da primeira publicacao Celery.
+O endpoint publica `cadastro` e retorna; quando `cadastro` termina com sucesso, `sem_alteracao` ou `skipped`, o worker publica `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` ja registrados para o ano.
+Isso impede que materializacao continue iniciando novos chunks enquanto a ingestao ainda esta apenas na fila, sem manter o request HTTP preso na montagem do workflow completo.
 
 Exemplo:
 

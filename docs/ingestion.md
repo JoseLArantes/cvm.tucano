@@ -856,6 +856,8 @@ Celery. O `id_tarefa` retornado pela API e o mesmo valor persistido no banco e e
 Celery. Enquanto uma execucao estiver em `agendada`, `em_execucao` ou
 `aguardando_ingestao`, o gate automatico de materializacao fica fechado por
 `INGESTION_ACTIVE`. Estados finais, incluindo `cancelada` e `falha`, nao bloqueiam o gate.
+No lote anual, a API publica `cadastro` e retorna; quando `cadastro` termina com sucesso,
+`sem_alteracao` ou `skipped`, o worker publica as fontes anuais ja registradas para o ano.
 No reprocessamento seletivo por `arquivo`, a comparacao do nome e case-insensitive para
 aceitar members CVM com siglas em maiusculas no nome do CSV. Depois da validacao, o
 backend preserva o nome canonico do arquivo para persistencia da execucao filha e para
