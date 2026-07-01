@@ -1248,15 +1248,13 @@ def ingerir_sincronizacao_zip(
             if c.status == "skipped":
                 continue
 
-            # Transition child to agendada
-            c.status = "agendada"
-            child_run = db.scalar(
-                select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
-            )
-            if child_run is not None:
-                update_run_state(child_run, status="agendada", phase="stage")
-
             if c.arquivo == document_file:
+                c.status = "agendada"
+                child_run = db.scalar(
+                    select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
+                )
+                if child_run is not None:
+                    update_run_state(child_run, status="agendada", phase="stage")
                 doc_tasks_to_dispatch.append({
                     "child_execucao_id": str(c.id),
                     "member_name": c.arquivo,
