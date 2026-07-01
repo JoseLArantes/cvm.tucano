@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+import tempfile
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from typing import Any, cast
@@ -1317,6 +1319,139 @@ def classify_duplicate(
     seen["normalized_hash"] = comparison_hash
     seen["normalized_data"] = comparison_data
     return ok_result(details={"duplicate_status": "updated"})
+
+
+class DiskBackedDuplicateClassifier:
+    """Duplicate classifier that keeps the seen-key index outside Python heap."""
+
+    def __init__(self, *, prefix: str = "cvm-ingestion-duplicates-") -> None:
+        self._closed = False
+        self._writes_since_commit = 0
+        self._tempdir = tempfile.TemporaryDirectory(prefix=prefix)
+        self._connection = sqlite3.connect(f"{self._tempdir.name}/duplicates.sqlite")
+        self._connection.execute("PRAGMA journal_mode=OFF")
+        self._connection.execute("PRAGMA synchronous=OFF")
+        self._connection.execute(
+            """
+            CREATE TABLE duplicate_keys (
+                row_kind TEXT NOT NULL,
+                natural_key_json TEXT NOT NULL,
+                normalized_hash TEXT NOT NULL,
+                normalized_data_json TEXT NOT NULL,
+                PRIMARY KEY (row_kind, natural_key_json)
+            )
+            """
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._connection.commit()
+        self._connection.close()
+        self._tempdir.cleanup()
+        self._closed = True
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def _record_write(self) -> None:
+        self._writes_since_commit += 1
+        if self._writes_since_commit >= 10_000:
+            self._connection.commit()
+            self._writes_since_commit = 0
+
+    def classify(
+        self,
+        *,
+        row_kind: str,
+        natural_key: dict[str, Any],
+        normalized_hash: str,
+        normalized_data: dict[str, Any],
+    ) -> ValidationResult:
+        natural_key_payload = normalizar_chave_natural(natural_key)
+        natural_key_json = json.dumps(natural_key_payload, ensure_ascii=False, sort_keys=True, default=str)
+        comparison_data = build_duplicate_comparison_data(normalized_data)
+        comparison_hash = gerar_hash_canonico(comparison_data)
+        row = self._connection.execute(
+            """
+            SELECT normalized_hash, normalized_data_json
+            FROM duplicate_keys
+            WHERE row_kind = ? AND natural_key_json = ?
+            """,
+            (row_kind, natural_key_json),
+        ).fetchone()
+        if row is None:
+            self._connection.execute(
+                """
+                INSERT INTO duplicate_keys (
+                    row_kind,
+                    natural_key_json,
+                    normalized_hash,
+                    normalized_data_json
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    row_kind,
+                    natural_key_json,
+                    comparison_hash,
+                    json.dumps(comparison_data, ensure_ascii=False, sort_keys=True, default=str),
+                ),
+            )
+            self._record_write()
+            return ok_result(details={"duplicate_status": "new"})
+
+        seen_hash, seen_data_json = row
+        if seen_hash == comparison_hash:
+            return ValidationResult(
+                status="ignored_duplicate",
+                reason_code="ignored_duplicate",
+                severity="info",
+                details={"natural_key": natural_key_payload},
+                repairable=False,
+            )
+
+        seen_data = json.loads(seen_data_json)
+        source_specific = _financeiro_zero_shadow_duplicate_resolution(
+            row_kind=row_kind,
+            seen_data=seen_data,
+            comparison_data=comparison_data,
+        )
+        if source_specific is not None:
+            self._connection.execute(
+                """
+                UPDATE duplicate_keys
+                SET normalized_hash = ?, normalized_data_json = ?
+                WHERE row_kind = ? AND natural_key_json = ?
+                """,
+                (
+                    gerar_hash_canonico(seen_data),
+                    json.dumps(seen_data, ensure_ascii=False, sort_keys=True, default=str),
+                    row_kind,
+                    natural_key_json,
+                ),
+            )
+            self._record_write()
+            return source_specific
+
+        self._connection.execute(
+            """
+            UPDATE duplicate_keys
+            SET normalized_hash = ?, normalized_data_json = ?
+            WHERE row_kind = ? AND natural_key_json = ?
+            """,
+            (
+                comparison_hash,
+                json.dumps(comparison_data, ensure_ascii=False, sort_keys=True, default=str),
+                row_kind,
+                natural_key_json,
+            ),
+        )
+        self._record_write()
+        return ok_result(details={"duplicate_status": "updated"})
 
 
 def write_validation_result(

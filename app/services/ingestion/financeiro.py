@@ -67,6 +67,7 @@ from app.services.ingestion.staging import (
 from app.services.ingestion.summary import build_contadores_quality_summary, build_quality_summary_snapshot
 from app.services.ingestion.typed_staging import clear_financeiro_stage_rows, load_financeiro_artifact_to_stage
 from app.services.ingestion.validation import (
+    DiskBackedDuplicateClassifier,
     build_natural_key,
     classify_duplicate,
     invalid_result,
@@ -1563,6 +1564,7 @@ def process_financeiro_member_direct_from_disk(
 
     update_run_state(run, phase="normalize_artifact")
     db.commit()
+    duplicate_classifier = DiskBackedDuplicateClassifier()
     for linha_origem, raw_data in row_iter:
         total_rows += 1
         contadores["lidas"] += 1
@@ -1602,12 +1604,11 @@ def process_financeiro_member_direct_from_disk(
             continue
 
         natural_key = build_natural_key(resolved_row_kind, dados)
-        duplicate_result = classify_duplicate(
+        duplicate_result = duplicate_classifier.classify(
             row_kind=resolved_row_kind,
             natural_key=natural_key,
             normalized_hash=gerar_hash_canonico(dados),
             normalized_data=dados,
-            seen_by_key=seen_by_row_kind.setdefault(resolved_row_kind, {}),
         )
         if duplicate_result.status == "ignored_duplicate":
             contadores["inalterados"] += 1
@@ -1731,6 +1732,7 @@ def process_financeiro_member_direct_from_disk(
             _atualizar_execucao(execucao, contadores)
             db.commit()
 
+    duplicate_classifier.close()
     member.row_count = total_rows
     normalized_artifacts = {kind: writer.close() for kind, writer in normalized_writers.items()}
     for artifact in normalized_artifacts.values():
