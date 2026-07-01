@@ -1474,8 +1474,19 @@ def test_analise_materializacoes_recuperar_stale_endpoints(client: TestClient, d
 
 
 def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
     campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
     db_session.add(campanha)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+        )
+    )
     db_session.commit()
 
     resp = client.post(
@@ -1492,8 +1503,19 @@ def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, 
 
 
 def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
     campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
     db_session.add(campanha)
+    db_session.flush()
+    db_session.add(
+        _materializacao_campanha_item(
+            campanha,
+            cia,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+        )
+    )
     db_session.commit()
     campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
     db_session.commit()

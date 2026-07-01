@@ -224,6 +224,9 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
         campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
         if campanha is None:
             return {"status": "missing_campaign", "campanha_id": campanha_id}
+        _recalcular_materializacao_campanha(db, campanha)
+        db.commit()
+        db.refresh(campanha)
         if campanha.status in {"success", "failed", "partial"}:
             return {"status": "finished_campaign", "campanha_id": campanha_id, "campanha_status": campanha.status}
 

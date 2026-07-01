@@ -305,6 +305,8 @@ def test_materializar_analise_campanha_reagenda_sem_consumir_retry_quando_sem_sl
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
     campanha_running = AnaliseMaterializacaoCampanha(
         source="post_ingestion",
         status="running",
@@ -333,6 +335,19 @@ def test_materializar_analise_campanha_reagenda_sem_consumir_retry_quando_sem_sl
         updated_at=datetime.now(UTC),
     )
     db_session.add_all([campanha_running, campanha_pending])
+    db_session.flush()
+    db_session.add(
+        AnaliseMaterializacaoCampanhaItem(
+            campanha_id=campanha_pending.id,
+            codigo_cvm=cia.codigo_cvm,
+            companhia_id=cia.id,
+            escopo="consolidated",
+            status="pending",
+            ordem=1,
+            attempts=0,
+            updated_at=datetime.now(UTC),
+        )
+    )
     db_session.commit()
 
     captured: dict[str, object] = {}
@@ -1079,7 +1094,7 @@ def test_reativar_materializacao_campanha_recupera_stale_e_reenfileira(db_sessio
     assert campanha_tem_requeue_em_transito(campanha_atualizada) is True
 
 
-def test_recuperar_materializacao_pendente_reenfileira_apenas_pending_undispatched(
+def test_recuperar_materializacao_pendente_reenfileira_pending_undispatched_com_wait_reason_antigo(
     db_session: Session,
 ) -> None:
     cia = _companhia(db_session)
@@ -1128,8 +1143,54 @@ def test_recuperar_materializacao_pendente_reenfileira_apenas_pending_undispatch
 
     assert resultado.status == "triggered"
     assert resultado.reason_code == "PENDING_UNDISPATCHED"
-    assert list(resultado.requeued_campaigns) == [str(campanha_recuperavel.id)]
-    assert str(campanha_bloqueada.id) not in resultado.requeued_campaigns
+    assert set(resultado.requeued_campaigns) == {str(campanha_recuperavel.id), str(campanha_bloqueada.id)}
+
+
+def test_recuperar_materializacao_pendente_recalcula_contadores_obsoletos(
+    db_session: Session,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+
+    item.status = "pending"
+    item.chunk_execucao_id = None
+    item.enqueued_at = None
+    chunk.status = "cancelled"
+    chunk.lease_expires_at = datetime.now(UTC)
+    campanha.status = "pending"
+    campanha.pending_items = 0
+    campanha.running_items = 1
+    campanha.summary = {
+        **(campanha.summary or {}),
+        "wait_reason": "INGESTION_ACTIVE",
+    }
+    campanha.created_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.commit()
+
+    resultado = recuperar_materializacao_pendente(
+        db_session,
+        max_campaigns=10,
+        max_requeues=10,
+        min_age_seconds=0,
+    )
+    campanha_atualizada = db_session.get(AnaliseMaterializacaoCampanha, campanha.id)
+
+    assert resultado.status == "triggered"
+    assert resultado.reason_code == "PENDING_UNDISPATCHED"
+    assert resultado.requeued_campaigns == (str(campanha.id),)
+    assert campanha_atualizada is not None
+    assert campanha_atualizada.pending_items == 2
+    assert campanha_atualizada.running_items == 0
 
 
 def test_recuperar_materializacao_pendente_task_reenfileira_campanhas(

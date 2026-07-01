@@ -3179,6 +3179,7 @@ def classificar_recuperacao_materializacao_campanha(
     now: datetime | None = None,
 ) -> MaterializacaoReativacaoClassificacao:
     reference_time = now or datetime.now(UTC)
+    _recalcular_materializacao_campanha(db, campanha)
     active_chunk = obter_chunk_ativo_campanha(db, campanha.id)
     stale_chunk_count = len(obter_chunks_stale_ativos(db, campanha_id=campanha.id))
     running_execution_count = int(
@@ -3192,8 +3193,6 @@ def classificar_recuperacao_materializacao_campanha(
     )
     created_at = _coerce_utc_datetime(campanha.created_at)
     age_seconds = max(0, int((reference_time - created_at).total_seconds())) if created_at else None
-    wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
-
     if campanha.pending_items <= 0:
         return MaterializacaoReativacaoClassificacao(
             reason_code="NO_PENDING_ITEMS",
@@ -3251,19 +3250,9 @@ def classificar_recuperacao_materializacao_campanha(
         )
         or 0
     )
-    if running_campaigns >= _settings.analise_materializacao_max_active_campaigns or wait_reason == "MAX_ACTIVE_CAMPAIGNS_REACHED":
+    if running_campaigns >= _settings.analise_materializacao_max_active_campaigns:
         return MaterializacaoReativacaoClassificacao(
             reason_code="WAITING_FOR_SLOT",
-            recoverable=False,
-            active_chunk_id=None,
-            stale_chunk_count=stale_chunk_count,
-            running_execution_count=running_execution_count,
-            age_seconds=age_seconds,
-        )
-
-    if wait_reason in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}:
-        return MaterializacaoReativacaoClassificacao(
-            reason_code="WAITING_FOR_GATE",
             recoverable=False,
             active_chunk_id=None,
             stale_chunk_count=stale_chunk_count,
