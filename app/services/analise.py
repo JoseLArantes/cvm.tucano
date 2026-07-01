@@ -3526,8 +3526,9 @@ def obter_estado_gate_materializacao(db: Session) -> MaterializacaoGateState:
             blockers=(),
         )
 
+    allowed_blocking_statuses = {"agendada", "em_execucao", "aguardando_ingestao"}
     blocking_statuses = _settings.parse_csv_set(_settings.analise_materializacao_blocking_sync_statuses)
-    effective_blocking_statuses = blocking_statuses.intersection({"em_execucao"}) or {"em_execucao"}
+    effective_blocking_statuses = blocking_statuses.intersection(allowed_blocking_statuses) or allowed_blocking_statuses
     blocker_rows = db.execute(
         select(
             ExecucaoSincronizacao.tipo_fonte,

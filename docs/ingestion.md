@@ -851,6 +851,11 @@ Endpoints no router `admin` (todos requerem autenticacao Bearer token):
 
 Todas as rotas de disparo aceitam `?force_reimport=true` para ignorar o skip por hash e
 reprocessar integralmente.
+Cada disparo persiste uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task
+Celery. O `id_tarefa` retornado pela API e o mesmo valor persistido no banco e enviado ao
+Celery. Enquanto uma execucao estiver em `agendada`, `em_execucao` ou
+`aguardando_ingestao`, o gate automatico de materializacao fica fechado por
+`INGESTION_ACTIVE`. Estados finais, incluindo `cancelada` e `falha`, nao bloqueiam o gate.
 No reprocessamento seletivo por `arquivo`, a comparacao do nome e case-insensitive para
 aceitar members CVM com siglas em maiusculas no nome do CSV. Depois da validacao, o
 backend preserva o nome canonico do arquivo para persistencia da execucao filha e para

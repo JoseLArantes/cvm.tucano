@@ -32,6 +32,7 @@ from app.services.ingestion.normalizers import (
     normalizar_tipo_mercado,
 )
 from app.services.ingestion.resolver import limpar_caches_resolver
+from app.services.ingestion.scheduling import adotar_ou_criar_execucao_sincronizacao
 from app.services.ingestion.source_registry import dataset_por_member_name
 
 ARQUIVO_CADASTRO_ABERTA = "cad_cia_aberta.csv"
@@ -924,15 +925,14 @@ def sincronizar_cadastro_companhias(
     url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
     url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
 
-    execucao = ExecucaoSincronizacao(
+    execucao = adotar_ou_criar_execucao_sincronizacao(
+        db,
         tipo_fonte="cadastro",
         ano=None,
-        id_tarefa=task_id,
+        task_id=task_id,
         arquivo=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
         url=f"{url_aberta}|{url_estrang}",
-        status="em_execucao",
     )
-    db.add(execucao)
     db.commit()
     db.refresh(execucao)
 

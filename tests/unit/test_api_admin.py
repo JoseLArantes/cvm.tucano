@@ -19,9 +19,48 @@ from app.models.ingestion import (
     SourceMemberSnapshot,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
+from app.services.ingestion.scheduling import (
+    adotar_ou_criar_execucao_sincronizacao,
+    criar_execucao_sincronizacao_agendada,
+)
 
 
-def test_admin_sincronizacao_tudo_agenda_tarefas(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_execucao_agendada_e_adotada_pelo_worker(db_session: Session) -> None:
+    task_id = str(uuid.uuid4())
+    execucao_agendada = criar_execucao_sincronizacao_agendada(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        task_id=task_id,
+    )
+    db_session.commit()
+
+    execucao_em_execucao = adotar_ou_criar_execucao_sincronizacao(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        task_id=task_id,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr_cia_aberta_2025.zip",
+        tipo_execucao="arquivo_zip",
+    )
+    db_session.commit()
+
+    assert execucao_em_execucao.id == execucao_agendada.id
+    assert execucao_em_execucao.status == "em_execucao"
+    assert (
+        db_session.query(ExecucaoSincronizacao)
+        .filter(ExecucaoSincronizacao.id_tarefa == task_id)
+        .count()
+        == 1
+    )
+
+
+def test_admin_sincronizacao_tudo_agenda_tarefas(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     wf_applied = False
 
     class FakeWorkflow:
@@ -40,6 +79,15 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(client: TestClient, monkeypatch
     assert payload["tarefas"][0]["tipo_fonte"] == "cadastro"
     assert payload["tarefas"][0]["ano"] is None
     assert [item["ano"] for item in payload["tarefas"][1:]] == [2025] * 7
+    task_ids = [item["id_tarefa"] for item in payload["tarefas"]]
+    execucoes = (
+        db_session.query(ExecucaoSincronizacao)
+        .filter(ExecucaoSincronizacao.id_tarefa.in_(task_ids))
+        .all()
+    )
+    assert len(execucoes) == 8
+    assert {execucao.status for execucao in execucoes} == {"agendada"}
+    assert {execucao.tipo_execucao for execucao in execucoes} == {"arquivo_simples", "arquivo_zip"}
     assert wf_applied is True
 
 
@@ -60,16 +108,37 @@ def test_admin_fontes_endpoints_expoem_registry(client: TestClient) -> None:
     assert resposta_inexistente.status_code == 404
 
 
-def test_admin_sincronizacao_vlmo_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_vlmo_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-vlmo-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
+def test_admin_sincronizacao_vlmo_agenda_tarefa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: dict[str, object] = {}
+
+    def fake_apply_async(*, args: tuple[object, ...], kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
+        scheduled["args"] = args
+        scheduled["kwargs"] = kwargs
+        scheduled["task_id"] = task_id
+        return SimpleNamespace(id=task_id)
+
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_vlmo_task.apply_async", fake_apply_async)
 
     resposta = client.post("/ingestion/sincronizacoes/vlmo/2025?force_reimport=true")
 
     assert resposta.status_code == 200
-    assert resposta.json() == {"id_tarefa": "task-vlmo-2025-True", "status": "agendada"}
+    payload = resposta.json()
+    assert payload["status"] == "agendada"
+    assert scheduled["args"] == (2025,)
+    assert scheduled["kwargs"] == {"force_reimport": True}
+    assert scheduled["task_id"] == payload["id_tarefa"]
+    execucao = (
+        db_session.query(ExecucaoSincronizacao)
+        .filter(ExecucaoSincronizacao.id_tarefa == payload["id_tarefa"])
+        .one()
+    )
+    assert execucao.tipo_fonte == "vlmo"
+    assert execucao.ano == 2025
+    assert execucao.status == "agendada"
 
 
 def test_admin_fontes_auditar_expoe_resposta_estruturada(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -164,35 +233,21 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
         
     db_session.commit()
 
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_dfp_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-dfp-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_fre_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-fre-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_fca_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-fca-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_ipe_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-ipe-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
-    monkeypatch.setattr(
-        "app.api.routers.admin.sincronizar_vlmo_task.delay",
-        lambda ano, **kwargs: SimpleNamespace(id=f"task-vlmo-{ano}-{kwargs.get('force_reimport', False)}"),
-    )
-    monkeypatch.setattr(
-        "app.worker.tasks.sincronizar_member_task.delay",
-        lambda **kwargs: SimpleNamespace(
-            id=(
-                f"task-{kwargs.get('tipo_fonte')}-member-"
-                f"{kwargs.get('ano')}-{kwargs.get('member_name')}-{kwargs.get('force_reimport', False)}"
-            )
-        ),
-    )
+    published: list[dict[str, object]] = []
+
+    def fake_apply_async(*, args: tuple[object, ...] = (), kwargs: dict[str, object] | None = None, task_id: str) -> SimpleNamespace:
+        published.append({"args": args, "kwargs": kwargs or {}, "task_id": task_id})
+        return SimpleNamespace(id=task_id)
+
+    for task_name in (
+        "sincronizar_dfp_task",
+        "sincronizar_fre_task",
+        "sincronizar_fca_task",
+        "sincronizar_ipe_task",
+        "sincronizar_vlmo_task",
+    ):
+        monkeypatch.setattr(f"app.api.routers.admin.{task_name}.apply_async", fake_apply_async)
+    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", fake_apply_async)
 
     resposta_zip = client.post("/ingestion/sincronizacoes/reprocessar-arquivo", json={"arquivo": "dfp_cia_aberta_2025.zip"})
     resposta_csv = client.post(
@@ -225,15 +280,20 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
 
     assert resposta_zip.status_code == 200
     assert resposta_zip.json()["tarefas"][0]["tipo_fonte"] == "dfp"
-    assert resposta_zip.json()["tarefas"][0]["id_tarefa"] == "task-dfp-2025-False"
+    resposta_zip_task_id = resposta_zip.json()["tarefas"][0]["id_tarefa"]
+    uuid.UUID(resposta_zip_task_id)
     assert resposta_csv.status_code == 200
     assert resposta_csv.json()["tarefas"][0]["tipo_fonte"] == "fre_membro"
     assert resposta_itr_csv_maiusculo.status_code == 200
     assert resposta_itr_csv_maiusculo.json()["tarefas"][0]["tipo_fonte"] == "itr_membro"
-    assert (
-        resposta_itr_csv_maiusculo.json()["tarefas"][0]["id_tarefa"]
-        == "task-itr-member-2026-itr_cia_aberta_BPA_con_2026.csv-False"
+    resposta_itr_csv_task_id = resposta_itr_csv_maiusculo.json()["tarefas"][0]["id_tarefa"]
+    exec_itr_member = (
+        db_session.query(ExecucaoSincronizacao)
+        .filter(ExecucaoSincronizacao.id_tarefa == resposta_itr_csv_task_id)
+        .one()
     )
+    assert exec_itr_member.arquivo == "itr_cia_aberta_BPA_con_2026.csv"
+    assert exec_itr_member.status == "agendada"
     assert resposta_fca.status_code == 200
     assert resposta_fca.json()["tarefas"][0]["tipo_fonte"] == "fca"
     assert resposta_ipe_zip.status_code == 200
@@ -251,7 +311,9 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
         json={"arquivo": "dfp_cia_aberta_2025.zip", "force_reimport": True},
     )
     assert resposta_forcada.status_code == 200
-    assert resposta_forcada.json()["tarefas"][0]["id_tarefa"] == "task-dfp-2025-True"
+    resposta_forcada_task_id = resposta_forcada.json()["tarefas"][0]["id_tarefa"]
+    uuid.UUID(resposta_forcada_task_id)
+    assert resposta_forcada_task_id in {str(item["task_id"]) for item in published}
 
 
 def test_admin_dashboard_quarentena_alteracoes(client: TestClient, db_session: Session) -> None:

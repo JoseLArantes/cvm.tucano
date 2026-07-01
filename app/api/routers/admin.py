@@ -77,6 +77,11 @@ from app.services.ingestion.operational import (
 )
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
+from app.services.ingestion.scheduling import (
+    criar_execucao_sincronizacao_agendada,
+    marcar_agendamento_com_falha,
+    novo_task_id,
+)
 from app.services.ingestion.source_registry import listar_datasets, listar_fontes, obter_fonte
 from app.services.ingestion.staging import (
     create_cancellation_request,
@@ -604,6 +609,8 @@ def _cancelar_sincronizacao_por_seletor(
 
 _DESC_SYNC_ANUAL = (
     "Agenda uma sincronizacao administrativa de uma fonte anual CVM. "
+    "Antes de publicar a task Celery, o backend persiste uma `ExecucaoSincronizacao` com `status=agendada` e `id_tarefa` igual ao ID que sera usado pelo Celery. "
+    "Esse estado ja fecha o gate de materializacao, entao novas campanhas/chunks de analise deixam de iniciar enquanto a ingestao estiver em `agendada`, `em_execucao` ou `aguardando_ingestao`. "
     "A task resultante executa um ciclo em quatro momentos operacionais: "
     "`acquire` com preflight remoto (`CKAN`/`HEAD`) para decidir se o recurso parece alterado; "
     "`stage` com extracao de members, headers, contagem de linhas e hashes; "
@@ -628,6 +635,27 @@ _STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cance
 
 def _agora() -> datetime:
     return datetime.now(UTC)
+
+
+def _agendar_task_sincronizacao(
+    db: DbSession,
+    *,
+    task: Any,
+    tipo_fonte: str,
+    ano: int | None,
+    args: tuple[Any, ...] = (),
+    kwargs: dict[str, Any] | None = None,
+) -> str:
+    task_id = novo_task_id()
+    criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=task_id)
+    db.commit()
+    try:
+        task.apply_async(args=args, kwargs=kwargs or {}, task_id=task_id)
+    except Exception as exc:
+        marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
+        db.commit()
+        raise
+    return task_id
 
 
 def _mensagem_cancelamento_administrativo(*, motivo: str | None, id_tarefa: str | None) -> str:
@@ -754,8 +782,14 @@ def _agendar_por_arquivo(
     ano_efetivo = ano if ano is not None else _extrair_ano_arquivo(arquivo_normalizado)
 
     if _arquivo_suportado_por_fonte("cadastro", arquivo_informado, None):
-        tarefa = sincronizar_cadastro_companhias_task.delay(force_reimport=force_reimport)
-        return TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=str(tarefa.id))
+        task_id = _agendar_task_sincronizacao(
+            db,
+            task=sincronizar_cadastro_companhias_task,
+            tipo_fonte="cadastro",
+            ano=None,
+            kwargs={"force_reimport": force_reimport},
+        )
+        return TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=task_id)
 
     tipo_fonte = None
     arquivo_canonico = None
@@ -785,8 +819,15 @@ def _agendar_por_arquivo(
             "cgvn": sincronizar_cgvn_task,
         }
         task_func = task_mapper[tipo_fonte]
-        tarefa = task_func.delay(ano_efetivo, force_reimport=force_reimport)
-        return TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano_efetivo, id_tarefa=str(tarefa.id))
+        task_id = _agendar_task_sincronizacao(
+            db,
+            task=task_func,
+            tipo_fonte=tipo_fonte,
+            ano=ano_efetivo,
+            args=(ano_efetivo,),
+            kwargs={"force_reimport": force_reimport},
+        )
+        return TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano_efetivo, id_tarefa=task_id)
     else:
         from app.models.sincronizacao import ExecucaoSincronizacao
         from app.worker.tasks import sincronizar_member_task
@@ -807,11 +848,13 @@ def _agendar_por_arquivo(
                 detail=f"Execucao pai nao encontrada para fonte {tipo_fonte} e ano {ano_efetivo}."
             )
 
+        task_id = novo_task_id()
         child_exec = ExecucaoSincronizacao(
             parent_execucao_id=exec_pai.id,
             tipo_execucao="arquivo_membro",
             tipo_fonte=tipo_fonte,
             ano=ano_efetivo,
+            id_tarefa=task_id,
             arquivo=arquivo_canonico,
             url=exec_pai.url,
             status="agendada",
@@ -820,18 +863,26 @@ def _agendar_por_arquivo(
         db.commit()
         db.refresh(child_exec)
 
-        tarefa = sincronizar_member_task.delay(
-            tipo_fonte=tipo_fonte,
-            ano=ano_efetivo,
-            member_name=arquivo_canonico,
-            parent_execucao_id=str(exec_pai.id),
-            child_execucao_id=str(child_exec.id),
-            force_reimport=force_reimport,
-        )
+        try:
+            sincronizar_member_task.apply_async(
+                kwargs={
+                    "tipo_fonte": tipo_fonte,
+                    "ano": ano_efetivo,
+                    "member_name": arquivo_canonico,
+                    "parent_execucao_id": str(exec_pai.id),
+                    "child_execucao_id": str(child_exec.id),
+                    "force_reimport": force_reimport,
+                },
+                task_id=task_id,
+            )
+        except Exception as exc:
+            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
+            db.commit()
+            raise
         return TarefaAgendadaResumo(
             tipo_fonte=f"{tipo_fonte}_membro",
             ano=ano_efetivo,
-            id_tarefa=str(tarefa.id),
+            id_tarefa=task_id,
         )
 
 
@@ -876,12 +927,19 @@ def _resumo_dataset(dataset: Any) -> FonteDatasetResumoResposta:
 )
 def disparar_sincronizacao_cadastro(
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do arquivo ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_cadastro_companhias_task.delay(force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_cadastro_companhias_task,
+        tipo_fonte="cadastro",
+        ano=None,
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -895,12 +953,20 @@ def disparar_sincronizacao_cadastro(
 def disparar_sincronizacao_dfp(
     ano: Annotated[int, Path(ge=2010, description="Ano do pacote DFP.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_dfp_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_dfp_task,
+        tipo_fonte="dfp",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -914,12 +980,20 @@ def disparar_sincronizacao_dfp(
 def disparar_sincronizacao_itr(
     ano: Annotated[int, Path(ge=2010, description="Ano do pacote ITR.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_itr_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_itr_task,
+        tipo_fonte="itr",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -933,12 +1007,20 @@ def disparar_sincronizacao_itr(
 def disparar_sincronizacao_fre(
     ano: Annotated[int, Path(ge=2010, description="Ano do pacote FRE.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_fre_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_fre_task,
+        tipo_fonte="fre",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -952,12 +1034,20 @@ def disparar_sincronizacao_fre(
 def disparar_sincronizacao_fca(
     ano: Annotated[int, Path(ge=2010, description="Ano do pacote FCA.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_fca_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_fca_task,
+        tipo_fonte="fca",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -971,12 +1061,20 @@ def disparar_sincronizacao_fca(
 def disparar_sincronizacao_ipe(
     ano: Annotated[int, Path(ge=2003, description="Ano do pacote IPE.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_ipe_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_ipe_task,
+        tipo_fonte="ipe",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -990,12 +1088,20 @@ def disparar_sincronizacao_ipe(
 def disparar_sincronizacao_vlmo(
     ano: Annotated[int, Path(ge=2018, description="Ano do pacote VLMO.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_vlmo_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_vlmo_task,
+        tipo_fonte="vlmo",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -1009,12 +1115,20 @@ def disparar_sincronizacao_vlmo(
 def disparar_sincronizacao_cgvn(
     ano: Annotated[int, Path(ge=2018, description="Ano do pacote CGVN.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do ZIP ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = sincronizar_cgvn_task.delay(ano, force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_cgvn_task,
+        tipo_fonte="cgvn",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada"}
 
 
 @router.post(
@@ -1025,6 +1139,7 @@ def disparar_sincronizacao_cgvn(
         "Agenda um lote administrativo para um ano especifico. "
         "O workflow sempre dispara primeiro a sincronizacao de `cadastro` e, na sequencia, agenda `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` para o mesmo ano. "
         "Este endpoint nao usa `ANOS_INICIAIS_*` do ambiente: o ano processado eh exclusivamente o argumento recebido em `/{ano}`. "
+        "Todas as execucoes do lote sao persistidas como `agendada` antes do workflow Celery ser publicado, e esses registros ja fecham o gate de materializacao. "
         "Cada fonte anual executa o mesmo mecanismo: preflight remoto em `acquire`, possivel skip sem download quando os metadados remotos permanecem inalterados, "
         "download apenas quando necessario, `stage` orientado a headers/row counts/member hashes, promocao apenas dos members alterados e `reconcile` para exclusao de linhas promovidas obsoletas do mesmo member. "
         "Se uma execucao anual anterior tiver terminado em `falha`, members que ja haviam sido concluidos com sucesso continuam elegiveis para reaproveitamento por `member_sha256` no rerun do mesmo ano, salvo quando `force_reimport=true`. "
@@ -1036,15 +1151,15 @@ def disparar_sincronizacao_cgvn(
 def disparar_sincronizacao_tudo(
     ano: Annotated[int, Path(ge=2003, description="Ano que sera usado em todas as sincronizacoes anuais do lote.", examples=[2025])],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do arquivo ja existir.", examples=[False])
     ] = False,
 ) -> RespostaAgendamentoEmLote:
-    import uuid
-
     tarefas: list[TarefaAgendadaResumo] = []
 
-    cadastro_id = str(uuid.uuid4())
+    cadastro_id = novo_task_id()
+    criar_execucao_sincronizacao_agendada(db, tipo_fonte="cadastro", ano=None, task_id=cadastro_id)
     s_cadastro = sincronizar_cadastro_companhias_task.si(force_reimport=force_reimport).set(task_id=cadastro_id)
     tarefas.append(TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=cadastro_id))
 
@@ -1059,7 +1174,8 @@ def disparar_sincronizacao_tudo(
         ("vlmo", sincronizar_vlmo_task),
         ("cgvn", sincronizar_cgvn_task),
     ):
-        tid = str(uuid.uuid4())
+        tid = novo_task_id()
+        criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=tid)
         sig = task.si(ano, force_reimport=force_reimport).set(task_id=tid)
         outras_sigs.append(sig)
         tarefas.append(TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano, id_tarefa=tid))
@@ -1069,7 +1185,14 @@ def disparar_sincronizacao_tudo(
     else:
         workflow = chain(s_cadastro)
 
-    workflow.apply_async()
+    task_ids = [tarefa.id_tarefa for tarefa in tarefas]
+    db.commit()
+    try:
+        workflow.apply_async()
+    except Exception as exc:
+        marcar_agendamento_com_falha(db, task_ids=task_ids, erro=str(exc))
+        db.commit()
+        raise
 
     return RespostaAgendamentoEmLote(status="agendada", tarefas=tarefas)
 
@@ -1168,6 +1291,8 @@ def ingerir_fonte_pre_processada(
         "Dispara reprocessamento seletivo por nome de arquivo CVM. "
         "Aceita arquivos `cad_cia_aberta.csv`, `dfp_cia_aberta_*`, `itr_cia_aberta_*`, "
         "`fre_cia_aberta_*`, `fca_cia_aberta_*`, `ipe_cia_aberta_*`, `vlmo_cia_aberta_*` e `cgvn_cia_aberta_*`. "
+        "O backend persiste a execucao seletiva em `agendada` antes de publicar a task Celery, usando o mesmo `id_tarefa` retornado na resposta. "
+        "Para members CSV, a validacao do nome e case-insensitive, mas o nome canonico do arquivo e preservado na execucao e no despacho da task. "
         "Use `force_reimport=true` no payload para ignorar o skip por hash repetido. "
         "Este endpoint permanece util para recuperacao cirurgica por member/arquivo, mas o fluxo normal de rerun anual agora tenta reaproveitar automaticamente members ja bem-sucedidos por `member_sha256`, inclusive quando a execucao anual anterior terminou em `falha`."
     ),

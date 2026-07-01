@@ -9,6 +9,40 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-01 - Disparo de ingestao passa a acionar o gate de materializacao imediatamente
+
+### Endpoints e superficies com impacto operacional visivel
+
+- `POST /ingestion/sincronizacoes/cadastro`
+- `POST /ingestion/sincronizacoes/dfp/{ano}`
+- `POST /ingestion/sincronizacoes/itr/{ano}`
+- `POST /ingestion/sincronizacoes/fre/{ano}`
+- `POST /ingestion/sincronizacoes/fca/{ano}`
+- `POST /ingestion/sincronizacoes/ipe/{ano}`
+- `POST /ingestion/sincronizacoes/vlmo/{ano}`
+- `POST /ingestion/sincronizacoes/cgvn/{ano}`
+- `POST /ingestion/sincronizacoes/tudo/{ano}`
+- `POST /ingestion/sincronizacoes/reprocessar-arquivo`
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/operations`
+- `GET /analise/materializacoes/monitoramento`
+- `GET /analise/materializacoes/controle`
+
+### Mudanca de comportamento
+
+- os endpoints de disparo de ingestao agora persistem `ExecucaoSincronizacao.status=agendada` antes de publicar a task Celery
+- o `id_tarefa` retornado pela API e o mesmo valor persistido no banco e enviado ao Celery
+- o gate automatico de materializacao passa a considerar `agendada`, `em_execucao` e `aguardando_ingestao` como bloqueadores
+- estados finais como `sucesso`, `sem_alteracao`, `skipped`, `falha` e `cancelada` continuam sem bloquear o gate
+- quando uma ingestao e disparada durante materializacao, a UI deve esperar `gate.status=red` com `reason_code=INGESTION_ACTIVE` mesmo antes do worker iniciar a task
+- `GET /analise/materializacoes/monitoramento` tolera falha/timeout de inspeção Celery e limita a deteccao detalhada de campanhas pendentes recuperaveis pela janela operacional de recovery
+
+### Leitura recomendada pelo frontend
+
+- apos disparar uma sincronizacao, usar `id_tarefa` para correlacionar a linha em `GET /ingestion/sincronizacoes`
+- quando `gate.status=red`, pausar expectativas de progresso de novas campanhas/chunks de materializacao
+- tratar execucoes `agendada` como trabalho aceito e aguardando worker, nao como chamada perdida
+
 ## 2026-06-30 - Direct path financeiro expoe fases e contadores mais precisos para DFP/ITR
 
 ### Endpoints e superficies com impacto operacional visivel

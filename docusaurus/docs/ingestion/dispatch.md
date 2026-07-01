@@ -12,7 +12,12 @@ Todos os endpoints desta pagina:
 - exigem token administrativo;
 - respondem com `RespostaAgendamentoSincronizacao` ou `RespostaAgendamentoEmLote`;
 - aceitam `force_reimport` nos cenarios de disparo;
-- apenas enfileiram o trabalho; o acompanhamento deve ser feito pelos endpoints de monitoramento.
+- persistem uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task Celery;
+- fecham automaticamente o gate de materializacao enquanto a execucao estiver em `agendada`, `em_execucao` ou `aguardando_ingestao`;
+- apenas enfileiram o trabalho pesado; o acompanhamento deve ser feito pelos endpoints de monitoramento.
+
+O `id_tarefa` retornado e o mesmo valor persistido em `execucoes_sincronizacao.id_tarefa`.
+Use esse identificador para cancelamento, auditoria e correlacao com logs Celery.
 
 ## `force_reimport`
 
@@ -72,6 +77,8 @@ Este endpoint agenda:
 8. `cgvn`
 
 O ano usado nas fontes anuais e exatamente o valor do path.
+Todas as execucoes do lote sao registradas como `agendada` antes do workflow ser enviado para o Celery.
+Isso impede que materializacao continue iniciando novos chunks enquanto a ingestao ainda esta apenas na fila.
 
 Exemplo:
 

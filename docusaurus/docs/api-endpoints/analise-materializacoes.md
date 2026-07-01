@@ -146,11 +146,20 @@ Semantica importante:
 - `campaigns[].active_chunk_id` continua existindo como identificador representativo de um dos chunks ativos
 - `campaigns[].active_chunks` e `campaigns[].active_chunk_ids_preview` devem ser usados quando a UI precisar refletir concorrencia intra-campanha
 - com o gate em `red`, o backend bloqueia tambem o dispatcher e o reenfileiramento de campanhas; a UI pode continuar vendo campanhas `pending`, mas nao deve esperar progresso ate o gate voltar a `green`
+- a deteccao detalhada de campanhas pendentes recuperaveis no snapshot e limitada por `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS`; o sweep de recuperacao continua sendo a rotina responsavel por varrer e reativar o backlog em lotes
 
 ## `GET /analise/materializacoes/controle`
 
 Retorna o estado consolidado do gate de materializacao e do modo manual persistido.
-As filas continuam isoladas: ingestao usa `celery` e materializacao usa `analise_materializacao`.
+As filas continuam isoladas: ingestao usa `ingestion` e `ingestion_control`; materializacao usa `analise_materializacao`.
+
+Status de ingestao que fecham o gate automatico:
+
+- `agendada`
+- `em_execucao`
+- `aguardando_ingestao`
+
+Status finais, como `sucesso`, `sem_alteracao`, `skipped`, `falha` e `cancelada`, nao fecham o gate.
 
 ## `POST /analise/materializacoes/controle/pause`
 
@@ -170,7 +179,7 @@ curl -X POST "http://localhost:8007/analise/materializacoes/controle/pause?reaso
 ## `POST /analise/materializacoes/controle/resume`
 
 Remove a pausa manual e devolve o gate ao modo automatico. Se ainda houver ingestao ativa, o gate continua vermelho por `INGESTION_ACTIVE`.
-Execucoes apenas `agendada` ou `cancelada` nao fecham o gate; o bloqueio automatico vale apenas para ingestao realmente em `em_execucao`.
+Execucoes `agendada`, `em_execucao` ou `aguardando_ingestao` fecham o gate; execucoes finais como `cancelada` e `falha` nao fecham.
 Enquanto o gate estiver vermelho, o backend nao deve iniciar novas tasks efetivas de dispatcher, campanha, chunk ou materializacao direta por companhia.
 
 ## `POST /analise/materializacoes/recuperar-stale`

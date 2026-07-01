@@ -380,7 +380,7 @@ def test_obter_estado_gate_materializacao_detecta_ingestao_ativa(db_session: Ses
     assert gate.blockers[0].source_type == "itr"
 
 
-def test_obter_estado_gate_materializacao_ignora_execucoes_nao_ativas(
+def test_obter_estado_gate_materializacao_bloqueia_execucao_agendada(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -408,6 +408,36 @@ def test_obter_estado_gate_materializacao_ignora_execucoes_nao_ativas(
                 iniciada_em=agora,
             ),
         ]
+    )
+    db_session.commit()
+
+    gate = obter_estado_gate_materializacao(db_session)
+
+    assert gate.status == "red"
+    assert gate.reason_code == "INGESTION_ACTIVE"
+    assert gate.blocking_ingestions == 1
+    assert gate.blockers[0].source_type == "dfp"
+    assert gate.blockers[0].status == "agendada"
+
+
+def test_obter_estado_gate_materializacao_ignora_execucao_cancelada(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    monkeypatch.setattr(
+        "app.services.analise._settings.analise_materializacao_blocking_sync_statuses",
+        "em_execucao,agendada,cancelada",
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2025,
+            arquivo="itr_2025.zip",
+            url="http://exemplo/itr",
+            status="cancelada",
+            iniciada_em=agora,
+        )
     )
     db_session.commit()
 

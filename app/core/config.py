@@ -142,7 +142,7 @@ class Settings(BaseSettings):
         alias="ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MIN_AGE_SECONDS",
     )
     analise_materializacao_blocking_sync_statuses: str = Field(
-        default="em_execucao",
+        default="agendada,em_execucao,aguardando_ingestao",
         alias="ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES",
     )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")

@@ -852,6 +852,7 @@ def pre_processar_sincronizacao_zip(
         get_csv_header,
     )
     from app.services.ingestion.operational import record_phase_artifact
+    from app.services.ingestion.scheduling import adotar_ou_criar_execucao_sincronizacao
     from app.services.ingestion.staging import (
         create_run,
         find_reusable_member_match,
@@ -868,16 +869,15 @@ def pre_processar_sincronizacao_zip(
     arquivo_zip = f"{tipo_fonte}_cia_aberta_{ano}.zip"
     url = f"{settings.cvm_base_url}/CIA_ABERTA/DOC/{tipo_formulario}/DADOS/{arquivo_zip}"
 
-    execucao = ExecucaoSincronizacao(
+    execucao = adotar_ou_criar_execucao_sincronizacao(
+        db,
         tipo_fonte=tipo_fonte,
         ano=ano,
-        id_tarefa=task_id,
+        task_id=task_id,
         arquivo=arquivo_zip,
         url=url,
-        status="em_execucao",
         tipo_execucao="arquivo_zip",
     )
-    db.add(execucao)
     db.commit()
     db.refresh(execucao)
 

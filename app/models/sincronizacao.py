@@ -10,6 +10,7 @@ from app.db.base import Base
 
 
 class StatusExecucao(enum.StrEnum):
+    agendada = "agendada"
     em_execucao = "em_execucao"
     sucesso = "sucesso"
     sem_alteracao = "sem_alteracao"

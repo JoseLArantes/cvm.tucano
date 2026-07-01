@@ -142,6 +142,18 @@ As filas operacionais sao isoladas:
 
 Workers de materializacao nao devem consumir filas de ingestao. Workers de ingestao podem manter a fila historica `celery` apenas para drenar mensagens legadas ja publicadas.
 
+## Gate de materializacao
+
+Todo disparo administrativo de ingestao cria uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task Celery.
+O gate automatico da materializacao considera bloqueadores os status:
+
+- `agendada`
+- `em_execucao`
+- `aguardando_ingestao`
+
+Estados finais, como `sucesso`, `sem_alteracao`, `skipped`, `falha` e `cancelada`, nao bloqueiam o gate.
+Quando o gate esta vermelho por ingestao, o backend bloqueia novos dispatchers, campanhas e chunks de materializacao; tarefas ja em andamento encerram ou devolvem itens pendentes conforme a semantica do chunk.
+
 ## Quarentena
 
 A quarentena representa excecoes persistidas de linha.

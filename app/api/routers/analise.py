@@ -438,16 +438,22 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
         "`situacao_registro=CANCELADA`; canceladas só aparecem se uma execução pontual tiver sido disparada com "
         "override explícito. O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
         "recuperáveis, campanhas presas sem despacho inicial, último sweep automático persistido e tasks ativas do "
-        "fluxo de recuperação de pendências."
+        "fluxo de recuperação de pendências. A inspeção Celery é tolerante a timeout/falha e a detecção detalhada "
+        "de campanhas pendentes recuperáveis é limitada por `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS`."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="monitorarMaterializacoesAnaliticas",
 )
 def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacaoMonitoramentoResposta:
-    inspect = celery_app.control.inspect(timeout=1.0)
-    active = inspect.active() or {}
-    reserved = inspect.reserved() or {}
-    scheduled = inspect.scheduled() or {}
+    inspect = celery_app.control.inspect(timeout=0.5)
+    try:
+        active = inspect.active() or {}
+        reserved = inspect.reserved() or {}
+        scheduled = inspect.scheduled() or {}
+    except Exception:
+        active = {}
+        reserved = {}
+        scheduled = {}
 
     running = list(
         db.scalars(
@@ -516,18 +522,19 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         )
     ).one()
     queued_chunks, running_chunks, stale_chunks = chunk_counts
-    waiting_for_gate_campaigns = sum(
-        1
-        for summary in db.scalars(
+    pending_summaries = list(
+        db.scalars(
             select(AnaliseMaterializacaoCampanha.summary).where(AnaliseMaterializacaoCampanha.status == "pending")
         ).all()
+    )
+    waiting_for_gate_campaigns = sum(
+        1
+        for summary in pending_summaries
         if isinstance(summary, dict) and summary.get("wait_reason") in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}
     )
     recovering_campaigns = sum(
         1
-        for summary in db.scalars(
-            select(AnaliseMaterializacaoCampanha.summary).where(AnaliseMaterializacaoCampanha.status == "pending")
-        ).all()
+        for summary in pending_summaries
         if isinstance(summary, dict) and summary.get("wait_reason") in {"STALE_CHUNK_RECOVERED", "STALE_CHUNK_DETECTED"}
     )
     pending_campaign_rows = list(
@@ -535,6 +542,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
             select(AnaliseMaterializacaoCampanha)
             .where(AnaliseMaterializacaoCampanha.status == "pending")
             .order_by(AnaliseMaterializacaoCampanha.created_at.asc())
+            .limit(_settings.analise_materializacao_pending_recovery_max_campaigns)
         ).all()
     )
     recoverable_campaign_ids: list[str] = []
@@ -689,7 +697,10 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     "/materializacoes/controle",
     response_model=AnaliseMaterializacaoControleResposta,
     summary="Consultar Controle de Materializacao Analitica",
-    description="Retorna o estado atual do gate de admissão da materialização analítica e o modo manual persistido.",
+    description=(
+        "Retorna o estado atual do gate de admissão da materialização analítica e o modo manual persistido. "
+        "No modo automático, execuções de ingestão em `agendada`, `em_execucao` ou `aguardando_ingestao` mantêm o gate vermelho por `INGESTION_ACTIVE`; estados finais não bloqueiam."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="consultarControleMaterializacaoAnalitica",
 )
@@ -724,7 +735,10 @@ def pausar_controle_materializacao_analitica(
     "/materializacoes/controle/resume",
     response_model=AnaliseMaterializacaoControleResposta,
     summary="Retomar Materializacao Analitica",
-    description="Remove a pausa manual e devolve o gate ao modo automático baseado no estado de ingestão.",
+    description=(
+        "Remove a pausa manual e devolve o gate ao modo automático baseado no estado de ingestão. "
+        "Se ainda houver execução em `agendada`, `em_execucao` ou `aguardando_ingestao`, o gate continua vermelho por `INGESTION_ACTIVE`."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="retomarControleMaterializacaoAnalitica",
 )
