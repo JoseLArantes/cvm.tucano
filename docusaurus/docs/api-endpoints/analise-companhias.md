@@ -78,7 +78,10 @@ Parametros:
 | Nome | Tipo | Descricao |
 | --- | --- | --- |
 | `escopo` | string | `consolidated` ou `individual` |
+| `periodicidade` | string | Filtro opcional: `annual` ou `quarterly` |
+| `base_periodo` | string | Filtro opcional: `fy`, `quarter` ou `ytd` |
 | `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual maximo quando `periodicidade=annual` e `base_periodo=fy` |
 
 ```bash
 curl -X GET "http://localhost:8007/analise/companhias/9512/coverage?escopo=consolidated" \
@@ -97,7 +100,11 @@ Cada item de `periodos` contém:
 | `form` | Formulário ou origem principal do período |
 | `has_raw_data` | Há dado financeiro bruto/promovido suficiente para listar o período |
 | `has_canonical_context` | A revisão de contexto canônica lista o período |
+| `has_canonical_facts` | Há ao menos uma revisão de fato canônica, disponível ou indisponível, para o período |
+| `has_materialized_metrics` | Há métricas materializadas disponíveis para o período |
 | `has_series` | Há ao menos uma métrica canônica disponível para o período |
+| `metrics_count` | Quantidade de métricas canônicas disponíveis |
+| `unavailable_count` | Quantidade de métricas canônicas avaliadas como indisponíveis |
 | `metrics_available` | Métricas disponíveis na camada canônica |
 | `metrics_unavailable` | Métricas avaliadas e indisponíveis na camada canônica |
 | `latest_execution_id` | Execução de materialização usada |
@@ -168,6 +175,59 @@ Cada item de `rejected_periods` informa:
 - `missing_forms`
 - `scope_mismatch`
 - `materialization_mismatch`
+- `has_raw_data`
+- `has_canonical_context`
+- `has_canonical_facts`
+- `has_materialized_metrics`
+- `materialization_status`
+- `materialization_execution_id`
+- `latest_execution_id`
+- `metrics_count`
+- `unavailable_count`
+- `metric_reasons`
+
+Cada item de `metric_reasons` traz `metric_id`, `reason_code`, `reason_message`, `layer`, `remediation_code` e `remediation_message`.
+
+`layer` indica onde a lacuna foi encontrada:
+
+- `raw`
+- `canonical_context`
+- `canonical_fact`
+- `metric_calculation`
+- `materialization`
+- `scope`
+- `filter`
+
+`reason_code` é estável para consumo da UI:
+
+- `RAW_DATA_MISSING`
+- `CANONICAL_CONTEXT_MISSING`
+- `CANONICAL_FACTS_MISSING`
+- `MATERIALIZATION_MISSING`
+- `MATERIALIZATION_PENDING`
+- `MATERIALIZATION_RUNNING`
+- `MATERIALIZATION_FAILED`
+- `SCOPE_MISMATCH`
+- `PERIODICITY_MISMATCH`
+- `BASE_PERIOD_MISMATCH`
+- `METRIC_MAPPING_MISSING`
+- `METRIC_INPUT_ACCOUNT_MISSING`
+- `METRIC_CALCULATION_UNAVAILABLE`
+- `INSUFFICIENT_SERIES_POINTS`
+
+`remediation_code` informa a ação recomendada:
+
+- `INGEST_SOURCE`
+- `RUN_MATERIALIZATION`
+- `WAIT_MATERIALIZATION`
+- `REBUILD_CANONICAL_CONTEXT`
+- `FIX_METRIC_MAPPING`
+- `CHANGE_SCOPE`
+- `CHANGE_PERIODICITY`
+- `CHANGE_BASE_PERIOD`
+- `SELECT_DIFFERENT_METRIC`
+
+Exemplo de leitura para a UI: `FY2023` pode ter `has_raw_data=true`, `has_canonical_context=true`, `has_canonical_facts=false` e `metric_reasons[].reason_code=CANONICAL_FACTS_MISSING`. Nesse caso, a ação recomendada é executar repair/materialização para a companhia, escopo e período.
 
 Com isso, a UI pode explicar casos como: "o período existe no DFP bruto, mas a métrica não foi materializada" ou "há dado no escopo individual, mas não no consolidado solicitado".
 

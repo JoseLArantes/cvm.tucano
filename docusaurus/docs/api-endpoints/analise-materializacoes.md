@@ -24,6 +24,7 @@ Esse bloco nao e a documentacao principal para leitura de dado financeiro final.
 | --- | --- | --- |
 | `GET` | `/analise/materializacoes` | Listagem de execucoes de materializacao analitica |
 | `GET` | `/analise/materializacoes/companhias/{codigo_cvm}/status` | Status de materializacao por companhia e escopo |
+| `POST` | `/analise/materializacoes/companhias/{codigo_cvm}/repair` | Repair focado de materializacao por companhia, escopo e períodos |
 | `GET` | `/analise/materializacoes/monitoramento` | Snapshot operacional da fila e dos workers de materializacao |
 | `GET` | `/analise/materializacoes/controle` | Estado atual do gate de materializacao |
 | `POST` | `/analise/materializacoes/controle/pause` | Pausa manual do gate de materializacao |
@@ -163,6 +164,58 @@ Cada item de `anos` contem:
 | `message` | string | Mensagem operacional ou erro de item |
 
 Cada item de `periodos_detalhe` contem `period_id`, `ano`, `periodicidade`, `base_periodo`, `escopo`, `has_context_revision`, `has_fact_revision`, `metrics_count`, `unavailable_count` e `coverage_complete`.
+
+## `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+
+Cria uma campanha pequena de materializacao para recompor a camada canonica de uma companhia e escopo a partir de períodos específicos.
+
+Autenticacao:
+
+- aceita token de sistema (`TUCANO_CVM_TOKEN`)
+- aceita usuario com `is_admin=true`
+- aceita usuario com `pode_operar_materializacao=true`
+
+Payload:
+
+```json
+{
+  "escopo": "consolidated",
+  "period_ids": ["FY2021", "FY2022", "FY2023"],
+  "metricas": ["receita_liquida", "ebitda", "lucro_liquido"],
+  "mode": "missing_only"
+}
+```
+
+Semantica:
+
+- `period_ids` define quais períodos serão avaliados para repair
+- `metricas` valida e explica a solicitação, mas a recomposição real continua sendo por companhia, escopo e janela de conhecimento
+- `mode=missing_only` aceita períodos com dado bruto e lacuna canônica/materializada
+- o backend deriva `invalidated_from` pelo documento CVM mais antigo que suporta os períodos aceitos
+- a campanha criada usa `source=manual_repair` e `chunk_size=1`
+- se o gate estiver vermelho, a campanha fica pendente e a resposta retorna `gate_status=red`
+
+Resposta:
+
+| Campo | Tipo | Descricao |
+| --- | --- | --- |
+| `status` | string | `accepted`, `partial` ou `rejected` |
+| `campanha_id` | string | Campanha criada, quando houver períodos aceitos |
+| `accepted_items` | array | Períodos aceitos para repair |
+| `rejected_items` | array | Períodos rejeitados com motivo acionável |
+| `reason_code` | string | Motivo consolidado da resposta |
+| `dispatcher_enqueued` | boolean | Indica se o orquestrador foi enfileirado |
+| `gate_status` | string | `green` ou `red` no momento da solicitação |
+| `triggered_at` | string | Momento da criação do repair |
+
+Cada item de `accepted_items` e `rejected_items` contém `period_id`, `accepted`, `reason_code`, `reason_message`, `remediation_code` e `remediation_message`.
+
+Rejeições comuns:
+
+- `RAW_DATA_MISSING`: ingerir a fonte CVM antes do repair
+- `METRIC_MAPPING_MISSING`: registrar ou corrigir o mapeamento da métrica
+- `MATERIALIZATION_RUNNING`: aguardar a campanha ativa concluir
+- `NO_MISSING_METRICS`: o período já possui as métricas solicitadas materializadas
 
 ## `GET /analise/materializacoes/monitoramento`
 

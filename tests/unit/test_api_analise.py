@@ -4,10 +4,12 @@ from decimal import Decimal
 
 from _pytest.monkeypatch import MonkeyPatch
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.models.analise import (
     AnaliseContextoRevision,
+    AnaliseFatoRevision,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -694,6 +696,65 @@ def test_analise_series_diagnostico_retorna_lacunas_por_periodo(client: TestClie
     assert "FY2025" in payload["returned_periods"]
     assert "unavailable_reasons" in payload
     assert all("materialization_mismatch" in item for item in payload["rejected_periods"])
+
+
+def test_analise_series_diagnostico_explica_fatos_canonicos_ausentes(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+    db_session.execute(
+        delete(AnaliseFatoRevision).where(
+            AnaliseFatoRevision.codigo_cvm == cia.codigo_cvm,
+            AnaliseFatoRevision.escopo == "consolidated",
+            AnaliseFatoRevision.fiscal_year.in_([2021, 2022, 2023]),
+        )
+    )
+    db_session.commit()
+
+    series = client.get(
+        "/analise/companhias/9512/series?metricas=receita_liquida,ebitda,lucro_liquido&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+    assert series.status_code == 200
+    series_periods = {item["period_id"] for item in series.json()["observacoes"]}
+    assert series_periods == {"FY2024", "FY2025"}
+
+    diagnostico = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida,ebitda,lucro_liquido&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+    assert diagnostico.status_code == 200
+    payload = diagnostico.json()
+    rejected = {item["period_id"]: item for item in payload["rejected_periods"]}
+    assert {"FY2021", "FY2022", "FY2023"}.issubset(rejected)
+    fy2023 = rejected["FY2023"]
+    assert fy2023["has_raw_data"] is True
+    assert fy2023["has_canonical_context"] is True
+    assert fy2023["has_canonical_facts"] is False
+    assert fy2023["has_materialized_metrics"] is False
+    assert fy2023["metrics_count"] == 0
+    assert fy2023["unavailable_count"] == 0
+    reason_by_metric = {item["metric_id"]: item for item in fy2023["metric_reasons"]}
+    assert reason_by_metric["receita_liquida"]["reason_code"] == "CANONICAL_FACTS_MISSING"
+    assert reason_by_metric["receita_liquida"]["layer"] == "canonical_fact"
+    assert reason_by_metric["receita_liquida"]["remediation_code"] == "RUN_MATERIALIZATION"
+
+
+def test_analise_coverage_e_diagnostico_usam_mesma_janela(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+
+    coverage = client.get(
+        "/analise/companhias/9512/coverage?escopo=consolidated&periodicidade=annual&base_periodo=fy&horizonte_anos=3"
+    )
+    diagnostico = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida&periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=3"
+    )
+
+    assert coverage.status_code == 200
+    assert diagnostico.status_code == 200
+    coverage_periods = [item["period_id"] for item in coverage.json()["periodos"]]
+    diag_periods = diagnostico.json()["candidate_periods"]
+    assert set(coverage_periods) == set(diag_periods)
+    assert all(item["periodicidade"] == "annual" and item["base_periodo"] == "fy" for item in coverage.json()["periodos"])
 
 
 def test_analise_series_annual_selects_latest_current_exercise(client: TestClient, db_session: Session) -> None:
@@ -1642,6 +1703,42 @@ def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, 
     assert payload["dispatcher_enqueued"] is True
 
 
+def test_analise_materializacoes_repair_companhia_cria_campanha_focada(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    _seed_analise_v2(db_session)
+
+    resp = client.post(
+        "/analise/materializacoes/companhias/9512/repair",
+        headers=_ops_headers(client),
+        json={
+            "escopo": "consolidated",
+            "period_ids": ["FY2021", "FY2022", "FY2030"],
+            "metricas": ["receita_liquida", "ebitda", "lucro_liquido"],
+            "mode": "missing_only",
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "partial"
+    assert payload["campanha_id"] is not None
+    assert payload["dispatcher_enqueued"] is True
+    assert [item["period_id"] for item in payload["accepted_items"]] == ["FY2021", "FY2022"]
+    rejected = {item["period_id"]: item for item in payload["rejected_items"]}
+    assert rejected["FY2030"]["reason_code"] == "RAW_DATA_MISSING"
+    campanha = db_session.get(AnaliseMaterializacaoCampanha, uuid.UUID(payload["campanha_id"]))
+    assert campanha is not None
+    assert campanha.source == "manual_repair"
+    assert campanha.chunk_size == 1
+    assert campanha.summary is not None
+    assert campanha.summary["repair"]["period_ids"] == ["FY2021", "FY2022", "FY2030"]
+    item = db_session.query(AnaliseMaterializacaoCampanhaItem).filter_by(campanha_id=campanha.id).one()
+    assert item.escopo == "consolidated"
+    assert item.invalidated_from == date(2022, 3, 15)
+
+
 def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: TestClient, db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
@@ -1728,6 +1825,7 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         "/analise/materializacoes/campanhas/{campanha_id}/reativar",
         "/analise/materializacoes/recuperacao/trigger",
         "/analise/materializacoes/companhias/{codigo_cvm}/status",
+        "/analise/materializacoes/companhias/{codigo_cvm}/repair",
         "/analise/materializacoes/{execucao_id}",
         "/analise/companhias/{codigo_cvm}",
         "/analise/companhias/{codigo_cvm}/coverage",
@@ -1766,16 +1864,33 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert paths["/analise/companhias/{codigo_cvm}/coverage"]["get"]["operationId"] == "obterAnaliseCoverage"
     assert paths["/analise/companhias/{codigo_cvm}/series"]["get"]["operationId"] == "obterAnaliseSeries"
     assert paths["/analise/companhias/{codigo_cvm}/series/diagnostico"]["get"]["operationId"] == "obterAnaliseSeriesDiagnostico"
+    assert paths["/analise/materializacoes/companhias/{codigo_cvm}/repair"]["post"]["operationId"] == "criarRepairMaterializacaoCompanhia"
     assert paths["/analise/companhias/{codigo_cvm}/comparacoes"]["get"]["operationId"] == "obterAnaliseComparacoes"
     manifesto_schema = components["AnaliseManifestoResposta"]["properties"]
     assert "periodos_disponiveis_por_metrica" in manifesto_schema
     coverage_schema = components["AnaliseCoveragePeriodoItem"]["properties"]
     assert "has_raw_data" in coverage_schema
     assert "has_canonical_context" in coverage_schema
+    assert "has_canonical_facts" in coverage_schema
+    assert "has_materialized_metrics" in coverage_schema
+    assert "metrics_count" in coverage_schema
+    assert "unavailable_count" in coverage_schema
     assert "metrics_available" in coverage_schema
     diagnostico_schema = components["AnaliseSeriesDiagnosticoResposta"]["properties"]
     assert "candidate_periods" in diagnostico_schema
     assert "rejected_periods" in diagnostico_schema
+    diagnostico_periodo_schema = components["AnaliseSeriesDiagnosticoPeriodo"]["properties"]
+    assert "has_raw_data" in diagnostico_periodo_schema
+    assert "has_canonical_facts" in diagnostico_periodo_schema
+    assert "materialization_status" in diagnostico_periodo_schema
+    assert "metric_reasons" in diagnostico_periodo_schema
+    metric_reason_schema = components["AnaliseSeriesDiagnosticoMetricReason"]["properties"]
+    assert "reason_code" in metric_reason_schema
+    assert "remediation_code" in metric_reason_schema
+    repair_schema = components["AnaliseMaterializacaoRepairResposta"]["properties"]
+    assert "accepted_items" in repair_schema
+    assert "rejected_items" in repair_schema
+    assert "gate_status" in repair_schema
     execucao_schema = components["AnaliseMaterializacaoExecucaoResumo"]["properties"]
     assert "materialization_mode" in execucao_schema
     assert "invalidated_from" in execucao_schema

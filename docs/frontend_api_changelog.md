@@ -15,6 +15,7 @@ Convencoes deste changelog:
 
 - `GET /analise/companhias/{codigo_cvm}/coverage`
 - `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
 
 ### Endpoints estendidos
 
@@ -24,7 +25,14 @@ Convencoes deste changelog:
 ### Comportamento entregue
 
 - `/coverage` retorna uma matriz por periodo cruzando dado bruto, contexto canonico, fatos canonicos e ultima execucao de materializacao
-- `/series/diagnostico` usa os mesmos filtros de `/series`, mas retorna periodos candidatos, periodos retornados, periodos rejeitados e motivos de indisponibilidade
+- `/coverage` passa a distinguir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `has_series`, `metrics_count` e `unavailable_count`
+- `/coverage` aceita `periodicidade`, `base_periodo` e `horizonte_anos` para alinhar a mesma janela usada por `/series`
+- `/series/diagnostico` usa os mesmos filtros de `/series`, mas retorna periodos candidatos, periodos retornados, periodos rejeitados, status completo do pipeline e motivos de indisponibilidade por metrica
+- cada item de `rejected_periods` passa a incluir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `materialization_status`, `materialization_execution_id`, `latest_execution_id`, `metrics_count`, `unavailable_count` e `metric_reasons`
+- cada item de `metric_reasons` inclui `metric_id`, `reason_code`, `reason_message`, `layer`, `remediation_code` e `remediation_message`
+- reason codes estaveis: `RAW_DATA_MISSING`, `CANONICAL_CONTEXT_MISSING`, `CANONICAL_FACTS_MISSING`, `MATERIALIZATION_MISSING`, `MATERIALIZATION_PENDING`, `MATERIALIZATION_RUNNING`, `MATERIALIZATION_FAILED`, `SCOPE_MISMATCH`, `PERIODICITY_MISMATCH`, `BASE_PERIOD_MISMATCH`, `METRIC_MAPPING_MISSING`, `METRIC_INPUT_ACCOUNT_MISSING`, `METRIC_CALCULATION_UNAVAILABLE`, `INSUFFICIENT_SERIES_POINTS`
+- remediation codes estaveis: `INGEST_SOURCE`, `RUN_MATERIALIZATION`, `WAIT_MATERIALIZATION`, `REBUILD_CANONICAL_CONTEXT`, `FIX_METRIC_MAPPING`, `CHANGE_SCOPE`, `CHANGE_PERIODICITY`, `CHANGE_BASE_PERIOD`, `SELECT_DIFFERENT_METRIC`
+- `/analise/materializacoes/companhias/{codigo_cvm}/repair` cria uma campanha `manual_repair` focada por companhia, escopo e periodos; `metricas` valida/explica a solicitacao, mas a recomposicao real continua por companhia/escopo/janela
 - o manifesto passa a incluir `periodos_disponiveis_por_metrica`, com `metric_id` e `period_ids`, para a UI decidir se um grafico pode existir sem chamar `/series`
 - o status de materializacao por companhia passa a incluir `periodos_detalhe`
 - cada item de `anos` no status de materializacao passa a incluir `period_id`, `has_context_revision`, `has_fact_revision`, `metrics_count` e `unavailable_count`
@@ -33,6 +41,9 @@ Convencoes deste changelog:
 
 - usar `/coverage` para explicar diferenca entre dado bruto existente e camada canonica ausente
 - usar `/series/diagnostico` quando um grafico tiver poucos pontos ou nenhum ponto
+- nao consultar endpoints brutos DFP/ITR para explicar gaps de grafico; a explicacao canonica deve vir de `/coverage` e `/series/diagnostico`
+- quando `metric_reasons[].remediation_code=RUN_MATERIALIZATION`, oferecer acao operacional baseada em `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+- exemplo de mensagem: `FY2023 tem dado bruto DFP, mas nao tem fatos canonicos para EBITDA e lucro_liquido. Execute repair/materializacao para codigo_cvm=9512, escopo=consolidated, period_id=FY2023.`
 - usar `periodos_disponiveis_por_metrica` no manifesto para habilitar/desabilitar secoes de grafico sem consultas extras
 - usar `periodos_detalhe` no status de materializacao para mostrar se a lacuna esta em contexto canonico, fatos canonicos ou indisponibilidade de metrica
 

@@ -46,6 +46,8 @@ from app.schemas.analise import (
     AnaliseMaterializacaoReativacaoResposta,
     AnaliseMaterializacaoReativacaoSweepResposta,
     AnaliseMaterializacaoRecuperacaoResposta,
+    AnaliseMaterializacaoRepairRequest,
+    AnaliseMaterializacaoRepairResposta,
     AnaliseMetricasCatalogoResposta,
     AnalisePeriodicidade,
     AnalisePessoasResposta,
@@ -60,6 +62,7 @@ from app.services.analise import (
     CALCULATION_VERSION,
     campanha_tem_requeue_em_transito,
     contar_chunks_stale_campanha,
+    criar_repair_materializacao_companhia,
     listar_chunks_ativos_campanha,
     listar_metricas,
     obter_brief,
@@ -1120,9 +1123,9 @@ def consultar_status_materializacao_companhia(
             base_periodo=item.base_periodo,
             escopo=item.escopo,
             has_context_revision=item.has_canonical_context,
-            has_fact_revision=bool(item.metrics_available or item.metrics_unavailable),
-            metrics_count=len(item.metrics_available),
-            unavailable_count=len(item.metrics_unavailable),
+            has_fact_revision=item.has_canonical_facts,
+            metrics_count=item.metrics_count,
+            unavailable_count=item.unavailable_count,
             coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
         )
         for item in coverage.periodos
@@ -1145,9 +1148,9 @@ def consultar_status_materializacao_companhia(
             if coverage_item is not None:
                 status_item.period_id = coverage_item.period_id
                 status_item.has_context_revision = coverage_item.has_canonical_context
-                status_item.has_fact_revision = bool(coverage_item.metrics_available or coverage_item.metrics_unavailable)
-                status_item.metrics_count = len(coverage_item.metrics_available)
-                status_item.unavailable_count = len(coverage_item.metrics_unavailable)
+                status_item.has_fact_revision = coverage_item.has_canonical_facts
+                status_item.metrics_count = coverage_item.metrics_count
+                status_item.unavailable_count = coverage_item.unavailable_count
             statuses.append(status_item)
         elif execucao_base is not None:
             status_item = _materializacao_ano_status_from_execucao(ano=ano, escopo=escopo, execucao=execucao_base)
@@ -1155,9 +1158,9 @@ def consultar_status_materializacao_companhia(
             if coverage_item is not None:
                 status_item.period_id = coverage_item.period_id
                 status_item.has_context_revision = coverage_item.has_canonical_context
-                status_item.has_fact_revision = bool(coverage_item.metrics_available or coverage_item.metrics_unavailable)
-                status_item.metrics_count = len(coverage_item.metrics_available)
-                status_item.unavailable_count = len(coverage_item.metrics_unavailable)
+                status_item.has_fact_revision = coverage_item.has_canonical_facts
+                status_item.metrics_count = coverage_item.metrics_count
+                status_item.unavailable_count = coverage_item.unavailable_count
             statuses.append(status_item)
         else:
             coverage_item = coverage_by_period.get(f"FY{ano}")
@@ -1168,9 +1171,9 @@ def consultar_status_materializacao_companhia(
                     status="missing",
                     escopo=escopo,
                     has_context_revision=coverage_item.has_canonical_context if coverage_item is not None else False,
-                    has_fact_revision=bool(coverage_item.metrics_available or coverage_item.metrics_unavailable) if coverage_item is not None else False,
-                    metrics_count=len(coverage_item.metrics_available) if coverage_item is not None else 0,
-                    unavailable_count=len(coverage_item.metrics_unavailable) if coverage_item is not None else 0,
+                    has_fact_revision=coverage_item.has_canonical_facts if coverage_item is not None else False,
+                    metrics_count=coverage_item.metrics_count if coverage_item is not None else 0,
+                    unavailable_count=coverage_item.unavailable_count if coverage_item is not None else 0,
                     coverage_complete=None,
                     calculation_version=CALCULATION_VERSION,
                 )
@@ -1208,6 +1211,36 @@ def consultar_status_materializacao_companhia(
         generated_at=datetime.now(UTC),
         updated_at=updated_at,
     )
+
+
+@router.post(
+    "/materializacoes/companhias/{codigo_cvm}/repair",
+    response_model=AnaliseMaterializacaoRepairResposta,
+    summary="Criar Repair Focado de Materializacao Analitica",
+    description=(
+        "Cria uma campanha pequena de materialização para recompor a camada canônica de uma companhia e escopo "
+        "a partir dos períodos solicitados. O payload pode informar métricas para validação e diagnóstico, mas "
+        "a recomposição operacional continua sendo por companhia, escopo e janela de conhecimento derivada do "
+        "primeiro período aceito. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
+        "resposta retorna `gate_status=red` e `reason_code=WAIT_MATERIALIZATION`."
+    ),
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
+    operation_id="criarRepairMaterializacaoCompanhia",
+)
+def criar_repair_materializacao_companhia_analitica(
+    codigo_cvm: int,
+    payload: AnaliseMaterializacaoRepairRequest,
+    db: DbSession,
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoRepairResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    resultado = criar_repair_materializacao_companhia(db, companhia, payload)
+    if resultado.campanha_id is not None and resultado.gate_status == "green":
+        from app.worker.tasks import materializar_analise_campanha_task
+
+        materializar_analise_campanha_task.delay(resultado.campanha_id)
+        resultado.dispatcher_enqueued = True
+    return resultado
 
 
 @router.get(
@@ -1268,10 +1301,21 @@ def obter_analise_coverage(
     codigo_cvm: int,
     db: DbSession,
     escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    periodicidade: Annotated[AnalisePeriodicidade | None, Query(description="Periodicidade opcional para alinhar com `/series`: `annual` ou `quarterly`.")] = None,
+    base_periodo: Annotated[AnaliseBasePeriodo | None, Query(description="Base temporal opcional para alinhar com `/series`: `fy`, `quarter` ou `ytd`.")] = None,
     as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    horizonte_anos: Annotated[int | None, Query(description="Horizonte anual máximo quando `periodicidade=annual&base_periodo=fy`.", ge=1, le=20)] = None,
 ) -> AnaliseCoverageResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
-    return obter_coverage(db, companhia, scope=escopo, as_of=date.fromisoformat(as_of) if as_of else None)
+    return obter_coverage(
+        db,
+        companhia,
+        scope=escopo,
+        as_of=date.fromisoformat(as_of) if as_of else None,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+    )
 
 
 @router.get(

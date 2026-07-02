@@ -28,6 +28,43 @@ AnaliseMaterializacaoGateStatus = Literal["green", "red"]
 AnaliseMaterializacaoControlMode = Literal["auto", "paused"]
 AnaliseMaterializacaoChunkStatus = Literal["queued", "running", "success", "failed", "stale", "cancelled"]
 AnaliseMaterializacaoMode = Literal["full", "incremental"]
+AnaliseDiagnosticoLayer = Literal[
+    "raw",
+    "canonical_context",
+    "canonical_fact",
+    "metric_calculation",
+    "materialization",
+    "scope",
+    "filter",
+]
+AnaliseDiagnosticoReasonCode = Literal[
+    "RAW_DATA_MISSING",
+    "CANONICAL_CONTEXT_MISSING",
+    "CANONICAL_FACTS_MISSING",
+    "MATERIALIZATION_MISSING",
+    "MATERIALIZATION_PENDING",
+    "MATERIALIZATION_RUNNING",
+    "MATERIALIZATION_FAILED",
+    "SCOPE_MISMATCH",
+    "PERIODICITY_MISMATCH",
+    "BASE_PERIOD_MISMATCH",
+    "METRIC_MAPPING_MISSING",
+    "METRIC_INPUT_ACCOUNT_MISSING",
+    "METRIC_CALCULATION_UNAVAILABLE",
+    "INSUFFICIENT_SERIES_POINTS",
+]
+AnaliseDiagnosticoRemediationCode = Literal[
+    "INGEST_SOURCE",
+    "RUN_MATERIALIZATION",
+    "WAIT_MATERIALIZATION",
+    "REBUILD_CANONICAL_CONTEXT",
+    "FIX_METRIC_MAPPING",
+    "CHANGE_SCOPE",
+    "CHANGE_PERIODICITY",
+    "CHANGE_BASE_PERIOD",
+    "SELECT_DIFFERENT_METRIC",
+]
+AnaliseMaterializacaoRepairMode = Literal["missing_only"]
 AnaliseMaterializacaoAnoStatusCode = Literal[
     "missing",
     "pending",
@@ -258,6 +295,33 @@ class AnaliseMaterializacaoCompanhiaStatusResposta(BaseModel):
     updated_at: datetime | None = Field(default=None, description="Última atualização conhecida entre execução, item e revisão canônica.")
 
 
+class AnaliseMaterializacaoRepairRequest(BaseModel):
+    escopo: AnaliseEscopo = Field(default="consolidated", description="Escopo societário a reparar.")
+    period_ids: list[str] = Field(description="Períodos canônicos solicitados para reparo, como `FY2023` ou `2023-Q3`.")
+    metricas: list[str] = Field(default_factory=list, description="Métricas usadas para validar e explicar o reparo; a recomposição real é por companhia/escopo/janela.")
+    mode: AnaliseMaterializacaoRepairMode = Field(default="missing_only", description="Modo operacional do reparo. No primeiro corte, apenas lacunas são aceitas.")
+
+
+class AnaliseMaterializacaoRepairItem(BaseModel):
+    period_id: str = Field(description="Período avaliado para reparo.")
+    accepted: bool = Field(description="Indica se o período entrou na campanha de reparo.")
+    reason_code: AnaliseDiagnosticoReasonCode | str = Field(description="Código estável da aceitação ou rejeição.")
+    reason_message: str = Field(description="Mensagem objetiva da decisão.")
+    remediation_code: AnaliseDiagnosticoRemediationCode | None = Field(default=None, description="Ação recomendada quando o item foi rejeitado ou exige espera.")
+    remediation_message: str | None = Field(default=None, description="Mensagem operacional recomendada.")
+
+
+class AnaliseMaterializacaoRepairResposta(BaseModel):
+    status: Literal["accepted", "partial", "rejected"] = Field(description="Resultado consolidado da solicitação de repair.")
+    campanha_id: str | None = Field(default=None, description="Campanha criada para executar o reparo, quando houver itens aceitos.")
+    accepted_items: list[AnaliseMaterializacaoRepairItem] = Field(default_factory=list, description="Períodos aceitos para reparo.")
+    rejected_items: list[AnaliseMaterializacaoRepairItem] = Field(default_factory=list, description="Períodos rejeitados com motivo acionável.")
+    reason_code: AnaliseDiagnosticoReasonCode | str = Field(description="Motivo consolidado da resposta.")
+    dispatcher_enqueued: bool = Field(description="Indica se o orquestrador de materialização foi enfileirado.")
+    gate_status: AnaliseMaterializacaoGateStatus = Field(description="Status do gate de materialização no momento da solicitação.")
+    triggered_at: datetime = Field(description="Momento da avaliação e criação do repair.")
+
+
 class AnaliseCoveragePeriodoItem(BaseModel):
     period_id: str = Field(description="Período canônico avaliado.")
     ano: int = Field(description="Ano fiscal.")
@@ -267,7 +331,11 @@ class AnaliseCoveragePeriodoItem(BaseModel):
     form: AnaliseForm = Field(description="Formulário ou origem principal do período.")
     has_raw_data: bool = Field(description="Indica se há linhas brutas/promovidas suficientes para listar o período.")
     has_canonical_context: bool = Field(description="Indica se a camada canônica possui contexto para o período.")
+    has_canonical_facts: bool = Field(default=False, description="Indica se existe ao menos uma revisão de fato canônica, disponível ou indisponível, para o período.")
+    has_materialized_metrics: bool = Field(default=False, description="Indica se a materialização produziu métricas disponíveis para o período.")
     has_series: bool = Field(description="Indica se há ao menos uma métrica canônica disponível para o período.")
+    metrics_count: int = Field(default=0, description="Quantidade de métricas canônicas disponíveis para o período.")
+    unavailable_count: int = Field(default=0, description="Quantidade de métricas canônicas avaliadas como indisponíveis para o período.")
     metrics_available: list[str] = Field(default_factory=list, description="Métricas disponíveis na camada canônica para o período.")
     metrics_unavailable: list[str] = Field(default_factory=list, description="Métricas avaliadas e indisponíveis na camada canônica para o período.")
     latest_execution_id: str | None = Field(default=None, description="Última execução de materialização bem-sucedida considerada.")
@@ -282,6 +350,15 @@ class AnaliseCoverageResposta(BaseModel):
     periodos: list[AnaliseCoveragePeriodoItem] = Field(description="Matriz autoritativa de cobertura por período.")
 
 
+class AnaliseSeriesDiagnosticoMetricReason(BaseModel):
+    metric_id: str = Field(description="Métrica rejeitada ou indisponível.")
+    reason_code: AnaliseDiagnosticoReasonCode = Field(description="Código estável da causa principal.")
+    reason_message: str = Field(description="Mensagem objetiva da causa.")
+    layer: AnaliseDiagnosticoLayer = Field(description="Camada do pipeline onde a lacuna foi encontrada.")
+    remediation_code: AnaliseDiagnosticoRemediationCode = Field(description="Código estável da ação recomendada.")
+    remediation_message: str = Field(description="Ação operacional ou de dados recomendada.")
+
+
 class AnaliseSeriesDiagnosticoPeriodo(BaseModel):
     period_id: str = Field(description="Período avaliado.")
     ano: int = Field(description="Ano fiscal.")
@@ -293,6 +370,16 @@ class AnaliseSeriesDiagnosticoPeriodo(BaseModel):
     missing_forms: list[AnaliseForm] = Field(default_factory=list, description="Formulários esperados e ausentes para o período.")
     scope_mismatch: bool = Field(description="Indica se existe dado bruto no outro escopo, mas não no escopo solicitado.")
     materialization_mismatch: bool = Field(description="Indica se há dado bruto candidato, mas falta contexto ou fato canônico para o período no escopo solicitado.")
+    has_raw_data: bool = Field(default=False, description="Indica se há dado bruto promovido para o período no escopo solicitado.")
+    has_canonical_context: bool = Field(default=False, description="Indica se a revisão de contexto canônico lista o período.")
+    has_canonical_facts: bool = Field(default=False, description="Indica se há fatos canônicos disponíveis ou indisponíveis para o período.")
+    has_materialized_metrics: bool = Field(default=False, description="Indica se há métricas materializadas disponíveis para o período.")
+    materialization_status: str | None = Field(default=None, description="Status operacional de materialização mais relevante para o período.")
+    materialization_execution_id: str | None = Field(default=None, description="Execução de materialização mais relevante para o período.")
+    latest_execution_id: str | None = Field(default=None, description="Alias operacional da última execução relevante.")
+    metrics_count: int = Field(default=0, description="Quantidade de métricas canônicas disponíveis para o período.")
+    unavailable_count: int = Field(default=0, description="Quantidade de métricas canônicas indisponíveis para o período.")
+    metric_reasons: list[AnaliseSeriesDiagnosticoMetricReason] = Field(default_factory=list, description="Motivos acionáveis por métrica rejeitada.")
 
 
 class AnaliseSeriesDiagnosticoResposta(BaseModel):

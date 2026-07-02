@@ -66,6 +66,8 @@ Pagina:
 Endpoints cobertos:
 
 - `GET /analise/materializacoes`
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
 - `GET /analise/materializacoes/monitoramento`
 - `GET /analise/materializacoes/controle`
 - `POST /analise/materializacoes/controle/pause`

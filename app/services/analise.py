@@ -45,6 +45,9 @@ from app.schemas.analise import (
     AnaliseContextoPadrao,
     AnaliseCoveragePeriodoItem,
     AnaliseCoverageResposta,
+    AnaliseDiagnosticoLayer,
+    AnaliseDiagnosticoReasonCode,
+    AnaliseDiagnosticoRemediationCode,
     AnaliseEscopo,
     AnaliseEvento,
     AnaliseEventosResposta,
@@ -54,6 +57,9 @@ from app.schemas.analise import (
     AnaliseIssue,
     AnaliseLinkSet,
     AnaliseManifestoResposta,
+    AnaliseMaterializacaoRepairItem,
+    AnaliseMaterializacaoRepairRequest,
+    AnaliseMaterializacaoRepairResposta,
     AnaliseMetricaCatalogoItem,
     AnaliseMetricaDisponibilidade,
     AnaliseMetricasCatalogoResposta,
@@ -69,6 +75,7 @@ from app.schemas.analise import (
     AnaliseRestatementContaAlterada,
     AnaliseRestatementItem,
     AnaliseRestatementsResposta,
+    AnaliseSeriesDiagnosticoMetricReason,
     AnaliseSeriesDiagnosticoPeriodo,
     AnaliseSeriesDiagnosticoResposta,
     AnaliseSeriesObservation,
@@ -1989,12 +1996,102 @@ def _periodos_disponiveis_por_metrica_runtime(context: ContextData, scope: Anali
     ]
 
 
+def _filtrar_periodos_coverage(
+    items: list[AnaliseCoveragePeriodoItem],
+    *,
+    periodicidade: AnalisePeriodicidade | None,
+    base_periodo: AnaliseBasePeriodo | None,
+    horizonte_anos: int | None,
+) -> list[AnaliseCoveragePeriodoItem]:
+    filtered = [
+        item
+        for item in items
+        if (periodicidade is None or item.periodicidade == periodicidade)
+        and (base_periodo is None or item.base_periodo == base_periodo)
+    ]
+    if periodicidade == "annual" and base_periodo == "fy" and horizonte_anos is not None and horizonte_anos > 0:
+        return filtered[:horizonte_anos]
+    return filtered
+
+
+def _latest_materializacao_execucao(
+    db: Session,
+    companhia: Companhia,
+    scope: AnaliseEscopo,
+) -> AnaliseMaterializacaoExecucao | None:
+    return db.scalar(
+        select(AnaliseMaterializacaoExecucao)
+        .where(
+            AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoExecucao.escopo == scope,
+            AnaliseMaterializacaoExecucao.calculation_version == CALCULATION_VERSION,
+        )
+        .order_by(
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        )
+        .limit(1)
+    )
+
+
+def _active_materializacao_item(
+    db: Session,
+    companhia: Companhia,
+    scope: AnaliseEscopo,
+) -> AnaliseMaterializacaoCampanhaItem | None:
+    return db.scalar(
+        select(AnaliseMaterializacaoCampanhaItem)
+        .join(
+            AnaliseMaterializacaoCampanha,
+            AnaliseMaterializacaoCampanha.id == AnaliseMaterializacaoCampanhaItem.campanha_id,
+        )
+        .where(
+            AnaliseMaterializacaoCampanhaItem.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoCampanhaItem.escopo == scope,
+            AnaliseMaterializacaoCampanhaItem.status.in_(_MATERIALIZACAO_ACTIVE_ITEM_STATUSES),
+            AnaliseMaterializacaoCampanha.status.in_(_MATERIALIZACAO_ACTIVE_CAMPAIGN_STATUSES),
+        )
+        .order_by(
+            AnaliseMaterializacaoCampanhaItem.updated_at.desc(),
+            AnaliseMaterializacaoCampanhaItem.created_at.desc(),
+        )
+        .limit(1)
+    )
+
+
+def _materialization_status_for_period(
+    *,
+    period_id: str,
+    latest_execucao: AnaliseMaterializacaoExecucao | None,
+    active_item: AnaliseMaterializacaoCampanhaItem | None,
+) -> tuple[str | None, str | None]:
+    fiscal_year = _year_from_period_id(period_id)
+    if active_item is not None:
+        if active_item.invalidated_from is None or fiscal_year is None or fiscal_year >= active_item.invalidated_from.year:
+            return active_item.status, str(active_item.materializacao_execucao_id) if active_item.materializacao_execucao_id is not None else None
+    if latest_execucao is None:
+        return None, None
+    return latest_execucao.status, str(latest_execucao.id)
+
+
+def _year_from_period_id(period_id: str) -> int | None:
+    if period_id.startswith("FY") and period_id[2:6].isdigit():
+        return int(period_id[2:6])
+    if len(period_id) >= 4 and period_id[:4].isdigit():
+        return int(period_id[:4])
+    return None
+
+
 def obter_coverage(
     db: Session,
     companhia: Companhia,
     *,
     scope: AnaliseEscopo = "consolidated",
     as_of: date | None = None,
+    periodicidade: AnalisePeriodicidade | None = None,
+    base_periodo: AnaliseBasePeriodo | None = None,
+    horizonte_anos: int | None = None,
 ) -> AnaliseCoverageResposta:
     runtime_context = _load_context(db, companhia, scope, as_of)
     context_pair = _context_revision_for_as_of(db, companhia, scope, as_of)
@@ -2033,6 +2130,7 @@ def obter_coverage(
         revisions = revisions_by_period.get(period_id, [])
         available_metrics = sorted({revision.metric_id for revision in revisions if revision.status == "available"})
         unavailable_metrics = sorted({revision.metric_id for revision in revisions if revision.status == "unavailable"})
+        has_canonical_facts = bool(available_metrics or unavailable_metrics)
         items.append(
             AnaliseCoveragePeriodoItem(
                 period_id=period_id,
@@ -2043,7 +2141,11 @@ def obter_coverage(
                 form=periodo.form,
                 has_raw_data=period_id in raw_periods,
                 has_canonical_context=period_id in canonical_periods,
+                has_canonical_facts=has_canonical_facts,
+                has_materialized_metrics=bool(available_metrics),
                 has_series=bool(available_metrics),
+                metrics_count=len(available_metrics),
+                unavailable_count=len(unavailable_metrics),
                 metrics_available=available_metrics,
                 metrics_unavailable=unavailable_metrics,
                 latest_execution_id=str(execucao.id) if execucao is not None else None,
@@ -2056,8 +2158,159 @@ def obter_coverage(
         escopo=scope,
         as_of=as_of,
         resolution=_canonical_resolution(execucao, as_of) if execucao is not None else _runtime_resolution(as_of),
-        periodos=items,
+        periodos=_filtrar_periodos_coverage(
+            items,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+        ),
     )
+
+
+def _diagnostico_metric_reason(
+    *,
+    metric_id: str,
+    period_id: str,
+    coverage_item: AnaliseCoveragePeriodoItem | None,
+    unavailable: AnaliseSeriesUnavailable | None,
+    scope_mismatch: bool,
+    materialization_status: str | None,
+    materialization_execution_id: str | None,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+) -> AnaliseSeriesDiagnosticoMetricReason:
+    if metric_id not in METRIC_SPECS:
+        return _reason(
+            metric_id,
+            "METRIC_MAPPING_MISSING",
+            f"A métrica `{metric_id}` não está registrada no catálogo analítico.",
+            "metric_calculation",
+            "FIX_METRIC_MAPPING",
+            f"Registrar o mapeamento canônico da métrica `{metric_id}` antes de usá-la em gráficos.",
+        )
+    if scope_mismatch:
+        other_scope = "individual" if scope == "consolidated" else "consolidated"
+        return _reason(
+            metric_id,
+            "SCOPE_MISMATCH",
+            f"O período `{period_id}` existe no escopo `{other_scope}`, mas não no escopo `{scope}` solicitado.",
+            "scope",
+            "CHANGE_SCOPE",
+            f"Consultar o gráfico com escopo `{other_scope}` ou ingerir/materializar dados para `{scope}`.",
+        )
+    if coverage_item is None or not coverage_item.has_raw_data:
+        return _reason(
+            metric_id,
+            "RAW_DATA_MISSING",
+            f"O período `{period_id}` não possui dado bruto CVM promovido para o escopo `{scope}`.",
+            "raw",
+            "INGEST_SOURCE",
+            f"Ingerir a fonte CVM que contém `{period_id}` antes de materializar a análise.",
+        )
+    if unavailable is not None and unavailable.reason_code == "METRIC_BASE_NOT_SUPPORTED":
+        return _reason(
+            metric_id,
+            "BASE_PERIOD_MISMATCH",
+            f"A métrica `{metric_id}` não suporta a base temporal `{base_periodo}`.",
+            "filter",
+            "CHANGE_BASE_PERIOD",
+            f"Escolher uma base temporal suportada para `{metric_id}` ou outra métrica.",
+        )
+    if not coverage_item.has_canonical_context:
+        remediation: AnaliseDiagnosticoRemediationCode = "WAIT_MATERIALIZATION" if materialization_status in {"pending", "running"} else "RUN_MATERIALIZATION"
+        return _reason(
+            metric_id,
+            "CANONICAL_CONTEXT_MISSING",
+            f"O período `{period_id}` tem dado bruto, mas não está listado no contexto canônico atual.",
+            "canonical_context",
+            remediation,
+            f"Executar repair/materialização para codigo_cvm, escopo `{scope}` e period_id `{period_id}`.",
+        )
+    if materialization_status in {"pending", "queued"}:
+        return _reason(
+            metric_id,
+            "MATERIALIZATION_PENDING",
+            f"A materialização para `{period_id}` está pendente.",
+            "materialization",
+            "WAIT_MATERIALIZATION",
+            "Aguardar a campanha de materialização ou reativar a campanha se ela ficar stale.",
+        )
+    if materialization_status == "running":
+        return _reason(
+            metric_id,
+            "MATERIALIZATION_RUNNING",
+            f"A materialização para `{period_id}` está em execução.",
+            "materialization",
+            "WAIT_MATERIALIZATION",
+            f"Aguardar a execução `{materialization_execution_id}` concluir antes de avaliar o gráfico.",
+        )
+    if materialization_status == "failed":
+        return _reason(
+            metric_id,
+            "MATERIALIZATION_FAILED",
+            f"A última materialização relevante para `{period_id}` falhou.",
+            "materialization",
+            "RUN_MATERIALIZATION",
+            f"Executar repair/materialização para codigo_cvm, escopo `{scope}` e period_id `{period_id}`.",
+        )
+    if not coverage_item.has_canonical_facts:
+        return _reason(
+            metric_id,
+            "CANONICAL_FACTS_MISSING",
+            f"O período `{period_id}` tem contexto canônico, mas não possui fatos canônicos materializados.",
+            "canonical_fact",
+            "RUN_MATERIALIZATION",
+            f"Executar repair/materialização para codigo_cvm, escopo `{scope}` e period_id `{period_id}`.",
+        )
+    if unavailable is not None and unavailable.reason_code == "MISSING_SOURCE_FACT":
+        return _reason(
+            metric_id,
+            "METRIC_INPUT_ACCOUNT_MISSING",
+            unavailable.message,
+            "metric_calculation",
+            "FIX_METRIC_MAPPING",
+            f"Revisar o mapeamento da métrica `{metric_id}` ou a disponibilidade das contas {', '.join(unavailable.missing)}.",
+        )
+    if unavailable is not None:
+        return _reason(
+            metric_id,
+            "METRIC_CALCULATION_UNAVAILABLE",
+            unavailable.message,
+            "metric_calculation",
+            "SELECT_DIFFERENT_METRIC",
+            f"Selecionar outra métrica ou revisar os insumos necessários para `{metric_id}`.",
+        )
+    return _reason(
+        metric_id,
+        "MATERIALIZATION_MISSING",
+        f"A métrica `{metric_id}` não foi retornada para `{period_id}` apesar de haver dado bruto candidato.",
+        "materialization",
+        "RUN_MATERIALIZATION",
+        f"Executar repair/materialização para codigo_cvm, escopo `{scope}` e period_id `{period_id}`.",
+    )
+
+
+def _reason(
+    metric_id: str,
+    reason_code: AnaliseDiagnosticoReasonCode,
+    reason_message: str,
+    layer: AnaliseDiagnosticoLayer,
+    remediation_code: AnaliseDiagnosticoRemediationCode,
+    remediation_message: str,
+) -> AnaliseSeriesDiagnosticoMetricReason:
+    return AnaliseSeriesDiagnosticoMetricReason(
+        metric_id=metric_id,
+        reason_code=reason_code,
+        reason_message=reason_message,
+        layer=layer,
+        remediation_code=remediation_code,
+        remediation_message=remediation_message,
+    )
+
+
+def _unavailable_by_metric(items: list[AnaliseSeriesUnavailable]) -> dict[str, AnaliseSeriesUnavailable]:
+    return {item.metric_id: item for item in items}
 
 
 def obter_series_diagnostico(
@@ -2100,8 +2353,18 @@ def obter_series_diagnostico(
         _period_id_for(periodicidade, base_periodo, year, quarter): (year, quarter)
         for year, quarter in other_period_tuples
     }
-    coverage = obter_coverage(db, companhia, scope=scope, as_of=as_of)
+    coverage = obter_coverage(
+        db,
+        companhia,
+        scope=scope,
+        as_of=as_of,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+    )
     coverage_by_period = {item.period_id: item for item in coverage.periodos}
+    latest_execucao = _latest_materializacao_execucao(db, companhia, scope)
+    active_item = _active_materializacao_item(db, companhia, scope)
 
     rejected: list[AnaliseSeriesDiagnosticoPeriodo] = []
     for year, quarter in candidate_tuples:
@@ -2116,6 +2379,27 @@ def obter_series_diagnostico(
             and (not coverage_item.has_canonical_context or bool(rejected_metrics))
             and series.resolution.mode == "canonical"
         )
+        materialization_status, materialization_execution_id = _materialization_status_for_period(
+            period_id=period_id,
+            latest_execucao=latest_execucao,
+            active_item=active_item,
+        )
+        unavailable_metric_map = _unavailable_by_metric(unavailable)
+        metric_reasons = [
+            _diagnostico_metric_reason(
+                metric_id=metric_id,
+                period_id=period_id,
+                coverage_item=coverage_item,
+                unavailable=unavailable_metric_map.get(metric_id),
+                scope_mismatch=False,
+                materialization_status=materialization_status,
+                materialization_execution_id=materialization_execution_id,
+                periodicidade=periodicidade,
+                base_periodo=base_periodo,
+                scope=scope,
+            )
+            for metric_id in rejected_metrics
+        ]
         if not rejected_metrics and not unavailable and not materialization_mismatch:
             continue
         rejected.append(
@@ -2134,12 +2418,27 @@ def obter_series_diagnostico(
                 ),
                 scope_mismatch=False,
                 materialization_mismatch=materialization_mismatch,
+                has_raw_data=coverage_item.has_raw_data if coverage_item is not None else False,
+                has_canonical_context=coverage_item.has_canonical_context if coverage_item is not None else False,
+                has_canonical_facts=coverage_item.has_canonical_facts if coverage_item is not None else False,
+                has_materialized_metrics=coverage_item.has_materialized_metrics if coverage_item is not None else False,
+                materialization_status=materialization_status,
+                materialization_execution_id=materialization_execution_id,
+                latest_execution_id=coverage_item.latest_execution_id if coverage_item is not None else materialization_execution_id,
+                metrics_count=coverage_item.metrics_count if coverage_item is not None else 0,
+                unavailable_count=coverage_item.unavailable_count if coverage_item is not None else 0,
+                metric_reasons=metric_reasons,
             )
         )
 
     for period_id, (year, quarter) in sorted(other_periods.items()):
         if period_id in candidate_period_ids:
             continue
+        materialization_status, materialization_execution_id = _materialization_status_for_period(
+            period_id=period_id,
+            latest_execucao=latest_execucao,
+            active_item=active_item,
+        )
         rejected.append(
             AnaliseSeriesDiagnosticoPeriodo(
                 period_id=period_id,
@@ -2152,6 +2451,30 @@ def obter_series_diagnostico(
                 missing_forms=[],
                 scope_mismatch=True,
                 materialization_mismatch=False,
+                has_raw_data=False,
+                has_canonical_context=False,
+                has_canonical_facts=False,
+                has_materialized_metrics=False,
+                materialization_status=materialization_status,
+                materialization_execution_id=materialization_execution_id,
+                latest_execution_id=materialization_execution_id,
+                metrics_count=0,
+                unavailable_count=0,
+                metric_reasons=[
+                    _diagnostico_metric_reason(
+                        metric_id=metric_id,
+                        period_id=period_id,
+                        coverage_item=None,
+                        unavailable=None,
+                        scope_mismatch=True,
+                        materialization_status=materialization_status,
+                        materialization_execution_id=materialization_execution_id,
+                        periodicidade=periodicidade,
+                        base_periodo=base_periodo,
+                        scope=scope,
+                    )
+                    for metric_id in metric_ids
+                ],
             )
         )
 
@@ -3280,6 +3603,209 @@ def _invalidated_from_por_codigo_cvm(
         for codigo_cvm, invalidated_from in rows
         if codigo_cvm is not None and invalidated_from is not None
     }
+
+
+def _period_reference_for_repair(item: AnaliseCoveragePeriodoItem) -> tuple[str, date]:
+    if item.periodicidade == "annual":
+        return "DFP", date(item.ano, 12, 31)
+    quarter = item.period_id.rsplit("Q", 1)[-1]
+    quarter_num = int(quarter) if quarter.isdigit() else item.ano
+    return "ITR", _quarter_end(item.ano, quarter_num)
+
+
+def _repair_invalidated_from(
+    db: Session,
+    companhia: Companhia,
+    accepted_periods: Sequence[AnaliseCoveragePeriodoItem],
+) -> date | None:
+    references = [_period_reference_for_repair(item) for item in accepted_periods]
+    if not references:
+        return None
+    conditions = [
+        and_(
+            DocumentoFinanceiro.tipo_formulario == form,
+            DocumentoFinanceiro.data_referencia == reference_date,
+        )
+        for form, reference_date in references
+    ]
+    return db.scalar(
+        select(func.min(func.coalesce(DocumentoFinanceiro.data_recebimento, DocumentoFinanceiro.data_referencia))).where(
+            DocumentoFinanceiro.cnpj_companhia == companhia.cnpj_companhia,
+            or_(*conditions),
+        )
+    )
+
+
+def criar_repair_materializacao_companhia(
+    db: Session,
+    companhia: Companhia,
+    request: AnaliseMaterializacaoRepairRequest,
+) -> AnaliseMaterializacaoRepairResposta:
+    triggered_at = datetime.now(UTC)
+    metricas = sorted(set(request.metricas))
+    unknown_metrics = sorted(metric_id for metric_id in metricas if metric_id not in METRIC_SPECS)
+    coverage = obter_coverage(
+        db,
+        companhia,
+        scope=request.escopo,
+        periodicidade=None,
+        base_periodo=None,
+    )
+    coverage_by_period = {item.period_id: item for item in coverage.periodos}
+    accepted_items: list[AnaliseMaterializacaoRepairItem] = []
+    rejected_items: list[AnaliseMaterializacaoRepairItem] = []
+    accepted_periods: list[AnaliseCoveragePeriodoItem] = []
+
+    if not request.period_ids:
+        return AnaliseMaterializacaoRepairResposta(
+            status="rejected",
+            campanha_id=None,
+            accepted_items=[],
+            rejected_items=[],
+            reason_code="RAW_DATA_MISSING",
+            dispatcher_enqueued=False,
+            gate_status=obter_estado_gate_materializacao(db).status,
+            triggered_at=triggered_at,
+        )
+
+    active_item = _active_materializacao_item(db, companhia, request.escopo)
+    if active_item is not None:
+        rejected_items = [
+            AnaliseMaterializacaoRepairItem(
+                period_id=period_id,
+                accepted=False,
+                reason_code="MATERIALIZATION_RUNNING",
+                reason_message=f"Ja existe materializacao ativa para codigo_cvm={companhia.codigo_cvm} escopo={request.escopo}.",
+                remediation_code="WAIT_MATERIALIZATION",
+                remediation_message="Aguardar a campanha ativa concluir ou reativar a campanha se ela ficar stale.",
+            )
+            for period_id in request.period_ids
+        ]
+        return AnaliseMaterializacaoRepairResposta(
+            status="rejected",
+            campanha_id=None,
+            accepted_items=[],
+            rejected_items=rejected_items,
+            reason_code="MATERIALIZATION_RUNNING",
+            dispatcher_enqueued=False,
+            gate_status=obter_estado_gate_materializacao(db).status,
+            triggered_at=triggered_at,
+        )
+
+    for period_id in request.period_ids:
+        coverage_item = coverage_by_period.get(period_id)
+        if coverage_item is None or not coverage_item.has_raw_data:
+            rejected_items.append(
+                AnaliseMaterializacaoRepairItem(
+                    period_id=period_id,
+                    accepted=False,
+                    reason_code="RAW_DATA_MISSING",
+                    reason_message=f"O periodo `{period_id}` nao possui dado bruto CVM promovido no escopo `{request.escopo}`.",
+                    remediation_code="INGEST_SOURCE",
+                    remediation_message=f"Ingerir a fonte CVM que contem `{period_id}` antes de solicitar repair.",
+                )
+            )
+            continue
+        if unknown_metrics:
+            rejected_items.append(
+                AnaliseMaterializacaoRepairItem(
+                    period_id=period_id,
+                    accepted=False,
+                    reason_code="METRIC_MAPPING_MISSING",
+                    reason_message=f"As metricas {', '.join(unknown_metrics)} nao existem no catalogo analitico.",
+                    remediation_code="FIX_METRIC_MAPPING",
+                    remediation_message="Registrar o mapeamento canonico das metricas antes de solicitar repair.",
+                )
+            )
+            continue
+        missing_metricas = [metric_id for metric_id in metricas if metric_id not in coverage_item.metrics_available]
+        if request.mode == "missing_only" and metricas and not missing_metricas:
+            rejected_items.append(
+                AnaliseMaterializacaoRepairItem(
+                    period_id=period_id,
+                    accepted=False,
+                    reason_code="NO_MISSING_METRICS",
+                    reason_message=f"O periodo `{period_id}` ja possui as metricas solicitadas materializadas.",
+                    remediation_code=None,
+                    remediation_message=None,
+                )
+            )
+            continue
+        accepted_periods.append(coverage_item)
+        accepted_items.append(
+            AnaliseMaterializacaoRepairItem(
+                period_id=period_id,
+                accepted=True,
+                reason_code="REPAIR_ACCEPTED",
+                reason_message=f"O periodo `{period_id}` foi aceito para recomposicao canonica.",
+                remediation_code="RUN_MATERIALIZATION",
+                remediation_message=f"A campanha ira recompor a companhia a partir do primeiro documento que suporta `{period_id}`.",
+            )
+        )
+
+    gate = obter_estado_gate_materializacao(db)
+    if not accepted_items:
+        return AnaliseMaterializacaoRepairResposta(
+            status="rejected",
+            campanha_id=None,
+            accepted_items=[],
+            rejected_items=rejected_items,
+            reason_code=rejected_items[0].reason_code if rejected_items else "RAW_DATA_MISSING",
+            dispatcher_enqueued=False,
+            gate_status=gate.status,
+            triggered_at=triggered_at,
+        )
+
+    invalidated_from = _repair_invalidated_from(db, companhia, accepted_periods)
+    campanha = AnaliseMaterializacaoCampanha(
+        source="manual_repair",
+        status="pending",
+        chunk_size=1,
+        summary={
+            "repair": {
+                "codigo_cvm": companhia.codigo_cvm,
+                "escopo": request.escopo,
+                "period_ids": request.period_ids,
+                "metricas": metricas,
+                "mode": request.mode,
+                "accepted_period_ids": [item.period_id for item in accepted_periods],
+                "rejected_period_ids": [item.period_id for item in rejected_items],
+                "invalidated_from": invalidated_from.isoformat() if invalidated_from is not None else None,
+                "created_at": triggered_at.isoformat(),
+            }
+        },
+    )
+    db.add(campanha)
+    db.flush()
+    db.add(
+        AnaliseMaterializacaoCampanhaItem(
+            campanha_id=campanha.id,
+            codigo_cvm=companhia.codigo_cvm or 0,
+            companhia_id=companhia.id,
+            escopo=request.escopo,
+            status="pending",
+            ordem=1,
+            attempts=0,
+            invalidated_from=invalidated_from,
+            reason="MANUAL_REPAIR",
+            updated_at=triggered_at,
+        )
+    )
+    db.flush()
+    _recalcular_materializacao_campanha(db, campanha)
+    db.commit()
+    db.refresh(campanha)
+
+    return AnaliseMaterializacaoRepairResposta(
+        status="partial" if rejected_items else "accepted",
+        campanha_id=str(campanha.id),
+        accepted_items=accepted_items,
+        rejected_items=rejected_items,
+        reason_code="WAIT_MATERIALIZATION" if gate.status == "red" else "RUN_MATERIALIZATION",
+        dispatcher_enqueued=False,
+        gate_status=gate.status,
+        triggered_at=triggered_at,
+    )
 
 
 def _recalcular_materializacao_campanha(db: Session, campanha: AnaliseMaterializacaoCampanha) -> AnaliseMaterializacaoCampanha:

@@ -52,7 +52,11 @@ Cada item de `periodos` inclui:
 | `form` | string | Formulário ou origem principal |
 | `has_raw_data` | boolean | Existe dado bruto/promovido para o período |
 | `has_canonical_context` | boolean | A revisão de contexto canônica lista o período |
+| `has_canonical_facts` | boolean | Existe ao menos uma revisão de fato canônica para o período |
+| `has_materialized_metrics` | boolean | Existem métricas materializadas disponíveis |
 | `has_series` | boolean | Existe ao menos uma métrica canônica disponível |
+| `metrics_count` | integer | Quantidade de métricas disponíveis |
+| `unavailable_count` | integer | Quantidade de métricas indisponíveis registradas |
 | `metrics_available` | array | Métricas disponíveis |
 | `metrics_unavailable` | array | Métricas indisponíveis registradas |
 | `latest_execution_id` | string | Execução de materialização associada |
@@ -72,7 +76,50 @@ Campos principais:
 | `rejected_periods` | array | Períodos com lacunas explicáveis |
 | `unavailable_reasons` | array | Indisponibilidades consolidadas do resolvedor |
 
-Cada item de `rejected_periods` informa métricas retornadas e rejeitadas, contas ausentes, formulários ausentes, mismatch de escopo e mismatch de materialização.
+Cada item de `rejected_periods` informa métricas retornadas e rejeitadas, contas ausentes, formulários ausentes, mismatch de escopo, mismatch de materialização, status completo do pipeline e `metric_reasons`.
+
+Campos acionáveis por período rejeitado:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `has_raw_data` | boolean | Existe dado bruto/promovido no escopo solicitado |
+| `has_canonical_context` | boolean | O contexto canônico lista o período |
+| `has_canonical_facts` | boolean | Existem fatos canônicos para o período |
+| `has_materialized_metrics` | boolean | Existem métricas disponíveis materializadas |
+| `materialization_status` | string | Estado operacional mais relevante |
+| `materialization_execution_id` | string | Execução mais relevante |
+| `latest_execution_id` | string | Alias operacional da execução mais recente |
+| `metrics_count` | integer | Quantidade de métricas disponíveis |
+| `unavailable_count` | integer | Quantidade de métricas indisponíveis |
+| `metric_reasons` | array | Motivos e remediações por métrica |
+
+Cada item de `metric_reasons` contém:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `metric_id` | string | Métrica rejeitada |
+| `reason_code` | string | Código estável da causa |
+| `reason_message` | string | Descrição objetiva da causa |
+| `layer` | string | `raw`, `canonical_context`, `canonical_fact`, `metric_calculation`, `materialization`, `scope` ou `filter` |
+| `remediation_code` | string | Código estável da ação recomendada |
+| `remediation_message` | string | Ação operacional recomendada |
+
+## Repair de Materialização
+
+`AnaliseMaterializacaoRepairRequest` aceita `escopo`, `period_ids`, `metricas` e `mode=missing_only`.
+
+`AnaliseMaterializacaoRepairResposta` retorna:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `status` | string | `accepted`, `partial` ou `rejected` |
+| `campanha_id` | string | Campanha criada para executar o repair |
+| `accepted_items` | array | Períodos aceitos |
+| `rejected_items` | array | Períodos rejeitados com motivo |
+| `reason_code` | string | Motivo consolidado |
+| `dispatcher_enqueued` | boolean | Indica se a campanha foi enfileirada |
+| `gate_status` | string | Estado do gate no momento da criação |
+| `triggered_at` | string | Momento da criação |
 
 ## Resolution
 
