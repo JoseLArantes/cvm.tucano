@@ -9,6 +9,69 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-02 - Diagnostico de disponibilidade dos datasets FRE
+
+### Endpoint novo
+
+- `GET /fre/datasets/disponibilidade`
+
+### Comportamento entregue
+
+- a API passa a expor um diagnostico operacional por `ano` e `dataset` FRE
+- o diagnostico cruza catalogo de fontes, snapshot do pacote anual, snapshot/indexacao do CSV membro e contagem da tabela promovida que alimenta o endpoint publico
+- quando um endpoint FRE estiver vazio, o frontend consegue distinguir:
+  - pacote anual nao ingerido
+  - CSV membro ausente no ZIP anual conhecido
+  - CSV membro existente, mas sem linhas
+  - CSV membro com linhas, mas promocao ausente
+  - endpoint/tabela nao promovidos
+  - endpoint disponivel com linhas promovidas
+
+### Campos principais
+
+- `resumo.total`
+- `resumo.available`
+- `resumo.package_not_ingested`
+- `resumo.source_member_missing`
+- `resumo.source_member_empty`
+- `resumo.promotion_missing`
+- `resumo.not_promoted`
+- `resumo.unsupported_dataset`
+- `dados[].ano`
+- `dados[].dataset`
+- `dados[].endpoint`
+- `dados[].member_name`
+- `dados[].row_kind`
+- `dados[].destino_promovido`
+- `dados[].source_package_seen`
+- `dados[].source_member_exists`
+- `dados[].source_member_row_count`
+- `dados[].member_ingested`
+- `dados[].promoted_rows`
+- `dados[].endpoint_available`
+- `dados[].diagnosis_code`
+- `dados[].diagnosis_message`
+- `dados[].latest_ingestion_run_id`
+- `dados[].latest_execucao_id`
+
+### Códigos estáveis
+
+- `AVAILABLE`
+- `PACKAGE_NOT_INGESTED`
+- `SOURCE_MEMBER_MISSING`
+- `SOURCE_MEMBER_EMPTY`
+- `PROMOTION_MISSING`
+- `NOT_PROMOTED`
+- `UNSUPPORTED_DATASET`
+
+### Leitura recomendada pelo frontend
+
+- quando uma tela de FRE receber `total=0` em um endpoint tematico, chamar `/fre/datasets/disponibilidade` com o mesmo `ano` e o `dataset` correspondente
+- se `diagnosis_code=SOURCE_MEMBER_MISSING`, apresentar que a CVM nao publicou ou o sistema nao indexou aquele CSV membro no ZIP conhecido
+- se `diagnosis_code=PROMOTION_MISSING`, tratar como problema operacional de ingestao/promocao e oferecer reprocessamento do membro
+- se `diagnosis_code=AVAILABLE`, o endpoint tematico deve retornar dados para o ano; divergencia entre os dois contratos deve ser tratada como bug
+- para datasets historicos ou esparsos de valores mobiliarios/tesouraria, usar o diagnostico antes de concluir que o endpoint e inutil
+
 ## 2026-07-02 - Coverage e diagnostico de lacunas analiticas
 
 ### Endpoints novos

@@ -1,4 +1,5 @@
 import uuid
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -1098,3 +1099,59 @@ class ListaFreAdministradoresDeclaracaoRacaResposta(BaseModel):
 class ListaFreAdministradoresPcdResposta(BaseModel):
     dados: list[FreAdministradorPcdResposta] = Field(description="Lista paginada de declarações PCD de administradores FRE.")
     paginacao: Paginacao
+
+
+FreDatasetDiagnosticoCodigo = Literal[
+    "AVAILABLE",
+    "PACKAGE_NOT_INGESTED",
+    "SOURCE_MEMBER_MISSING",
+    "SOURCE_MEMBER_EMPTY",
+    "PROMOTION_MISSING",
+    "NOT_PROMOTED",
+    "UNSUPPORTED_DATASET",
+]
+
+
+class FreDatasetDisponibilidadeItem(BaseModel):
+    ano: int = Field(description="Ano do ZIP anual FRE avaliado.")
+    dataset: str = Field(description="Identificador do dataset no catálogo de fontes.")
+    descricao: str = Field(description="Descrição curta do dataset.")
+    endpoint: str | None = Field(description="Endpoint público que consome a tabela promovida, quando existe.")
+    member_name: str = Field(description="Nome esperado do CSV membro dentro do ZIP FRE anual.")
+    row_kind: str | None = Field(description="Classificação operacional usada na ingestão.")
+    destino_promovido: str | None = Field(description="Tabela de domínio esperada para promoção, quando aplicável.")
+    status_suporte: str = Field(description="Status do suporte no catálogo de fontes.")
+    obrigatorio: bool = Field(description="Indica se o CSV membro é obrigatório para o pacote anual.")
+    source_package_seen: bool = Field(description="Indica se há snapshot ou arquivo anual FRE conhecido para o ano.")
+    source_package_status: str | None = Field(description="Status do snapshot anual FRE mais recente, quando conhecido.")
+    source_package_run_id: uuid.UUID | None = Field(description="IngestionRun do snapshot anual FRE mais recente, quando conhecido.")
+    source_member_exists: bool = Field(description="Indica se o CSV membro foi encontrado/indexado no pacote anual.")
+    source_member_row_count: int | None = Field(description="Quantidade de linhas do CSV membro no snapshot/indexação.")
+    source_member_schema_status: str | None = Field(description="Status de schema/header do CSV membro, quando conhecido.")
+    source_member_lifecycle_status: str | None = Field(description="Status de lifecycle do snapshot do CSV membro, quando conhecido.")
+    member_ingested: bool = Field(description="Indica se há evidência operacional de processamento do CSV membro.")
+    promoted_rows: int | None = Field(description="Quantidade de linhas na tabela de domínio que alimenta o endpoint.")
+    endpoint_available: bool = Field(description="Indica se o endpoint público possui linhas para o dataset/ano.")
+    diagnosis_code: FreDatasetDiagnosticoCodigo = Field(description="Código estável do diagnóstico de disponibilidade.")
+    diagnosis_message: str = Field(description="Mensagem operacional curta explicando o estado do dataset.")
+    latest_ingestion_run_id: uuid.UUID | None = Field(description="IngestionRun mais recente correlacionada ao pacote ou membro.")
+    latest_execucao_id: uuid.UUID | None = Field(description="ExecucaoSincronizacao mais recente correlacionada ao pacote ou membro.")
+    atualizado_em: BrazilianDateTime | None = Field(description="Timestamp operacional mais recente usado no diagnóstico.")
+
+
+class FreDatasetDisponibilidadeResumo(BaseModel):
+    total: int = Field(description="Quantidade total de combinações ano/dataset avaliadas.")
+    available: int = Field(description="Quantidade com endpoint público contendo linhas.")
+    package_not_ingested: int = Field(description="Quantidade sem pacote anual FRE conhecido.")
+    source_member_missing: int = Field(description="Quantidade com pacote conhecido, mas sem CSV membro indexado.")
+    source_member_empty: int = Field(description="Quantidade com CSV membro indexado e sem linhas.")
+    promotion_missing: int = Field(description="Quantidade com CSV membro contendo linhas, mas sem linhas promovidas.")
+    not_promoted: int = Field(description="Quantidade sem tabela/endpoint promovido para consulta pública.")
+    unsupported_dataset: int = Field(description="Quantidade marcada como não suportada pelo catálogo.")
+
+
+class ListaFreDatasetsDisponibilidadeResposta(BaseModel):
+    resumo: FreDatasetDisponibilidadeResumo
+    dados: list[FreDatasetDisponibilidadeItem] = Field(
+        description="Diagnóstico de disponibilidade por ano e dataset FRE."
+    )

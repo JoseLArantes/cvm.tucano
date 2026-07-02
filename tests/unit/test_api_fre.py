@@ -36,6 +36,7 @@ from app.models.fre import (
     FreRemuneracaoVariavel,
     FreResponsavel,
 )
+from app.models.ingestion import IngestionRun, SourceArtifactSnapshot, SourceMemberSnapshot
 
 
 def _companhia() -> Companhia:
@@ -956,6 +957,94 @@ def test_endpoints_fre_mvp(client: TestClient, db_session: Session) -> None:
     assert client.get("/fre/responsaveis?ordenar_por=invalid_field").status_code == 422
 
 
+def test_diagnostico_disponibilidade_datasets_fre(client: TestClient, db_session: Session) -> None:
+    from app.models.fre import FreOutroValorMobiliario
+
+    companhia = _companhia()
+    db_session.add(companhia)
+    db_session.commit()
+    agora = datetime.now(UTC)
+    run = IngestionRun(
+        tipo_fonte="fre",
+        ano=2025,
+        status="success",
+        phase="complete",
+        execucao_sincronizacao_id=None,
+    )
+    db_session.add(run)
+    db_session.flush()
+    artifact = SourceArtifactSnapshot(
+        ingestion_run_id=run.id,
+        tipo_fonte="fre",
+        ano=2025,
+        resource_url="https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/fre_cia_aberta_2025.zip",
+        source_filename="fre_cia_aberta_2025.zip",
+        status="success",
+    )
+    db_session.add(artifact)
+    db_session.flush()
+    db_session.add(
+        SourceMemberSnapshot(
+            artifact_snapshot_id=artifact.id,
+            ingestion_file_member_id=None,
+            member_name="fre_cia_aberta_titular_valor_mobiliario_2025.csv",
+            member_sha256="sha-titular",
+            row_count=10,
+            header=["CNPJ_Companhia", "ID_Documento"],
+            row_kind="fre_titular_valor_mobiliario",
+            destino_promovido="fre_titulares_valores_mobiliarios",
+            required_member=False,
+            schema_status="valid",
+            delivery_index_role="auto",
+            lifecycle_status="present",
+        )
+    )
+    db_session.add(
+        FreOutroValorMobiliario(
+            companhia_id=companhia.id,
+            cnpj_companhia="08773135000100",
+            data_referencia=date(2025, 12, 31),
+            versao=1,
+            id_documento=123,
+            nome_companhia="EMPRESA A",
+            nome_valor_mobiliario="Debenture",
+            caracteristicas_valor_mobiliario="Debenture conversivel",
+            arquivo_origem="fre_cia_aberta_outro_valor_mobiliario_2025.csv",
+            ano_origem=2025,
+            linha_origem=2,
+            hash_origem="h-disponibilidade",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db_session.commit()
+
+    response = client.get(
+        "/fre/datasets/disponibilidade",
+        params=[
+            ("ano", "2025"),
+            ("dataset", "outro_valor_mobiliario"),
+            ("dataset", "titular_valor_mobiliario"),
+            ("dataset", "volume_valor_mobiliario"),
+        ],
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    por_dataset = {item["dataset"]: item for item in payload["dados"]}
+    assert payload["resumo"]["total"] == 3
+    assert por_dataset["outro_valor_mobiliario"]["diagnosis_code"] == "AVAILABLE"
+    assert por_dataset["outro_valor_mobiliario"]["endpoint_available"] is True
+    assert por_dataset["outro_valor_mobiliario"]["promoted_rows"] == 1
+    assert por_dataset["titular_valor_mobiliario"]["diagnosis_code"] == "PROMOTION_MISSING"
+    assert por_dataset["titular_valor_mobiliario"]["source_member_exists"] is True
+    assert por_dataset["titular_valor_mobiliario"]["source_member_row_count"] == 10
+    assert por_dataset["volume_valor_mobiliario"]["diagnosis_code"] == "SOURCE_MEMBER_MISSING"
+    assert por_dataset["volume_valor_mobiliario"]["source_package_seen"] is True
+    assert por_dataset["volume_valor_mobiliario"]["source_member_exists"] is False
+
+
 def test_endpoints_fre_phase_2_discontinued_members_are_removed(client: TestClient) -> None:
     urls = [
         "/fre/capital-social/aumentos",
@@ -976,6 +1065,9 @@ def test_openapi_does_not_expose_removed_fre_phase_2_endpoints(client: TestClien
     assert response.status_code == 200
     paths = response.json()["paths"]
 
+    assert paths["/fre/datasets/disponibilidade"]["get"]["operationId"] == "diagnosticarDisponibilidadeDatasetsFre"
+    schema_ref = paths["/fre/datasets/disponibilidade"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]["$ref"]
+    assert schema_ref == "#/components/schemas/ListaFreDatasetsDisponibilidadeResposta"
     assert "/fre/capital-social/aumentos" not in paths
     assert "/fre/capital-social/aumentos-classes-acoes" not in paths
     assert "/fre/capital-social/desdobramentos" not in paths
