@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_DIR="${ROOT_DIR}/deploy/helm/tucano-cvm"
-SECRET_FILE="${ROOT_DIR}/secrets.yaml"
 
 NAMESPACE="${NAMESPACE:-tucano-services}"
 RELEASE_NAME="${RELEASE_NAME:-tucano-cvm}"
@@ -33,26 +32,10 @@ if ! command -v helm >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f "${SECRET_FILE}" ]]; then
-  echo "Missing secret manifest: ${SECRET_FILE}" >&2
-  exit 1
-fi
-
 if [[ ! -d "${CHART_DIR}" ]]; then
   echo "Missing Helm chart: ${CHART_DIR}" >&2
   exit 1
 fi
-
-require_secret_key() {
-  local key="$1"
-  if ! grep -Eq "^[[:space:]]+${key}:" "${SECRET_FILE}"; then
-    echo "Required key ${key} not found in ${SECRET_FILE}" >&2
-    exit 1
-  fi
-}
-
-require_secret_key "DATABASE_URL"
-require_secret_key "TUCANO_CVM_TOKEN"
 
 echo "==> Ensuring namespace ${NAMESPACE}"
 kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${NAMESPACE}"
@@ -71,11 +54,9 @@ if ! kubectl get crd rollouts.argoproj.io >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Applying application secret to namespace ${NAMESPACE}"
-sed -E "s/^([[:space:]]*namespace:).*/\\1 ${NAMESPACE}/" "${SECRET_FILE}" | kubectl apply -f -
-
 if ! kubectl -n "${NAMESPACE}" get secret "${APP_SECRET_NAME}" >/dev/null 2>&1; then
-  echo "Secret ${APP_SECRET_NAME} was not found in namespace ${NAMESPACE} after apply" >&2
+  echo "Required Kubernetes Secret ${APP_SECRET_NAME} was not found in namespace ${NAMESPACE}." >&2
+  echo "Please create it before running this install script." >&2
   exit 1
 fi
 

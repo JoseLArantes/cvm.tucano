@@ -39,33 +39,21 @@ api:
 
 worker:
   enabled: true
-  replicaCount: 6
+  replicaCount: 1
   command:
-    - celery
-    - -A
-    - app.worker.celery_app
-    - worker
-    - --loglevel=info
-    - --concurrency=1
-    - -Ofair
-    - -Q
-    - celery
+    - sh
+    - -c
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery"
   resources: {}
   podAnnotations: {}
 
 materializationWorker:
   enabled: true
-  replicaCount: 2
+  replicaCount: 1
   command:
-    - celery
-    - -A
-    - app.worker.celery_app
-    - worker
-    - --loglevel=info
-    - --concurrency=1
-    - -Ofair
-    - -Q
-    - analise_materializacao
+    - sh
+    - -c
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Ofair -Q ${ANALISE_MATERIALIZACAO_QUEUE_NAME:-analise_materializacao}"
   resources: {}
   podAnnotations: {}
 
@@ -80,14 +68,13 @@ beat:
   podAnnotations: {}
 
 env:
-  REDIS_URL: "redis://redis.beakcloud.com:6379/0"
   CVM_BASE_URL: "https://dados.cvm.gov.br/dados"
   LOG_LEVEL: "INFO"
-  AMBIENTE: "producao"
+  AMBIENTE: "desenvolvimento"
   ENABLE_PROMETHEUS_METRICS: "false"
-  ANOS_INICIAIS_DFP: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_ITR: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_FRE: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_DFP: ""
+  ANOS_INICIAIS_ITR: ""
+  ANOS_INICIAIS_FRE: ""
   ANOS_INICIAIS_FCA: "2021,2022,2023,2024,2025"
   ANOS_INICIAIS_IPE: "2021,2022,2023,2024,2025"
   ANOS_INICIAIS_VLMO: "2021,2022,2023,2024,2025"
@@ -96,7 +83,7 @@ env:
   INGESTION_PROVISIONAL_COMPANY_ENABLED: "false"
   INGESTION_MAX_RETRIES: "5"
   INGESTION_RETRY_BACKOFF_MAX_SECONDS: "600"
-  INGESTION_COMPANY_MISSING_MAX_RATIO: "0.01"
+  INGESTION_COMPANY_MISSING_MAX_RATIO: "0.10"
   ANALISE_MATERIALIZACAO_CHUNK_SIZE: "25"
   ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS: "1"
   ANALISE_MATERIALIZACAO_QUEUE_NAME: "analise_materializacao"
@@ -104,7 +91,15 @@ env:
   INGESTION_STAGE_BATCH_SIZE: "5000"
   INGESTION_PROMOTE_BATCH_SIZE: "5000"
   STORAGE_DIR: "data/storage"
-  BACKEND_CORS_ORIGINS: "http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com"
+
+  # Novas variaveis solicitadas
+  INGESTION_V2_ENABLED: "true"
+  INGESTION_V2_PROMOTE_ENABLED: "true"
+  INGESTION_DUCKDB_STAGING_ENABLED: "true"
+  CELERY_WORKER_MAX_TASKS_PER_CHILD: "1"
+  CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB: "1500000"
+  ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN: "10"
+  INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "1"
 
 appSecret:
   name: "cvm-secret"
@@ -127,6 +122,17 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteMany
+  size: 10Gi
+  mountPath: /app/data
+
+migration:
+  enabled: true
 
 nodeSelector: {}
 tolerations: []
