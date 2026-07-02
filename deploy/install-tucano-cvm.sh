@@ -14,13 +14,15 @@ WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 HELM_WAIT="${HELM_WAIT:-false}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-registry.beakcloud.com/tucano-cvm}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-INGRESS_ENABLED="${INGRESS_ENABLED:-false}"
-INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME:-}"
-INGRESS_HOST="${INGRESS_HOST:-cvm.tucano.beakcloud.com}"
+HTTPPROXY_ENABLED="${HTTPPROXY_ENABLED:-true}"
+HTTPPROXY_FQDN="${HTTPPROXY_FQDN:-cvm.tucano.beakcloud.com}"
+HTTPPROXY_TLS_ENABLED="${HTTPPROXY_TLS_ENABLED:-true}"
+HTTPPROXY_TLS_SECRET_NAME="${HTTPPROXY_TLS_SECRET_NAME:-tucano-cvm-tls}"
+CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"
 ENABLE_METRICS="${ENABLE_METRICS:-false}"
-SERVICE_TYPE="${SERVICE_TYPE:-NodePort}"
+SERVICE_TYPE="${SERVICE_TYPE:-ClusterIP}"
 SERVICE_PORT="${SERVICE_PORT:-8110}"
-NODE_PORT="${NODE_PORT:-30110}"
+NODE_PORT="${NODE_PORT:-}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl is required" >&2
@@ -86,13 +88,15 @@ HELM_ARGS=(
   --set "env.ENABLE_PROMETHEUS_METRICS=${ENABLE_METRICS}"
   --set "service.type=${SERVICE_TYPE}"
   --set "service.port=${SERVICE_PORT}"
-  --set "service.nodePort=${NODE_PORT}"
-  --set "ingress.enabled=${INGRESS_ENABLED}"
-  --set "ingress.hosts[0].host=${INGRESS_HOST}"
+  --set "httpProxy.enabled=${HTTPPROXY_ENABLED}"
+  --set "httpProxy.fqdn=${HTTPPROXY_FQDN}"
+  --set "httpProxy.tls.enabled=${HTTPPROXY_TLS_ENABLED}"
+  --set "httpProxy.tls.secretName=${HTTPPROXY_TLS_SECRET_NAME}"
+  --set "certManager.enabled=${CERT_MANAGER_ENABLED}"
 )
 
-if [[ -n "${INGRESS_CLASS_NAME}" ]]; then
-  HELM_ARGS+=(--set "ingress.className=${INGRESS_CLASS_NAME}")
+if [[ -n "${NODE_PORT}" && "${SERVICE_TYPE}" == "NodePort" ]]; then
+  HELM_ARGS+=(--set "service.nodePort=${NODE_PORT}")
 fi
 
 if [[ "${HELM_WAIT}" == "true" ]]; then
@@ -130,5 +134,6 @@ Useful commands:
   helm -n ${NAMESPACE} status ${RELEASE_NAME}
 
 Expected service exposure:
-  ${SERVICE_PORT}:${NODE_PORT}
+  Service Type:   ${SERVICE_TYPE}
+  HTTPProxy FQDN: ${HTTPPROXY_FQDN} (TLS: ${HTTPPROXY_TLS_ENABLED})
 EOF

@@ -107,21 +107,31 @@ appSecret:
 secretEnv: {}
 
 service:
-  type: NodePort
+  type: ClusterIP
   port: 8110
   targetPort: 8007
-  nodePort: 30110
 
-ingress:
-  enabled: false
-  className: ""
+httpProxy:
+  enabled: true
+  fqdn: "cvm.tucano.beakcloud.com"
   annotations: {}
-  hosts:
-    - host: cvm.tucano.beakcloud.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  tls:
+    enabled: true
+    secretName: "tucano-cvm-tls"
+    minimumProtocolVersion: "1.2"
+  responseTimeout: "60s"
+  retryPolicy:
+    enabled: false
+    count: 2
+    perTryTimeout: "10s"
+  loadBalancerPolicy: "RoundRobin"
+
+certManager:
+  enabled: false
+  issuerRef:
+    kind: "ClusterIssuer"
+    name: "letsencrypt-prod"
+  dnsNames: []
 
 persistence:
   enabled: false

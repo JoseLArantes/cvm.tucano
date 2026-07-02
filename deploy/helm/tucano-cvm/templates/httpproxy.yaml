@@ -1,0 +1,43 @@
+{{- if .Values.httpProxy.enabled }}
+apiVersion: projectcontour.io/v1
+kind: HTTPProxy
+metadata:
+  name: {{ include "tucano-cvm.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "tucano-cvm.labels" . | nindent 4 }}
+  {{- with .Values.httpProxy.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.httpProxy.tls.enabled }}
+  virtualhost:
+    fqdn: {{ .Values.httpProxy.fqdn | quote }}
+    tls:
+      secretName: {{ .Values.httpProxy.tls.secretName | quote }}
+      minimumProtocolVersion: {{ .Values.httpProxy.tls.minimumProtocolVersion | default "1.2" | quote }}
+  {{- else }}
+  virtualhost:
+    fqdn: {{ .Values.httpProxy.fqdn | quote }}
+  {{- end }}
+  routes:
+    - conditions:
+        - prefix: /
+      {{- if .Values.httpProxy.responseTimeout }}
+      timeoutPolicy:
+        response: {{ .Values.httpProxy.responseTimeout | quote }}
+      {{- end }}
+      {{- if .Values.httpProxy.retryPolicy.enabled }}
+      retryPolicy:
+        count: {{ .Values.httpProxy.retryPolicy.count }}
+        perTryTimeout: {{ .Values.httpProxy.retryPolicy.perTryTimeout | quote }}
+      {{- end }}
+      {{- if .Values.httpProxy.loadBalancerPolicy }}
+      loadBalancerPolicy:
+        strategy: {{ .Values.httpProxy.loadBalancerPolicy | quote }}
+      {{- end }}
+      services:
+        - name: {{ include "tucano-cvm.fullname" . }}
+          port: {{ .Values.service.port }}
+{{- end }}
