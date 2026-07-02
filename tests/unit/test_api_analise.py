@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.models.analise import (
+    AnaliseContextoRevision,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -648,6 +649,51 @@ def test_analise_manifesto(client: TestClient, db_session: Session) -> None:
     assert payload["resolution"]["mode"] == "runtime_fallback"
     assert payload["links"]["series"] == "/analise/companhias/9512/series"
     assert any(periodo["period_id"] == "2025-Q3" for periodo in payload["periodos_disponiveis"])
+    availability = {item["metric_id"]: item["period_ids"] for item in payload["periodos_disponiveis_por_metrica"]}
+    assert "FY2025" in availability["receita_liquida"]
+
+
+def test_analise_coverage_explica_raw_vs_canonico(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+
+    resp_runtime = client.get("/analise/companhias/9512/coverage?escopo=consolidated")
+    assert resp_runtime.status_code == 200
+    runtime_payload = resp_runtime.json()
+    fy2025_runtime = next(item for item in runtime_payload["periodos"] if item["period_id"] == "FY2025")
+    assert runtime_payload["resolution"]["mode"] == "runtime_fallback"
+    assert fy2025_runtime["has_raw_data"] is True
+    assert fy2025_runtime["has_canonical_context"] is False
+    assert fy2025_runtime["has_series"] is False
+
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+
+    resp_canonical = client.get("/analise/companhias/9512/coverage?escopo=consolidated")
+    assert resp_canonical.status_code == 200
+    canonical_payload = resp_canonical.json()
+    fy2025 = next(item for item in canonical_payload["periodos"] if item["period_id"] == "FY2025")
+    assert canonical_payload["resolution"]["mode"] == "canonical"
+    assert fy2025["has_raw_data"] is True
+    assert fy2025["has_canonical_context"] is True
+    assert fy2025["has_series"] is True
+    assert "receita_liquida" in fy2025["metrics_available"]
+    assert fy2025["latest_execution_id"] == str(execucao.id)
+
+
+def test_analise_series_diagnostico_retorna_lacunas_por_periodo(client: TestClient, db_session: Session) -> None:
+    _seed_analise_v2(db_session)
+
+    resp = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida,liquidez_corrente&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["requested_metrics"] == ["receita_liquida", "liquidez_corrente"]
+    assert "FY2025" in payload["candidate_periods"]
+    assert "FY2025" in payload["returned_periods"]
+    assert "unavailable_reasons" in payload
+    assert all("materialization_mismatch" in item for item in payload["rejected_periods"])
 
 
 def test_analise_series_annual_selects_latest_current_exercise(client: TestClient, db_session: Session) -> None:
@@ -1076,6 +1122,100 @@ def test_analise_materializacoes_list_and_detail(client: TestClient, db_session:
     assert filtrado.status_code == 200
     filtrado_payload = filtrado.json()
     assert len(filtrado_payload["dados"]) == 2
+
+
+def test_analise_materializacao_companhia_status_retorna_anos_canonicos(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    finished_at = datetime.now(UTC) - timedelta(minutes=5)
+    execucao = _materializacao_execucao(
+        cia,
+        status="success",
+        escopo="consolidated",
+        source="post_ingestion",
+        materialization_mode="incremental",
+        invalidated_from=date(2025, 2, 26),
+        started_at=finished_at - timedelta(seconds=30),
+        finished_at=finished_at,
+        updated_at=finished_at,
+        coverage_complete=True,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    db_session.add(
+        AnaliseContextoRevision(
+            id=uuid.uuid4(),
+            execucao_id=execucao.id,
+            companhia_id=cia.id,
+            codigo_cvm=cia.codigo_cvm,
+            escopo="consolidated",
+            calculation_version="2026.2",
+            known_from=date(2025, 2, 26),
+            known_to=None,
+            default_period_id="FY2025",
+            periodos_disponiveis=[
+                {"period_id": "FY2024", "fiscal_year": 2024, "periodicidade": "annual", "base_periodo": "fy"},
+                {"period_id": "FY2025", "fiscal_year": 2025, "periodicidade": "annual", "base_periodo": "fy"},
+                {"period_id": "2025-Q3", "fiscal_year": 2025, "periodicidade": "quarterly", "base_periodo": "quarter"},
+            ],
+            qualidade={},
+            issues=[],
+            fingerprint="ctx-9512",
+        )
+    )
+    db_session.commit()
+
+    resp = client.get("/analise/materializacoes/companhias/9512/status?escopo=consolidated")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["codigo_cvm"] == 9512
+    assert payload["escopo"] == "consolidated"
+    assert payload["status"] == "success"
+    assert payload["coverage_complete"] is True
+    assert payload["latest_execution"]["id"] == str(execucao.id)
+    assert [item["ano"] for item in payload["anos"]] == [2025, 2024]
+    assert payload["status_por_ano"]["2025"]["status"] == "success"
+    assert payload["status_por_ano"]["2025"]["materialization_execution_id"] == str(execucao.id)
+    assert payload["dados"] == payload["anos"]
+    assert payload["periodos"] == payload["anos"]
+    assert payload["materializacoes"] == payload["anos"]
+
+
+def test_analise_materializacao_companhia_status_reflete_item_pendente(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    item = _materializacao_campanha_item(
+        campanha,
+        cia,
+        status="pending",
+        escopo="individual",
+        ordem=1,
+        invalidated_from=date(2026, 3, 10),
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    resp = client.get("/analise/materializacoes/companhias/9512/status?escopo=individual")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "pending"
+    assert payload["latest_execution"] is None
+    assert payload["active_item"]["item_id"] == str(item.id)
+    assert len(payload["anos"]) == 1
+    assert payload["anos"][0]["ano"] == 2026
+    assert payload["anos"][0]["status"] == "pending"
+    assert payload["anos"][0]["escopo"] == "individual"
+    assert payload["anos"][0]["updated_at"] is not None
+    assert payload["anos"][0]["materialization_mode"] == "incremental"
 
 
 def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
@@ -1587,9 +1727,12 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         "/analise/materializacoes/campanhas/{campanha_id}/recuperar",
         "/analise/materializacoes/campanhas/{campanha_id}/reativar",
         "/analise/materializacoes/recuperacao/trigger",
+        "/analise/materializacoes/companhias/{codigo_cvm}/status",
         "/analise/materializacoes/{execucao_id}",
         "/analise/companhias/{codigo_cvm}",
+        "/analise/companhias/{codigo_cvm}/coverage",
         "/analise/companhias/{codigo_cvm}/series",
+        "/analise/companhias/{codigo_cvm}/series/diagnostico",
         "/analise/companhias/{codigo_cvm}/comparacoes",
         "/analise/companhias/{codigo_cvm}/qualidade",
         "/analise/companhias/{codigo_cvm}/sinais",
@@ -1620,8 +1763,19 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
 
     assert "AnaliseLegadoRemovidoResposta" not in components
     assert paths["/analise/companhias/{codigo_cvm}"]["get"]["operationId"] == "obterAnaliseManifesto"
+    assert paths["/analise/companhias/{codigo_cvm}/coverage"]["get"]["operationId"] == "obterAnaliseCoverage"
     assert paths["/analise/companhias/{codigo_cvm}/series"]["get"]["operationId"] == "obterAnaliseSeries"
+    assert paths["/analise/companhias/{codigo_cvm}/series/diagnostico"]["get"]["operationId"] == "obterAnaliseSeriesDiagnostico"
     assert paths["/analise/companhias/{codigo_cvm}/comparacoes"]["get"]["operationId"] == "obterAnaliseComparacoes"
+    manifesto_schema = components["AnaliseManifestoResposta"]["properties"]
+    assert "periodos_disponiveis_por_metrica" in manifesto_schema
+    coverage_schema = components["AnaliseCoveragePeriodoItem"]["properties"]
+    assert "has_raw_data" in coverage_schema
+    assert "has_canonical_context" in coverage_schema
+    assert "metrics_available" in coverage_schema
+    diagnostico_schema = components["AnaliseSeriesDiagnosticoResposta"]["properties"]
+    assert "candidate_periods" in diagnostico_schema
+    assert "rejected_periods" in diagnostico_schema
     execucao_schema = components["AnaliseMaterializacaoExecucaoResumo"]["properties"]
     assert "materialization_mode" in execucao_schema
     assert "invalidated_from" in execucao_schema
@@ -1631,6 +1785,12 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         for item in paths["/analise/materializacoes"]["get"]["parameters"]
     }
     assert "campanha_id" in materializacoes_params
+    companhia_status_schema = components["AnaliseMaterializacaoCompanhiaStatusResposta"]["properties"]
+    assert "anos" in companhia_status_schema
+    assert "periodos_detalhe" in companhia_status_schema
+    assert "status_por_ano" in companhia_status_schema
+    assert "latest_execution" in companhia_status_schema
+    assert "active_item" in companhia_status_schema
     monitor_schema = components["AnaliseMaterializacaoMonitoramentoResposta"]["properties"]
     assert "gate" in monitor_schema
     assert "running_full_executions" in monitor_schema

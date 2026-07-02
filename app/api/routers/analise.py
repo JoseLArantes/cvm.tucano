@@ -9,6 +9,7 @@ from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
 from app.api.deps import DbSession, PaginacaoQuery
 from app.core.config import get_settings
 from app.models.analise import (
+    AnaliseContextoRevision,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -20,14 +21,17 @@ from app.schemas.analise import (
     AnaliseBasePeriodo,
     AnaliseBriefResposta,
     AnaliseComparacoesResposta,
+    AnaliseCoverageResposta,
     AnaliseEscopo,
     AnaliseEventosResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
+    AnaliseMaterializacaoAnoStatus,
     AnaliseMaterializacaoCampanhaItemPreview,
     AnaliseMaterializacaoCampanhaResumo,
     AnaliseMaterializacaoChunkExecucaoPreview,
     AnaliseMaterializacaoChunkExecucaoResumo,
+    AnaliseMaterializacaoCompanhiaStatusResposta,
     AnaliseMaterializacaoControleResposta,
     AnaliseMaterializacaoExecucaoDetalhe,
     AnaliseMaterializacaoExecucaoResumo,
@@ -37,6 +41,7 @@ from app.schemas.analise import (
     AnaliseMaterializacaoGateSnapshot,
     AnaliseMaterializacaoIngestionBlocker,
     AnaliseMaterializacaoMonitoramentoResposta,
+    AnaliseMaterializacaoPeriodoStatus,
     AnaliseMaterializacaoProgress,
     AnaliseMaterializacaoReativacaoResposta,
     AnaliseMaterializacaoReativacaoSweepResposta,
@@ -46,11 +51,13 @@ from app.schemas.analise import (
     AnalisePessoasResposta,
     AnaliseQualidadeResposta,
     AnaliseRestatementsResposta,
+    AnaliseSeriesDiagnosticoResposta,
     AnaliseSeriesResposta,
     AnaliseSinaisResposta,
 )
 from app.schemas.comum import Paginacao
 from app.services.analise import (
+    CALCULATION_VERSION,
     campanha_tem_requeue_em_transito,
     contar_chunks_stale_campanha,
     listar_chunks_ativos_campanha,
@@ -60,6 +67,7 @@ from app.services.analise import (
     obter_chunks_stale_ativos,
     obter_comparacoes,
     obter_controle_materializacao,
+    obter_coverage,
     obter_estado_gate_materializacao,
     obter_eventos,
     obter_governanca,
@@ -68,6 +76,7 @@ from app.services.analise import (
     obter_qualidade,
     obter_restatements,
     obter_series,
+    obter_series_diagnostico,
     obter_sinais,
     pausar_controle_materializacao,
     reativar_materializacao_campanha,
@@ -385,6 +394,76 @@ def _serializar_item_preview(item: AnaliseMaterializacaoCampanhaItem) -> Analise
         status=item.status,
         started_at=item.started_at,
     )
+
+
+def _materializacao_ano_status_from_execucao(
+    *,
+    ano: int,
+    escopo: AnaliseEscopo,
+    execucao: AnaliseMaterializacaoExecucao,
+) -> AnaliseMaterializacaoAnoStatus:
+    return AnaliseMaterializacaoAnoStatus(
+        ano=ano,
+        status=execucao.status,
+        escopo=escopo,
+        coverage_complete=execucao.coverage_complete,
+        materialized_at=execucao.finished_at if execucao.status == "success" else None,
+        started_at=execucao.started_at,
+        finished_at=execucao.finished_at,
+        updated_at=execucao.updated_at,
+        execution_id=str(execucao.id),
+        materialization_execution_id=str(execucao.id),
+        calculation_version=execucao.calculation_version,
+        source=execucao.source,
+        materialization_mode=execucao.materialization_mode,
+        message=None,
+    )
+
+
+def _materializacao_ano_status_from_item(
+    *,
+    ano: int,
+    escopo: AnaliseEscopo,
+    item: AnaliseMaterializacaoCampanhaItem,
+) -> AnaliseMaterializacaoAnoStatus:
+    status = "queued" if item.status == "pending" and item.chunk_execucao_id is not None else item.status
+    return AnaliseMaterializacaoAnoStatus(
+        ano=ano,
+        status=status,
+        escopo=escopo,
+        coverage_complete=None,
+        materialized_at=None,
+        started_at=item.started_at,
+        finished_at=item.finished_at,
+        updated_at=item.updated_at,
+        execution_id=str(item.materializacao_execucao_id) if item.materializacao_execucao_id is not None else None,
+        materialization_execution_id=str(item.materializacao_execucao_id) if item.materializacao_execucao_id is not None else None,
+        calculation_version=CALCULATION_VERSION,
+        source=None,
+        materialization_mode="incremental" if item.invalidated_from is not None else "full",
+        message=item.last_error,
+    )
+
+
+def _anos_from_context_revision(revision: AnaliseContextoRevision | None) -> list[int]:
+    if revision is None:
+        return []
+    anos: set[int] = set()
+    for periodo in revision.periodos_disponiveis or []:
+        if not isinstance(periodo, dict):
+            continue
+        if periodo.get("periodicidade") != "annual" or periodo.get("base_periodo") != "fy":
+            continue
+        fiscal_year = periodo.get("fiscal_year")
+        if isinstance(fiscal_year, int):
+            anos.add(fiscal_year)
+    return sorted(anos, reverse=True)
+
+
+def _datetime_sort_key(value: datetime) -> float:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
 
 
 def _serializar_gate(db: DbSession, controle: AnaliseMaterializacaoControle | None = None) -> AnaliseMaterializacaoGateSnapshot:
@@ -952,6 +1031,186 @@ def listar_materializacoes_analiticas(
 
 
 @router.get(
+    "/materializacoes/companhias/{codigo_cvm}/status",
+    response_model=AnaliseMaterializacaoCompanhiaStatusResposta,
+    summary="Consultar Status de Materializacao por Companhia",
+    description=(
+        "Retorna um snapshot de leitura rapida para a materializacao analitica de uma companhia em um escopo. "
+        "O endpoint combina a revisao canonica atual, a ultima execucao de materializacao e eventual item ativo "
+        "ou pendente de campanha. A lista `anos` representa os anos fiscais anuais FY presentes na revisao canonica "
+        "corrente; quando ainda nao existe revisao canonica, o backend retorna o ano inferido da janela ativa ou "
+        "da ultima execucao, se disponivel. Os aliases `dados`, `periodos`, `materializacoes` e `status_por_ano` "
+        "existem para consumidores desacoplados que renderizam status por ano sem depender da listagem operacional."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="consultarStatusMaterializacaoCompanhia",
+)
+def consultar_status_materializacao_companhia(
+    codigo_cvm: int,
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societario consultado.")] = "consolidated",
+) -> AnaliseMaterializacaoCompanhiaStatusResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    latest_execucao = db.scalar(
+        select(AnaliseMaterializacaoExecucao)
+        .where(
+            AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoExecucao.escopo == escopo,
+            AnaliseMaterializacaoExecucao.calculation_version == CALCULATION_VERSION,
+        )
+        .order_by(
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        )
+        .limit(1)
+    )
+    latest_success = db.scalar(
+        select(AnaliseMaterializacaoExecucao)
+        .where(
+            AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoExecucao.escopo == escopo,
+            AnaliseMaterializacaoExecucao.calculation_version == CALCULATION_VERSION,
+            AnaliseMaterializacaoExecucao.status == "success",
+        )
+        .order_by(
+            AnaliseMaterializacaoExecucao.finished_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        )
+        .limit(1)
+    )
+    active_item = db.scalar(
+        select(AnaliseMaterializacaoCampanhaItem)
+        .join(
+            AnaliseMaterializacaoCampanha,
+            AnaliseMaterializacaoCampanha.id == AnaliseMaterializacaoCampanhaItem.campanha_id,
+        )
+        .where(
+            AnaliseMaterializacaoCampanhaItem.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoCampanhaItem.escopo == escopo,
+            AnaliseMaterializacaoCampanhaItem.status.in_(("pending", "running")),
+            AnaliseMaterializacaoCampanha.status.in_(("pending", "running")),
+        )
+        .order_by(
+            case((AnaliseMaterializacaoCampanhaItem.status == "running", 0), else_=1),
+            AnaliseMaterializacaoCampanhaItem.updated_at.desc(),
+            AnaliseMaterializacaoCampanhaItem.created_at.desc(),
+        )
+        .limit(1)
+    )
+    revision = db.scalar(
+        select(AnaliseContextoRevision)
+        .where(
+            AnaliseContextoRevision.codigo_cvm == companhia.codigo_cvm,
+            AnaliseContextoRevision.escopo == escopo,
+            AnaliseContextoRevision.calculation_version == CALCULATION_VERSION,
+            AnaliseContextoRevision.known_to.is_(None),
+        )
+        .order_by(AnaliseContextoRevision.known_from.desc(), AnaliseContextoRevision.created_at.desc())
+        .limit(1)
+    )
+    coverage = obter_coverage(db, companhia, scope=escopo)
+    coverage_by_period = {item.period_id: item for item in coverage.periodos}
+    periodos_detalhe = [
+        AnaliseMaterializacaoPeriodoStatus(
+            period_id=item.period_id,
+            ano=item.ano,
+            periodicidade=item.periodicidade,
+            base_periodo=item.base_periodo,
+            escopo=item.escopo,
+            has_context_revision=item.has_canonical_context,
+            has_fact_revision=bool(item.metrics_available or item.metrics_unavailable),
+            metrics_count=len(item.metrics_available),
+            unavailable_count=len(item.metrics_unavailable),
+            coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
+        )
+        for item in coverage.periodos
+    ]
+
+    anos = _anos_from_context_revision(revision)
+    execucao_base = latest_success or latest_execucao
+    anos_set = set(anos)
+    if active_item is not None and active_item.invalidated_from is not None:
+        anos_set.add(active_item.invalidated_from.year)
+    if execucao_base is not None and execucao_base.invalidated_from is not None:
+        anos_set.add(execucao_base.invalidated_from.year)
+    anos = sorted(anos_set, reverse=True)
+
+    statuses: list[AnaliseMaterializacaoAnoStatus] = []
+    for ano in anos:
+        if active_item is not None and active_item.invalidated_from is not None and ano >= active_item.invalidated_from.year:
+            status_item = _materializacao_ano_status_from_item(ano=ano, escopo=escopo, item=active_item)
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            if coverage_item is not None:
+                status_item.period_id = coverage_item.period_id
+                status_item.has_context_revision = coverage_item.has_canonical_context
+                status_item.has_fact_revision = bool(coverage_item.metrics_available or coverage_item.metrics_unavailable)
+                status_item.metrics_count = len(coverage_item.metrics_available)
+                status_item.unavailable_count = len(coverage_item.metrics_unavailable)
+            statuses.append(status_item)
+        elif execucao_base is not None:
+            status_item = _materializacao_ano_status_from_execucao(ano=ano, escopo=escopo, execucao=execucao_base)
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            if coverage_item is not None:
+                status_item.period_id = coverage_item.period_id
+                status_item.has_context_revision = coverage_item.has_canonical_context
+                status_item.has_fact_revision = bool(coverage_item.metrics_available or coverage_item.metrics_unavailable)
+                status_item.metrics_count = len(coverage_item.metrics_available)
+                status_item.unavailable_count = len(coverage_item.metrics_unavailable)
+            statuses.append(status_item)
+        else:
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            statuses.append(
+                AnaliseMaterializacaoAnoStatus(
+                    ano=ano,
+                    period_id=coverage_item.period_id if coverage_item is not None else f"FY{ano}",
+                    status="missing",
+                    escopo=escopo,
+                    has_context_revision=coverage_item.has_canonical_context if coverage_item is not None else False,
+                    has_fact_revision=bool(coverage_item.metrics_available or coverage_item.metrics_unavailable) if coverage_item is not None else False,
+                    metrics_count=len(coverage_item.metrics_available) if coverage_item is not None else 0,
+                    unavailable_count=len(coverage_item.metrics_unavailable) if coverage_item is not None else 0,
+                    coverage_complete=None,
+                    calculation_version=CALCULATION_VERSION,
+                )
+            )
+
+    if active_item is not None:
+        status = "queued" if active_item.status == "pending" and active_item.chunk_execucao_id is not None else active_item.status
+    elif latest_execucao is not None:
+        status = latest_execucao.status
+    elif revision is not None:
+        status = "success"
+    else:
+        status = "missing"
+
+    updated_candidates = [
+        latest_execucao.updated_at if latest_execucao is not None else None,
+        active_item.updated_at if active_item is not None else None,
+        revision.created_at if revision is not None else None,
+    ]
+    updated_at = max((item for item in updated_candidates if item is not None), key=_datetime_sort_key, default=None)
+    status_por_ano = {str(item.ano): item for item in statuses}
+    return AnaliseMaterializacaoCompanhiaStatusResposta(
+        codigo_cvm=companhia.codigo_cvm or codigo_cvm,
+        escopo=escopo,
+        status=status,
+        coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
+        latest_execution=_serializar_materializacao_execucao(latest_execucao) if latest_execucao is not None else None,
+        active_item=_serializar_item_preview(active_item) if active_item is not None else None,
+        anos=statuses,
+        periodos_detalhe=periodos_detalhe,
+        dados=statuses,
+        periodos=statuses,
+        materializacoes=statuses,
+        status_por_ano=status_por_ano,
+        generated_at=datetime.now(UTC),
+        updated_at=updated_at,
+    )
+
+
+@router.get(
     "/materializacoes/{execucao_id}",
     response_model=AnaliseMaterializacaoExecucaoDetalhe,
     summary="Detalhar Materializacao Analitica",
@@ -994,6 +1253,28 @@ def obter_analise_manifesto(
 
 
 @router.get(
+    "/companhias/{codigo_cvm}/coverage",
+    response_model=AnaliseCoverageResposta,
+    summary="Matriz de Cobertura Analitica da Companhia",
+    description=(
+        "Retorna uma matriz autoritativa por período que cruza dado bruto promovido, contexto canônico, fatos "
+        "canônicos e última execução de materialização. Use para explicar lacunas como períodos que existem no "
+        "DFP/ITR bruto, mas ainda não geraram série canônica para as métricas do gráfico."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseCoverage",
+)
+def obter_analise_coverage(
+    codigo_cvm: int,
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+) -> AnaliseCoverageResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    return obter_coverage(db, companhia, scope=escopo, as_of=date.fromisoformat(as_of) if as_of else None)
+
+
+@router.get(
     "/companhias/{codigo_cvm}/series",
     response_model=AnaliseSeriesResposta,
     summary="Series Analiticas Normalizadas",
@@ -1013,6 +1294,41 @@ def obter_analise_series(
 ) -> AnaliseSeriesResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     return obter_series(
+        db,
+        companhia,
+        metricas=_parse_metricas(metricas),
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=escopo,
+        as_of=date.fromisoformat(as_of) if as_of else None,
+        horizonte_anos=horizonte_anos,
+    )
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/series/diagnostico",
+    response_model=AnaliseSeriesDiagnosticoResposta,
+    summary="Diagnostico de Lacunas das Series Analiticas",
+    description=(
+        "Usa os mesmos filtros de `/analise/companhias/{codigo_cvm}/series`, mas retorna candidatos, períodos "
+        "retornados, períodos rejeitados, contas ausentes, formulários ausentes, mismatch de escopo e mismatch "
+        "de materialização. O objetivo é explicar por que um gráfico não possui pontos suficientes."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseSeriesDiagnostico",
+)
+def obter_analise_series_diagnostico(
+    codigo_cvm: int,
+    db: DbSession,
+    metricas: Annotated[str | None, Query(description="Lista CSV de métricas estáveis.")] = None,
+    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade: `annual` ou `quarterly`.")] = "annual",
+    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal: `fy`, `quarter` ou `ytd`.")] = "fy",
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo a diagnosticar quando `periodicidade=annual&base_periodo=fy`.", ge=1, le=20)] = 5,
+) -> AnaliseSeriesDiagnosticoResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    return obter_series_diagnostico(
         db,
         companhia,
         metricas=_parse_metricas(metricas),

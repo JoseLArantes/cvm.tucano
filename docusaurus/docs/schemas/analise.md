@@ -9,7 +9,7 @@ Os contratos analíticos atuais são fechados e orientados a períodos, métrica
 
 ## Manifesto
 
-`AnaliseManifestoResposta` descreve a companhia, o contexto padrão, os períodos disponíveis, o resumo de qualidade e os links para os demais blocos analíticos.
+`AnaliseManifestoResposta` descreve a companhia, o contexto padrão, os períodos disponíveis, a disponibilidade compacta por métrica, o resumo de qualidade e os links para os demais blocos analíticos.
 
 Campos principais:
 
@@ -18,12 +18,61 @@ Campos principais:
 | `companhia` | object | Resumo cadastral da companhia |
 | `contexto_padrao.periodo_id` | string | Período padrão sugerido |
 | `periodos_disponiveis` | array | Lista de períodos canônicos disponíveis |
+| `periodos_disponiveis_por_metrica` | array | Lista compacta de `metric_id` e `period_ids` disponíveis |
 | `qualidade` | object | Resumo de completude, comparabilidade e consistência |
 | `calculation_version` | string | Versão do motor analítico |
 | `resolution` | object | Origem efetiva do payload (`canonical` ou `runtime_fallback`) |
 | `links` | object | URLs relativas dos blocos analíticos |
 
 Os links atuais incluem `series`, `comparacoes`, `qualidade`, `sinais`, `eventos`, `restatements`, `governanca`, `pessoas` e `brief`.
+
+## Coverage
+
+`AnaliseCoverageResposta` cruza dados brutos, contexto canônico e fatos canônicos.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `companhia` | object | Resumo cadastral da companhia |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional |
+| `resolution` | object | Camada usada para a leitura de cobertura |
+| `periodos` | array | Matriz por período |
+
+Cada item de `periodos` inclui:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `period_id` | string | Período canônico |
+| `ano` | integer | Ano fiscal |
+| `periodicidade` | string | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
+| `escopo` | string | Escopo societário |
+| `form` | string | Formulário ou origem principal |
+| `has_raw_data` | boolean | Existe dado bruto/promovido para o período |
+| `has_canonical_context` | boolean | A revisão de contexto canônica lista o período |
+| `has_series` | boolean | Existe ao menos uma métrica canônica disponível |
+| `metrics_available` | array | Métricas disponíveis |
+| `metrics_unavailable` | array | Métricas indisponíveis registradas |
+| `latest_execution_id` | string | Execução de materialização associada |
+| `materialized_at` | string | Conclusão da materialização associada |
+
+## Diagnóstico de Séries
+
+`AnaliseSeriesDiagnosticoResposta` explica lacunas de `/series`.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `requested_metrics` | array | Métricas reconhecidas pelo backend |
+| `candidate_periods` | array | Períodos candidatos nos dados brutos para os filtros |
+| `returned_periods` | array | Períodos com ao menos uma observação retornada |
+| `rejected_periods` | array | Períodos com lacunas explicáveis |
+| `unavailable_reasons` | array | Indisponibilidades consolidadas do resolvedor |
+
+Cada item de `rejected_periods` informa métricas retornadas e rejeitadas, contas ausentes, formulários ausentes, mismatch de escopo e mismatch de materialização.
 
 ## Resolution
 
@@ -188,6 +237,45 @@ Campos principais:
 | `progress_ratio` | number | Progresso estimado entre 0 e 1 |
 | `context_revisions` | integer | Revisões de contexto já acumuladas |
 | `fact_revisions` | integer | Revisões de fatos já acumuladas |
+
+### `AnaliseMaterializacaoCompanhiaStatusResposta`
+
+`GET /analise/materializacoes/companhias/{codigo_cvm}/status` retorna um snapshot compacto para telas de companhia.
+
+O contrato evita que clientes precisem recompor status a partir de campanhas, chunks e execuções. A resposta usa a revisão canônica atual para montar os anos fiscais anuais `FY` e usa a última execução ou item ativo de campanha para indicar o estado operacional.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `codigo_cvm` | integer | Companhia consultada |
+| `escopo` | string | `consolidated` ou `individual` |
+| `status` | string | Estado consolidado da companhia/escopo |
+| `coverage_complete` | boolean | Cobertura da última execução conhecida |
+| `latest_execution` | object | Última execução de materialização conhecida |
+| `active_item` | object | Item ativo ou pendente de campanha, quando houver |
+| `anos` | array | Status por ano fiscal anual |
+| `dados` | array | Alias de `anos` |
+| `periodos` | array | Alias de `anos` |
+| `materializacoes` | array | Alias de `anos` |
+| `status_por_ano` | object | Mapa por ano fiscal |
+| `generated_at` | string | Momento de geração do snapshot |
+| `updated_at` | string | Última atualização operacional conhecida |
+
+Estados esperados em `status` e `anos[].status`:
+
+- `missing`
+- `pending`
+- `queued`
+- `running`
+- `success`
+- `failed`
+- `stale`
+- `skipped`
+- `partial`
+- `unknown`
+
+Cada item de `anos` inclui `ano`, `status`, `escopo`, `coverage_complete`, timestamps operacionais, identificadores de execução, `calculation_version`, `source`, `materialization_mode` e `message`.
 
 ### Monitoramento da fila
 

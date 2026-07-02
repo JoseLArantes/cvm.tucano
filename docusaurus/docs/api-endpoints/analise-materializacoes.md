@@ -23,6 +23,7 @@ Esse bloco nao e a documentacao principal para leitura de dado financeiro final.
 | Metodo | Rota | Descricao |
 | --- | --- | --- |
 | `GET` | `/analise/materializacoes` | Listagem de execucoes de materializacao analitica |
+| `GET` | `/analise/materializacoes/companhias/{codigo_cvm}/status` | Status de materializacao por companhia e escopo |
 | `GET` | `/analise/materializacoes/monitoramento` | Snapshot operacional da fila e dos workers de materializacao |
 | `GET` | `/analise/materializacoes/controle` | Estado atual do gate de materializacao |
 | `POST` | `/analise/materializacoes/controle/pause` | Pausa manual do gate de materializacao |
@@ -92,6 +93,76 @@ Parametros:
 curl -X GET "http://localhost:8007/analise/materializacoes?status=running" \
   -H "Authorization: Bearer <token>"
 ```
+
+## `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+
+Retorna o status consolidado de materializacao para uma companhia em um escopo societario.
+
+Esse endpoint e orientado a consumidores desacoplados que precisam renderizar um sinal simples por companhia, sem consultar diretamente campanhas, chunks e execucoes. Ele combina:
+
+- a revisao canonica atual da companhia e escopo;
+- a ultima execucao de materializacao conhecida;
+- eventual item `pending` ou `running` de campanha ativa;
+- a lista de anos fiscais anuais `FY` presentes na revisao canonica corrente.
+
+Quando ainda nao existe revisao canonica, o backend tenta inferir um ano a partir de `active_item.invalidated_from` ou da ultima execucao. Se tambem nao houver esse dado, `anos` fica vazio e o campo raiz `status` indica `missing`.
+
+Parametros:
+
+| Nome | Tipo | Descricao |
+| --- | --- | --- |
+| `codigo_cvm` | integer | Companhia consultada |
+| `escopo` | string | `consolidated` ou `individual`; padrao `consolidated` |
+
+```bash
+curl -X GET "http://localhost:8007/analise/materializacoes/companhias/9512/status?escopo=consolidated" \
+  -H "Authorization: Bearer <token>"
+```
+
+Campos principais:
+
+| Campo | Tipo | Descricao |
+| --- | --- | --- |
+| `codigo_cvm` | integer | Companhia consultada |
+| `escopo` | string | Escopo societario consultado |
+| `status` | string | Estado consolidado para companhia/escopo: `missing`, `pending`, `queued`, `running`, `success`, `failed`, `stale`, `skipped`, `partial` ou `unknown` |
+| `coverage_complete` | boolean | Cobertura da execucao mais relevante, quando houver |
+| `latest_execution` | object | Ultima execucao conhecida no mesmo formato resumido de `/analise/materializacoes` |
+| `active_item` | object | Item ativo ou pendente de campanha, quando houver |
+| `anos` | array | Status por ano fiscal anual `FY` |
+| `periodos_detalhe` | array | Detalhe por período canônico conhecido |
+| `dados` | array | Alias de `anos` |
+| `periodos` | array | Alias de `anos` |
+| `materializacoes` | array | Alias de `anos` |
+| `status_por_ano` | object | Mapa de ano fiscal para item de status |
+| `generated_at` | string | Momento de geracao do snapshot |
+| `updated_at` | string | Ultima atualizacao conhecida entre execucao, item e revisao canonica |
+
+Cada item de `anos` contem:
+
+| Campo | Tipo | Descricao |
+| --- | --- | --- |
+| `ano` | integer | Ano fiscal |
+| `period_id` | string | Período canônico principal associado ao ano |
+| `status` | string | Estado derivado para o ano |
+| `escopo` | string | Escopo societario |
+| `has_context_revision` | boolean | Existe revisão de contexto canônica cobrindo o período |
+| `has_fact_revision` | boolean | Existe ao menos uma revisão de fato canônica para o período |
+| `metrics_count` | integer | Quantidade de métricas disponíveis no período |
+| `unavailable_count` | integer | Quantidade de indisponibilidades registradas no período |
+| `coverage_complete` | boolean | Cobertura da execucao associada |
+| `materialized_at` | string | Momento de conclusao da materializacao associada |
+| `started_at` | string | Inicio da execucao ou item associado |
+| `finished_at` | string | Fim da execucao ou item associado |
+| `updated_at` | string | Ultima atualizacao operacional associada |
+| `execution_id` | string | Execucao de materializacao associada |
+| `materialization_execution_id` | string | Alias de `execution_id` |
+| `calculation_version` | string | Versao do motor analitico |
+| `source` | string | Origem do disparo |
+| `materialization_mode` | string | `full` ou `incremental` |
+| `message` | string | Mensagem operacional ou erro de item |
+
+Cada item de `periodos_detalhe` contem `period_id`, `ano`, `periodicidade`, `base_periodo`, `escopo`, `has_context_revision`, `has_fact_revision`, `metrics_count`, `unavailable_count` e `coverage_complete`.
 
 ## `GET /analise/materializacoes/monitoramento`
 

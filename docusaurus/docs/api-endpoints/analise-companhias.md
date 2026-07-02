@@ -23,7 +23,9 @@ Ao contrario de materializacao e monitoramento operacional, os endpoints abaixo 
 | --- | --- | --- |
 | `GET` | `/analise/metricas` | Catalogo versionado de metricas analiticas |
 | `GET` | `/analise/companhias/{codigo_cvm}` | Manifesto analitico da companhia |
+| `GET` | `/analise/companhias/{codigo_cvm}/coverage` | Matriz de cobertura entre dado bruto, contexto canonico e series |
 | `GET` | `/analise/companhias/{codigo_cvm}/series` | Series normalizadas por metrica e periodo |
+| `GET` | `/analise/companhias/{codigo_cvm}/series/diagnostico` | Diagnostico de lacunas das series |
 | `GET` | `/analise/companhias/{codigo_cvm}/comparacoes` | Comparacoes prontas sobre as series |
 | `GET` | `/analise/companhias/{codigo_cvm}/qualidade` | Diagnostico de qualidade analitica |
 | `GET` | `/analise/companhias/{codigo_cvm}/sinais` | Sinais deterministicos com evidencias |
@@ -44,7 +46,7 @@ curl -X GET "http://localhost:8007/analise/metricas" \
 
 ## `GET /analise/companhias/{codigo_cvm}`
 
-Retorna o manifesto analítico da companhia: contexto padrão, períodos disponíveis, resumo de qualidade e links para os demais blocos.
+Retorna o manifesto analítico da companhia: contexto padrão, períodos disponíveis, disponibilidade compacta por métrica, resumo de qualidade e links para os demais blocos.
 
 Parametros:
 
@@ -58,6 +60,48 @@ Parametros:
 curl -X GET "http://localhost:8007/analise/companhias/9512?escopo=consolidated" \
   -H "Authorization: Bearer <token>"
 ```
+
+Campos de disponibilidade:
+
+- `periodos_disponiveis`: períodos canônicos disponíveis no contexto padrão
+- `periodos_disponiveis_por_metrica`: lista compacta por métrica, com `metric_id` e `period_ids`, para a UI saber se um gráfico pode existir sem chamar `/series`
+- `resolution.mode`: `canonical` quando a resposta veio da camada materializada; `runtime_fallback` quando foi calculada no request
+
+## `GET /analise/companhias/{codigo_cvm}/coverage`
+
+Retorna uma matriz de cobertura por período.
+
+Use este endpoint quando a UI precisa explicar por que um período aparece nos dados brutos, mas não aparece em uma série ou gráfico.
+
+Parametros:
+
+| Nome | Tipo | Descricao |
+| --- | --- | --- |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+
+```bash
+curl -X GET "http://localhost:8007/analise/companhias/9512/coverage?escopo=consolidated" \
+  -H "Authorization: Bearer <token>"
+```
+
+Cada item de `periodos` contém:
+
+| Campo | Descricao |
+| --- | --- |
+| `period_id` | Período canônico, como `FY2025`, `2025-Q3` ou `2025-YTDQ3` |
+| `ano` | Ano fiscal |
+| `periodicidade` | `annual` ou `quarterly` |
+| `base_periodo` | `fy`, `quarter` ou `ytd` |
+| `escopo` | Escopo societário avaliado |
+| `form` | Formulário ou origem principal do período |
+| `has_raw_data` | Há dado financeiro bruto/promovido suficiente para listar o período |
+| `has_canonical_context` | A revisão de contexto canônica lista o período |
+| `has_series` | Há ao menos uma métrica canônica disponível para o período |
+| `metrics_available` | Métricas disponíveis na camada canônica |
+| `metrics_unavailable` | Métricas avaliadas e indisponíveis na camada canônica |
+| `latest_execution_id` | Execução de materialização usada |
+| `materialized_at` | Momento de conclusão da materialização usada |
 
 ## `GET /analise/companhias/{codigo_cvm}/series`
 
@@ -86,6 +130,46 @@ Cada resposta de serie inclui:
 - `resolution.materialized_at`: instante de conclusao da materializacao
 - `resolution.as_of`: data de corte informacional efetivamente aplicada
 - `horizonte_anos`: horizonte anual efetivamente aplicado em consultas historicas FY
+
+## `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
+
+Usa os mesmos filtros de `/series`, mas retorna uma explicação operacional de lacunas.
+
+Parametros:
+
+| Nome | Tipo | Descricao |
+| --- | --- | --- |
+| `metricas` | string | Lista CSV de metricas estaveis |
+| `periodicidade` | string | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy`, `quarter` ou `ytd` |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
+| `horizonte_anos` | integer | Horizonte anual maximo quando `periodicidade=annual` e `base_periodo=fy` |
+
+```bash
+curl -X GET "http://localhost:8007/analise/companhias/9512/series/diagnostico?metricas=receita_liquida&periodicidade=annual&base_periodo=fy&escopo=consolidated" \
+  -H "Authorization: Bearer <token>"
+```
+
+Campos principais:
+
+- `requested_metrics`: métricas solicitadas e reconhecidas
+- `candidate_periods`: períodos candidatos encontrados no dado bruto para os filtros
+- `returned_periods`: períodos que retornaram ao menos uma observação em `/series`
+- `rejected_periods`: períodos com lacunas por métrica
+- `unavailable_reasons`: indisponibilidades consolidadas do resolvedor
+
+Cada item de `rejected_periods` informa:
+
+- `returned_metrics`
+- `rejected_metrics`
+- `unavailable_reasons`
+- `missing_accounts`
+- `missing_forms`
+- `scope_mismatch`
+- `materialization_mismatch`
+
+Com isso, a UI pode explicar casos como: "o período existe no DFP bruto, mas a métrica não foi materializada" ou "há dado no escopo individual, mas não no consolidado solicitado".
 
 ## `GET /analise/companhias/{codigo_cvm}/comparacoes`
 

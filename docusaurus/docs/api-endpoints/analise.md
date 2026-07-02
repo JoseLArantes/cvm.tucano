@@ -43,7 +43,9 @@ Endpoints cobertos:
 
 - `GET /analise/metricas`
 - `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/companhias/{codigo_cvm}/coverage`
 - `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
 - `GET /analise/companhias/{codigo_cvm}/comparacoes`
 - `GET /analise/companhias/{codigo_cvm}/qualidade`
 - `GET /analise/companhias/{codigo_cvm}/sinais`

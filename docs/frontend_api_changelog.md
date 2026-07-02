@@ -9,6 +9,71 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-02 - Coverage e diagnostico de lacunas analiticas
+
+### Endpoints novos
+
+- `GET /analise/companhias/{codigo_cvm}/coverage`
+- `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
+
+### Endpoints estendidos
+
+- `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+
+### Comportamento entregue
+
+- `/coverage` retorna uma matriz por periodo cruzando dado bruto, contexto canonico, fatos canonicos e ultima execucao de materializacao
+- `/series/diagnostico` usa os mesmos filtros de `/series`, mas retorna periodos candidatos, periodos retornados, periodos rejeitados e motivos de indisponibilidade
+- o manifesto passa a incluir `periodos_disponiveis_por_metrica`, com `metric_id` e `period_ids`, para a UI decidir se um grafico pode existir sem chamar `/series`
+- o status de materializacao por companhia passa a incluir `periodos_detalhe`
+- cada item de `anos` no status de materializacao passa a incluir `period_id`, `has_context_revision`, `has_fact_revision`, `metrics_count` e `unavailable_count`
+
+### Leitura recomendada pelo frontend
+
+- usar `/coverage` para explicar diferenca entre dado bruto existente e camada canonica ausente
+- usar `/series/diagnostico` quando um grafico tiver poucos pontos ou nenhum ponto
+- usar `periodos_disponiveis_por_metrica` no manifesto para habilitar/desabilitar secoes de grafico sem consultas extras
+- usar `periodos_detalhe` no status de materializacao para mostrar se a lacuna esta em contexto canonico, fatos canonicos ou indisponibilidade de metrica
+
+## 2026-07-02 - Status de materializacao por companhia
+
+### Endpoint novo
+
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+
+### Comportamento entregue
+
+- o backend passa a expor um snapshot direto para telas de companhia consultarem a materializacao de um `codigo_cvm` em um `escopo`
+- o endpoint combina revisao canonica atual, ultima execucao conhecida e eventual item ativo ou pendente de campanha
+- `anos` traz status por ano fiscal anual `FY` quando ha revisao canonica
+- `dados`, `periodos` e `materializacoes` sao aliases de `anos` para consumidores desacoplados
+- `status_por_ano` fornece o mesmo conteudo indexado por ano fiscal
+- quando ainda nao ha revisao canonica, o backend tenta inferir o ano por `active_item.invalidated_from` ou pela ultima execucao; se nao houver dado suficiente, retorna `status=missing` e `anos=[]`
+
+### Campos principais
+
+- `codigo_cvm`
+- `escopo`
+- `status`
+- `coverage_complete`
+- `latest_execution`
+- `active_item`
+- `anos`
+- `dados`
+- `periodos`
+- `materializacoes`
+- `status_por_ano`
+- `generated_at`
+- `updated_at`
+
+### Leitura recomendada pelo frontend
+
+- para o painel de detalhe da companhia, consumir este endpoint em vez de derivar estado a partir de `/analise/materializacoes`
+- usar `anos` ou `status_por_ano` para renderizar indicadores por ano
+- tratar `pending`, `queued` e `running` como trabalho aceito ou em processamento
+- tratar `missing` como ausencia de materializacao conhecida para o escopo consultado
+
 ## 2026-07-01 - Disparo de ingestao passa a acionar o gate de materializacao imediatamente
 
 ### Endpoints e superficies com impacto operacional visivel

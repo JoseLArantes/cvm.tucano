@@ -43,6 +43,8 @@ from app.schemas.analise import (
     AnaliseComparisonKind,
     AnaliseComparisonUnit,
     AnaliseContextoPadrao,
+    AnaliseCoveragePeriodoItem,
+    AnaliseCoverageResposta,
     AnaliseEscopo,
     AnaliseEvento,
     AnaliseEventosResposta,
@@ -53,6 +55,7 @@ from app.schemas.analise import (
     AnaliseLinkSet,
     AnaliseManifestoResposta,
     AnaliseMetricaCatalogoItem,
+    AnaliseMetricaDisponibilidade,
     AnaliseMetricasCatalogoResposta,
     AnaliseMetricType,
     AnaliseNaturezaPeriodo,
@@ -66,6 +69,8 @@ from app.schemas.analise import (
     AnaliseRestatementContaAlterada,
     AnaliseRestatementItem,
     AnaliseRestatementsResposta,
+    AnaliseSeriesDiagnosticoPeriodo,
+    AnaliseSeriesDiagnosticoResposta,
     AnaliseSeriesObservation,
     AnaliseSeriesResposta,
     AnaliseSeriesUnavailable,
@@ -1782,6 +1787,7 @@ def _obter_manifesto_runtime(
         companhia=_companhia_resumo(companhia),
         contexto_padrao=AnaliseContextoPadrao(periodo_id=latest_period, periodicidade="annual", escopo=scope),
         periodos_disponiveis=context.periodos_disponiveis,
+        periodos_disponiveis_por_metrica=_periodos_disponiveis_por_metrica_runtime(context, scope),
         qualidade=context.qualidade,
         calculation_version=CALCULATION_VERSION,
         resolution=_runtime_resolution(as_of),
@@ -1800,7 +1806,8 @@ def obter_manifesto(
     if context_pair is None:
         return _obter_manifesto_runtime(db, companhia, scope=scope, as_of=as_of)
     execucao, revision = context_pair
-    periodos = [AnalisePeriodoDisponivel.model_validate(item) for item in revision.periodos_disponiveis]
+    periodos = [_periodo_disponivel_from_payload(item, scope) for item in revision.periodos_disponiveis]
+    revisions_by_period = _fact_revisions_by_period(db, companhia, scope, as_of)
     return AnaliseManifestoResposta(
         companhia=_companhia_resumo(companhia),
         contexto_padrao=AnaliseContextoPadrao(
@@ -1809,6 +1816,7 @@ def obter_manifesto(
             escopo=scope,
         ),
         periodos_disponiveis=periodos,
+        periodos_disponiveis_por_metrica=_periodos_disponiveis_por_metrica_from_revisions(revisions_by_period),
         qualidade=AnaliseQualidadeResumo.model_validate(revision.qualidade),
         calculation_version=CALCULATION_VERSION,
         resolution=_canonical_resolution(execucao, as_of),
@@ -1884,6 +1892,283 @@ def obter_series(
         scope=scope,
         as_of=as_of,
         horizonte_anos=horizonte_anos,
+    )
+
+
+def _current_fact_revisions_stmt(
+    companhia: Companhia,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> Any:
+    stmt = select(AnaliseFatoRevision).where(
+        AnaliseFatoRevision.codigo_cvm == companhia.codigo_cvm,
+        AnaliseFatoRevision.escopo == scope,
+        AnaliseFatoRevision.calculation_version == CALCULATION_VERSION,
+    )
+    if as_of is None:
+        return stmt.where(AnaliseFatoRevision.known_to.is_(None))
+    return stmt.where(
+        AnaliseFatoRevision.known_from <= as_of,
+        or_(AnaliseFatoRevision.known_to.is_(None), AnaliseFatoRevision.known_to > as_of),
+    )
+
+
+def _fact_revisions_by_period(
+    db: Session,
+    companhia: Companhia,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> dict[str, list[AnaliseFatoRevision]]:
+    revisions = db.scalars(_current_fact_revisions_stmt(companhia, scope, as_of)).all()
+    by_period: dict[str, list[AnaliseFatoRevision]] = defaultdict(list)
+    for revision in revisions:
+        by_period[revision.period_id].append(revision)
+    return by_period
+
+
+def _periodo_sort_key(period_id: str, periodos: dict[str, AnalisePeriodoDisponivel]) -> tuple[int, int, str]:
+    periodo = periodos.get(period_id)
+    if periodo is None:
+        return (0, 0, period_id)
+    return (periodo.fiscal_year, periodo.quarter or 0, period_id)
+
+
+def _periodo_disponivel_from_payload(payload: dict[str, Any], scope: AnaliseEscopo) -> AnalisePeriodoDisponivel:
+    period_id = str(payload.get("period_id") or "")
+    fiscal_year = int(payload.get("fiscal_year") or payload.get("ano") or (period_id[:4] if period_id[:4].isdigit() else period_id.replace("FY", "")[:4] or 0))
+    quarter = payload.get("quarter")
+    if quarter is None and "-Q" in period_id:
+        quarter = int(period_id.rsplit("-Q", 1)[1])
+    periodicidade = cast(AnalisePeriodicidade, payload.get("periodicidade") or ("annual" if period_id.startswith("FY") else "quarterly"))
+    base_periodo = cast(AnaliseBasePeriodo, payload.get("base_periodo") or ("fy" if periodicidade == "annual" else "quarter"))
+    return AnalisePeriodoDisponivel(
+        period_id=period_id,
+        fiscal_year=fiscal_year,
+        quarter=quarter,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        period_nature=cast(Any, payload.get("period_nature") or "duration"),
+        start_date=payload.get("start_date"),
+        end_date=payload.get("end_date") or date(fiscal_year, 12, 31),
+        form=cast(AnaliseForm, payload.get("form") or ("DFP" if periodicidade == "annual" else "ITR")),
+        scope=cast(AnaliseEscopo, payload.get("scope") or scope),
+        restated=bool(payload.get("restated", False)),
+    )
+
+
+def _periodos_disponiveis_por_metrica_from_revisions(
+    revisions_by_period: dict[str, list[AnaliseFatoRevision]],
+) -> list[AnaliseMetricaDisponibilidade]:
+    periodos_by_metric: dict[str, set[str]] = defaultdict(set)
+    for period_id, revisions in revisions_by_period.items():
+        for revision in revisions:
+            if revision.status == "available":
+                periodos_by_metric[revision.metric_id].add(period_id)
+    return [
+        AnaliseMetricaDisponibilidade(metric_id=metric_id, period_ids=sorted(period_ids))
+        for metric_id, period_ids in sorted(periodos_by_metric.items())
+    ]
+
+
+def _periodos_disponiveis_por_metrica_runtime(context: ContextData, scope: AnaliseEscopo) -> list[AnaliseMetricaDisponibilidade]:
+    periodos_by_metric: dict[str, set[str]] = defaultdict(set)
+    metric_ids = list(METRIC_SPECS.keys())
+    for periodicidade, base_periodo in (("annual", "fy"), ("quarterly", "quarter"), ("quarterly", "ytd")):
+        facts, _, _ = _resolve_series_facts(
+            context,
+            metric_ids,
+            cast(AnalisePeriodicidade, periodicidade),
+            cast(AnaliseBasePeriodo, base_periodo),
+            scope,
+        )
+        for fact in facts:
+            periodos_by_metric[fact.metric_id].add(fact.period_id)
+    return [
+        AnaliseMetricaDisponibilidade(metric_id=metric_id, period_ids=sorted(period_ids))
+        for metric_id, period_ids in sorted(periodos_by_metric.items())
+    ]
+
+
+def obter_coverage(
+    db: Session,
+    companhia: Companhia,
+    *,
+    scope: AnaliseEscopo = "consolidated",
+    as_of: date | None = None,
+) -> AnaliseCoverageResposta:
+    runtime_context = _load_context(db, companhia, scope, as_of)
+    context_pair = _context_revision_for_as_of(db, companhia, scope, as_of)
+    execucao: AnaliseMaterializacaoExecucao | None = None
+    context_revision: AnaliseContextoRevision | None = None
+    if context_pair is not None:
+        execucao, context_revision = context_pair
+
+    raw_periods = {periodo.period_id: periodo for periodo in runtime_context.periodos_disponiveis}
+    canonical_periods: dict[str, AnalisePeriodoDisponivel] = {}
+    if context_revision is not None:
+        canonical_periods = {periodo.period_id: periodo for periodo in (_periodo_disponivel_from_payload(item, scope) for item in context_revision.periodos_disponiveis)}
+    revisions_by_period = _fact_revisions_by_period(db, companhia, scope, as_of)
+
+    period_lookup = {**canonical_periods, **raw_periods}
+    period_ids = sorted(set(raw_periods) | set(canonical_periods) | set(revisions_by_period), key=lambda item: _periodo_sort_key(item, period_lookup), reverse=True)
+    items: list[AnaliseCoveragePeriodoItem] = []
+    for period_id in period_ids:
+        periodo = raw_periods.get(period_id) or canonical_periods.get(period_id)
+        if periodo is None:
+            revisions = revisions_by_period[period_id]
+            first_revision = revisions[0]
+            periodo = AnalisePeriodoDisponivel(
+                period_id=period_id,
+                fiscal_year=first_revision.fiscal_year,
+                quarter=first_revision.quarter,
+                periodicidade=cast(AnalisePeriodicidade, first_revision.periodicidade),
+                base_periodo=cast(AnaliseBasePeriodo, first_revision.base_periodo),
+                period_nature="duration",
+                start_date=None,
+                end_date=first_revision.known_from,
+                form="DERIVED",
+                scope=scope,
+                restated=False,
+            )
+        revisions = revisions_by_period.get(period_id, [])
+        available_metrics = sorted({revision.metric_id for revision in revisions if revision.status == "available"})
+        unavailable_metrics = sorted({revision.metric_id for revision in revisions if revision.status == "unavailable"})
+        items.append(
+            AnaliseCoveragePeriodoItem(
+                period_id=period_id,
+                ano=periodo.fiscal_year,
+                periodicidade=periodo.periodicidade,
+                base_periodo=periodo.base_periodo,
+                escopo=scope,
+                form=periodo.form,
+                has_raw_data=period_id in raw_periods,
+                has_canonical_context=period_id in canonical_periods,
+                has_series=bool(available_metrics),
+                metrics_available=available_metrics,
+                metrics_unavailable=unavailable_metrics,
+                latest_execution_id=str(execucao.id) if execucao is not None else None,
+                materialized_at=execucao.finished_at if execucao is not None else None,
+            )
+        )
+
+    return AnaliseCoverageResposta(
+        companhia=_companhia_resumo(companhia),
+        escopo=scope,
+        as_of=as_of,
+        resolution=_canonical_resolution(execucao, as_of) if execucao is not None else _runtime_resolution(as_of),
+        periodos=items,
+    )
+
+
+def obter_series_diagnostico(
+    db: Session,
+    companhia: Companhia,
+    *,
+    metricas: list[str] | None,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo = "consolidated",
+    as_of: date | None = None,
+    horizonte_anos: int | None = None,
+) -> AnaliseSeriesDiagnosticoResposta:
+    metric_ids = _filter_metric_ids(metricas)
+    runtime_context = _load_context(db, companhia, scope, as_of)
+    candidate_tuples = _candidate_periods(runtime_context, periodicidade, base_periodo, horizonte_anos)
+    candidate_period_ids = [_period_id_for(periodicidade, base_periodo, year, quarter) for year, quarter in candidate_tuples]
+    _, runtime_unavailable, runtime_issues = _resolve_series_facts(runtime_context, metric_ids, periodicidade, base_periodo, scope, horizonte_anos)
+    series = obter_series(
+        db,
+        companhia,
+        metricas=metric_ids,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+        horizonte_anos=horizonte_anos,
+    )
+    returned_by_period: dict[str, set[str]] = defaultdict(set)
+    for observation in series.observacoes:
+        returned_by_period[observation.period_id].add(observation.metric_id)
+    unavailable_by_period: dict[str, list[AnaliseSeriesUnavailable]] = defaultdict(list)
+    for item in [*runtime_unavailable, *series.indisponibilidades]:
+        unavailable_by_period[item.period_id].append(item)
+
+    other_scope: AnaliseEscopo = "individual" if scope == "consolidated" else "consolidated"
+    other_context = _load_context(db, companhia, other_scope, as_of)
+    other_period_tuples = _candidate_periods(other_context, periodicidade, base_periodo, horizonte_anos)
+    other_periods = {
+        _period_id_for(periodicidade, base_periodo, year, quarter): (year, quarter)
+        for year, quarter in other_period_tuples
+    }
+    coverage = obter_coverage(db, companhia, scope=scope, as_of=as_of)
+    coverage_by_period = {item.period_id: item for item in coverage.periodos}
+
+    rejected: list[AnaliseSeriesDiagnosticoPeriodo] = []
+    for year, quarter in candidate_tuples:
+        period_id = _period_id_for(periodicidade, base_periodo, year, quarter)
+        returned_metrics = sorted(returned_by_period.get(period_id, set()))
+        rejected_metrics = sorted(set(metric_ids) - set(returned_metrics))
+        unavailable = _dedupe_unavailable(unavailable_by_period.get(period_id, []))
+        coverage_item = coverage_by_period.get(period_id)
+        materialization_mismatch = (
+            coverage_item is not None
+            and coverage_item.has_raw_data
+            and (not coverage_item.has_canonical_context or bool(rejected_metrics))
+            and series.resolution.mode == "canonical"
+        )
+        if not rejected_metrics and not unavailable and not materialization_mismatch:
+            continue
+        rejected.append(
+            AnaliseSeriesDiagnosticoPeriodo(
+                period_id=period_id,
+                ano=year,
+                quarter=quarter,
+                returned_metrics=returned_metrics,
+                rejected_metrics=rejected_metrics,
+                unavailable_reasons=unavailable,
+                missing_accounts=sorted({missing for item in unavailable for missing in item.missing if missing and missing[0].isdigit()}),
+                missing_forms=(
+                    []
+                    if coverage_item is not None and coverage_item.has_raw_data
+                    else ["DFP" if periodicidade == "annual" else "ITR"]
+                ),
+                scope_mismatch=False,
+                materialization_mismatch=materialization_mismatch,
+            )
+        )
+
+    for period_id, (year, quarter) in sorted(other_periods.items()):
+        if period_id in candidate_period_ids:
+            continue
+        rejected.append(
+            AnaliseSeriesDiagnosticoPeriodo(
+                period_id=period_id,
+                ano=year,
+                quarter=quarter,
+                returned_metrics=[],
+                rejected_metrics=metric_ids,
+                unavailable_reasons=[],
+                missing_accounts=[],
+                missing_forms=[],
+                scope_mismatch=True,
+                materialization_mismatch=False,
+            )
+        )
+
+    return AnaliseSeriesDiagnosticoResposta(
+        companhia=_companhia_resumo(companhia),
+        calculation_version=CALCULATION_VERSION,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        escopo=scope,
+        horizonte_anos=horizonte_anos if periodicidade == "annual" and base_periodo == "fy" else None,
+        resolution=series.resolution,
+        requested_metrics=metric_ids,
+        candidate_periods=candidate_period_ids,
+        returned_periods=sorted(returned_by_period),
+        rejected_periods=rejected,
+        unavailable_reasons=_dedupe_unavailable([*runtime_unavailable, *series.indisponibilidades]),
+        issues=_dedupe_issues([*runtime_issues, *series.issues]),
     )
 
 

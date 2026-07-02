@@ -28,6 +28,18 @@ AnaliseMaterializacaoGateStatus = Literal["green", "red"]
 AnaliseMaterializacaoControlMode = Literal["auto", "paused"]
 AnaliseMaterializacaoChunkStatus = Literal["queued", "running", "success", "failed", "stale", "cancelled"]
 AnaliseMaterializacaoMode = Literal["full", "incremental"]
+AnaliseMaterializacaoAnoStatusCode = Literal[
+    "missing",
+    "pending",
+    "queued",
+    "running",
+    "success",
+    "failed",
+    "stale",
+    "skipped",
+    "partial",
+    "unknown",
+]
 AnaliseMaterializacaoRecoveryStatus = Literal["triggered", "recovered", "noop", "rejected"]
 AnaliseMaterializacaoRecoveryReasonCode = Literal[
     "PENDING_UNDISPATCHED",
@@ -117,10 +129,19 @@ class AnaliseResolutionMetadata(BaseModel):
     )
 
 
+class AnaliseMetricaDisponibilidade(BaseModel):
+    metric_id: str = Field(description="Identificador estável da métrica.")
+    period_ids: list[str] = Field(default_factory=list, description="Períodos em que a métrica está disponível no contexto consultado.")
+
+
 class AnaliseManifestoResposta(BaseModel):
     companhia: AnaliseCompanhiaResumo
     contexto_padrao: AnaliseContextoPadrao
     periodos_disponiveis: list[AnalisePeriodoDisponivel] = Field(description="Lista dos períodos analíticos disponíveis no contexto padrão.")
+    periodos_disponiveis_por_metrica: list[AnaliseMetricaDisponibilidade] = Field(
+        default_factory=list,
+        description="Resumo compacto de disponibilidade por métrica no contexto padrão, para a UI decidir se um gráfico pode existir sem chamar `/series`.",
+    )
     qualidade: AnaliseQualidadeResumo = Field(description="Resumo objetivo da qualidade analítica atual.")
     calculation_version: CalculationVersion = Field(description="Versão do motor analítico.")
     resolution: AnaliseResolutionMetadata = Field(description="Metadados da estratégia de resolução usada na resposta.")
@@ -183,6 +204,111 @@ class AnaliseMaterializacaoExecucoesListaResposta(BaseModel):
     dados: list[AnaliseMaterializacaoExecucaoResumo] = Field(description="Lista paginada de execuções de materialização.")
     paginacao: Paginacao = Field(description="Metadados de paginação da listagem.")
     resumo: AnaliseMaterializacaoExecucoesResumo = Field(description="Resumo agregado para os mesmos filtros da listagem.")
+
+
+class AnaliseMaterializacaoAnoStatus(BaseModel):
+    ano: int = Field(description="Ano fiscal coberto ou aguardado pela materialização.", examples=[2025])
+    period_id: str | None = Field(default=None, description="Período canônico principal associado ao status do ano, quando aplicável.")
+    status: AnaliseMaterializacaoAnoStatusCode | str = Field(description="Estado derivado para o ano fiscal.")
+    escopo: AnaliseEscopo = Field(description="Escopo societário avaliado.")
+    has_context_revision: bool | None = Field(default=None, description="Indica se existe revisão de contexto canônica cobrindo o período.")
+    has_fact_revision: bool | None = Field(default=None, description="Indica se existe ao menos uma revisão de fato canônica para o período.")
+    metrics_count: int | None = Field(default=None, description="Quantidade de métricas canônicas disponíveis para o período.")
+    unavailable_count: int | None = Field(default=None, description="Quantidade de indisponibilidades canônicas registradas para o período.")
+    coverage_complete: bool | None = Field(default=None, description="Indica se a execução associada declarou cobertura canônica completa.")
+    materialized_at: datetime | None = Field(default=None, description="Momento de conclusão da materialização associada ao ano.")
+    started_at: datetime | None = Field(default=None, description="Momento de início da execução ou item associado.")
+    finished_at: datetime | None = Field(default=None, description="Momento de fim da execução ou item associado.")
+    updated_at: datetime | None = Field(default=None, description="Última atualização operacional associada ao ano.")
+    execution_id: str | None = Field(default=None, description="Identificador da execução de materialização associada.")
+    materialization_execution_id: str | None = Field(default=None, description="Alias de `execution_id` para consumidores que usam nomenclatura explícita.")
+    calculation_version: CalculationVersion | str | None = Field(default=None, description="Versão do motor analítico usada.")
+    source: str | None = Field(default=None, description="Origem do disparo da materialização.")
+    materialization_mode: AnaliseMaterializacaoMode | str | None = Field(default=None, description="Modo de materialização associado.")
+    message: str | None = Field(default=None, description="Mensagem operacional, como erro de item ou indicação de fila.")
+
+
+class AnaliseMaterializacaoPeriodoStatus(BaseModel):
+    period_id: str = Field(description="Período canônico avaliado.")
+    ano: int = Field(description="Ano fiscal do período.")
+    periodicidade: AnalisePeriodicidade = Field(description="Periodicidade do período.")
+    base_periodo: AnaliseBasePeriodo = Field(description="Base temporal do período.")
+    escopo: AnaliseEscopo = Field(description="Escopo societário.")
+    has_context_revision: bool = Field(description="Indica se a revisão de contexto canônica lista o período.")
+    has_fact_revision: bool = Field(description="Indica se existe ao menos uma revisão de fato para o período.")
+    metrics_count: int = Field(description="Quantidade de métricas disponíveis no período.")
+    unavailable_count: int = Field(description="Quantidade de indisponibilidades registradas no período.")
+    coverage_complete: bool | None = Field(default=None, description="Cobertura da última execução relevante.")
+
+
+class AnaliseMaterializacaoCompanhiaStatusResposta(BaseModel):
+    codigo_cvm: int = Field(description="Código CVM consultado.")
+    escopo: AnaliseEscopo = Field(description="Escopo societário consultado.")
+    status: AnaliseMaterializacaoAnoStatusCode | str = Field(description="Estado operacional consolidado para a companhia e escopo.")
+    coverage_complete: bool | None = Field(default=None, description="Cobertura da execução mais relevante para a companhia e escopo.")
+    latest_execution: AnaliseMaterializacaoExecucaoResumo | None = Field(default=None, description="Última execução conhecida para a companhia e escopo.")
+    active_item: AnaliseMaterializacaoCampanhaItemPreview | None = Field(default=None, description="Item ativo ou pendente mais relevante quando ainda não há execução corrente.")
+    anos: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Status derivado por ano fiscal.")
+    periodos_detalhe: list[AnaliseMaterializacaoPeriodoStatus] = Field(default_factory=list, description="Detalhe por período canônico conhecido para explicar lacunas de materialização.")
+    dados: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores genéricos.")
+    periodos: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores orientados a períodos.")
+    materializacoes: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores legados do frontend.")
+    status_por_ano: dict[str, AnaliseMaterializacaoAnoStatus] = Field(default_factory=dict, description="Mapa de ano fiscal para status derivado.")
+    generated_at: datetime = Field(description="Momento em que o snapshot foi produzido.")
+    updated_at: datetime | None = Field(default=None, description="Última atualização conhecida entre execução, item e revisão canônica.")
+
+
+class AnaliseCoveragePeriodoItem(BaseModel):
+    period_id: str = Field(description="Período canônico avaliado.")
+    ano: int = Field(description="Ano fiscal.")
+    periodicidade: AnalisePeriodicidade = Field(description="Periodicidade do período.")
+    base_periodo: AnaliseBasePeriodo = Field(description="Base temporal do período.")
+    escopo: AnaliseEscopo = Field(description="Escopo societário.")
+    form: AnaliseForm = Field(description="Formulário ou origem principal do período.")
+    has_raw_data: bool = Field(description="Indica se há linhas brutas/promovidas suficientes para listar o período.")
+    has_canonical_context: bool = Field(description="Indica se a camada canônica possui contexto para o período.")
+    has_series: bool = Field(description="Indica se há ao menos uma métrica canônica disponível para o período.")
+    metrics_available: list[str] = Field(default_factory=list, description="Métricas disponíveis na camada canônica para o período.")
+    metrics_unavailable: list[str] = Field(default_factory=list, description="Métricas avaliadas e indisponíveis na camada canônica para o período.")
+    latest_execution_id: str | None = Field(default=None, description="Última execução de materialização bem-sucedida considerada.")
+    materialized_at: datetime | None = Field(default=None, description="Momento em que a materialização considerada terminou.")
+
+
+class AnaliseCoverageResposta(BaseModel):
+    companhia: AnaliseCompanhiaResumo
+    escopo: AnaliseEscopo
+    as_of: date | None = Field(default=None, description="Data de corte informacional considerada.")
+    resolution: AnaliseResolutionMetadata = Field(description="Metadados da camada canônica usada para a cobertura.")
+    periodos: list[AnaliseCoveragePeriodoItem] = Field(description="Matriz autoritativa de cobertura por período.")
+
+
+class AnaliseSeriesDiagnosticoPeriodo(BaseModel):
+    period_id: str = Field(description="Período avaliado.")
+    ano: int = Field(description="Ano fiscal.")
+    quarter: int | None = Field(default=None, description="Trimestre fiscal quando aplicável.")
+    returned_metrics: list[str] = Field(default_factory=list, description="Métricas retornadas em `/series` para o período.")
+    rejected_metrics: list[str] = Field(default_factory=list, description="Métricas solicitadas que não foram retornadas.")
+    unavailable_reasons: list[AnaliseSeriesUnavailable] = Field(default_factory=list, description="Motivos objetivos de indisponibilidade por métrica.")
+    missing_accounts: list[str] = Field(default_factory=list, description="Contas CVM candidatas ausentes para as métricas rejeitadas.")
+    missing_forms: list[AnaliseForm] = Field(default_factory=list, description="Formulários esperados e ausentes para o período.")
+    scope_mismatch: bool = Field(description="Indica se existe dado bruto no outro escopo, mas não no escopo solicitado.")
+    materialization_mismatch: bool = Field(description="Indica se há dado bruto candidato, mas falta contexto ou fato canônico para o período no escopo solicitado.")
+
+
+class AnaliseSeriesDiagnosticoResposta(BaseModel):
+    companhia: AnaliseCompanhiaResumo
+    calculation_version: CalculationVersion
+    periodicidade: AnalisePeriodicidade
+    base_periodo: AnaliseBasePeriodo
+    escopo: AnaliseEscopo
+    horizonte_anos: int | None = Field(default=None, description="Horizonte anual efetivamente aplicado, quando aplicável.")
+    resolution: AnaliseResolutionMetadata = Field(description="Metadados da estratégia de resolução usada por `/series`.")
+    requested_metrics: list[str] = Field(description="Métricas solicitadas e reconhecidas pelo backend.")
+    candidate_periods: list[str] = Field(description="Períodos candidatos identificados nos dados brutos para os filtros.")
+    returned_periods: list[str] = Field(description="Períodos que retornaram ao menos uma observação.")
+    rejected_periods: list[AnaliseSeriesDiagnosticoPeriodo] = Field(description="Períodos com lacunas explicáveis por métrica, forma, escopo ou materialização.")
+    unavailable_reasons: list[AnaliseSeriesUnavailable] = Field(description="Lista consolidada de indisponibilidades produzidas pelo resolvedor.")
+    issues: list[AnaliseIssue] = Field(default_factory=list, description="Problemas contextuais detectados durante a resolução.")
 
 
 class AnaliseMaterializacaoFilaSnapshot(BaseModel):
