@@ -73,6 +73,8 @@ Retorna uma matriz de cobertura por período.
 
 Use este endpoint quando a UI precisa explicar por que um período aparece nos dados brutos, mas não aparece em uma série ou gráfico.
 
+Para os mesmos filtros de `periodicidade`, `base_periodo`, `escopo`, `as_of` e `horizonte_anos`, `/coverage`, `/series` e `/series/diagnostico` usam a mesma janela de períodos. Quando um item de `/coverage` retorna `has_series=true` e `metrics_count>0`, `/series` deve retornar as observações materializadas desse período para as métricas solicitadas disponíveis.
+
 Parametros:
 
 | Nome | Tipo | Descricao |
@@ -228,6 +230,8 @@ Cada item de `metric_reasons` traz `metric_id`, `reason_code`, `reason_message`,
 - `SELECT_DIFFERENT_METRIC`
 
 Exemplo de leitura para a UI: `FY2023` pode ter `has_raw_data=true`, `has_canonical_context=true`, `has_canonical_facts=false` e `metric_reasons[].reason_code=CANONICAL_FACTS_MISSING`. Nesse caso, a ação recomendada é executar repair/materialização para a companhia, escopo e período.
+
+Quando o repair para o mesmo período, métrica e escopo retorna `NO_MISSING_METRICS`, o diagnóstico não recomenda `RUN_MATERIALIZATION`. Se uma observação materializada for excluída por filtros de consulta, o motivo aparece na camada `filter`.
 
 Com isso, a UI pode explicar casos como: "o período existe no DFP bruto, mas a métrica não foi materializada" ou "há dado no escopo individual, mas não no consolidado solicitado".
 

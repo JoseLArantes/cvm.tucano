@@ -1882,10 +1882,8 @@ def obter_series(
     )
     if canonical is not None:
         if periodicidade == "annual" and base_periodo == "fy" and horizonte_anos is not None and horizonte_anos > 0:
-            allowed_period_ids = {
-                obs.period_id
-                for obs in sorted(canonical.observacoes, key=lambda item: item.fiscal_year)[-horizonte_anos:]
-            }
+            all_period_ids = {obs.period_id for obs in canonical.observacoes} | {item.period_id for item in canonical.indisponibilidades}
+            allowed_period_ids = set(sorted(all_period_ids, key=_period_id_sort_key)[-horizonte_anos:])
             canonical.observacoes = [obs for obs in canonical.observacoes if obs.period_id in allowed_period_ids]
             canonical.indisponibilidades = [item for item in canonical.indisponibilidades if item.period_id in allowed_period_ids]
             canonical.horizonte_anos = horizonte_anos
@@ -1938,6 +1936,20 @@ def _periodo_sort_key(period_id: str, periodos: dict[str, AnalisePeriodoDisponiv
     if periodo is None:
         return (0, 0, period_id)
     return (periodo.fiscal_year, periodo.quarter or 0, period_id)
+
+
+def _period_id_sort_key(period_id: str) -> tuple[int, int, str]:
+    if period_id.startswith("FY") and period_id[2:].isdigit():
+        return (int(period_id[2:]), 0, period_id)
+    if "-YTDQ" in period_id:
+        year_token, quarter_token = period_id.split("-YTDQ", 1)
+        if year_token.isdigit() and quarter_token.isdigit():
+            return (int(year_token), int(quarter_token), period_id)
+    if "-Q" in period_id:
+        year_token, quarter_token = period_id.split("-Q", 1)
+        if year_token.isdigit() and quarter_token.isdigit():
+            return (int(year_token), int(quarter_token), period_id)
+    return (0, 0, period_id)
 
 
 def _periodo_disponivel_from_payload(payload: dict[str, Any], scope: AnaliseEscopo) -> AnalisePeriodoDisponivel:
@@ -2280,6 +2292,15 @@ def _diagnostico_metric_reason(
             "metric_calculation",
             "SELECT_DIFFERENT_METRIC",
             f"Selecionar outra métrica ou revisar os insumos necessários para `{metric_id}`.",
+        )
+    if coverage_item.has_materialized_metrics and metric_id in coverage_item.metrics_available:
+        return _reason(
+            metric_id,
+            "INSUFFICIENT_SERIES_POINTS",
+            f"A métrica `{metric_id}` está materializada para `{period_id}`, mas não entrou na resposta de `/series` com os filtros atuais.",
+            "filter",
+            "CHANGE_PERIODICITY",
+            "Revisar os filtros de `periodicidade`, `base_periodo`, `horizonte_anos` e `as_of`; não é necessário executar repair para este período/métrica.",
         )
     return _reason(
         metric_id,

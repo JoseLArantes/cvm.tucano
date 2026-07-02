@@ -27,6 +27,7 @@ Convencoes deste changelog:
 - `/coverage` retorna uma matriz por periodo cruzando dado bruto, contexto canonico, fatos canonicos e ultima execucao de materializacao
 - `/coverage` passa a distinguir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `has_series`, `metrics_count` e `unavailable_count`
 - `/coverage` aceita `periodicidade`, `base_periodo` e `horizonte_anos` para alinhar a mesma janela usada por `/series`
+- `/series` passa a aplicar `horizonte_anos` por períodos distintos, não por quantidade de observações; quando `/coverage` indica `has_series=true` e `metrics_count>0`, os fatos materializados do mesmo período entram em `/series` para os mesmos filtros
 - `/series/diagnostico` usa os mesmos filtros de `/series`, mas retorna periodos candidatos, periodos retornados, periodos rejeitados, status completo do pipeline e motivos de indisponibilidade por metrica
 - cada item de `rejected_periods` passa a incluir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `materialization_status`, `materialization_execution_id`, `latest_execution_id`, `metrics_count`, `unavailable_count` e `metric_reasons`
 - cada item de `metric_reasons` inclui `metric_id`, `reason_code`, `reason_message`, `layer`, `remediation_code` e `remediation_message`
@@ -43,6 +44,7 @@ Convencoes deste changelog:
 - usar `/series/diagnostico` quando um grafico tiver poucos pontos ou nenhum ponto
 - nao consultar endpoints brutos DFP/ITR para explicar gaps de grafico; a explicacao canonica deve vir de `/coverage` e `/series/diagnostico`
 - quando `metric_reasons[].remediation_code=RUN_MATERIALIZATION`, oferecer acao operacional baseada em `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+- se `/repair` retornar `NO_MISSING_METRICS` para o mesmo período/métrica/escopo, `/series/diagnostico` não deve recomendar `RUN_MATERIALIZATION`; se houver exclusão por filtro, o motivo vem na camada `filter`
 - exemplo de mensagem: `FY2023 tem dado bruto DFP, mas nao tem fatos canonicos para EBITDA e lucro_liquido. Execute repair/materializacao para codigo_cvm=9512, escopo=consolidated, period_id=FY2023.`
 - usar `periodos_disponiveis_por_metrica` no manifesto para habilitar/desabilitar secoes de grafico sem consultas extras
 - usar `periodos_detalhe` no status de materializacao para mostrar se a lacuna esta em contexto canonico, fatos canonicos ou indisponibilidade de metrica

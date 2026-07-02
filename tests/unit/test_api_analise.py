@@ -987,6 +987,57 @@ def test_analise_series_reads_from_canonical_materialization(client: TestClient,
     assert fy2025["value"] == "497549000000"
 
 
+def test_analise_series_coverage_diagnostico_e_repair_sao_consistentes_para_periodos_materializados(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+
+    params = "periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=20"
+    coverage = client.get(f"/analise/companhias/9512/coverage?{params}")
+    series = client.get(f"/analise/companhias/9512/series?{params}")
+    diagnostico = client.get(f"/analise/companhias/9512/series/diagnostico?metricas=receita_liquida&{params}")
+    repair = client.post(
+        "/analise/materializacoes/companhias/9512/repair",
+        headers=_ops_headers(client),
+        json={
+            "escopo": "consolidated",
+            "period_ids": ["FY2021"],
+            "metricas": ["receita_liquida"],
+            "mode": "missing_only",
+        },
+    )
+
+    assert coverage.status_code == 200
+    assert series.status_code == 200
+    assert diagnostico.status_code == 200
+    assert repair.status_code == 200
+
+    coverage_by_period = {item["period_id"]: item for item in coverage.json()["periodos"]}
+    for period_id in ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025"]:
+        assert coverage_by_period[period_id]["has_series"] is True
+        assert coverage_by_period[period_id]["metrics_count"] > 0
+
+    series_periods = {item["period_id"] for item in series.json()["observacoes"]}
+    assert {"FY2021", "FY2022", "FY2023", "FY2024", "FY2025"}.issubset(series_periods)
+    assert any(item["period_id"] == "FY2021" and item["metric_id"] == "receita_liquida" for item in series.json()["observacoes"])
+
+    repair_payload = repair.json()
+    assert repair_payload["status"] == "rejected"
+    assert repair_payload["rejected_items"][0]["period_id"] == "FY2021"
+    assert repair_payload["rejected_items"][0]["reason_code"] == "NO_MISSING_METRICS"
+
+    rejected_by_period = {item["period_id"]: item for item in diagnostico.json()["rejected_periods"]}
+    assert "FY2021" not in rejected_by_period
+    assert all(
+        reason["reason_code"] != "MATERIALIZATION_MISSING" and reason["remediation_code"] != "RUN_MATERIALIZATION"
+        for item in diagnostico.json()["rejected_periods"]
+        for reason in item["metric_reasons"]
+    )
+
+
 def test_materializar_analise_companhia_pula_cancelada_por_padrao(db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     cia.situacao_registro = "CANCELADA"
