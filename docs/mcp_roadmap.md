@@ -161,9 +161,29 @@ Ferramentas operacionais, mutáveis ou de administração ficam fora do escopo d
 
 ---
 
+## 2.8 Estado Atual da Preparação Arquitetural
+
+A preparação arquitetural necessária para iniciar a implementação direta do MCP analítico read-only está concluída.
+
+Componentes já extraídos para services compartilhados:
+
+- `app/services/companhias.py`: busca, filtros, paginação, resolução de logo e serialização de companhias.
+- `app/services/fre_diagnostics.py`: diagnóstico de disponibilidade dos datasets FRE.
+- `app/services/analise.py`: catálogo de métricas, séries, coverage, diagnóstico de séries e brief analítico.
+
+Routers REST já adaptados para reutilizar esses services:
+
+- `app/api/routers/companhias.py`
+- `app/api/routers/fre.py`
+- `app/api/routers/analise.py` nos endpoints analíticos do MVP.
+
+Testes de paridade REST/service já existem para as áreas extraídas. Portanto, a próxima etapa não é nova refatoração arquitetural; é a implementação do servidor MCP read-only sobre essa base.
+
+---
+
 ## 3. Sessões de Implementação (Fases)
 
-O roadmap está estruturado em 3 sessões lógicas. Todas são read-only e analíticas.
+O roadmap atual está estruturado em 3 sessões lógicas. Todas são read-only e analíticas. A sessão de preparação de services já está concluída.
 
 ### Sessão 1: Infraestrutura Base do Servidor MCP
 * **Foco:** Criação do servidor base, suporte ao protocolo JSON-RPC e integração segura com a aplicação.
@@ -177,16 +197,17 @@ O roadmap está estruturado em 3 sessões lógicas. Todas são read-only e anal�
   * nenhum handler MCP pode consultar modelos ORM diretamente quando existir regra equivalente em router REST;
   * antes de criar a ferramenta, a regra deve estar em service/query compartilhado.
 
-### Sessão 2: Extração de Services Compartilhados
-* **Foco:** Remover dependência de regras presas nos routers antes de expor as ferramentas MCP.
-* **Extrações necessárias:**
-  * `companhias`: mover busca por companhia, serialização compacta e resolução de logo para service/query compartilhado.
-  * `fre`: mover diagnóstico de disponibilidade de datasets FRE para service/query compartilhado.
-  * `analise`: confirmar que coverage, séries, diagnóstico de séries e brief usam funções de service sem lógica complementar no router.
+### Sessão 2: Base Compartilhada de Services
+* **Status:** Concluída.
+* **Foco:** Garantir que as ferramentas MCP usem a mesma camada de services das APIs REST.
+* **Services disponíveis:**
+  * `companhias`: busca por companhia, serialização, paginação, filtros e resolução de logo.
+  * `fre_diagnostics`: diagnóstico de disponibilidade dos datasets FRE.
+  * `analise`: coverage, séries, diagnóstico de séries, brief e catálogo de métricas.
 * **Critérios de Aceitação:**
-  * routers REST e tools MCP chamam os mesmos services;
-  * testes cobrem a semântica do service compartilhado;
-  * nenhuma query, filtro, regra de fallback ou cálculo é duplicado no MCP.
+  * routers REST chamam os services compartilhados;
+  * testes cobrem a semântica dos services compartilhados;
+  * nenhuma ferramenta MCP deve duplicar query, filtro, regra de fallback ou cálculo já existente nesses services.
 
 ### Sessão 3: Ferramentas Read-Only de Diagnóstico e Análise
 * **Foco:** Expor dados de companhias, cobertura canônica, séries analíticas e disponibilidade de datasets sem alterar estado.
@@ -211,7 +232,7 @@ O roadmap está estruturado em 3 sessões lógicas. Todas são read-only e anal�
 
 ## 4. Planejamento de Tarefas de Alto Nível (Tasks)
 
-As tarefas a seguir cobrem a implementação do MCP analítico read-only sem fatiamento excessivo.
+As tarefas a seguir cobrem a implementação direta do MCP analítico read-only. A extração prévia de services compartilhados já foi concluída e não deve ser reimplementada.
 
 ### Tarefa 1: Setup da Infraestrutura do Servidor MCP e Ciclo de Vida
 * **Objetivo:** Estabelecer o servidor MCP executável, com controle de dependências, gerenciamento de sessões de banco de dados e testes locais de conectividade.
@@ -235,17 +256,18 @@ As tarefas a seguir cobrem a implementação do MCP analítico read-only sem fat
   * Respostas de erro devem ser estruturadas, sem stack trace ou segredo.
   * Nenhuma ferramenta MCP deve chamar diretamente um handler FastAPI nem duplicar regra existente em router.
 
-### Tarefa 2: Extração de Services Compartilhados Para o MVP
-* **Objetivo:** Garantir que o MCP não implemente regra própria nem dependa de handlers REST.
+### Tarefa 2: Adaptadores e Serialização MCP Read-Only
+* **Objetivo:** Criar uma camada fina de adaptação entre argumentos MCP, services compartilhados e respostas compactas para LLM.
 * **Escopo das Modificações:**
-  * Criar ou completar service/query de companhias para busca e obtenção por `codigo_cvm`/CNPJ.
-  * Extrair o diagnóstico de disponibilidade FRE para service/query compartilhado.
-  * Revisar os endpoints analíticos usados pelo MCP e mover qualquer lógica residual de router para service.
-  * Manter os schemas HTTP como contrato público, mas permitir serialização MCP compacta em camada própria.
+  * Implementar `app/mcp/adapters.py` chamando somente services compartilhados.
+  * Implementar `app/mcp/serialization.py` para respostas compactas, com `include_raw=false` por padrão.
+  * Normalizar argumentos MCP sem alterar a regra de negócio dos services.
+  * Converter exceções de validação em erros MCP estruturados.
 * **Critérios de Aceitação:**
-  * REST e MCP chamam os mesmos services para cada capacidade exposta.
-  * Os services possuem testes próprios de regra de negócio.
-  * O MCP não possui query SQL/ORM duplicada para comportamento já existente na API.
+  * adaptadores não possuem queries SQL/ORM próprias;
+  * adaptadores não chamam handlers FastAPI;
+  * respostas compactas preservam ids, filtros aplicados, reason codes e próximos passos úteis;
+  * limites de linhas, anos e timeout são aplicados antes de executar ferramentas.
 
 ### Tarefa 3: Implementação do Toolset do Analista Financeiro
 * **Objetivo:** Expor ferramentas de leitura e análise de companhias que permitam à IA consultar a base de dados normalizada da CVM.
@@ -265,7 +287,7 @@ As tarefas a seguir cobrem a implementação do MCP analítico read-only sem fat
   * A chamada de `obter_brief_companhia` deve retornar dados consistentes e integrados com a base de dados PostgreSQL.
   * Para uma mesma companhia/período/métrica, `obter_coverage_companhia` e `obter_diagnostico_series` devem retornar period IDs e escopo compatíveis.
   * Quando um endpoint FRE estiver vazio, `obter_disponibilidade_fre_dataset` deve indicar se a causa é fonte ausente, member ausente, member vazio ou promoção ausente.
-  * Se a lógica de uma ferramenta ainda estiver implementada dentro de um router REST, a tarefa só é considerada concluída depois da extração para service/query compartilhado.
+  * Se uma ferramenta futura depender de lógica ainda presa em router REST, essa lógica deve ser extraída antes da ferramenta entrar no MCP.
 
 ### Tarefa 4: Resources e Prompts Analíticos
 * **Objetivo:** Fornecer acesso direto a metadados do sistema e templates estruturados de prompts para agilizar fluxos de trabalho comuns.
