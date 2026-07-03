@@ -105,6 +105,8 @@ Resposta esperada:
 | Variável | Descrição | Padrão |
 |----------|-----------|--------|
 | `MCP_PROFILE` | Perfil do servidor MCP. O primeiro corte aceita somente `analyst`. | `analyst` |
+| `MCP_HTTP_ENABLED` | Monta o servidor MCP HTTP na instancia FastAPI em `/mcp`. | `false` |
+| `MCP_HTTP_REQUIRE_BEARER` | Exige `Authorization: Bearer <MCP_TOKEN>` no transporte HTTP. | `true` |
 | `MCP_REQUIRE_TOKEN` | Quando `true`, toda ferramenta exige o argumento `token` com o valor de `MCP_TOKEN`. | `false` |
 | `MCP_TOKEN` | Token exclusivo do MCP. Tokens REST/API nao liberam MCP automaticamente. | vazio |
 | `MCP_MAX_ROWS` | Limite de linhas por resposta compacta. | `50` |

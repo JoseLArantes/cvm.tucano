@@ -23,6 +23,19 @@ spec:
   {{- end }}
   routes:
     - conditions:
+        - prefix: /mcp
+      {{- if .Values.httpProxy.mcpResponseTimeout }}
+      timeoutPolicy:
+        response: {{ .Values.httpProxy.mcpResponseTimeout | quote }}
+      {{- end }}
+      {{- if .Values.httpProxy.loadBalancerPolicy }}
+      loadBalancerPolicy:
+        strategy: {{ .Values.httpProxy.loadBalancerPolicy | quote }}
+      {{- end }}
+      services:
+        - name: {{ include "tucano-cvm.fullname" . }}
+          port: {{ .Values.service.port }}
+    - conditions:
         - prefix: /
       {{- if .Values.httpProxy.responseTimeout }}
       timeoutPolicy:

@@ -15,7 +15,8 @@ from app.mcp.adapters import (
     obter_series_temporais_adapter,
 )
 from app.mcp.registry import READ_ONLY_TOOL_NAMES
-from app.mcp.security import McpAuthError, mask_secrets, validate_analyst_access
+from app.mcp.security import McpAuthError, mask_secrets, validate_analyst_access, validate_http_bearer
+from app.mcp.server import create_server
 from app.mcp.settings import McpSettings
 from app.models.companhia import Companhia
 
@@ -83,6 +84,23 @@ def test_mcp_rejeita_perfil_nao_analyst_e_token_rest() -> None:
 
     with pytest.raises(McpAuthError):
         validate_analyst_access(_settings(token="mcp-token", require_token=True), token="token-rest")
+
+
+def test_mcp_http_bearer_usa_token_proprio() -> None:
+    settings = _settings(token="mcp-token", http_enabled=True, http_require_bearer=True)
+
+    validate_http_bearer(settings, "Bearer mcp-token")
+    with pytest.raises(McpAuthError):
+        validate_http_bearer(settings, "Bearer token-rest")
+
+
+def test_mcp_http_server_usa_path_raiz_para_mount_em_mcp() -> None:
+    server = create_server(_settings(), http=True)
+    app = server.streamable_http_app()
+
+    route_paths = {getattr(route, "path", "") for route in app.routes}
+    assert "/" in route_paths
+    assert "/mcp" not in route_paths
 
 
 def test_mcp_mascara_segredos_em_payloads() -> None:

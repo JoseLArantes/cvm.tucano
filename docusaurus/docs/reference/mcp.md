@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # MCP Analitico Read-Only
 
-O Tucano CVM expoe um servidor **Model Context Protocol (MCP)** local via `stdio` para consultas analiticas read-only. Ele e um adaptador para assistentes como Cursor e Claude Desktop, reutilizando os mesmos services internos usados pelas APIs REST.
+O Tucano CVM expoe um servidor **Model Context Protocol (MCP)** para consultas analiticas read-only. Ele pode rodar localmente via `stdio` ou ser montado na mesma instancia FastAPI da API REST em `/mcp` quando `MCP_HTTP_ENABLED=true`.
 
 O MCP nao substitui a API HTTP. Ele nao executa ingestao, nao dispara materializacao, nao executa repair, nao cancela runs, nao controla filas e nao aceita SQL arbitrario.
 
@@ -34,7 +34,7 @@ Regras obrigatorias:
 
 ## Execucao Local
 
-Valide a CLI:
+Valide a CLI local:
 
 ```bash
 docker compose run --rm cvm_api python -m app.cli.mcp --help
@@ -47,11 +47,20 @@ Inicie o servidor via `stdio`:
 docker compose run --rm -i cvm_api python -m app.cli.mcp serve
 ```
 
+Em Kubernetes, a instancia principal da API pode servir REST e MCP no mesmo host:
+
+```text
+https://cvm.tucano.beakcloud.com/      # REST
+https://cvm.tucano.beakcloud.com/mcp   # MCP Streamable HTTP
+```
+
 ## Variaveis de Ambiente
 
 | Variavel | Descricao | Padrao |
 |----------|-----------|--------|
 | `MCP_PROFILE` | Perfil MCP. Neste corte, somente `analyst` e aceito. | `analyst` |
+| `MCP_HTTP_ENABLED` | Monta o servidor MCP HTTP na instancia FastAPI em `/mcp`. | `false` |
+| `MCP_HTTP_REQUIRE_BEARER` | Exige `Authorization: Bearer <MCP_TOKEN>` para qualquer request HTTP em `/mcp`. | `true` |
 | `MCP_REQUIRE_TOKEN` | Exige token MCP no argumento `token` de cada ferramenta. | `false` |
 | `MCP_TOKEN` | Token exclusivo do MCP. Nao e o token REST/API. | vazio |
 | `MCP_MAX_ROWS` | Limite de linhas retornadas por ferramenta. | `50` |
@@ -59,7 +68,7 @@ docker compose run --rm -i cvm_api python -m app.cli.mcp serve
 | `MCP_TOOL_TIMEOUT_SECONDS` | Limite operacional configurado para ferramentas. | `30` |
 | `MCP_INCLUDE_RAW_DEFAULT` | Inclui payload bruto dos schemas REST por padrao. | `false` |
 
-Quando `MCP_REQUIRE_TOKEN=true`, informe o valor de `MCP_TOKEN` no argumento `token` da tool chamada pelo cliente MCP. O token administrativo REST (`TUCANO_CVM_TOKEN`) nao e aceito como substituto.
+Quando `MCP_HTTP_ENABLED=true`, publique o endpoint `/mcp` somente com TLS e `MCP_HTTP_REQUIRE_BEARER=true`. O cliente deve enviar `Authorization: Bearer <MCP_TOKEN>`. Quando `MCP_REQUIRE_TOKEN=true`, informe tambem o valor de `MCP_TOKEN` no argumento `token` da tool chamada pelo cliente MCP. O token administrativo REST (`TUCANO_CVM_TOKEN`) nao e aceito como substituto.
 
 ## Configuracao no Claude Desktop
 

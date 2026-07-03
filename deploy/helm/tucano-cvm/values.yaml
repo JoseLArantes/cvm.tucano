@@ -100,6 +100,14 @@ env:
   INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "1"
   BACKEND_CORS_ORIGINS: http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com,https://cvm.companhias.tucano.beakcloud.com
   API_URL: https://cvm.tucano.beakcloud.com
+  MCP_HTTP_ENABLED: "true"
+  MCP_HTTP_REQUIRE_BEARER: "true"
+  MCP_PROFILE: "analyst"
+  MCP_REQUIRE_TOKEN: "true"
+  MCP_MAX_ROWS: "50"
+  MCP_MAX_PERIODS: "20"
+  MCP_TOOL_TIMEOUT_SECONDS: "30"
+  MCP_INCLUDE_RAW_DEFAULT: "false"
 
 appSecret:
   name: "cvm-secret"
@@ -120,6 +128,7 @@ httpProxy:
     secretName: "tucano-cvm-tls"
     minimumProtocolVersion: "1.2"
   responseTimeout: "60s"
+  mcpResponseTimeout: "300s"
   retryPolicy:
     enabled: false
     count: 2

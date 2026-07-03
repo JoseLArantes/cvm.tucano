@@ -15,6 +15,8 @@ class McpSettings(BaseSettings):
     profile: str = Field(default="analyst", alias="MCP_PROFILE")
     token: str = Field(default="", alias="MCP_TOKEN")
     require_token: bool = Field(default=False, alias="MCP_REQUIRE_TOKEN")
+    http_enabled: bool = Field(default=False, alias="MCP_HTTP_ENABLED")
+    http_require_bearer: bool = Field(default=True, alias="MCP_HTTP_REQUIRE_BEARER")
     max_rows: int = Field(default=50, ge=1, le=500, alias="MCP_MAX_ROWS")
     max_periods: int = Field(default=20, ge=1, le=80, alias="MCP_MAX_PERIODS")
     tool_timeout_seconds: int = Field(default=30, ge=1, le=300, alias="MCP_TOOL_TIMEOUT_SECONDS")

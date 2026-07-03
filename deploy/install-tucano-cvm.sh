@@ -62,6 +62,18 @@ if ! kubectl -n "${NAMESPACE}" get secret "${APP_SECRET_NAME}" >/dev/null 2>&1; 
   exit 1
 fi
 
+if ! kubectl -n "${NAMESPACE}" get secret "${APP_SECRET_NAME}" -o jsonpath='{.data.MCP_TOKEN}' | grep -q .; then
+  cat >&2 <<EOF
+Required key MCP_TOKEN was not found in Kubernetes Secret ${APP_SECRET_NAME}.
+Create or patch it before deploying the public MCP endpoint, for example:
+
+kubectl -n ${NAMESPACE} patch secret ${APP_SECRET_NAME} \\
+  --type='merge' \\
+  -p '{"stringData":{"MCP_TOKEN":"<long-random-token>"}}'
+EOF
+  exit 1
+fi
+
 if ! kubectl -n "${NAMESPACE}" get secret registry-cred >/dev/null 2>&1; then
   cat >&2 <<EOF
 registry-cred is not present in the target namespace.
@@ -136,4 +148,5 @@ Useful commands:
 Expected service exposure:
   Service Type:   ${SERVICE_TYPE}
   HTTPProxy FQDN: ${HTTPPROXY_FQDN} (TLS: ${HTTPPROXY_TLS_ENABLED})
+  MCP Endpoint:   https://${HTTPPROXY_FQDN}/mcp
 EOF

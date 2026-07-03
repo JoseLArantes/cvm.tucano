@@ -233,14 +233,21 @@ def register_tools(server: Any, settings: McpSettings) -> None:
         )
 
 
-def create_server(settings: McpSettings | None = None) -> Any:
+def create_server(settings: McpSettings | None = None, *, http: bool = False) -> Any:
     try:
         from mcp.server.fastmcp import FastMCP
     except ImportError as exc:
         raise RuntimeError("Dependencia MCP ausente. Instale as dependencias do projeto antes de iniciar o servidor.") from exc
 
     resolved_settings = settings or get_mcp_settings()
-    server = FastMCP("Tucano CVM MCP Analitico Read-Only")
+    if http:
+        server = FastMCP(
+            "Tucano CVM MCP Analitico Read-Only",
+            streamable_http_path="/",
+            stateless_http=True,
+        )
+    else:
+        server = FastMCP("Tucano CVM MCP Analitico Read-Only")
     register_tools(server, resolved_settings)
     return server
 

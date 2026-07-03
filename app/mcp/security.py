@@ -29,6 +29,17 @@ def validate_analyst_access(settings: McpSettings, token: str | None = None) -> 
         raise McpAuthError("Token MCP invalido.")
 
 
+def validate_http_bearer(settings: McpSettings, authorization: str | None) -> None:
+    if not settings.http_require_bearer:
+        return
+    configured = settings.token.strip()
+    if not configured:
+        raise McpAuthError("MCP_HTTP_REQUIRE_BEARER=true exige MCP_TOKEN configurado.")
+    expected = f"Bearer {configured}"
+    if (authorization or "").strip() != expected:
+        raise McpAuthError("Bearer token MCP ausente ou invalido.")
+
+
 def mask_secret(value: str) -> str:
     masked = _URL_WITH_CREDENTIALS.sub(r"\g<scheme>***:***@", value)
     if masked != value or "://" in value:

@@ -59,6 +59,8 @@ Variáveis importantes:
 - `AMBIENTE`
 - `BACKEND_CORS_ORIGINS`
 - `MCP_PROFILE`
+- `MCP_HTTP_ENABLED`
+- `MCP_HTTP_REQUIRE_BEARER`
 - `MCP_REQUIRE_TOKEN`
 - `MCP_TOKEN`
 - `MCP_MAX_ROWS`
@@ -100,6 +102,8 @@ Para validar configuracao e listagem de ferramentas:
 docker compose run --rm cvm_api python -m app.cli.mcp --help
 docker compose run --rm cvm_api python -m app.cli.mcp smoke-test
 ```
+
+Em ambientes HTTP, a API pode montar o MCP na mesma instancia FastAPI em `/mcp` com `MCP_HTTP_ENABLED=true` e `MCP_HTTP_REQUIRE_BEARER=true`.
 
 ## API e autenticação
 
