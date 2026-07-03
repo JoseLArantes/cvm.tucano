@@ -1,10 +1,11 @@
 from typing import Any, cast
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import validar_token_api
 from app.api.routers import protected_router, public_router
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.observabilidade import ObservabilidadeMiddleware, configurar_logging, criar_app_metricas
 
 DESCRICAO_API = """
@@ -143,17 +144,20 @@ app = FastAPI(
 settings = get_settings()
 configurar_logging(settings.log_level)
 
-from fastapi.middleware.cors import CORSMiddleware
 
-if settings.cors_origins:
-    app.add_middleware(
+def configurar_cors(api_app: FastAPI, app_settings: Settings) -> None:
+    if not app_settings.cors_origins:
+        return
+    api_app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        allow_origins=app_settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
+
+configurar_cors(app, settings)
 app.add_middleware(ObservabilidadeMiddleware, habilitar_metricas=settings.enable_prometheus_metrics)
 if settings.enable_prometheus_metrics:
     app_metricas = criar_app_metricas()

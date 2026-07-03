@@ -16,6 +16,28 @@ def test_configura_ttl_token_por_alias() -> None:
     assert settings.access_token_ttl_minutes == 30
 
 
+def test_configura_cors_origins_por_alias() -> None:
+    settings = Settings.model_validate(
+        {
+            "BACKEND_CORS_ORIGINS": "http://localhost:3000, http://localhost:5173,https://app.tucano.local",
+        }
+    )
+
+    assert settings.backend_cors_origins == "http://localhost:3000, http://localhost:5173,https://app.tucano.local"
+    assert settings.cors_origins == [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "https://app.tucano.local",
+    ]
+
+
+def test_cors_origins_vazio_desabilita_middleware() -> None:
+    settings = Settings.model_validate({})
+
+    assert settings.backend_cors_origins == ""
+    assert settings.cors_origins == []
+
+
 def test_configura_reciclagem_de_worker_celery() -> None:
     settings = Settings.model_validate(
         {

@@ -6,13 +6,6 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-# Cors
-# app/core/config.py
-backend_cors_origins: str = Field(default="", alias="BACKEND_CORS_ORIGINS")
-
-@property
-def cors_origins(self) -> list[str]:
-    return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
 
 # Aumentar o limite de tamanho do campo do parser de CSV para lidar com os longos campos de texto da CVM (ex: FRE)
 def _setup_csv_limit() -> None:
@@ -43,6 +36,7 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     ambiente: str = Field(default="desenvolvimento", alias="AMBIENTE")
     enable_prometheus_metrics: bool = Field(default=False, alias="ENABLE_PROMETHEUS_METRICS")
+    backend_cors_origins: str = Field(default="", alias="BACKEND_CORS_ORIGINS")
     anos_iniciais_dfp: str = Field(default="", alias="ANOS_INICIAIS_DFP")
     anos_iniciais_itr: str = Field(default="", alias="ANOS_INICIAIS_ITR")
     anos_iniciais_fre: str = Field(default="", alias="ANOS_INICIAIS_FRE")
@@ -212,6 +206,10 @@ class Settings(BaseSettings):
         if not valor.strip():
             return set()
         return {parte.strip() for parte in valor.split(",") if parte.strip()}
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

@@ -9,6 +9,26 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-03 - CORS configuravel para clientes web
+
+### Superficie afetada
+
+- Middleware HTTP da API
+- Variavel de ambiente `BACKEND_CORS_ORIGINS`
+
+### Comportamento entregue
+
+- a API passa a habilitar CORS quando `BACKEND_CORS_ORIGINS` estiver preenchida
+- a variavel aceita lista separada por virgulas com origins completas, por exemplo `http://localhost:3000,http://localhost:5173`
+- origins devem usar formato `scheme://host[:port]`, sem path
+- quando a variavel estiver vazia, CORS permanece desabilitado
+- nenhum endpoint, query param, payload ou status code foi alterado
+
+### Impacto para frontend
+
+- ambientes web devem configurar `BACKEND_CORS_ORIGINS` no backend com a origin exata da aplicacao frontend
+- chamadas autenticadas com `Authorization` passam a responder corretamente ao preflight do navegador para origins autorizadas
+
 ## 2026-07-02 - Diagnostico de disponibilidade dos datasets FRE
 
 ### Endpoint novo

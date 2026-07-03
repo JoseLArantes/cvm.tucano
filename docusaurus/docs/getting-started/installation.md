@@ -96,6 +96,9 @@ Resposta esperada:
 | `REDIS_URL` | URL de conexão Redis | `redis://host:6379/0` |
 | `LOG_LEVEL` | Nível de log | `INFO`, `DEBUG`, `WARNING` |
 | `AMBIENTE` | Ambiente de execução | `development`, `production` |
+| `BACKEND_CORS_ORIGINS` | Origins liberadas para navegadores, separadas por vírgula | `http://localhost:3000,http://localhost:5173` |
+
+`BACKEND_CORS_ORIGINS` deve conter apenas origins completas no formato `scheme://host[:port]`, sem path. Quando vazio, o middleware CORS não é habilitado.
 
 ### Autenticação
 
