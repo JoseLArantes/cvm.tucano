@@ -61,6 +61,8 @@ https://cvm.tucano.beakcloud.com/mcp   # MCP Streamable HTTP
 | `MCP_PROFILE` | Perfil MCP. Neste corte, somente `analyst` e aceito. | `analyst` |
 | `MCP_HTTP_ENABLED` | Monta o servidor MCP HTTP na instancia FastAPI em `/mcp`. | `false` |
 | `MCP_HTTP_REQUIRE_BEARER` | Exige `Authorization: Bearer <MCP_TOKEN>` para qualquer request HTTP em `/mcp`. | `true` |
+| `MCP_HTTP_ALLOWED_HOSTS` | Lista de `Host` headers aceitos pela proteção contra DNS rebinding. | `localhost,127.0.0.1,127.0.0.1:*` |
+| `MCP_HTTP_ALLOWED_ORIGINS` | Lista de `Origin` headers aceitos pela proteção contra DNS rebinding. | vazio |
 | `MCP_REQUIRE_TOKEN` | Exige token MCP no argumento `token` de cada ferramenta. | `false` |
 | `MCP_TOKEN` | Token exclusivo do MCP. Nao e o token REST/API. | vazio |
 | `MCP_MAX_ROWS` | Limite de linhas retornadas por ferramenta. | `50` |

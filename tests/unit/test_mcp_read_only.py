@@ -3,6 +3,7 @@ import sys
 from datetime import UTC, date, datetime
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.mcp.adapters import (
@@ -101,6 +102,23 @@ def test_mcp_http_server_usa_path_raiz_para_mount_em_mcp() -> None:
     route_paths = {getattr(route, "path", "") for route in app.routes}
     assert "/" in route_paths
     assert "/mcp" not in route_paths
+
+
+def test_mcp_http_server_configura_hosts_publicos_permitidos() -> None:
+    settings = _settings(
+        http_allowed_hosts="cvm.tucano.beakcloud.com,cvm.tucano.beakcloud.com:443",
+        http_allowed_origins="https://cvm.tucano.beakcloud.com",
+    )
+    rejected_app = create_server(settings, http=True).streamable_http_app()
+    accepted_app = create_server(settings, http=True).streamable_http_app()
+
+    with TestClient(rejected_app, base_url="http://host-nao-autorizado") as client:
+        rejected = client.post("/", json={"jsonrpc": "2.0"}, headers={"Accept": "application/json"})
+    with TestClient(accepted_app, base_url="http://cvm.tucano.beakcloud.com") as client:
+        accepted = client.post("/", json={"jsonrpc": "2.0"}, headers={"Accept": "application/json"})
+
+    assert rejected.status_code == 421
+    assert accepted.status_code != 421
 
 
 def test_mcp_mascara_segredos_em_payloads() -> None:

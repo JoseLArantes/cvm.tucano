@@ -241,10 +241,17 @@ def create_server(settings: McpSettings | None = None, *, http: bool = False) ->
 
     resolved_settings = settings or get_mcp_settings()
     if http:
+        from mcp.server.transport_security import TransportSecuritySettings
+
         server = FastMCP(
             "Tucano CVM MCP Analitico Read-Only",
             streamable_http_path="/",
             stateless_http=True,
+            transport_security=TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=resolved_settings.allowed_hosts,
+                allowed_origins=resolved_settings.allowed_origins,
+            ),
         )
     else:
         server = FastMCP("Tucano CVM MCP Analitico Read-Only")

@@ -102,6 +102,8 @@ env:
   API_URL: https://cvm.tucano.beakcloud.com
   MCP_HTTP_ENABLED: "true"
   MCP_HTTP_REQUIRE_BEARER: "true"
+  MCP_HTTP_ALLOWED_HOSTS: "cvm.tucano.beakcloud.com,cvm.tucano.beakcloud.com:443"
+  MCP_HTTP_ALLOWED_ORIGINS: "https://cvm.tucano.beakcloud.com"
   MCP_PROFILE: "analyst"
   MCP_REQUIRE_TOKEN: "true"
   MCP_MAX_ROWS: "50"

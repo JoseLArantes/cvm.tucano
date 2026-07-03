@@ -107,6 +107,8 @@ Resposta esperada:
 | `MCP_PROFILE` | Perfil do servidor MCP. O primeiro corte aceita somente `analyst`. | `analyst` |
 | `MCP_HTTP_ENABLED` | Monta o servidor MCP HTTP na instancia FastAPI em `/mcp`. | `false` |
 | `MCP_HTTP_REQUIRE_BEARER` | Exige `Authorization: Bearer <MCP_TOKEN>` no transporte HTTP. | `true` |
+| `MCP_HTTP_ALLOWED_HOSTS` | Hosts aceitos pela proteção contra DNS rebinding do transporte MCP. | `localhost,127.0.0.1,127.0.0.1:*` |
+| `MCP_HTTP_ALLOWED_ORIGINS` | Origins aceitas pela proteção contra DNS rebinding do transporte MCP. | vazio |
 | `MCP_REQUIRE_TOKEN` | Quando `true`, toda ferramenta exige o argumento `token` com o valor de `MCP_TOKEN`. | `false` |
 | `MCP_TOKEN` | Token exclusivo do MCP. Tokens REST/API nao liberam MCP automaticamente. | vazio |
 | `MCP_MAX_ROWS` | Limite de linhas por resposta compacta. | `50` |
