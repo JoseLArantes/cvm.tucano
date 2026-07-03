@@ -100,6 +100,7 @@ env:
   CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB: "1500000"
   ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN: "10"
   INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "1"
+  BACKEND_CORS_ORIGINS: http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com,https://cvm.companhias.tucano.beakcloud.com
 
 appSecret:
   name: "cvm-secret"

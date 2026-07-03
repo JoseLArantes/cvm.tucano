@@ -143,6 +143,17 @@ app = FastAPI(
 settings = get_settings()
 configurar_logging(settings.log_level)
 
+from fastapi.middleware.cors import CORSMiddleware
+
+if settings.cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 app.add_middleware(ObservabilidadeMiddleware, habilitar_metricas=settings.enable_prometheus_metrics)
 if settings.enable_prometheus_metrics:
     app_metricas = criar_app_metricas()

@@ -6,6 +6,13 @@ from typing import Literal
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Cors
+# app/core/config.py
+backend_cors_origins: str = Field(default="", alias="BACKEND_CORS_ORIGINS")
+
+@property
+def cors_origins(self) -> list[str]:
+    return [origin.strip() for origin in self.backend_cors_origins.split(",") if origin.strip()]
 
 # Aumentar o limite de tamanho do campo do parser de CSV para lidar com os longos campos de texto da CVM (ex: FRE)
 def _setup_csv_limit() -> None:

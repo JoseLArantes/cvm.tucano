@@ -37,6 +37,7 @@ from app.models.fre import (
     FreResponsavel,
 )
 from app.models.ingestion import IngestionRun, SourceArtifactSnapshot, SourceMemberSnapshot
+from app.services.fre_diagnostics import diagnosticar_disponibilidade_datasets_fre
 
 
 def _companhia() -> Companhia:
@@ -1032,6 +1033,14 @@ def test_diagnostico_disponibilidade_datasets_fre(client: TestClient, db_session
 
     assert response.status_code == 200
     payload = response.json()
+    service_payload = diagnosticar_disponibilidade_datasets_fre(
+        db_session,
+        ano=2025,
+        ano_inicio=None,
+        ano_fim=None,
+        dataset=["outro_valor_mobiliario", "titular_valor_mobiliario", "volume_valor_mobiliario"],
+    ).model_dump(mode="json")
+    assert payload == service_payload
     por_dataset = {item["dataset"]: item for item in payload["dados"]}
     assert payload["resumo"]["total"] == 3
     assert por_dataset["outro_valor_mobiliario"]["diagnosis_code"] == "AVAILABLE"
