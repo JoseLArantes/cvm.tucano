@@ -177,7 +177,36 @@ Routers REST já adaptados para reutilizar esses services:
 - `app/api/routers/fre.py`
 - `app/api/routers/analise.py` nos endpoints analíticos do MVP.
 
-Testes de paridade REST/service já existem para as áreas extraídas. Portanto, a próxima etapa não é nova refatoração arquitetural; é a implementação do servidor MCP read-only sobre essa base.
+Testes de paridade REST/service já existem para as áreas extraídas. Portanto, a etapa atual é a implementação do servidor MCP read-only sobre essa base, sem nova refatoração arquitetural obrigatória.
+
+---
+
+## 2.9 Estado Atual da Implementação MCP
+
+O primeiro corte do MCP analítico read-only está implementado como superfície local via `stdio`.
+
+Componentes adicionados:
+
+- `app/mcp/settings.py`: variáveis `MCP_PROFILE`, `MCP_TOKEN`, `MCP_REQUIRE_TOKEN`, `MCP_MAX_ROWS`, `MCP_MAX_PERIODS`, `MCP_TOOL_TIMEOUT_SECONDS` e `MCP_INCLUDE_RAW_DEFAULT`.
+- `app/mcp/security.py`: validação do perfil `analyst`, separação de token MCP e mascaramento de segredos.
+- `app/mcp/db.py`: abertura e fechamento de sessão SQLAlchemy por chamada de ferramenta.
+- `app/mcp/serialization.py`: envelopes JSON compactos, serialização de Pydantic e mascaramento de respostas.
+- `app/mcp/adapters.py`: adaptação fina entre argumentos MCP e services compartilhados.
+- `app/mcp/server.py`: registro das ferramentas no SDK MCP oficial.
+- `app/cli/mcp.py`: CLI `python -m app.cli.mcp serve` e `python -m app.cli.mcp smoke-test`.
+
+Ferramentas disponíveis:
+
+- `healthcheck`
+- `buscar_companhias`
+- `listar_metricas_analise`
+- `obter_coverage_companhia`
+- `obter_diagnostico_series`
+- `obter_series_temporais`
+- `obter_brief_companhia`
+- `obter_disponibilidade_fre_dataset`
+
+O MCP permanece read-only: não há tool de ingestão, materialização, repair, cancelamento, gate, filas ou SQL arbitrário.
 
 ---
 
@@ -189,7 +218,7 @@ O roadmap atual está estruturado em 3 sessões lógicas. Todas são read-only e
 * **Foco:** Criação do servidor base, suporte ao protocolo JSON-RPC e integração segura com a aplicação.
 * **Componentes:**
   * Uso do SDK oficial Python do Model Context Protocol (`mcp`).
-  * Implementação de um ponto de entrada CLI para o servidor (ex: `python -m app.cli.mcp_server`).
+  * Implementação de um ponto de entrada CLI para o servidor (`python -m app.cli.mcp serve`).
   * Configuração de segurança por ambiente: `MCP_PROFILE`, `MCP_TOOL_TIMEOUT_SECONDS`, `MCP_MAX_ROWS`, `MCP_TOKEN` e escopo `mcp:analyst`.
   * Mapeamento do ciclo de vida das sessões do banco de dados (SQLAlchemy).
   * Compatibilidade com execução em ambientes locais e Docker.
@@ -245,8 +274,8 @@ As tarefas a seguir cobrem a implementação direta do MCP analítico read-only.
     * `app/mcp/security.py`: validação de perfil, checagem de permissão e mascaramento de segredos.
     * `app/mcp/serialization.py`: serialização compacta para respostas orientadas a LLM.
     * `app/mcp/adapters.py`: adaptadores finos que convertem argumentos MCP para chamadas aos application services compartilhados, sem regras de negócio próprias.
-  * **Interface CLI:** Criar `app/cli/mcp.py` (ou integrar ao CLI existente) para iniciar o servidor via entrada/saída padrão (`stdio`). Exemplo: `tucano-cvm mcp-server`.
-  * **Docker:** Atualizar o `docker-compose.yml` para expor opcionalmente uma forma de rodar o servidor MCP ou documentar o comando `docker compose run` correspondente.
+  * **Interface CLI:** Criar `app/cli/mcp.py` para iniciar o servidor via entrada/saída padrão (`stdio`) com `python -m app.cli.mcp serve`.
+  * **Docker:** Documentar o comando `docker compose run --rm -i cvm_api python -m app.cli.mcp serve`, sem criar serviço sempre ativo por padrão.
 * **Critérios de Aceitação:**
   * O servidor deve inicializar e responder ao aperto de mão (handshake) inicial do protocolo MCP via `stdio`.
   * O utilitário `mcp-cli-tester` ou o Claude Desktop devem conseguir se conectar ao servidor e listar uma lista vazia de ferramentas com sucesso.
@@ -272,7 +301,7 @@ As tarefas a seguir cobrem a implementação direta do MCP analítico read-only.
 ### Tarefa 3: Implementação do Toolset do Analista Financeiro
 * **Objetivo:** Expor ferramentas de leitura e análise de companhias que permitam à IA consultar a base de dados normalizada da CVM.
 * **Escopo das Modificações:**
-  * **Desenvolvimento de Ferramentas (`app/mcp/tools/analise.py`):**
+  * **Desenvolvimento de Ferramentas (`app/mcp/server.py` + `app/mcp/adapters.py`):**
     * Registrar a ferramenta `buscar_companhias` reutilizando queries ou services da camada de companhias.
     * Registrar a ferramenta `obter_coverage_companhia`, alinhada ao contrato de `/analise/companhias/{codigo_cvm}/coverage`.
     * Registrar a ferramenta `obter_diagnostico_series`, alinhada ao contrato de `/analise/companhias/{codigo_cvm}/series/diagnostico`.

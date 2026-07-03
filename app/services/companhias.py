@@ -137,6 +137,10 @@ def obter_companhia_por_codigo_cvm(db: Session, codigo_cvm: int) -> CompanhiaRes
     return serializar_companhia(companhia, logo_url)
 
 
+def obter_companhia_modelo_por_codigo_cvm(db: Session, codigo_cvm: int) -> Companhia | None:
+    return db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
+
+
 def obter_companhia_por_cnpj(db: Session, cnpj_companhia: str) -> CompanhiaResposta | None:
     cnpj = normalizar_cnpj(cnpj_companhia)
     companhia = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
@@ -148,6 +152,7 @@ def obter_companhia_por_cnpj(db: Session, cnpj_companhia: str) -> CompanhiaRespo
 
 __all__: tuple[str, ...] = (
     "listar_companhias",
+    "obter_companhia_modelo_por_codigo_cvm",
     "obter_companhia_por_cnpj",
     "obter_companhia_por_codigo_cvm",
     "obter_logo_urls_por_cnpj",

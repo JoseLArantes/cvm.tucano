@@ -100,6 +100,25 @@ Resposta esperada:
 
 `BACKEND_CORS_ORIGINS` deve conter apenas origins completas no formato `scheme://host[:port]`, sem path. Quando vazio, o middleware CORS não é habilitado.
 
+### MCP Analitico Read-Only
+
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `MCP_PROFILE` | Perfil do servidor MCP. O primeiro corte aceita somente `analyst`. | `analyst` |
+| `MCP_REQUIRE_TOKEN` | Quando `true`, toda ferramenta exige o argumento `token` com o valor de `MCP_TOKEN`. | `false` |
+| `MCP_TOKEN` | Token exclusivo do MCP. Tokens REST/API nao liberam MCP automaticamente. | vazio |
+| `MCP_MAX_ROWS` | Limite de linhas por resposta compacta. | `50` |
+| `MCP_MAX_PERIODS` | Limite de periodos em coverage, series e diagnostico. | `20` |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Limite operacional configurado para execucao de ferramentas. | `30` |
+| `MCP_INCLUDE_RAW_DEFAULT` | Inclui payload bruto dos schemas compartilhados por padrao. | `false` |
+
+Valide o servidor MCP local:
+
+```bash
+docker compose run --rm cvm_api python -m app.cli.mcp --help
+docker compose run --rm cvm_api python -m app.cli.mcp smoke-test
+```
+
 ### Autenticação
 
 | Variável | Descrição | Exemplo |

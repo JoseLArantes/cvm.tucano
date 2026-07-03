@@ -97,6 +97,7 @@ const sidebars = {
       type: 'category',
       label: 'Referência',
       items: [
+        'reference/mcp',
         'reference/troubleshooting',
         'reference/glossary',
         'reference/changelog',
