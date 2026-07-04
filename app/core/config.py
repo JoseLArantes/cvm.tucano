@@ -187,6 +187,12 @@ class Settings(BaseSettings):
     auto_analyze_on_detect: bool = Field(default=True, alias="AUTO_ANALYZE_ON_DETECT")
     session_timeout_hours: int = Field(default=24, alias="SESSION_TIMEOUT_HOURS")
     temp_dir: str = Field(default="data/temp_updates", alias="TEMP_DIR")
+    public_companies_cvm: str = Field(default="", alias="PUBLIC_COMPANIES_CVM")
+    public_cache_ttl_seconds: int = Field(default=86400, alias="PUBLIC_CACHE_TTL_SECONDS")
+
+    @property
+    def public_companies_list(self) -> list[int]:
+        return self.parse_anos(self.public_companies_cvm)
 
     @field_validator("database_url", mode="before")
     @classmethod
