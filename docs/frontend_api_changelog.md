@@ -9,6 +9,29 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-04 - Exposição Pública de Companhias Selecionadas via Redis Cache
+
+### Endpoints novos
+
+- `GET /public/analise/companhias/{codigo_cvm}` (Manifesto público)
+- `GET /public/analise/companhias/{codigo_cvm}/coverage` (Cobertura analítica pública)
+- `GET /public/analise/companhias/{codigo_cvm}/series` (Séries analíticas públicas)
+- `GET /public/analise/companhias/{codigo_cvm}/series/diagnostico` (Diagnóstico público)
+- `GET /public/analise/companhias/{codigo_cvm}/comparacoes` (YoY/QoQ/CAGR público)
+- `GET /public/analise/companhias/{codigo_cvm}/qualidade` (Qualidade de dados pública)
+- `GET /public/analise/companhias/{codigo_cvm}/sinais` (Sinais públicos)
+- `GET /public/analise/companhias/{codigo_cvm}/eventos` (Timeline pública)
+- `GET /public/analise/companhias/{codigo_cvm}/governanca` (Governança pública)
+- `GET /public/analise/companhias/{codigo_cvm}/pessoas` (Pessoas e remuneração pública)
+- `GET /public/analise/companhias/{codigo_cvm}/brief` (Brief analítico público)
+- `GET /public/analise/companhias/{codigo_cvm}/restatements` (Reapresentações públicas)
+
+### Comportamento entregue
+
+- A API passa a expor rotas analíticas públicas sob o prefixo `/public/analise/companhias/{codigo_cvm}` completamente independentes e sem exigência de autenticação bearer.
+- O acesso a essas rotas é restrito a uma lista de companhias autorizadas configurada via variável de ambiente `PUBLIC_COMPANIES_CVM` (ex: `PUBLIC_COMPANIES_CVM=12345,67890`). CVMs não permitidos recebem `403 Forbidden`.
+- Um cache de tipo *Read-Through* no Redis armazena os payloads das respostas com um TTL configurável via `PUBLIC_CACHE_TTL_SECONDS` (padrão de 24 horas), eliminando requisições recorrentes ao banco PostgreSQL.
+
 ## 2026-07-03 - CORS configuravel para clientes web
 
 ### Superficie afetada

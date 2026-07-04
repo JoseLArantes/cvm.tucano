@@ -78,6 +78,29 @@ Endpoints cobertos:
 - `POST /analise/materializacoes/recuperacao/trigger`
 - `GET /analise/materializacoes/{execucao_id}`
 
+### 4. Análise Pública de Companhias Selecionadas
+
+Use esta documentação para integrar com as rotas públicas (sem autenticação) que expõem os mesmos dados de análise para companhias autorizadas de forma cacheada no Redis.
+
+Pagina:
+
+- [Análise Pública de Companhias Selecionadas](./public-analise.md)
+
+Endpoints cobertos:
+
+- `GET /public/analise/companhias/{codigo_cvm}` (Manifesto público)
+- `GET /public/analise/companhias/{codigo_cvm}/coverage` (Matriz de Cobertura pública)
+- `GET /public/analise/companhias/{codigo_cvm}/series` (Séries analíticas públicas)
+- `GET /public/analise/companhias/{codigo_cvm}/series/diagnostico` (Diagnóstico público)
+- `GET /public/analise/companhias/{codigo_cvm}/comparacoes` (YoY/QoQ/CAGR público)
+- `GET /public/analise/companhias/{codigo_cvm}/qualidade` (Qualidade de dados pública)
+- `GET /public/analise/companhias/{codigo_cvm}/sinais` (Sinais públicos)
+- `GET /public/analise/companhias/{codigo_cvm}/eventos` (Timeline pública)
+- `GET /public/analise/companhias/{codigo_cvm}/governanca` (Governança pública)
+- `GET /public/analise/companhias/{codigo_cvm}/pessoas` (Pessoas e remuneração pública)
+- `GET /public/analise/companhias/{codigo_cvm}/brief` (Brief analítico público)
+- `GET /public/analise/companhias/{codigo_cvm}/restatements` (Reapresentações públicas)
+
 ## Como escolher a documentacao certa
 
 ### Se o foco for analise financeira

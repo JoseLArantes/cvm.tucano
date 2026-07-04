@@ -13,6 +13,7 @@ Este documento registra mudanças significativas na API do Tucano CVM.
 
 ### Alterações recentes
 
+- Implementação de endpoints públicos isolados sob o prefixo `/public/analise/companhias/{codigo_cvm}` com cache Read-Through no Redis (TTL de 24h configurável) para um grupo de companhias autorizadas na variável de ambiente `PUBLIC_COMPANIES_CVM`.
 - Ingestion admin e documentacao operacional agora descrevem explicitamente o rerun anual com reaproveitamento por `member_sha256`, inclusive quando a execucao pai anterior terminou com falha parcial.
 - `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}` passam a ser documentados com counters de lifecycle voltados a recuperacao operacional, como `members_reused_from_previous` e `members_reused_from_failed_parent`.
 - A documentacao de pipeline e monitoramento agora distingue `sem_alteracao`, skip administrativo/legado e reuso de members bem-sucedidos dentro de um artefato anual alterado ou rerodado.

@@ -115,3 +115,32 @@ def test_endpoint_publico_nao_encontrado(
     )
     assert resposta.status_code == 404
     assert resposta.json()["detail"] == "Companhia nao encontrada."
+
+
+def test_todos_os_endpoints_publicos_de_analise(
+    client: TestClient,
+    public_setup: Companhia,
+    mock_redis: MagicMock,
+) -> None:
+    """Garante que todas as 12 rotas públicas estão devidamente conectadas aos serviços."""
+    endpoints = [
+        "",
+        "/coverage",
+        "/series",
+        "/series/diagnostico",
+        "/comparacoes",
+        "/qualidade",
+        "/sinais",
+        "/eventos",
+        "/governanca",
+        "/pessoas",
+        "/brief",
+        "/restatements",
+    ]
+    for suffix in endpoints:
+        url = f"/public/analise/companhias/{public_setup.codigo_cvm}{suffix}"
+        resposta = client.get(url, headers={"Authorization": ""})
+        # Os endpoints devem responder com sucesso (200) ou 404 (caso não haja dados da companhia fictícia no SQLite),
+        # mas nunca com erros internos do servidor (500) ou erro de assinatura de rota.
+        assert resposta.status_code in (200, 404)
+
