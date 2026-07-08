@@ -67,8 +67,10 @@ def _settings(tmp_path: Path) -> Settings:
     return settings
 
 
-def test_settings_radar_defaults() -> None:
-    settings = Settings()
+def test_settings_radar_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("RADAR_CVM_ENABLED", raising=False)
+    monkeypatch.delenv("RADAR_CVM_QUEUE_NAME", raising=False)
+    settings = Settings(_env_file=None)
     assert settings.radar_cvm_enabled is False
     assert settings.radar_cvm_storage_backend == "r2"
     assert settings.radar_cvm_queue_name == "celery"
@@ -101,6 +103,20 @@ def test_classificacao_deterministica() -> None:
     assert "dados_abertos" in tags
     assert relevance == "alta"
     assert signals
+
+
+def test_classificacao_resolucoes() -> None:
+    tags, relevance, signals = classify_text("qualquer texto", title="CVM altera Resolução")
+    assert "resolução" in tags
+    assert relevance == "media"
+
+    tags, relevance, signals = classify_text("texto com resolucao 193", title="CVM altera resolucao 50")
+    assert "50" in tags
+    assert "193" in tags
+
+    tags, relevance, signals = classify_text("texto aleatorio", title="titulo aleatorio")
+    assert relevance == "normal"
+
 
 
 def test_parsers_extraem_snapshots_html() -> None:
@@ -235,7 +251,7 @@ def test_radar_beat_schedule_condicional(monkeypatch: pytest.MonkeyPatch) -> Non
     schedule = construir_beat_schedule()
     assert schedule["radar-noticias-periodico"]["task"] == "app.radar.tasks.run_radar_collection_task"
     assert schedule["radar-noticias-periodico"]["args"] == (["noticias"],)
-    assert celery_app.conf.task_routes["app.radar.tasks.run_radar_collection_task"]["queue"] == "celery"
+    assert celery_app.conf.task_routes["app.radar.tasks.run_radar_collection_task"]["queue"] == settings.radar_cvm_queue_name
 
 
 def _feed() -> RadarFeed:

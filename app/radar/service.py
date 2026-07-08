@@ -169,7 +169,7 @@ def _to_feed_items(parsed_items: list[ParsedRadarItem], *, captured_at: datetime
     items: list[RadarItem] = []
     for parsed in parsed_items:
         canonical = canonical_url(base_url, parsed.url)
-        tags, relevance, signals = classify_text(parsed.raw_text)
+        tags, relevance, signals = classify_text(parsed.raw_text, title=parsed.title)
         date_part = (parsed.published_at or captured_at).date().isoformat()
         item_id = f"{parsed.channel}:{date_part}:{slugify(canonical)}"
         items.append(

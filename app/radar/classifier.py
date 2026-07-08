@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import re
 from dataclasses import dataclass
 
 from app.radar.models import RadarRelevance
@@ -21,7 +20,7 @@ TAG_RULES: tuple[TagRule, ...] = (
 )
 
 
-def classify_text(text: str) -> tuple[list[str], RadarRelevance, list[str]]:
+def classify_text(text: str, title: str = "") -> tuple[list[str], RadarRelevance, list[str]]:
     normalized = text.lower()
     tags: list[str] = []
     signals: list[str] = []
@@ -31,7 +30,7 @@ def classify_text(text: str) -> tuple[list[str], RadarRelevance, list[str]]:
             tags.append(rule.tag)
             signals.extend(f"{rule.tag}:{term}" for term in matches[:3])
 
-    relevance: RadarRelevance = "desconhecida"
+    relevance: RadarRelevance = "normal"
     if any(tag in tags for tag in ("layout", "normativa", "atividade_sancionadora")):
         relevance = "alta"
     elif any(tag in tags for tag in ("dados_abertos", "mercado_capitais")):
@@ -39,4 +38,15 @@ def classify_text(text: str) -> tuple[list[str], RadarRelevance, list[str]]:
     elif "agenda_evento" in tags:
         relevance = "baixa"
 
+    if "resolução" in title.lower() or "resolucao" in title.lower():
+        relevance = "media"
+        if "resolução" not in tags:
+            tags.append("resolução")
+
+    resolucao_numbers = re.findall(r"\bresolu[cç][aã]o\s+(?:n[oºª\.]\s*)?(\d+)\b", f"{title} {text}", re.IGNORECASE)
+    for num in resolucao_numbers:
+        if num not in tags:
+            tags.append(num)
+
     return sorted(set(tags)), relevance, sorted(set(signals))
+

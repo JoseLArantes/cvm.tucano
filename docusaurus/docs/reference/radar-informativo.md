@@ -110,7 +110,7 @@ export type RadarItemKind =
   | "consulta_publica" 
   | "outro";
 
-export type RadarRelevance = "baixa" | "media" | "alta" | "desconhecida";
+export type RadarRelevance = "baixa" | "media" | "alta" | "normal" | "desconhecida";
 
 export type RadarChannelStatus = "success" | "not_modified" | "partial" | "failed" | "disabled";
 

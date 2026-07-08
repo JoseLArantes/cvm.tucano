@@ -7,7 +7,7 @@ from pydantic import AnyUrl, BaseModel, ConfigDict, Field
 
 RadarChannelKey = Literal["noticias", "novidades_dados", "normas", "atos_declaratorios"]
 RadarItemKind = Literal["noticia", "novidade_dados", "norma", "ato_declaratorio", "consulta_publica", "outro"]
-RadarRelevance = Literal["baixa", "media", "alta", "desconhecida"]
+RadarRelevance = Literal["baixa", "media", "alta", "normal", "desconhecida"]
 RadarChannelStatus = Literal["success", "not_modified", "partial", "failed", "disabled"]
 
 
