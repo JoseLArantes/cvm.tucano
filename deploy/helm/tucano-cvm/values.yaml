@@ -154,7 +154,7 @@ persistence:
   mountPath: /app/data
 
 migration:
-  enabled: true
+  enabled: false
 
 nodeSelector: {}
 tolerations: []
