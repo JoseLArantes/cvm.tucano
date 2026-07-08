@@ -22,12 +22,14 @@ celery_app.conf.worker_cancel_long_running_tasks_on_connection_loss = True
 celery_app.conf.worker_max_tasks_per_child = settings.celery_worker_max_tasks_per_child
 celery_app.conf.worker_max_memory_per_child = settings.celery_worker_max_memory_per_child_kb
 celery_app.conf.task_default_queue = settings.ingestion_queue_name
-celery_app.conf.task_queues = (
-    Queue("celery"),
-    Queue(settings.ingestion_queue_name),
-    Queue(settings.ingestion_control_queue_name),
-    Queue(settings.analise_materializacao_queue_name),
+queue_names = (
+    "celery",
+    settings.ingestion_queue_name,
+    settings.ingestion_control_queue_name,
+    settings.analise_materializacao_queue_name,
+    settings.radar_cvm_queue_name,
 )
+celery_app.conf.task_queues = tuple(Queue(queue_name) for queue_name in dict.fromkeys(queue_names))
 celery_app.conf.task_routes = {
     "app.worker.tasks.sincronizar_cadastro_companhias_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_member_task": {"queue": settings.ingestion_queue_name},
@@ -49,6 +51,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.despachar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.reconciliar_materializacao_stale_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.recuperar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
+    "app.radar.tasks.run_radar_collection_task": {"queue": settings.radar_cvm_queue_name},
 }
 
 
@@ -67,6 +70,18 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
         beat_schedule["analise-materializacao-pending-recovery"] = {
             "task": "app.worker.tasks.recuperar_materializacao_pendente_task",
             "schedule": timedelta(seconds=settings.analise_materializacao_pending_recovery_sweep_seconds),
+        }
+
+    if settings.radar_cvm_enabled:
+        beat_schedule["radar-noticias-periodico"] = {
+            "task": "app.radar.tasks.run_radar_collection_task",
+            "schedule": crontab(minute=15, hour="*/4"),
+            "args": (["noticias"],),
+        }
+        beat_schedule["radar-completo-diario"] = {
+            "task": "app.radar.tasks.run_radar_collection_task",
+            "schedule": crontab(hour=6, minute=30),
+            "args": (["noticias", "novidades_dados", "normas"],),
         }
     
     if settings.auto_trigger_updates:
@@ -105,4 +120,4 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
 
 
 celery_app.conf.beat_schedule = construir_beat_schedule()
-celery_app.autodiscover_tasks(["app.worker", "app.updates"])
+celery_app.autodiscover_tasks(["app.worker", "app.updates", "app.radar"])

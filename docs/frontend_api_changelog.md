@@ -9,6 +9,27 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-08 - Radar Informativo Tucano CVM via feed estatico
+
+### Superficie nova
+
+- `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`
+
+### Comportamento entregue
+
+- O backend passa a produzir um feed JSON estatico com novidades publicas da CVM, publicado fora da API FastAPI em Cloudflare R2 ou storage local.
+- O frontend deve ler o feed diretamente pela URL publica; nenhuma chamada ao backend ou consulta ao PostgreSQL ocorre durante leitura.
+- O feed inclui `generated_at`, `window`, `summary`, `channels` e `items`.
+- Falhas parciais de coleta aparecem em `channels[].status`, `channels[].error` e `summary.channels_failed`.
+- A UI deve tratar feed com mais de 24h sem sucesso como obsoleto.
+
+### Campos principais para consumo
+
+- `items[].channel`: `noticias`, `novidades_dados`, `normas` ou `atos_declaratorios`
+- `items[].kind`: `noticia`, `novidade_dados`, `norma`, `ato_declaratorio`, `consulta_publica` ou `outro`
+- `items[].relevance`: `baixa`, `media`, `alta` ou `desconhecida`
+- `items[].tags` e `items[].signals`: classificacao deterministica usada pela UI para filtros e explicabilidade
+
 ## 2026-07-04 - Exposição Pública de Companhias Selecionadas via Redis Cache
 
 ### Endpoints novos

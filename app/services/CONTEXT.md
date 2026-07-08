@@ -26,6 +26,9 @@ For ingestion internals, also read `app/services/ingestion/CONTEXT.md`.
 - **Chunk** means the executable slice leased to a worker.
 - **Admission gate** means the control that prevents new materialization chunks from starting during active ingestion or manual pause.
 - **Scope** means analysis scope such as `consolidated` or `individual`.
+- **Radar Informativo Tucano CVM** means the consultative feed of public institutional or regulatory CVM updates, separate from canonical ingestion and analysis.
+- **Monitored channel** means a public CVM page watched by Radar Informativo Tucano CVM, such as news or data-portal updates. Avoid using **Source** for this concept because ingestion uses Source for structured CVM datasets.
+- **Radar item** means one normalized public update emitted by Radar Informativo Tucano CVM with a canonical URL, classification signals, and publication/capture timestamps.
 
 ## Operational rules
 

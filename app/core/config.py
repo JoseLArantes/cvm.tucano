@@ -173,6 +173,34 @@ class Settings(BaseSettings):
     )
     ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
     ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
+    radar_cvm_enabled: bool = Field(default=False, alias="RADAR_CVM_ENABLED")
+    radar_cvm_queue_name: str = Field(default="celery", alias="RADAR_CVM_QUEUE_NAME")
+    radar_cvm_storage_backend: Literal["r2", "local"] = Field(default="r2", alias="RADAR_CVM_STORAGE_BACKEND")
+    radar_cvm_storage_prefix: str = Field(default="radar-cvm/", alias="RADAR_CVM_STORAGE_PREFIX")
+    radar_cvm_public_base_url: str = Field(default="", alias="RADAR_CVM_PUBLIC_BASE_URL")
+    radar_cvm_retention_days: int = Field(default=90, ge=1, alias="RADAR_CVM_RETENTION_DAYS")
+    radar_cvm_max_items: int = Field(default=500, ge=1, alias="RADAR_CVM_MAX_ITEMS")
+    radar_cvm_request_timeout_seconds: int = Field(default=30, ge=1, alias="RADAR_CVM_REQUEST_TIMEOUT_SECONDS")
+    radar_cvm_user_agent: str = Field(
+        default="Radar-Informativo-Tucano-CVM/1.0",
+        alias="RADAR_CVM_USER_AGENT",
+    )
+    radar_cvm_cache_control: str = Field(
+        default="public, max-age=300, s-maxage=3600, stale-while-revalidate=86400",
+        alias="RADAR_CVM_CACHE_CONTROL",
+    )
+    radar_cvm_r2_endpoint_url: str = Field(default="", alias="RADAR_CVM_R2_ENDPOINT_URL")
+    radar_cvm_r2_bucket: str = Field(default="", alias="RADAR_CVM_R2_BUCKET")
+    radar_cvm_r2_access_key_id: str = Field(default="", alias="RADAR_CVM_R2_ACCESS_KEY_ID")
+    radar_cvm_r2_secret_access_key: str = Field(default="", alias="RADAR_CVM_R2_SECRET_ACCESS_KEY")
+    radar_cvm_r2_region: str = Field(default="auto", alias="RADAR_CVM_R2_REGION")
+    radar_cvm_noticias_enabled: bool = Field(default=True, alias="RADAR_CVM_NOTICIAS_ENABLED")
+    radar_cvm_novidades_dados_enabled: bool = Field(default=True, alias="RADAR_CVM_NOVIDADES_DADOS_ENABLED")
+    radar_cvm_normas_enabled: bool = Field(default=True, alias="RADAR_CVM_NORMAS_ENABLED")
+    radar_cvm_atos_declaratorios_enabled: bool = Field(
+        default=False,
+        alias="RADAR_CVM_ATOS_DECLARATORIOS_ENABLED",
+    )
     ingestion_normalized_artifact_format: Literal["typed_csv", "parquet"] = Field(
         default="typed_csv",
         alias="INGESTION_NORMALIZED_ARTIFACT_FORMAT",

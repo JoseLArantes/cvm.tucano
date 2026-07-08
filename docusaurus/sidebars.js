@@ -98,6 +98,7 @@ const sidebars = {
       label: 'Referência',
       items: [
         'reference/mcp',
+        'reference/radar-informativo',
         'reference/troubleshooting',
         'reference/glossary',
         'reference/changelog',
