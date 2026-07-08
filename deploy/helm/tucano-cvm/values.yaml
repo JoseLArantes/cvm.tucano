@@ -114,6 +114,16 @@ env:
   RADAR_CVM_R2_ENDPOINT_URL: "https://54f6d15a41f0acc9c00980b88502baf6.r2.cloudflarestorage.com"
   RADAR_CVM_R2_BUCKET: "tucano-cvm"
   RADAR_CVM_R2_REGION: "auto"
+  RADAR_CVM_ENABLED: "true"
+  RADAR_CVM_QUEUE_NAME: "celery"
+  RADAR_CVM_STORAGE_BACKEND: "r2"
+  RADAR_CVM_STORAGE_PREFIX: "radar-cvm/"
+  RADAR_CVM_PUBLIC_BASE_URL: "https://cvm.radar.tucano.beakcloud.com"
+  RADAR_CVM_RETENTION_DAYS: "90"
+  RADAR_CVM_MAX_ITEMS: "500"
+  RADAR_CVM_REQUEST_TIMEOUT_SECONDS: "30"
+  RADAR_CVM_USER_AGENT: "Radar-Informativo-Tucano-CVM/1.0"
+  RADAR_CVM_CACHE_CONTROL: "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
 
 appSecret:
   name: "cvm-secret"
