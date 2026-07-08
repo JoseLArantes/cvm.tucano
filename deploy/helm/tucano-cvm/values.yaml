@@ -111,6 +111,9 @@ env:
   MCP_TOOL_TIMEOUT_SECONDS: "30"
   MCP_INCLUDE_RAW_DEFAULT: "false"
   PUBLIC_COMPANIES_CVM: "23264,22616,19348,4170,9512"
+  RADAR_CVM_R2_ENDPOINT_URL: "https://54f6d15a41f0acc9c00980b88502baf6.r2.cloudflarestorage.com"
+  RADAR_CVM_R2_BUCKET: "tucano-cvm"
+  RADAR_CVM_R2_REGION: "auto"
 
 appSecret:
   name: "cvm-secret"
