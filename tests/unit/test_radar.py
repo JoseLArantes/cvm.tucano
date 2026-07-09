@@ -151,6 +151,16 @@ def test_parser_extrai_publicado_em_com_data_brasileira_e_hora() -> None:
     assert published_at == datetime(2026, 7, 3, 17, 30, tzinfo=UTC)
 
 
+def test_parser_extrai_publicado_em_de_html_do_govbr() -> None:
+    html = """
+    <span class="documentPublished">
+      <span>Publicado em</span>
+      <span class="value">10/06/2026 09h45</span>
+    </span>
+    """
+    assert extract_published_at(html) == datetime(2026, 6, 10, 9, 45, tzinfo=UTC)
+
+
 def test_parsers_extraem_snapshots_html() -> None:
     noticias = parse_channel_html("noticias", "https://www.gov.br/cvm/pt-br/assuntos/noticias", NOTICIAS_HTML)
     novidades = parse_channel_html("novidades_dados", "https://dados.cvm.gov.br/pages/novidades", NOVIDADES_HTML)

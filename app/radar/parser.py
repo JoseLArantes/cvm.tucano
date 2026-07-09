@@ -16,9 +16,9 @@ _BR_DATE_PATTERN = (
     r"(?:\s+(?P<hour>\d{1,2})(?:h|:)(?P<minute>\d{2}))?"
 )
 _PUBLISHED_PATTERNS = [
-    re.compile(rf"\bPublicad[oa]\s+em\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
-    re.compile(rf"\bPublicad[oa]\s+no\s+DOU\s+de\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
-    re.compile(rf"\bAviso\s+publicado\s+em\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bPublicad[oa]\s+em\s*{_BR_DATE_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bPublicad[oa]\s+no\s+DOU\s+de\s*{_BR_DATE_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bAviso\s+publicado\s+em\s*{_BR_DATE_PATTERN}", re.IGNORECASE),
 ]
 
 
@@ -116,10 +116,15 @@ def _summary_from_text(text: str, title: str) -> str | None:
 
 
 def extract_published_at(text: str) -> datetime | None:
-    for pattern in _PUBLISHED_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return _br_datetime_from_match(match)
+    candidates = [text]
+    if "<" in text and ">" in text:
+        without_comments = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+        candidates.append(normalize_space(re.sub(r"<[^>]+>", " ", without_comments)))
+    for candidate in candidates:
+        for pattern in _PUBLISHED_PATTERNS:
+            match = pattern.search(candidate)
+            if match:
+                return _br_datetime_from_match(match)
     return None
 
 
