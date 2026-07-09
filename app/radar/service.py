@@ -7,7 +7,7 @@ import httpx
 from pydantic import AnyUrl
 
 from app.core.config import Settings, get_settings
-from app.radar.channels import CHANNELS, RadarChannelConfig
+from app.radar.channels import CHANNELS, NORMAS_SUBCHANNEL_URLS, RadarChannelConfig
 from app.radar.classifier import classify_text
 from app.radar.models import (
     ParsedRadarItem,
@@ -112,6 +112,8 @@ def _collect_channel(
             headers["If-None-Match"] = previous.etag
         if previous.last_modified:
             headers["If-Modified-Since"] = previous.last_modified
+    if channel.key == "normas":
+        return _collect_normas_channel(channel, previous=previous, state=state, settings=settings, captured_at=captured_at)
     try:
         response = httpx.get(
             channel.url,
@@ -153,6 +155,52 @@ def _collect_channel(
             last_success_at=captured_at,
             items_count=len(parsed_items),
             error=None if parsed_items else "parser_returned_no_items",
+        ),
+        parsed_items,
+    )
+
+
+def _collect_normas_channel(
+    channel: RadarChannelConfig,
+    *,
+    previous: RadarStateChannel | None,
+    state: RadarState,
+    settings: Settings,
+    captured_at: datetime,
+) -> tuple[RadarChannel, list[ParsedRadarItem]]:
+    headers = {"User-Agent": settings.radar_cvm_user_agent}
+    parsed_items: list[ParsedRadarItem] = []
+    failures: list[str] = []
+    for url in NORMAS_SUBCHANNEL_URLS:
+        try:
+            response = httpx.get(
+                url,
+                timeout=settings.radar_cvm_request_timeout_seconds,
+                headers=headers,
+                follow_redirects=True,
+            )
+        except Exception as exc:
+            failures.append(f"{url}: {type(exc).__name__}: {exc}")
+            continue
+        if response.status_code >= 400:
+            failures.append(f"{url}: HTTP {response.status_code}")
+            continue
+        base_url = str(getattr(response, "url", url) or url)
+        parsed_items.extend(parse_channel_html("normas", base_url, response.text))
+
+    if not parsed_items and failures:
+        return _failed_channel(channel, previous, RuntimeError("; ".join(failures)[:500])), []
+
+    status: RadarChannelStatus = "success" if parsed_items and not failures else "partial"
+    state.channels[channel.key] = RadarStateChannel(last_success_at=captured_at)
+    return (
+        RadarChannel(
+            key=channel.key,
+            url=channel.url,
+            status=status,
+            last_success_at=captured_at,
+            items_count=len(parsed_items),
+            error=None if not failures else "; ".join(failures)[:500],
         ),
         parsed_items,
     )
@@ -243,6 +291,7 @@ def _build_feed(
     if previous_feed is not None:
         items.extend(previous_feed.items)
 
+    items = _backfill_noticias_published_at(items, settings=settings)
     window_start = generated_at - timedelta(days=settings.radar_cvm_retention_days)
     deduped = _dedupe_items(items)
     filtered = [
@@ -267,6 +316,45 @@ def _build_feed(
     content = feed.model_dump(mode="json")
     checksum = sha256_bytes(str(content).encode("utf-8"))
     return feed.model_copy(update={"summary": summary.model_copy(update={"checksum_sha256": checksum})})
+
+
+def _backfill_noticias_published_at(items: list[RadarItem], *, settings: Settings) -> list[RadarItem]:
+    headers = {"User-Agent": settings.radar_cvm_user_agent}
+    enriched: list[RadarItem] = []
+    attempts = 0
+    for item in items:
+        if item.channel != "noticias" or item.published_at is not None or attempts >= settings.radar_cvm_max_items:
+            enriched.append(item)
+            continue
+        attempts += 1
+        try:
+            response = httpx.get(
+                str(item.url),
+                timeout=settings.radar_cvm_request_timeout_seconds,
+                headers=headers,
+                follow_redirects=True,
+            )
+            if response.status_code >= 400:
+                enriched.append(item)
+                continue
+            published_at = extract_published_at(response.text)
+        except Exception:
+            enriched.append(item)
+            continue
+        if published_at is None:
+            enriched.append(item)
+            continue
+        canonical = str(item.url)
+        date_part = published_at.date().isoformat()
+        enriched.append(
+            item.model_copy(
+                update={
+                    "id": f"{item.channel}:{date_part}:{slugify(canonical)}",
+                    "published_at": published_at,
+                }
+            )
+        )
+    return enriched
 
 
 def _dedupe_items(items: list[RadarItem]) -> list[RadarItem]:

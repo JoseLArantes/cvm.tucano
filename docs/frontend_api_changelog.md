@@ -18,9 +18,11 @@ Convencoes deste changelog:
 ### Comportamento entregue
 
 - `items[].published_at` passa a usar a melhor data oficial encontrada pelo coletor, sem mudar o nome ou o tipo do campo.
-- Para `noticias`, a data e extraida da pagina de detalhe quando houver texto como `Publicado em 03/07/2026 17h30`.
+- Para `noticias`, a data e extraida da pagina de detalhe, preferindo `NewsArticle.datePublished` com timezone e usando texto como `Publicado em 03/07/2026 17h30` como fallback.
+- Noticias preservadas de snapshots anteriores que ainda estejam sem `published_at` sao reprocessadas pela URL de detalhe antes da publicacao do proximo `latest.json`.
 - Para `novidades_dados`, a data continua vindo do bloco da novidade no portal de dados.
 - Para `normas`, a data passa a preferir a publicacao no DOU quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
+- O canal `normas` passa a coletar diretamente os subcanais de resolucoes, deliberacoes, pareceres de orientacao e audiencias/consultas publicas, evitando links de navegacao da pagina agregadora.
 - Quando a data oficial nao for encontrada, `published_at` permanece `null` e `captured_at` segue indicando apenas o momento da coleta.
 
 ## 2026-07-08 - Radar Informativo Tucano CVM via feed estatico

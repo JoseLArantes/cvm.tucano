@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from selectolax.lexbor import LexborHTMLParser
 
@@ -20,6 +22,7 @@ _PUBLISHED_PATTERNS = [
     re.compile(rf"\bPublicad[oa]\s+no\s+DOU\s+de\s*{_BR_DATE_PATTERN}", re.IGNORECASE),
     re.compile(rf"\bAviso\s+publicado\s+em\s*{_BR_DATE_PATTERN}", re.IGNORECASE),
 ]
+_SAO_PAULO = ZoneInfo("America/Sao_Paulo")
 
 
 def parse_channel_html(channel: RadarChannelKey, base_url: str, html: str) -> list[ParsedRadarItem]:
@@ -116,6 +119,11 @@ def _summary_from_text(text: str, title: str) -> str | None:
 
 
 def extract_published_at(text: str) -> datetime | None:
+    if "<" in text and ">" in text:
+        structured = _extract_structured_published_at(text)
+        if structured is not None:
+            return structured
+
     candidates = [text]
     if "<" in text and ">" in text:
         without_comments = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
@@ -125,6 +133,69 @@ def extract_published_at(text: str) -> datetime | None:
             match = pattern.search(candidate)
             if match:
                 return _br_datetime_from_match(match)
+    return None
+
+
+def _extract_structured_published_at(html: str) -> datetime | None:
+    parser = LexborHTMLParser(html)
+    for script in parser.css('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(script.text(deep=True) or "")
+        except json.JSONDecodeError:
+            continue
+        for value in _iter_json_values(data, keys={"datePublished", "dateCreated"}):
+            parsed = _parse_datetime_value(value)
+            if parsed is not None:
+                return parsed
+
+    selectors = (
+        'meta[property="article:published_time"]',
+        'meta[property="datePublished"]',
+        'meta[name="datePublished"]',
+        'meta[itemprop="datePublished"]',
+        'time[datetime]',
+        ".documentPublished .value",
+    )
+    for selector in selectors:
+        for node in parser.css(selector):
+            value = node.attributes.get("content") or node.attributes.get("datetime") or node.text(deep=True)
+            parsed = _parse_datetime_value(value or "")
+            if parsed is not None:
+                return parsed
+    return None
+
+
+def _iter_json_values(data: object, *, keys: set[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if key in keys and isinstance(value, str):
+                values.append(value)
+            elif isinstance(value, dict | list):
+                values.extend(_iter_json_values(value, keys=keys))
+    elif isinstance(data, list):
+        for item in data:
+            values.extend(_iter_json_values(item, keys=keys))
+    return values
+
+
+def _parse_datetime_value(value: str) -> datetime | None:
+    cleaned = normalize_space(value)
+    if not cleaned:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(cleaned.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
+    br_match = re.search(_BR_DATE_PATTERN, cleaned)
+    if br_match:
+        return _br_datetime_from_match(br_match)
     return None
 
 
@@ -165,11 +236,13 @@ def _br_datetime_from_match(match: re.Match[str]) -> datetime:
     year = int(year_text)
     if len(year_text) == 2:
         year += 2000
-    return datetime(
+    parsed = datetime(
         year,
         int(match.group("month")),
         int(match.group("day")),
         int(match.group("hour") or 0),
         int(match.group("minute") or 0),
-        tzinfo=UTC,
     )
+    if match.group("hour") is not None:
+        return parsed.replace(tzinfo=_SAO_PAULO).astimezone(UTC)
+    return parsed.replace(tzinfo=UTC)

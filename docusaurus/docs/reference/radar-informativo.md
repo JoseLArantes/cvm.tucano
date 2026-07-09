@@ -43,9 +43,12 @@ Cada item contem `id`, `channel`, `kind`, `title`, `summary`, `url`, `published_
 
 `published_at` representa a melhor data oficial encontrada pelo coletor:
 
-- `noticias`: extraida da pagina de detalhe no formato exibido pela CVM, como `Publicado em 03/07/2026 17h30`;
+- `noticias`: extraida da pagina de detalhe, preferindo metadados estruturados `NewsArticle.datePublished` e usando o texto visivel `Publicado em 03/07/2026 17h30` como fallback;
 - `novidades_dados`: extraida do cabecalho/data do bloco da novidade no portal de dados;
 - `normas`: extraida preferencialmente da publicacao no DOU, quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
+
+Noticias preservadas de snapshots anteriores que ainda estejam sem `published_at` sao reprocessadas pela URL de detalhe antes da publicacao do novo `latest.json`.
+O canal `normas` coleta diretamente os subcanais de resolucoes, deliberacoes, pareceres de orientacao e audiencias/consultas publicas, evitando publicar links de navegacao da pagina agregadora como itens.
 
 Quando a data oficial nao puder ser identificada, `published_at` fica `null` e o frontend deve usar `captured_at` apenas como indicador operacional de captura.
 

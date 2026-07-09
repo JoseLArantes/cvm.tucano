@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import AnyUrl, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.radar.classifier import classify_text
@@ -52,6 +52,23 @@ NOTICIA_DETALHE_HTML = """
     <p>Publicado em 03/07/2026 17h30</p>
     <h1>CVM publica nova resolucao</h1>
   </main>
+</body></html>
+"""
+
+NOTICIA_JSON_LD_HTML = """
+<html><body>
+  <script type="application/ld+json">
+    {
+      "@type": "NewsArticle",
+      "headline": "CVM multa administradores",
+      "datePublished": "2026-06-02T20:05:38-03:00",
+      "dateModified": "2026-06-02T20:05:38-03:00"
+    }
+  </script>
+  <span class="documentPublished">
+    <span>Publicado em</span>
+    <span class="value">02/06/2026 20h05</span>
+  </span>
 </body></html>
 """
 
@@ -148,7 +165,7 @@ def test_classificacao_resolucoes() -> None:
 
 def test_parser_extrai_publicado_em_com_data_brasileira_e_hora() -> None:
     published_at = extract_published_at("Publicado em 03/07/2026 17h30")
-    assert published_at == datetime(2026, 7, 3, 17, 30, tzinfo=UTC)
+    assert published_at == datetime(2026, 7, 3, 20, 30, tzinfo=UTC)
 
 
 def test_parser_extrai_publicado_em_de_html_do_govbr() -> None:
@@ -158,7 +175,11 @@ def test_parser_extrai_publicado_em_de_html_do_govbr() -> None:
       <span class="value">10/06/2026 09h45</span>
     </span>
     """
-    assert extract_published_at(html) == datetime(2026, 6, 10, 9, 45, tzinfo=UTC)
+    assert extract_published_at(html) == datetime(2026, 6, 10, 12, 45, tzinfo=UTC)
+
+
+def test_parser_prefere_date_published_estruturado() -> None:
+    assert extract_published_at(NOTICIA_JSON_LD_HTML) == datetime(2026, 6, 2, 23, 5, 38, tzinfo=UTC)
 
 
 def test_parsers_extraem_snapshots_html() -> None:
@@ -192,7 +213,73 @@ def test_run_radar_collection_enriquece_noticia_com_data_da_pagina(
 
     assert result["published"] is True
     feed = RadarFeed.model_validate_json((tmp_path / "radar-cvm/latest.json").read_bytes())
-    assert feed.items[0].published_at == datetime(2026, 7, 3, 17, 30, tzinfo=UTC)
+    assert feed.items[0].published_at == datetime(2026, 7, 3, 20, 30, tzinfo=UTC)
+
+
+def test_run_radar_collection_corrige_noticia_antiga_sem_data(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    publisher = LocalRadarPublisher(base_dir=str(tmp_path), prefix="radar-cvm/", cache_control="public")
+    now = datetime(2026, 7, 8, 23, 45, tzinfo=UTC)
+    previous_feed = _feed().model_copy(
+        update={
+            "generated_at": now,
+            "items": [
+                _feed().items[0].model_copy(
+                    update={
+                        "id": "noticias:2026-07-08:noticia-antiga",
+                        "title": "CVM multa administradores",
+                        "url": AnyUrl("https://www.gov.br/cvm/pt-br/assuntos/noticias/2026/cvm-multa-administradores"),
+                        "published_at": None,
+                        "captured_at": now,
+                    }
+                )
+            ],
+        }
+    )
+    publisher.publish(
+        feed=previous_feed,
+        state=RadarState(),
+        history_key="radar-cvm/history/2026/07/08/234500.json",
+        latest_key="radar-cvm/latest.json",
+        state_key="radar-cvm/state.json",
+    )
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        if url == "https://www.gov.br/cvm/pt-br/assuntos/noticias":
+            return FakeResponse(NOTICIAS_HTML)
+        if url == "https://www.gov.br/cvm/pt-br/assuntos/noticias/2026/cvm-multa-administradores":
+            return FakeResponse(NOTICIA_JSON_LD_HTML)
+        return FakeResponse(NOTICIA_DETALHE_HTML)
+
+    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    result = run_radar_collection(channels=["noticias"], settings=settings)
+
+    assert result["published"] is True
+    feed = RadarFeed.model_validate_json((tmp_path / "radar-cvm/latest.json").read_bytes())
+    old_item = next(item for item in feed.items if item.title == "CVM multa administradores")
+    assert old_item.published_at == datetime(2026, 6, 2, 23, 5, 38, tzinfo=UTC)
+    assert old_item.id.startswith("noticias:2026-06-02:")
+
+
+def test_run_radar_collection_coleta_normas_por_subcanais(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        if "resolucoes" in url:
+            return FakeResponse(NORMAS_DOU_HTML, url="http://conteudo.cvm.gov.br/legislacao/resolucoes.html")
+        return FakeResponse("<html><body></body></html>", url=url)
+
+    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    result = run_radar_collection(channels=["normas"], settings=settings)
+
+    assert result["published"] is True
+    feed = RadarFeed.model_validate_json((tmp_path / "radar-cvm/latest.json").read_bytes())
+    assert [item.title for item in feed.items] == ["Resolucao CVM 245"]
+    assert feed.items[0].published_at == datetime(2026, 7, 3, tzinfo=UTC)
 
 
 def test_run_radar_collection_publica_feed_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
