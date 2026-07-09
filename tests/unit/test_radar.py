@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from app.core.config import Settings, get_settings
 from app.radar.classifier import classify_text
 from app.radar.models import RadarFeed, RadarItem, RadarState
-from app.radar.parser import parse_channel_html
+from app.radar.parser import extract_published_at, parse_channel_html
 from app.radar.service import run_radar_collection
 from app.radar.storage import LocalRadarPublisher, R2RadarPublisher
 from app.worker.celery_app import celery_app, construir_beat_schedule
@@ -30,7 +30,7 @@ NOVIDADES_HTML = """
 <html><body>
   <main>
     <a href="/pages/novidades#layout-dfp">Atualizacao de layout DFP</a>
-    <p>2026-07-08 Inclusao de coluna em arquivo CSV do portal de dados.</p>
+    <p>20/06/2026: Inclusao de coluna em arquivo CSV do portal de dados. (Aviso publicado em 12/06/2026.)</p>
   </main>
 </body></html>
 """
@@ -46,16 +46,44 @@ NORMAS_HTML = """
 </body></html>
 """
 
+NOTICIA_DETALHE_HTML = """
+<html><body>
+  <main>
+    <p>Publicado em 03/07/2026 17h30</p>
+    <h1>CVM publica nova resolucao</h1>
+  </main>
+</body></html>
+"""
+
+NORMAS_DOU_HTML = """
+<html><body>
+  <ul>
+    <li>
+      <a href="/legislacao/resolucoes/resol245.html">Resolucao CVM 245</a>
+      01/07/2026 (Publicada no DOU de 03.07.2026)
+    </li>
+  </ul>
+</body></html>
+"""
+
 
 class FakeResponse:
-    def __init__(self, text: str, *, status_code: int = 200, headers: dict[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        status_code: int = 200,
+        headers: dict[str, str] | None = None,
+        url: str | None = None,
+    ) -> None:
         self.text = text
         self.status_code = status_code
         self.headers = headers or {}
+        self.url = url
 
 
 def _settings(tmp_path: Path) -> Settings:
-    settings = Settings()
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     settings.radar_cvm_storage_backend = "local"
     settings.storage_dir = str(tmp_path)
     settings.radar_cvm_storage_prefix = "radar-cvm/"
@@ -70,7 +98,7 @@ def _settings(tmp_path: Path) -> Settings:
 def test_settings_radar_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("RADAR_CVM_ENABLED", raising=False)
     monkeypatch.delenv("RADAR_CVM_QUEUE_NAME", raising=False)
-    settings = Settings(_env_file=None)
+    settings = Settings(_env_file=None)  # type: ignore[call-arg]
     assert settings.radar_cvm_enabled is False
     assert settings.radar_cvm_storage_backend == "r2"
     assert settings.radar_cvm_queue_name == "celery"
@@ -118,6 +146,10 @@ def test_classificacao_resolucoes() -> None:
     assert relevance == "normal"
 
 
+def test_parser_extrai_publicado_em_com_data_brasileira_e_hora() -> None:
+    published_at = extract_published_at("Publicado em 03/07/2026 17h30")
+    assert published_at == datetime(2026, 7, 3, 17, 30, tzinfo=UTC)
+
 
 def test_parsers_extraem_snapshots_html() -> None:
     noticias = parse_channel_html("noticias", "https://www.gov.br/cvm/pt-br/assuntos/noticias", NOTICIAS_HTML)
@@ -125,8 +157,32 @@ def test_parsers_extraem_snapshots_html() -> None:
     normas = parse_channel_html("normas", "https://www.gov.br/cvm/pt-br/assuntos/normas", NORMAS_HTML)
     assert [item.title for item in noticias] == ["CVM publica nova resolucao"]
     assert novidades[0].title == "Atualizacao de layout DFP"
+    assert novidades[0].published_at == datetime(2026, 6, 20, tzinfo=UTC)
     assert len(normas) == 4
     assert {item.kind for item in normas} == {"norma", "consulta_publica"}
+
+
+def test_parser_normas_prefere_data_de_publicacao_no_dou() -> None:
+    normas = parse_channel_html("normas", "http://conteudo.cvm.gov.br/legislacao/resolucoes.html", NORMAS_DOU_HTML)
+    assert normas[0].published_at == datetime(2026, 7, 3, tzinfo=UTC)
+
+
+def test_run_radar_collection_enriquece_noticia_com_data_da_pagina(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        if url == "https://www.gov.br/cvm/pt-br/assuntos/noticias":
+            return FakeResponse(NOTICIAS_HTML)
+        return FakeResponse(NOTICIA_DETALHE_HTML)
+
+    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    result = run_radar_collection(channels=["noticias"], settings=settings)
+
+    assert result["published"] is True
+    feed = RadarFeed.model_validate_json((tmp_path / "radar-cvm/latest.json").read_bytes())
+    assert feed.items[0].published_at == datetime(2026, 7, 3, 17, 30, tzinfo=UTC)
 
 
 def test_run_radar_collection_publica_feed_local(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -41,6 +41,14 @@ Campos de topo:
 
 Cada item contem `id`, `channel`, `kind`, `title`, `summary`, `url`, `published_at`, `captured_at`, `tags`, `relevance`, `signals` e `source_hash`.
 
+`published_at` representa a melhor data oficial encontrada pelo coletor:
+
+- `noticias`: extraida da pagina de detalhe no formato exibido pela CVM, como `Publicado em 03/07/2026 17h30`;
+- `novidades_dados`: extraida do cabecalho/data do bloco da novidade no portal de dados;
+- `normas`: extraida preferencialmente da publicacao no DOU, quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
+
+Quando a data oficial nao puder ser identificada, `published_at` fica `null` e o frontend deve usar `captured_at` apenas como indicador operacional de captura.
+
 ## Staleness e falhas parciais
 
 O frontend deve usar:
@@ -256,4 +264,3 @@ Ao renderizar o Radar Informativo, o frontend deve implementar os seguintes comp
     *   Itens com `relevance: "alta"` devem ter destaque visual destacado (ex: borda colorida, ícone de alerta vermelho/laranja) para chamar a atenção imediata do operador.
 5.  **Filtros Rápidos:**
     *   Disponibilize filtros interativos para permitir ao usuário filtrar a lista por **Canal** (`channel`), **Tipo** (`kind`) e por **Tags** de classificação (como `layout`, `normativa`, `dados_abertos`, etc.).
-

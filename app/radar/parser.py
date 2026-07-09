@@ -3,12 +3,23 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from urllib.parse import urlsplit
 
 from selectolax.lexbor import LexborHTMLParser
 
 from app.radar.channels import NORMAS_SUBCHANNEL_URLS
 from app.radar.models import ParsedRadarItem, RadarChannelKey, RadarItemKind
 from app.radar.utils import canonical_url, normalize_space
+
+_BR_DATE_PATTERN = (
+    r"(?P<day>\d{1,2})[/.](?P<month>\d{1,2})[/.](?P<year>\d{2,4})"
+    r"(?:\s+(?P<hour>\d{1,2})(?:h|:)(?P<minute>\d{2}))?"
+)
+_PUBLISHED_PATTERNS = [
+    re.compile(rf"\bPublicad[oa]\s+em\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bPublicad[oa]\s+no\s+DOU\s+de\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
+    re.compile(rf"\bAviso\s+publicado\s+em\s+{_BR_DATE_PATTERN}", re.IGNORECASE),
+]
 
 
 def parse_channel_html(channel: RadarChannelKey, base_url: str, html: str) -> list[ParsedRadarItem]:
@@ -59,7 +70,7 @@ def _parse_generic_listing(
 
         container_text = _nearest_text(link)
         summary = _summary_from_text(container_text, title)
-        published_at = _extract_date(container_text)
+        published_at = _extract_date(container_text, prefer_labeled=channel == "normas")
         raw_text = normalize_space(f"{title} {summary or ''} {container_text}")
         items.append(
             ParsedRadarItem(
@@ -77,6 +88,10 @@ def _parse_generic_listing(
 
 
 def _is_relevant_url(base_url: str, url: str) -> bool:
+    base_parts = urlsplit(base_url)
+    url_parts = urlsplit(url)
+    if base_parts.netloc == "conteudo.cvm.gov.br" and url_parts.netloc == base_parts.netloc:
+        return url_parts.path.startswith(("/legislacao/", "/audiencias_publicas/"))
     return url.startswith(base_url.rstrip("/"))
 
 
@@ -100,7 +115,20 @@ def _summary_from_text(text: str, title: str) -> str | None:
     return cleaned[:1000]
 
 
-def _extract_date(text: str) -> datetime | None:
+def extract_published_at(text: str) -> datetime | None:
+    for pattern in _PUBLISHED_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return _br_datetime_from_match(match)
+    return None
+
+
+def _extract_date(text: str, *, prefer_labeled: bool = False) -> datetime | None:
+    if prefer_labeled:
+        published = extract_published_at(text)
+        if published is not None:
+            return published
+
     iso_match = re.search(r"\b(20\d{2})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2})(?::(\d{2}))?)?", text)
     if iso_match:
         year, month, day, hour, minute, second = iso_match.groups()
@@ -114,10 +142,9 @@ def _extract_date(text: str) -> datetime | None:
             tzinfo=UTC,
         )
 
-    br_match = re.search(r"\b(\d{1,2})/(\d{1,2})/(20\d{2})(?:\s+(\d{1,2}):(\d{2}))?", text)
+    br_match = re.search(_BR_DATE_PATTERN, text)
     if br_match:
-        day, month, year, hour, minute = br_match.groups()
-        return datetime(int(year), int(month), int(day), int(hour or 0), int(minute or 0), tzinfo=UTC)
+        return _br_datetime_from_match(br_match)
 
     try:
         parsed = parsedate_to_datetime(text)
@@ -126,3 +153,18 @@ def _extract_date(text: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _br_datetime_from_match(match: re.Match[str]) -> datetime:
+    year_text = match.group("year")
+    year = int(year_text)
+    if len(year_text) == 2:
+        year += 2000
+    return datetime(
+        year,
+        int(match.group("month")),
+        int(match.group("day")),
+        int(match.group("hour") or 0),
+        int(match.group("minute") or 0),
+        tzinfo=UTC,
+    )

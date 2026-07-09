@@ -9,6 +9,20 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-09 - Datas oficiais no Radar Informativo Tucano CVM
+
+### Superficie afetada
+
+- `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`
+
+### Comportamento entregue
+
+- `items[].published_at` passa a usar a melhor data oficial encontrada pelo coletor, sem mudar o nome ou o tipo do campo.
+- Para `noticias`, a data e extraida da pagina de detalhe quando houver texto como `Publicado em 03/07/2026 17h30`.
+- Para `novidades_dados`, a data continua vindo do bloco da novidade no portal de dados.
+- Para `normas`, a data passa a preferir a publicacao no DOU quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
+- Quando a data oficial nao for encontrada, `published_at` permanece `null` e `captured_at` segue indicando apenas o momento da coleta.
+
 ## 2026-07-08 - Radar Informativo Tucano CVM via feed estatico
 
 ### Superficie nova

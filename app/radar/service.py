@@ -20,7 +20,7 @@ from app.radar.models import (
     RadarSummary,
     RadarWindow,
 )
-from app.radar.parser import parse_channel_html
+from app.radar.parser import extract_published_at, parse_channel_html
 from app.radar.storage import LocalRadarPublisher, R2RadarPublisher, RadarPublisher
 from app.radar.utils import canonical_url, sha256_bytes, slugify, source_hash, utc_now
 
@@ -113,7 +113,12 @@ def _collect_channel(
         if previous.last_modified:
             headers["If-Modified-Since"] = previous.last_modified
     try:
-        response = httpx.get(channel.url, timeout=settings.radar_cvm_request_timeout_seconds, headers=headers)
+        response = httpx.get(
+            channel.url,
+            timeout=settings.radar_cvm_request_timeout_seconds,
+            headers=headers,
+            follow_redirects=True,
+        )
     except Exception as exc:
         return _failed_channel(channel, previous, exc), []
     if response.status_code == 304:
@@ -130,7 +135,10 @@ def _collect_channel(
     if response.status_code >= 400:
         return _failed_channel(channel, previous, RuntimeError(f"HTTP {response.status_code}")), []
 
-    parsed_items = parse_channel_html(channel.key, channel.url, response.text)
+    base_url = str(getattr(response, "url", channel.url) or channel.url)
+    parsed_items = parse_channel_html(channel.key, base_url, response.text)
+    if channel.key == "noticias":
+        parsed_items = _enrich_noticias_published_at(parsed_items, headers=headers, settings=settings)
     status: RadarChannelStatus = "success" if parsed_items else "partial"
     state.channels[channel.key] = RadarStateChannel(
         etag=response.headers.get("etag"),
@@ -148,6 +156,35 @@ def _collect_channel(
         ),
         parsed_items,
     )
+
+
+def _enrich_noticias_published_at(
+    items: list[ParsedRadarItem],
+    *,
+    headers: dict[str, str],
+    settings: Settings,
+) -> list[ParsedRadarItem]:
+    enriched: list[ParsedRadarItem] = []
+    for index, item in enumerate(items):
+        if index >= settings.radar_cvm_max_items:
+            enriched.append(item)
+            continue
+        try:
+            response = httpx.get(
+                str(item.url),
+                timeout=settings.radar_cvm_request_timeout_seconds,
+                headers=headers,
+                follow_redirects=True,
+            )
+            if response.status_code >= 400:
+                enriched.append(item)
+                continue
+            published_at = extract_published_at(response.text)
+        except Exception:
+            enriched.append(item)
+            continue
+        enriched.append(item if published_at is None else item.model_copy(update={"published_at": published_at}))
+    return enriched
 
 
 def _failed_channel(
