@@ -2,7 +2,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy import case, func, select
 
 from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
@@ -1556,19 +1556,83 @@ def obter_analise_restatements(
     "/companhias/{codigo_cvm}/fundamentalista",
     response_model=AnaliseFundamentalistaResposta,
     summary="Relatório de Análise Fundamentalista da Companhia",
-    description="Retorna o relatório analítico estruturado composto por ponto de partida, resultado, caixa e governança.",
+    description=(
+        "Gera um relatório financeiro e cadastral consolidado estruturado em quatro etapas lógicas:\n\n"
+        "1. **Ponto de Partida**: Informações básicas do emissor, qualidade cadastral e física da base de dados.\n"
+        "2. **Resultado e Eficiência**: Séries e comparações de desempenho operacional (receitas, margens, lucros).\n"
+        "3. **Caixa e Solidez**: Métricas de fluxo de caixa, endividamento, liquidez e sinais automáticos de alavancagem.\n"
+        "4. **Governança e Conclusão**: Histórico de governança corporativa (CGVN), remunerações (FRE), eventos oficiais (IPE) e VLMO.\n\n"
+        "**Comportamento de Resolução (Resolution Mode)**:\n"
+        "- Se os dados analíticos canônicos estiverem materializados para a companhia, o endpoint retorna em modo `canonical` (alta performance, leitura direta).\n"
+        "- Caso contrário, o motor executa o cálculo sob demanda em modo `runtime_fallback` a partir do staging promovido relacional.\n\n"
+        "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis no formato `ev::{codigo_cvm}::{type}::{identifier}`.\n"
+        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem causal entre os fatos."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseFundamentalista",
 )
 def obter_analise_fundamentalista(
-    codigo_cvm: int,
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM (5 ou 6 dígitos).", examples=[9512])],
     db: DbSession,
-    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
-    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade: `annual` ou `quarterly`.")] = "annual",
-    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal: `fy`, `quarter` ou `ytd`.")] = "fy",
-    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo a retornar.", ge=1, le=20)] = 5,
-    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
-    include: Annotated[str | None, Query(description="Parâmetro opcional de inclusão. Use `evidence_graph` para obter o grafo.")] = None,
+    escopo: Annotated[
+        AnaliseEscopo,
+        Query(
+            description=(
+                "Escopo societário considerado para a consolidação dos dados: "
+                "`consolidated` (demonstrações consolidadas do grupo econômico) ou "
+                "`individual` (demonstrações individuais da controladora)."
+            )
+        )
+    ] = "consolidated",
+    periodicidade: Annotated[
+        AnalisePeriodicidade,
+        Query(
+            description=(
+                "Periodicidade dos pontos de dados históricos a retornar: "
+                "`annual` (dados anuais acumulados) ou `quarterly` (dados trimestrais)."
+            )
+        )
+    ] = "annual",
+    base_periodo: Annotated[
+        AnaliseBasePeriodo,
+        Query(
+            description=(
+                "Base temporal de referência para a seleção de períodos: "
+                "`fy` (ano fiscal completo - obrigatório se periodicidade=annual), "
+                "`quarter` (trimestre isolado de três meses) ou "
+                "`ytd` (acumulado do início do ano até o trimestre)."
+            )
+        )
+    ] = "fy",
+    horizonte_anos: Annotated[
+        int,
+        Query(
+            description="Horizonte anual máximo de dados históricos a retornar para séries e comparações.",
+            ge=1,
+            le=20,
+            examples=[5]
+        )
+    ] = 5,
+    as_of: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Data de corte informacional em formato ISO 8601 (`AAAA-MM-DD`). "
+                "Se omitido, considera a data e hora do momento da requisição (último dado disponível)."
+            ),
+            examples=["2025-12-31"]
+        )
+    ] = None,
+    include: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Parâmetro opcional de inclusão de blocos adicionais de resposta. "
+                "Informe `evidence_graph` para obter o grafo estruturado de proveniência lógica e documental."
+            ),
+            examples=["evidence_graph"]
+        )
+    ] = None,
 ) -> AnaliseFundamentalistaResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     if periodicidade == "annual" and base_periodo != "fy":
@@ -1592,13 +1656,29 @@ def obter_analise_fundamentalista(
     "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}",
     response_model=AnaliseFundamentalistaEvidenciaDetalhe,
     summary="Detalhar Evidência sob Demanda",
-    description="Retorna os detalhes factuais, contas e proveniência de uma evidência específica da companhia.",
+    description=(
+        "Resolve e detalha as informações lógicas, documentais e a proveniência factual de uma "
+        "determinada evidência acionada no relatório fundamentalista.\n\n"
+        "Esse endpoint funciona como o motor do *Audit Trail* da plataforma, permitindo ao usuário "
+        "conectar qualquer número ou sinal apresentado na tela ao documento oficial assinado "
+        "e protocolado na CVM (como DFP, ITR ou FRE).\n\n"
+        "**Segurança e Validação**:\n"
+        "- Valida se o `evidence_id` está no formato correto de dois pontos (`ev::{codigo_cvm}::{type}::{identifier}`).\n"
+        "- Garante que a evidência pertence de fato à companhia identificada na rota. Se houver divergência, retorna **403 Forbidden**.\n"
+        "- Se a evidência não existir ou o período for inconsistente, retorna **404 Not Found**."
+    ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseFundamentalistaEvidencia",
 )
 def obter_analise_fundamentalista_evidencia(
-    codigo_cvm: int,
-    evidence_id: str,
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM (5 ou 6 dígitos).", examples=[9512])],
+    evidence_id: Annotated[
+        str,
+        Path(
+            description="Identificador único e estável da evidência (ex: 'ev::9512::metric::receita_liquida::FY2025').",
+            examples=["ev::9512::metric::receita_liquida::FY2025"]
+        )
+    ],
     db: DbSession,
 ) -> AnaliseFundamentalistaEvidenciaDetalhe:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
@@ -1610,4 +1690,5 @@ def obter_analise_fundamentalista_evidencia(
         raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
 

@@ -839,25 +839,78 @@ class AnaliseRestatementsResposta(BaseModel):
 
 
 class CompactEvidenceRef(BaseModel):
-    id: str = Field(description="Identificador estável e determinístico da evidência.")
-    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de entidade da evidência.")
-    label: str = Field(description="Rótulo amigável em português para exibição.")
-    period_id: str | None = Field(default=None, description="Período associado à evidência, quando houver.")
+    """
+    Referência compacta de uma evidência factual mapeada no relatório.
+    
+    Utilizado pela UI para renderizar de forma rápida e contextualizada links ou dicas de tela
+    sobre a proveniência dos números e conclusões factuais expostos no relatório fundamentalista.
+    """
+    id: str = Field(
+        description="Identificador estável e determinístico da evidência (formato 'ev::{codigo_cvm}::{type}::{identifier}').",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
+        description="Tipo semântico da evidência: 'observation' (métrica), 'signal' (alerta), 'event' (fato/comunicado), 'document' (arquivo) ou 'restatement' (reapresentação)."
+    )
+    label: str = Field(
+        description="Rótulo legível por humanos formatado em português brasileiro para renderização imediata na UI.",
+        examples=["Valor de Receita Líquida no período FY2025"]
+    )
+    period_id: str | None = Field(
+        default=None,
+        description="Período canônico correspondente à evidência.",
+        examples=["FY2025"]
+    )
 
 
 class AnaliseEvidenceGraphNode(BaseModel):
-    id: str = Field(description="Identificador do nó.")
-    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de nó.")
-    label: str = Field(description="Rótulo curto em português.")
-    period_id: str | None = Field(default=None, description="Período correspondente.")
-    severity: str | None = Field(default=None, description="Severidade, aplicável a sinais/eventos.")
-    evidence_id: str | None = Field(default=None, description="Identificador correspondente na lista de evidências.")
+    """
+    Nó estruturado representando uma evidência factual ou documento na árvore de proveniência lógica.
+    """
+    id: str = Field(
+        description="Identificador exclusivo do nó (geralmente corresponde ao evidence_id ou ID do documento).",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
+        description="Tipo de nó que define o ícone e comportamento visual na visualização gráfica da UI."
+    )
+    label: str = Field(
+        description="Título ou rótulo textual do nó.",
+        examples=["Receita Líquida (FY2025)"]
+    )
+    period_id: str | None = Field(
+        default=None,
+        description="Período canônico do nó, se aplicável.",
+        examples=["FY2025"]
+    )
+    severity: str | None = Field(
+        default=None,
+        description="Classificação de gravidade ou severidade aplicável a sinais/eventos.",
+        examples=["warning"]
+    )
+    evidence_id: str | None = Field(
+        default=None,
+        description="Link cruzado para obter o detalhe completo da evidência pela API de auditoria.",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
 
 
 class AnaliseEvidenceGraphEdge(BaseModel):
-    id: str = Field(description="Identificador único da aresta.")
-    source: str = Field(description="Identificador do nó de origem.")
-    target: str = Field(description="Identificador do nó de destino.")
+    """
+    Aresta direcionada representando o relacionamento causal ou lógico entre dois nós de evidência.
+    """
+    id: str = Field(
+        description="Identificador único da aresta para controle de renderização.",
+        examples=["edge_ev::9512::metric::ebitda::FY2025_derived_ev::9512::metric::lucro_bruto::FY2025"]
+    )
+    source: str = Field(
+        description="ID do nó de origem da aresta (quem depende ou origina a relação).",
+        examples=["ev::9512::metric::ebitda::FY2025"]
+    )
+    target: str = Field(
+        description="ID do nó de destino (a evidência de suporte ou documento de base).",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
     relation: Literal[
         "derivada_de",
         "comparada_com",
@@ -865,96 +918,314 @@ class AnaliseEvidenceGraphEdge(BaseModel):
         "acionou_sinal",
         "reapresentada_por",
         "relacionada_a_evento",
-    ] = Field(description="Tipo de relação factual.")
+    ] = Field(
+        description="Conector semântico da relação física ou lógica entre os dados."
+    )
 
 
 class AnaliseEvidenceGraph(BaseModel):
-    nodes: list[AnaliseEvidenceGraphNode] = Field(default_factory=list)
-    edges: list[AnaliseEvidenceGraphEdge] = Field(default_factory=list)
+    """
+    Grafo direcionado e acíclico mapeando a linhagem de dados e proveniência documental de toda a análise.
+    """
+    nodes: list[AnaliseEvidenceGraphNode] = Field(
+        default_factory=list,
+        description="Lista de nós de dados, documentos e alertas que compõem a análise fundamentalista."
+    )
+    edges: list[AnaliseEvidenceGraphEdge] = Field(
+        default_factory=list,
+        description="Lista de conexões causais expressando como as métricas e conclusões foram derivadas."
+    )
 
 
 class AnaliseStagePontoPartida(BaseModel):
-    identidade_companhia: AnaliseCompanhiaResumo
-    recorte_efetivo: dict[str, object] = Field(description="Parâmetros de recortagem e materialização efetivos.")
-    periodos_disponiveis: list[AnalisePeriodoDisponivel] = Field(default_factory=list)
-    cobertura: list[AnaliseCoveragePeriodoItem] = Field(default_factory=list)
-    qualidade: AnaliseQualidadeResumo
-    auditor: str | None = Field(default=None, description="Nome do auditor cadastrado.")
-    cnpj_auditor: str | None = Field(default=None, description="CNPJ do auditor cadastrado.")
-    setor: str | None = Field(default=None, description="Setor de atividade cadastrado.")
-    controle: str | None = Field(default=None, description="Controle acionário cadastrado.")
-    situacao_registro: str | None = Field(default=None, description="Situação cadastral do registro.")
-    metricas_retrato_disponiveis: list[str] = Field(default_factory=list, description="Lista de métricas de retrato disponíveis.")
+    """
+    Etapa 1 (Ponto de Partida): Qualidade Cadastral e Cobertura de Dados.
+    
+    Traz informações básicas do emissor, histórico de auditoria externa, setor,
+    e a cobertura de dados cadastrada/identificada no pipeline de ingestão.
+    """
+    identidade_companhia: AnaliseCompanhiaResumo = Field(
+        description="Informações cadastrais e identificadores da companhia na CVM e CNPJ."
+    )
+    recorte_efetivo: dict[str, object] = Field(
+        description="Parâmetros de consulta e metadados sobre como este relatório foi estruturado pelo motor analítico.",
+        examples=[{
+            "escopo": "consolidated",
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "horizonte_anos": 5,
+            "resolution_mode": "canonical"
+        }]
+    )
+    periodos_disponiveis: list[AnalisePeriodoDisponivel] = Field(
+        default_factory=list,
+        description="Todos os períodos temporais canônicos identificados como disponíveis na base do Tucano CVM."
+    )
+    cobertura: list[AnaliseCoveragePeriodoItem] = Field(
+        default_factory=list,
+        description="Diagnóstico físico de cobertura do pipeline detalhando a presença de dados brutos e materializados por período."
+    )
+    qualidade: AnaliseQualidadeResumo = Field(
+        description="Resumo de completude, comparabilidade e consistência dos relatórios entregues."
+    )
+    auditor: str | None = Field(
+        default=None,
+        description="Nome da empresa de auditoria independente registrada para o último período.",
+        examples=["PricewaterhouseCoopers Auditores Independentes Ltda."]
+    )
+    cnpj_auditor: str | None = Field(
+        default=None,
+        description="CNPJ da empresa de auditoria registrada.",
+        examples=["59281253000123"]
+    )
+    setor: str | None = Field(
+        default=None,
+        description="Setor de atividade oficial cadastrado na CVM.",
+        examples=["Petróleo, Gás e Biocombustíveis"]
+    )
+    controle: str | None = Field(
+        default=None,
+        description="Classificação do tipo de controle acionário declarado.",
+        examples=["ESTATAL"]
+    )
+    situacao_registro: str | None = Field(
+        default=None,
+        description="Situação cadastral atual de registro na CVM.",
+        examples=["ATIVO"]
+    )
+    metricas_retrato_disponiveis: list[str] = Field(
+        default_factory=list,
+        description="Lista de métricas de retrato (balanço/instante) que possuem dados cadastrados consistentes."
+    )
 
 
 class AnaliseStageResultadoEficiencia(BaseModel):
-    series: list[AnaliseSeriesObservation] = Field(default_factory=list)
-    comparacoes: list[AnaliseComparacaoItem] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
+    """
+    Etapa 2 (Resultado e Eficiência): Desempenho Operacional e Rentabilidade.
+    
+    Foca na performance econômica e rentabilidade, agrupando dados históricos e variações
+    anuais/trimestrais para receitas, custos, margens e lucros.
+    """
+    series: list[AnaliseSeriesObservation] = Field(
+        default_factory=list,
+        description="Séries históricas de métricas de fluxo de resultado (ex: receita_liquida, ebit, lucro_liquido)."
+    )
+    comparacoes: list[AnaliseComparacaoItem] = Field(
+        default_factory=list,
+        description="Comparações prontas YoY/QoQ e taxas de crescimento CAGR calculadas para as métricas de resultado."
+    )
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="Identificadores de evidência contidos nesta etapa para rápida auditoria visual pela UI."
+    )
 
 
 class AnaliseStageCaixaSolidez(BaseModel):
-    series: list[AnaliseSeriesObservation] = Field(default_factory=list)
-    comparacoes: list[AnaliseComparacaoItem] = Field(default_factory=list)
-    sinais: list[AnaliseSignal] = Field(default_factory=list)
-    reapresentacoes: list[AnaliseRestatementItem] = Field(default_factory=list)
-    evidence_ids: list[str] = Field(default_factory=list)
+    """
+    Etapa 3 (Caixa e Solidez): Geração de Caixa, Endividamento e Liquidez.
+    
+    Apresenta métricas patrimoniais e de caixa, alertas automáticos de alavancagem
+    e histórico de reapresentações financeiras que afetaram o fluxo de caixa.
+    """
+    series: list[AnaliseSeriesObservation] = Field(
+        default_factory=list,
+        description="Séries históricas de métricas de caixa, investimentos e passivos financeiros."
+    )
+    comparacoes: list[AnaliseComparacaoItem] = Field(
+        default_factory=list,
+        description="Comparações prontas YoY/QoQ para métricas de endividamento e liquidez."
+    )
+    sinais: list[AnaliseSignal] = Field(
+        default_factory=list,
+        description="Sinais de alerta determinísticos acionados para endividamento, liquidez ou caixa operacional negativo."
+    )
+    reapresentacoes: list[AnaliseRestatementItem] = Field(
+        default_factory=list,
+        description="Histórico de reapresentações documentais entregues que afetaram contas do pilar de caixa."
+    )
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="Identificadores de evidência contidos nesta etapa."
+    )
 
 
 class AnaliseStageGovernancaConclusao(BaseModel):
-    governanca: list[AnaliseTemporalObservation] = Field(default_factory=list)
-    pessoas: list[AnaliseTemporalObservation] | None = Field(default=None, description="Dados de pessoas e remuneração, se disponíveis.")
-    eventos_ipe: list[AnaliseEvento] = Field(default_factory=list)
-    vlmo_disponivel: bool = Field(description="Indica se há dados cadastrados de VLMO.")
-    estrutura_controle: str | None = Field(default=None, description="Estrutura de controle societário.")
-    sinais: list[AnaliseSignal] = Field(default_factory=list)
-    problemas_qualidade: list[AnaliseIssue] = Field(default_factory=list)
-    reapresentacoes: list[AnaliseRestatementItem] = Field(default_factory=list)
-    limites_analiticos: list[str] = Field(default_factory=list, description="Limitações e avisos de consistência.")
-    evidence_ids: list[str] = Field(default_factory=list)
+    """
+    Etapa 4 (Governança e Conclusão): Práticas de Governança, Pessoas, Eventos e Limites.
+    
+    Unifica dados de práticas de governança corporativa, estatísticas de remuneração de órgãos,
+    IPEs e fatos relevantes de canais oficiais, consistência de dados do VLMO, problemas cadastrais,
+    e limites analíticos identificados.
+    """
+    governanca: list[AnaliseTemporalObservation] = Field(
+        default_factory=list,
+        description="Séries históricas de governança corporativa baseadas no informe CGVN."
+    )
+    pessoas: list[AnaliseTemporalObservation] | None = Field(
+        default=None,
+        description="Séries históricas de remuneração média de administradores e quadro de funcionários extraídos do Formulário de Referência (FRE)."
+    )
+    eventos_ipe: list[AnaliseEvento] = Field(
+        default_factory=list,
+        description="Lista ordenada de fatos relevantes e comunicados de IPE cadastrados."
+    )
+    vlmo_disponivel: bool = Field(
+        description="Sinaliza a presença de dados estruturados de negociação de administradores e pessoas ligadas (VLMO)."
+    )
+    estrutura_controle: str | None = Field(
+        default=None,
+        description="Descrição sintética da estrutura de controle atual.",
+        examples=["Controle Definido / Estatal"]
+    )
+    sinais: list[AnaliseSignal] = Field(
+        default_factory=list,
+        description="Sinais de governança e controles acionados."
+    )
+    problemas_qualidade: list[AnaliseIssue] = Field(
+        default_factory=list,
+        description="Lista detalhada de inconsistências ou omissões cadastrais/financeiras mapeadas."
+    )
+    reapresentacoes: list[AnaliseRestatementItem] = Field(
+        default_factory=list,
+        description="Outras reapresentações financeiras e IPEs fora do pilar de caixa."
+    )
+    limites_analiticos: list[str] = Field(
+        default_factory=list,
+        description="Avisos legíveis consolidados pelo resolvedor sobre restrições e limites dos dados.",
+        examples=[["[WARNING] Dados ausentes para o ano fiscal de 2021"]]
+    )
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="Identificadores de evidência contidos nesta etapa."
+    )
 
 
 class AnaliseFundamentalistaEtapas(BaseModel):
-    ponto_partida: AnaliseStagePontoPartida
-    resultado_eficiencia: AnaliseStageResultadoEficiencia
-    caixa_solidez: AnaliseStageCaixaSolidez
-    governanca_conclusao: AnaliseStageGovernancaConclusao
+    """
+    Agrupador das quatro etapas lógicas que constituem a jornada analítica da companhia.
+    """
+    ponto_partida: AnaliseStagePontoPartida = Field(description="Etapa 1: Qualidade cadastral e cobertura física.")
+    resultado_eficiencia: AnaliseStageResultadoEficiencia = Field(description="Etapa 2: Performance de resultado e rentabilidade.")
+    caixa_solidez: AnaliseStageCaixaSolidez = Field(description="Etapa 3: Fluxos de caixa, liquidez e endividamento.")
+    governanca_conclusao: AnaliseStageGovernancaConclusao = Field(description="Etapa 4: Práticas de governança, remuneração, eventos IPE e integridade.")
 
 
 class AnaliseFundamentalistaResposta(BaseModel):
-    report_id: str = Field(description="Identificador determinístico único do relatório.")
-    report_version: str = Field(description="Versão de cálculo/layout do relatório.")
-    companhia: AnaliseCompanhiaResumo
-    contexto: AnaliseContextoPadrao
-    qualidade: AnaliseQualidadeResumo
-    resolution: AnaliseResolutionMetadata
-    metodologia: dict[str, object] = Field(description="Premissas metodológicas do cálculo.")
-    etapas: AnaliseFundamentalistaEtapas
-    evidence_index: dict[str, CompactEvidenceRef] = Field(default_factory=dict)
-    evidence_graph: AnaliseEvidenceGraph | None = Field(default=None, description="Grafo de evidências opcional.")
+    """
+    Payload unificado e estruturado do Relatório de Análise Fundamentalista.
+    """
+    report_id: str = Field(
+        description="Identificador determinístico único do relatório gerado com base nos filtros aplicados.",
+        examples=["rep_9512_consolidated_annual_fy_5_latest_2026.2_runtime"]
+    )
+    report_version: str = Field(
+        description="Versão lógica do formato/layout do relatório para compatibilidade de renderização na UI.",
+        examples=["1.0.0"]
+    )
+    companhia: AnaliseCompanhiaResumo = Field(description="Cadastral básico da companhia analisada.")
+    contexto: AnaliseContextoPadrao = Field(description="Contexto informacional padrão (período ativo sugerido, escopo).")
+    qualidade: AnaliseQualidadeResumo = Field(description="Métricas agregadas de qualidade dos dados para o recorte.")
+    resolution: AnaliseResolutionMetadata = Field(description="Metadados indicando a origem e método de cálculo da resposta.")
+    metodologia: dict[str, object] = Field(
+        description="Resumo metodológico declarativo das regras aplicadas para auditoria externa.",
+        examples=[{
+            "motor_versao": "2026.2",
+            "etapas_definicao": {
+                "ponto_partida": "Identidade e qualidade cadastral/cobertura"
+            }
+        }]
+    )
+    etapas: AnaliseFundamentalistaEtapas = Field(description="Pilares de análise com dados históricos estruturados.")
+    evidence_index: dict[str, CompactEvidenceRef] = Field(
+        default_factory=dict,
+        description="Mapa chave-valor indexando cada evidence_id para sua referência compacta amigável."
+    )
+    evidence_graph: AnaliseEvidenceGraph | None = Field(
+        default=None,
+        description="Grafo de linhagem factual contendo nós e arestas direcionadas (presente apenas se include=evidence_graph)."
+    )
 
 
 class AnaliseEvidenceDocumentDetails(BaseModel):
-    form: AnaliseForm = Field(description="Formulário do documento.")
-    document_id: int | None = Field(default=None, description="ID do documento.")
-    version: int | None = Field(default=None, description="Versão do documento.")
-    filed_at: date | None = Field(default=None, description="Data de entrega do documento.")
-    link_download: str | None = Field(default=None, description="Link para download oficial na CVM.")
+    """
+    Metadados de auditoria e proveniência documental de um formulário oficial entregue na CVM.
+    """
+    form: AnaliseForm = Field(description="Formulário CVM original: 'DFP', 'ITR', 'FRE', 'FCA' ou 'CGVN'.")
+    document_id: int | None = Field(
+        default=None,
+        description="Identificador único oficial do documento no repositório da CVM.",
+        examples=[95431]
+    )
+    version: int | None = Field(
+        default=None,
+        description="Versão oficial do documento declarada pelo emissor (ex: retificações geram versão > 1).",
+        examples=[1]
+    )
+    filed_at: date | None = Field(
+        default=None,
+        description="Data oficial de entrega e protocolo do documento na CVM.",
+        examples=["2025-03-15"]
+    )
+    link_download: str | None = Field(
+        default=None,
+        description="URL direta de download do ZIP/PDF oficial nos servidores públicos da CVM.",
+        examples=["https://dados.cvm.gov.br/dfp/2025/v1.zip"]
+    )
 
 
 class AnaliseEvidenceRelationship(BaseModel):
-    target_id: str = Field(description="Identificador da evidência/aresta alvo.")
-    relation_type: str = Field(description="Descrição da relação.")
-    note: str = Field(description="Explicação da relação.")
+    """
+    Relacionamento lógico documentado para fins de explicabilidade acionável de uma evidência.
+    """
+    target_id: str = Field(
+        description="ID da evidência ou fórmula relacionada de destino.",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
+    relation_type: str = Field(
+        description="Descrição técnica do conector lógico.",
+        examples=["derivada_de"]
+    )
+    note: str = Field(
+        description="Mensagem em português brasileiro detalhando o motivo ou premissa matemática da conexão.",
+        examples=["Calculado como: receita_liquida - custo_vendas"]
+    )
 
 
 class AnaliseFundamentalistaEvidenciaDetalhe(BaseModel):
-    evidence_id: str = Field(description="Identificador único da evidência.")
-    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de evidência.")
-    label: str = Field(description="Título amigável.")
-    period_id: str | None = Field(default=None, description="Período correspondente.")
-    metric: AnaliseMetricaCatalogoItem | None = Field(default=None, description="Catálogo da métrica, se aplicável.")
-    observation: AnaliseSeriesObservation | None = Field(default=None, description="Valor canônico e proveniência, se aplicável.")
-    document: AnaliseEvidenceDocumentDetails | None = Field(default=None, description="Detalhes documentais, se aplicável.")
-    relationships: list[AnaliseEvidenceRelationship] = Field(default_factory=list, description="Lista de relacionamentos a partir deste fato.")
+    """
+    Payload completo de auditoria sob demanda para uma evidência factual específica.
+    """
+    evidence_id: str = Field(
+        description="Identificador único e estável da evidência consultada.",
+        examples=["ev::9512::metric::receita_liquida::FY2025"]
+    )
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
+        description="Tipo semântico da evidência, definindo o preenchimento dos blocos opcionais."
+    )
+    label: str = Field(
+        description="Rótulo formatado para exibição na UI.",
+        examples=["Receita Líquida no período FY2025"]
+    )
+    period_id: str | None = Field(
+        default=None,
+        description="Período canônico correspondente à evidência.",
+        examples=["FY2025"]
+    )
+    metric: AnaliseMetricaCatalogoItem | None = Field(
+        default=None,
+        description="Detalhes do catálogo de métricas (nome, fórmula, contas candidatas) se type='observation'."
+    )
+    observation: AnaliseSeriesObservation | None = Field(
+        default=None,
+        description="Fato ou ponto financeiro correspondente (valor, unidade, escala, proveniência) se type='observation'."
+    )
+    document: AnaliseEvidenceDocumentDetails | None = Field(
+        default=None,
+        description="Metadados e link do documento de origem oficial na CVM."
+    )
+    relationships: list[AnaliseEvidenceRelationship] = Field(
+        default_factory=list,
+        description="Caminhos direcionados demonstrando a derivação da evidência a partir de outras métricas ou fatos de suporte."
+    )
+
 
