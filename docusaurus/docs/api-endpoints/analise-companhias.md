@@ -371,11 +371,73 @@ Parâmetros:
 
 O payload de resposta contém:
 - `report_id`: identificador determinístico único para o recorte
-- `report_version`: versão do cálculo/motor analítico
+- `report_version`: versão do layout do relatório; campos novos são aditivos
 - `companhia`, `contexto`, `qualidade`, `resolution`
 - `etapas`: objeto com `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao`
 - `evidence_index`: mapa chave-valor de referências compactas para todas as evidências acionadas no relatório
 - `evidence_graph`: grafo estruturado de arestas e nós expressando relações factuais de dados e documentos (quando `include=evidence_graph`)
+- `event_buckets`: agrupamentos de eventos por ano ou mês, com contadores por família e severidade
+- `evidence_dossier`: dossiê factual priorizado pelo backend para orientar a UI sem inferência no frontend
+
+Campos adicionais em `etapas.caixa_solidez`:
+
+- `ponte_caixa`: lista por período com itens de ponte de caixa. Cada item traz `metric_id`, `label`, `value`, `unit`, `role` (`opening`, `operating_cash`, `capex`, `adjustment` ou `free_cash`) e `evidence_ids`. Quando a ponte não é compatível com os componentes disponíveis, o período retorna `unavailable_reason`.
+- `painel_posicao_financeira`: separa `monetary_series` de `ratio_series`, preservando o contrato completo de `AnaliseSeriesObservation`.
+
+As contas de `changed_accounts` em reapresentações incluem metadados de exibição e linhagem factual: `account_label`, `statement_label`, `unit`, `display_rank`, `is_focus`, `reason_if_available` e `evidence_id`.
+
+Exemplos de uso:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=5"
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=quarterly&base_periodo=ytd&escopo=individual&as_of=2025-11-15"
+```
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`
+
+Retorna a lista detalhada de eventos oficiais vinculados ao relatório fundamentalista. Use este endpoint para abrir um bucket retornado em `event_buckets` sem carregar todos os eventos no relatório principal.
+
+Parâmetros:
+
+| Nome | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `escopo` | string | `consolidated` | Mesmo recorte societário do relatório principal |
+| `periodicidade` | string | `annual` | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy` | `fy`, `quarter` ou `ytd` |
+| `horizonte_anos` | integer | `5` | Janela anual considerada |
+| `as_of` | string | ausente | Data máxima de conhecimento informacional |
+| `bucket` | string | ausente | Bucket específico em `YYYY` ou `YYYY-MM` |
+| `familias` | array | ausente | Famílias de evento a retornar |
+| `severidades` | array | ausente | Severidades a retornar |
+| `cursor` | string | ausente | Cursor opaco de paginação |
+| `limit` | integer | `25` | Tamanho da página, máximo 100 |
+
+Resposta:
+
+- `items`: lista de `AnaliseEvento`, ordenada do mais recente para o mais antigo e nunca após `as_of`
+- `next_cursor`: cursor opaco para a próxima página, ou `null`
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha`
+
+Retorna uma trilha focal curta para uma evidência específica. O endpoint é recomendado para interações de drill-down na UI porque limita a profundidade e o volume da resposta.
+
+Parâmetros:
+
+| Nome | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `depth` | integer | `1` | Profundidade fixa do contrato atual |
+| `limit` | integer | `12` | Limite máximo de nós |
+| `types` | array | ausente | Filtra tipos: `observation`, `signal`, `event`, `document` ou `restatement` |
+
+Resposta:
+
+- `root_evidence_id`: evidência raiz solicitada
+- `nodes`: nós factuais da trilha
+- `edges`: relações factuais (`derivada_de`, `comparada_com`, `reportada_em`, `acionou_sinal`, `reapresentada_por`, `relacionada_a_evento`)
+- `truncated`: indica se a resposta foi limitada por profundidade ou quantidade de nós
 
 ## `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}`
 
@@ -386,4 +448,3 @@ O endpoint valida se a evidência de fato pertence à companhia solicitada. Reto
 - Contas CVM e demonstração de origem
 - Metadados do documento/formulário entregue na CVM com link de download direto
 - Relação com outras comparações, sinais ou reapresentações do relatório
-

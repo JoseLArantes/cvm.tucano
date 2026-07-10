@@ -9,19 +9,26 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
-## 2026-07-10 - Análise Fundamentalista Explicável
+## 2026-07-10 - Evoluções Aditivas da Análise Fundamentalista
 
-### Endpoints novos
+### Superfícies afetadas
 
-- `GET /analise/companhias/{codigo_cvm}/fundamentalista` (Relatório fundamentalista completo)
-- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}` (Detalhar evidência sob demanda)
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}`
 
 ### Comportamento entregue
 
-- O relatório de análise fundamentalista unifica a leitura analítica em uma resposta composta por quatro pilares: `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao`.
-- Retorna `evidence_index` com referências compactas mapeando IDs determinísticos de evidências.
-- Suporta parâmetro `include=evidence_graph` para retornar um grafo completo com nós e arestas representando relações factuais entre dados, documentos, sinais e restatements.
-- Rota de evidências sob demanda resolve contas CVM, metadados do documento e links para download direto na CVM, com validação de pertencimento à companhia.
+- O relatório de análise fundamentalista continua compatível e passa a retornar campos aditivos para a revisão de UX.
+- `etapas.caixa_solidez.ponte_caixa` entrega a ponte de caixa calculada pelo backend por período, com `role`, `value`, `unit` e `evidence_ids`. Quando não há componentes compatíveis, o período pode retornar `unavailable_reason`.
+- `etapas.caixa_solidez.painel_posicao_financeira` separa `monetary_series` de `ratio_series`, preservando `AnaliseSeriesObservation` completo.
+- `changed_accounts` em reapresentações passa a incluir `account_label`, `statement_label`, `unit`, `display_rank`, `is_focus`, `reason_if_available` e `evidence_id`.
+- `event_buckets` agrega eventos por período, família e severidade. O detalhamento paginado fica em `GET /fundamentalista/eventos`.
+- `evidence_dossier` retorna evidências factuais agrupadas em `available`, `attention` e `limitation`.
+- `GET /fundamentalista/evidencias/{evidence_id}/trilha` retorna uma trilha focal limitada a `depth=1` e até 12 nós, usando relações factuais estáveis.
+- O frontend deve tratar `evidence_id` como opaco e não deve inferir ponte de caixa, agrupamentos financeiros, ranking de contas, prioridade de evidências ou relações entre nós.
+- O backend não expõe score, recomendação, preço-alvo, previsão ou classificação de companhia.
 
 ## 2026-07-09 - Datas oficiais no Radar Informativo Tucano CVM
 

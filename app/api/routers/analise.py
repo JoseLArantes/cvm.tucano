@@ -24,6 +24,8 @@ from app.schemas.analise import (
     AnaliseCoverageResposta,
     AnaliseEscopo,
     AnaliseEventosResposta,
+    AnaliseEvidenceTrailResponse,
+    AnaliseFundamentalistaEventosResposta,
     AnaliseFundamentalistaEvidenciaDetalhe,
     AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
@@ -76,7 +78,9 @@ from app.services.analise import (
     obter_estado_gate_materializacao,
     obter_eventos,
     obter_evidencia_detalhe,
+    obter_evidencia_trilha,
     obter_fundamentalista,
+    obter_fundamentalista_eventos,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
@@ -1464,9 +1468,13 @@ def obter_analise_sinais(
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseEventos",
 )
-def obter_analise_eventos(codigo_cvm: int, db: DbSession) -> AnaliseEventosResposta:
+def obter_analise_eventos(
+    codigo_cvm: int,
+    db: DbSession,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+) -> AnaliseEventosResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
-    return obter_eventos(db, companhia)
+    return obter_eventos(db, companhia, as_of=date.fromisoformat(as_of) if as_of else None)
 
 
 @router.get(
@@ -1565,8 +1573,8 @@ def obter_analise_restatements(
         "**Comportamento de Resolução (Resolution Mode)**:\n"
         "- Se os dados analíticos canônicos estiverem materializados para a companhia, o endpoint retorna em modo `canonical` (alta performance, leitura direta).\n"
         "- Caso contrário, o motor executa o cálculo sob demanda em modo `runtime_fallback` a partir do staging promovido relacional.\n\n"
-        "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis no formato `ev::{codigo_cvm}::{type}::{identifier}`.\n"
-        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem causal entre os fatos."
+        "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis e opacas no formato `ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`.\n"
+        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseFundamentalista",
@@ -1653,6 +1661,96 @@ def obter_analise_fundamentalista(
 
 
 @router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/eventos",
+    response_model=AnaliseFundamentalistaEventosResposta,
+    summary="Eventos do Relatório Fundamentalista",
+    description=(
+        "Retorna eventos oficiais relacionados ao relatório fundamentalista em ordem do mais recente para o mais antigo. "
+        "A resposta respeita `escopo`, `periodicidade`, `base_periodo`, `horizonte_anos` e `as_of`, e usa cursor opaco para paginação. "
+        "Use este endpoint para detalhar buckets agregados retornados no relatório principal."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEventos",
+)
+def obter_analise_fundamentalista_eventos(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM.", examples=[9512])],
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade dos pontos históricos do contexto.")] = "annual",
+    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal do contexto.")] = "fy",
+    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo para seleção de eventos.", ge=1, le=20)] = 5,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    bucket: Annotated[str | None, Query(description="Bucket temporal específico no formato `YYYY` ou `YYYY-MM`.")] = None,
+    familias: Annotated[list[str] | None, Query(description="Famílias de evento a filtrar, por exemplo `IPE` ou `FRE`.")] = None,
+    severidades: Annotated[list[str] | None, Query(description="Severidades a filtrar, por exemplo `info`, `warning` ou `critical`.")] = None,
+    cursor: Annotated[str | None, Query(description="Cursor opaco retornado pela página anterior.")] = None,
+    limit: Annotated[int, Query(description="Quantidade máxima de eventos por página.", ge=1, le=100)] = 25,
+) -> AnaliseFundamentalistaEventosResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    if periodicidade == "annual" and base_periodo != "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'annual', a base de periodo deve ser 'fy'.")
+    if periodicidade == "quarterly" and base_periodo == "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'quarterly', a base de periodo deve ser 'quarter' ou 'ytd'.")
+    try:
+        return obter_fundamentalista_eventos(
+            db,
+            companhia,
+            scope=escopo,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=date.fromisoformat(as_of) if as_of else None,
+            bucket=bucket,
+            familias=familias,
+            severidades=severidades,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha",
+    response_model=AnaliseEvidenceTrailResponse,
+    summary="Trilha Focal de Evidência",
+    description=(
+        "Retorna uma trilha factual curta ao redor de uma evidência do relatório fundamentalista. "
+        "O `evidence_id` é opaco, a profundidade é limitada a 1 e a resposta nunca passa de 12 nós."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEvidenciaTrilha",
+)
+def obter_analise_fundamentalista_evidencia_trilha(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM.", examples=[9512])],
+    evidence_id: Annotated[str, Path(description="Identificador opaco da evidência raiz.")],
+    db: DbSession,
+    depth: Annotated[int, Query(description="Profundidade da trilha focal. Neste contrato, apenas `1` é aceito.", ge=1, le=1)] = 1,
+    limit: Annotated[int, Query(description="Limite máximo de nós na trilha.", ge=1, le=12)] = 12,
+    types: Annotated[list[str] | None, Query(description="Tipos de nós permitidos: observation, signal, event, document ou restatement.")] = None,
+) -> AnaliseEvidenceTrailResponse:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    allowed = {"observation", "signal", "event", "document", "restatement"}
+    if types and any(item not in allowed for item in types):
+        raise HTTPException(status_code=422, detail="Tipo de nó de evidência invalido.")
+    try:
+        return obter_evidencia_trilha(
+            db,
+            companhia,
+            evidence_id,
+            depth=depth,
+            limit=limit,
+            types=cast(list[Any], types) if types else None,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get(
     "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}",
     response_model=AnaliseFundamentalistaEvidenciaDetalhe,
     summary="Detalhar Evidência sob Demanda",
@@ -1663,7 +1761,7 @@ def obter_analise_fundamentalista(
         "conectar qualquer número ou sinal apresentado na tela ao documento oficial assinado "
         "e protocolado na CVM (como DFP, ITR ou FRE).\n\n"
         "**Segurança e Validação**:\n"
-        "- Valida se o `evidence_id` está no formato correto de dois pontos (`ev::{codigo_cvm}::{type}::{identifier}`).\n"
+        "- Valida se o `evidence_id` está no formato correto de dois pontos (`ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`).\n"
         "- Garante que a evidência pertence de fato à companhia identificada na rota. Se houver divergência, retorna **403 Forbidden**.\n"
         "- Se a evidência não existir ou o período for inconsistente, retorna **404 Not Found**."
     ),
@@ -1675,8 +1773,8 @@ def obter_analise_fundamentalista_evidencia(
     evidence_id: Annotated[
         str,
         Path(
-            description="Identificador único e estável da evidência (ex: 'ev::9512::metric::receita_liquida::FY2025').",
-            examples=["ev::9512::metric::receita_liquida::FY2025"]
+            description="Identificador único e estável da evidência. Deve ser tratado de forma opaca pelo cliente (ex: 'ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025').",
+            examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
         )
     ],
     db: DbSession,
@@ -1690,5 +1788,3 @@ def obter_analise_fundamentalista_evidencia(
         raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
-
-

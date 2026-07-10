@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -74,12 +75,13 @@ def _row(
     start: date | None = None,
     end: date | None = None,
     statement_type: str = "demonstracao_resultado",
+    scope: str = "consolidado",
 ) -> DemonstracaoFinanceira:
     return DemonstracaoFinanceira(
         companhia_id=cia.id,
         tipo_formulario=form,
         tipo_demonstracao=statement_type,
-        escopo_demonstracao="consolidado",
+        escopo_demonstracao=scope,
         cnpj_companhia=cia.cnpj_companhia,
         codigo_cvm=cia.codigo_cvm,
         data_referencia=ref,
@@ -209,6 +211,14 @@ def _seed_analise_v2(db: Session) -> Companhia:
         _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.11", value="7000000", start=date(2025, 7, 1), end=date(2025, 9, 30)),
         _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.01", value="120000000", start=date(2024, 7, 1), end=date(2024, 9, 30)),
         _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.11", value="18000000", start=date(2024, 7, 1), end=date(2024, 9, 30)),
+
+        # Seed rows for scope="individual" YTD Q3
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.01", value="350000000", start=date(2025, 1, 1), end=date(2025, 9, 30), scope="individual"),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.05", value="82000000", start=date(2025, 1, 1), end=date(2025, 9, 30), scope="individual"),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.11", value="22000000", start=date(2025, 1, 1), end=date(2025, 9, 30), scope="individual"),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="1.01.01", value="34000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2025, 9, 30), scope="individual"),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="2.01.04", value="36500000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2025, 9, 30), scope="individual"),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="2.02.01", value="87500000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2025, 9, 30), scope="individual"),
     ]
     db.add_all(rows)
 
@@ -252,7 +262,7 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
 
     # 3. Assert response structure
     assert "report_id" in data
-    assert data["report_version"] == "1.0.0"
+    assert data["report_version"] == "1.1.0"
     assert data["companhia"]["codigo_cvm"] == cia.codigo_cvm
     assert data["resolution"]["mode"] == "runtime_fallback"
 
@@ -281,15 +291,40 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
     cash_metric_ids = {obs["metric_id"] for obs in caixa["series"]}
     assert "caixa_operacional" in cash_metric_ids
     assert "capex" in cash_metric_ids
+    assert caixa["ponte_caixa"]
+    available_bridge = next(item for item in caixa["ponte_caixa"] if item["items"])
+    bridge_roles = {item["role"] for item in available_bridge["items"]}
+    assert {"operating_cash", "capex", "free_cash"}.issubset(bridge_roles)
+    assert all(item["evidence_ids"] for item in available_bridge["items"])
+    painel = caixa["painel_posicao_financeira"]
+    assert painel["monetary_series"]
+    assert all(obs["unit"] == "BRL" for obs in painel["monetary_series"])
+    assert painel["ratio_series"]
+    assert all(obs["unit"] in {"ratio", "percentage_point", "index"} for obs in painel["ratio_series"])
 
     # Stage 4: Governança e Conclusão
     gov = etapas["governanca_conclusao"]
     assert len(gov["eventos_ipe"]) > 0
     assert gov["eventos_ipe"][0]["family"] == "IPE"
+    restatement_accounts = [
+        account
+        for item in caixa["reapresentacoes"] + gov["reapresentacoes"]
+        for account in item["changed_accounts"]
+    ]
+    assert restatement_accounts
+    assert all(account["display_rank"] > 0 for account in restatement_accounts)
+    assert all("account_label" in account for account in restatement_accounts)
+    assert all("statement_label" in account for account in restatement_accounts)
+    assert all("is_focus" in account for account in restatement_accounts)
 
     # Evidence index
     assert "evidence_index" in data
     assert len(data["evidence_index"]) > 0
+    assert data["event_buckets"]
+    assert data["event_buckets"][0]["total"] >= 1
+    assert data["evidence_dossier"]
+    dossier_groups = {item["group"] for item in data["evidence_dossier"]}
+    assert {"available", "attention"}.issubset(dossier_groups)
 
 
 def test_fundamentalista_canonical_mode(client: TestClient, db_session: Session) -> None:
@@ -387,6 +422,47 @@ def test_fundamentalista_evidencias_detail(client: TestClient, db_session: Sessi
     assert ev_data["observation"] is not None
     assert ev_data["document"] is not None
 
+    trail_response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/evidencias/{metric_ev_id}/trilha",
+        headers=headers,
+    )
+    assert trail_response.status_code == 200
+    trail = trail_response.json()
+    assert trail["root_evidence_id"] == metric_ev_id
+    assert len(trail["nodes"]) >= 1
+    assert len(trail["nodes"]) <= 12
+
+    receita_ev_id = [e_id for e_id in evidence_ids if "::metric::" in e_id and "::receita_liquida::" in e_id][0]
+    isolated_response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/evidencias/{receita_ev_id}/trilha",
+        params={"types": ["signal"]},
+        headers=headers,
+    )
+    assert isolated_response.status_code == 200
+    assert isolated_response.json()["nodes"] == []
+
+
+def test_fundamentalista_cash_bridge_unavailable_when_component_missing(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+    db_session.query(DemonstracaoFinanceira).filter(
+        DemonstracaoFinanceira.codigo_cvm == cia.codigo_cvm,
+        DemonstracaoFinanceira.codigo_conta == "6.02.01",
+    ).delete(synchronize_session=False)
+    db_session.commit()
+
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={"periodicidade": "annual", "base_periodo": "fy", "horizonte_anos": 5},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    bridges = data["etapas"]["caixa_solidez"]["ponte_caixa"]
+    unavailable = [item for item in bridges if item["unavailable_reason"]]
+    assert unavailable
+    assert unavailable[0]["unavailable_reason"]["reason_code"] == "MISSING_CASH_COMPONENT"
+
 
 def test_fundamentalista_evidencias_authorization_validation(client: TestClient, db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
@@ -401,3 +477,128 @@ def test_fundamentalista_evidencias_authorization_validation(client: TestClient,
     )
     # Should return 403 Forbidden because it doesn't belong to the requested company
     assert response.status_code == 403
+
+
+def test_fundamentalista_as_of_events_and_context_propagation(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+
+    # 1. Fetch report with as_of = 2025-06-01
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "as_of": "2025-06-01"
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # The IPE event delivered on 2025-11-20 should NOT be present (since as_of is 2025-06-01)
+    eventos_ipe = data["etapas"]["governanca_conclusao"]["eventos_ipe"]
+    ipe_titles = {evt["title"] for evt in eventos_ipe}
+    assert "Atualização operacional" not in ipe_titles
+
+    # Check evidence ID structure is: ev::{codigo_cvm}::metric::consolidated::2025-06-01::fy::...
+    evidence_ids = list(data["evidence_index"].keys())
+    metric_ev_ids = [e_id for e_id in evidence_ids if "::metric::" in e_id]
+    assert len(metric_ev_ids) > 0
+    
+    first_ev_id = metric_ev_ids[0]
+    assert "::consolidated::2025-06-01::fy::" in first_ev_id
+
+    # 2. Query evidence detail for this specific context-propagated ID
+    ev_response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/evidencias/{first_ev_id}",
+        headers=headers,
+    )
+    assert ev_response.status_code == 200
+    ev_data = ev_response.json()
+    assert ev_data["evidence_id"] == first_ev_id
+
+
+def test_fundamentalista_eventos_endpoint_filters_and_paginates(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/eventos",
+        params={
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "horizonte_anos": 5,
+            "bucket": "2025",
+            "familias": ["IPE"],
+            "severidades": ["warning"],
+            "limit": 1,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["items"]
+    assert data["items"][0]["family"] == "IPE"
+    assert data["items"][0]["severity"] == "warning"
+    assert data["items"][0]["occurred_at"] <= "2026-07-10"
+    assert data["next_cursor"] is None
+
+
+def test_fundamentalista_quarterly_ytd_context_propagation(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+
+    # 1. Fetch report with scope=individual, base_periodo=ytd, and as_of historical (after filing on 2025-11-08)
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={
+            "periodicidade": "quarterly",
+            "base_periodo": "ytd",
+            "escopo": "individual",
+            "as_of": "2025-11-15"
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify context resolution metadata
+    assert data["contexto"]["escopo"] == "individual"
+    
+    # Locate a YTD period evidence id in the index (e.g. for period_id = "2025-YTDQ3")
+    evidence_ids = list(data["evidence_index"].keys())
+    ytd_metric_ev_ids = [e_id for e_id in evidence_ids if "::metric::" in e_id and "2025-YTDQ3" in e_id]
+    assert len(ytd_metric_ev_ids) > 0
+
+    first_ytd_ev_id = ytd_metric_ev_ids[0]
+    # Check that it propagated scope, as_of and base_periodo
+    assert "::individual::2025-11-15::ytd::" in first_ytd_ev_id
+
+    # 2. Query evidence detail for this YTD context-propagated ID
+    ev_response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/evidencias/{first_ytd_ev_id}",
+        headers=headers,
+    )
+    assert ev_response.status_code == 200
+    ev_data = ev_response.json()
+    assert ev_data["evidence_id"] == first_ytd_ev_id
+    assert ev_data["period_id"] == "2025-YTDQ3"
+    assert ev_data["observation"] is not None
+
+
+def test_fundamentalista_openapi_exposes_additive_contract_without_causal_language(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    openapi = response.json()
+    serialized = json.dumps(openapi, ensure_ascii=False).lower()
+    assert "causal" not in serialized
+
+    paths = openapi["paths"]
+    assert "/analise/companhias/{codigo_cvm}/fundamentalista/eventos" in paths
+    assert "/analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha" in paths
+    schemas = openapi["components"]["schemas"]
+    assert "AnalisePonteCaixaPeriodo" in schemas
+    assert "AnalisePainelPosicaoFinanceira" in schemas
+    assert "AnaliseEvidenceDossierItem" in schemas
+    assert "AnaliseEvidenceTrailResponse" in schemas

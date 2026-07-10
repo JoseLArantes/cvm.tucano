@@ -719,7 +719,14 @@ Cada conta alterada inclui:
 | Campo | Tipo | Descrição |
 | --- | --- | --- |
 | `account_code` | string | Código de conta CVM |
+| `account_label` | string | Nome determinístico da conta, quando conhecido |
 | `statement_type` | string | Tipo da demonstração |
+| `statement_label` | string | Nome legível da demonstração |
+| `unit` | string | Unidade factual associada |
+| `display_rank` | integer | Ordem determinística para exibição; não representa materialidade |
+| `is_focus` | boolean | Indica se a conta pertence ao conjunto de foco operacional do relatório |
+| `reason_if_available` | string | Descrição factual disponível sobre a diferença entre versões |
+| `evidence_id` | string | Identificador opaco da evidência da reapresentação |
 | `order` | string | Valor de `ordem_exercicio` |
 | `start_date` | string | Data inicial da observação |
 | `before_value` | string | Valor anterior |
@@ -745,6 +752,62 @@ Campos principais:
 | `etapas` | object | Estrutura contendo os pilares: `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao` |
 | `evidence_index` | object | Mapa de identificador estável para referências compactas das evidências |
 | `evidence_graph` | object | Grafo opcional com nós (`nodes`) e arestas (`edges`) expressando relacionamentos |
+| `event_buckets` | array | Buckets agregados de eventos por ano ou mês |
+| `evidence_dossier` | array | Dossiê factual priorizado para a UI |
+
+### `AnaliseStageCaixaSolidez`
+
+Além de `series`, `comparacoes`, `sinais`, `reapresentacoes` e `evidence_ids`, o pilar de caixa retorna:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `ponte_caixa` | array | Ponte de caixa por período, calculada pelo backend quando os componentes são compatíveis |
+| `painel_posicao_financeira` | object | Separação entre séries monetárias e séries de razão/índice |
+
+### `AnalisePonteCaixaPeriodo`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `period_id` | string | Período canônico |
+| `unit` | string | Unidade padrão do período |
+| `items` | array | Itens reconciliadores |
+| `unavailable_reason` | object | Motivo factual quando a ponte não está disponível |
+
+Cada item de `items` contém `metric_id`, `label`, `value`, `unit`, `role` e `evidence_ids`. `role` pode ser `opening`, `operating_cash`, `capex`, `adjustment` ou `free_cash`.
+
+### `AnalisePainelPosicaoFinanceira`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `monetary_series` | array | Observações monetárias (`unit=BRL`) com proveniência completa |
+| `ratio_series` | array | Observações de razão, ponto percentual ou índice com proveniência completa |
+
+### `AnaliseEventBucket`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `bucket` | string | `YYYY` ou `YYYY-MM` |
+| `start_date` | string | Início do bucket |
+| `end_date` | string | Fim do bucket, respeitando `as_of` |
+| `total` | integer | Quantidade total de eventos |
+| `by_family` | object | Contagem por família |
+| `by_severity` | object | Contagem por severidade |
+| `has_more` | boolean | Indica se há detalhes consultáveis no endpoint de eventos |
+
+### `AnaliseEvidenceDossierItem`
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `group` | string | `available`, `attention` ou `limitation` |
+| `display_rank` | integer | Ordem determinística de exibição |
+| `type` | string | `observation`, `signal`, `event`, `document` ou `restatement` |
+| `label` | string | Rótulo factual |
+| `summary` | string | Resumo factual sem recomendação ou avaliação qualitativa |
+| `period_id` | string | Período associado |
+| `occurred_at` | string | Data do evento ou protocolo |
+| `evidence_id` | string | Identificador opaco da evidência |
+| `source_status` | string | `available`, `unavailable` ou `partial` |
+| `link_documento` | string | Link oficial quando disponível |
 
 ## Evidência sob Demanda
 
@@ -763,3 +826,30 @@ Campos principais:
 | `document` | object | Formulário, versão, data de entrega e link de download na CVM (se aplicável) |
 | `relationships` | array | Lista de arestas/relacionamentos a partir desta evidência |
 
+## Eventos do Relatório Fundamentalista
+
+`AnaliseFundamentalistaEventosResposta` pagina eventos oficiais usados pelo relatório.
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `companhia` | object | Resumo cadastral da companhia |
+| `calculation_version` | string | Versão do motor analítico |
+| `escopo` | string | Escopo aplicado |
+| `periodicidade` | string | Periodicidade aplicada |
+| `base_periodo` | string | Base temporal aplicada |
+| `horizonte_anos` | integer | Horizonte aplicado |
+| `as_of` | string | Data de corte informacional |
+| `bucket` | string | Bucket filtrado, quando informado |
+| `items` | array | Lista de `AnaliseEvento` |
+| `next_cursor` | string | Cursor opaco para próxima página |
+
+## Trilha Focal de Evidência
+
+`AnaliseEvidenceTrailResponse` retorna uma visão curta e limitada da linhagem factual de uma evidência.
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `root_evidence_id` | string | Evidência raiz solicitada |
+| `nodes` | array | Nós da trilha |
+| `edges` | array | Relações factuais entre nós |
+| `truncated` | boolean | Indica truncamento por limite de profundidade ou quantidade |

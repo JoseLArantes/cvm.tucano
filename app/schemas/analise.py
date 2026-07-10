@@ -18,6 +18,9 @@ AnaliseForm = Literal["DFP", "ITR", "DERIVED"]
 AnaliseValueSource = Literal["reported", "derived_from_ytd_delta", "derived_from_dfp_minus_ytd", "derived_from_formula"]
 AnaliseStatus = Literal["available", "unavailable"]
 AnaliseSeverity = Literal["info", "warning", "critical"]
+AnaliseCashBridgeRole = Literal["opening", "operating_cash", "capex", "adjustment", "free_cash"]
+AnaliseEvidenceDossierGroup = Literal["available", "attention", "limitation"]
+AnaliseEvidenceSourceStatus = Literal["available", "unavailable", "partial"]
 AnaliseCoverage = Literal["complete", "partial", "missing"]
 AnaliseComparisonKind = Literal["YoY", "QoQ", "CAGR", "VERTICAL", "BASE100"]
 AnaliseResolutionMode = Literal["canonical", "runtime_fallback"]
@@ -811,7 +814,14 @@ class AnaliseBriefResposta(BaseModel):
 
 class AnaliseRestatementContaAlterada(BaseModel):
     account_code: str = Field(description="Código de conta CVM alterado.")
+    account_label: str | None = Field(default=None, description="Nome determinístico da conta CVM, quando conhecido pelo catálogo analítico.")
     statement_type: str | None = Field(default=None, description="Tipo da demonstração da conta.")
+    statement_label: str | None = Field(default=None, description="Nome legível da demonstração financeira, quando conhecido.")
+    unit: AnaliseUnit | None = Field(default=None, description="Unidade factual associada à conta alterada.")
+    display_rank: int = Field(default=0, description="Ordem determinística sugerida para exibição; não representa materialidade.")
+    is_focus: bool = Field(default=False, description="Indica se a conta pertence ao conjunto de contas de foco operacional do relatório.")
+    reason_if_available: str | None = Field(default=None, description="Descrição factual do motivo disponível no backend, sem inferir causa econômica.")
+    evidence_id: str | None = Field(default=None, description="Identificador opaco de evidência da reapresentação associada.")
     order: str | None = Field(default=None, description="Valor de `ordem_exercicio` associado.")
     start_date: date | None = Field(default=None, description="Data inicial da observação em ISO 8601.")
     end_date: date | None = Field(default=None, description="Data final da observação em ISO 8601.")
@@ -846,8 +856,8 @@ class CompactEvidenceRef(BaseModel):
     sobre a proveniência dos números e conclusões factuais expostos no relatório fundamentalista.
     """
     id: str = Field(
-        description="Identificador estável e determinístico da evidência (formato 'ev::{codigo_cvm}::{type}::{identifier}').",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="Identificador único, estável e determinístico da evidência (formato 'ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}'). Deve ser tratado como opaco pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
     type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
         description="Tipo semântico da evidência: 'observation' (métrica), 'signal' (alerta), 'event' (fato/comunicado), 'document' (arquivo) ou 'restatement' (reapresentação)."
@@ -868,8 +878,8 @@ class AnaliseEvidenceGraphNode(BaseModel):
     Nó estruturado representando uma evidência factual ou documento na árvore de proveniência lógica.
     """
     id: str = Field(
-        description="Identificador exclusivo do nó (geralmente corresponde ao evidence_id ou ID do documento).",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="Identificador exclusivo do nó. Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
     type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
         description="Tipo de nó que define o ícone e comportamento visual na visualização gráfica da UI."
@@ -890,26 +900,26 @@ class AnaliseEvidenceGraphNode(BaseModel):
     )
     evidence_id: str | None = Field(
         default=None,
-        description="Link cruzado para obter o detalhe completo da evidência pela API de auditoria.",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="Link cruzado para obter o detalhe completo da evidência pela API de auditoria. Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
 
 
 class AnaliseEvidenceGraphEdge(BaseModel):
     """
-    Aresta direcionada representando o relacionamento causal ou lógico entre dois nós de evidência.
+    Aresta direcionada representando o relacionamento factual ou lógico entre dois nós de evidência.
     """
     id: str = Field(
         description="Identificador único da aresta para controle de renderização.",
-        examples=["edge_ev::9512::metric::ebitda::FY2025_derived_ev::9512::metric::lucro_bruto::FY2025"]
+        examples=["edge_ev::9512::metric::consolidated::none::fy::ebitda::FY2025_derived_ev::9512::metric::consolidated::none::fy::lucro_bruto::FY2025"]
     )
     source: str = Field(
-        description="ID do nó de origem da aresta (quem depende ou origina a relação).",
-        examples=["ev::9512::metric::ebitda::FY2025"]
+        description="ID do nó de origem da aresta (quem depende ou origina a relação). Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::ebitda::FY2025"]
     )
     target: str = Field(
-        description="ID do nó de destino (a evidência de suporte ou documento de base).",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="ID do nó de destino (a evidência de suporte ou documento de base). Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
     relation: Literal[
         "derivada_de",
@@ -919,7 +929,7 @@ class AnaliseEvidenceGraphEdge(BaseModel):
         "reapresentada_por",
         "relacionada_a_evento",
     ] = Field(
-        description="Conector semântico da relação física ou lógica entre os dados."
+        description="Conector semântico da relação factual entre os dados."
     )
 
 
@@ -933,7 +943,7 @@ class AnaliseEvidenceGraph(BaseModel):
     )
     edges: list[AnaliseEvidenceGraphEdge] = Field(
         default_factory=list,
-        description="Lista de conexões causais expressando como as métricas e conclusões foram derivadas."
+        description="Lista de relações factuais e lógicas entre dados, sinais, reapresentações e documentos que compõem a proveniência da análise."
     )
 
 
@@ -1020,6 +1030,49 @@ class AnaliseStageResultadoEficiencia(BaseModel):
     )
 
 
+class AnalisePonteCaixaUnavailableReason(BaseModel):
+    reason_code: str = Field(description="Código estável indicando o motivo da indisponibilidade (ex.: `MISSING_CASH_COMPONENT`).")
+    message: str = Field(description="Mensagem factual detalhando a indisponibilidade dos componentes de caixa.")
+
+
+class AnalisePonteCaixaItem(BaseModel):
+    metric_id: str = Field(description="Identificador da métrica (ex. 'caixa_operacional') ou 'ajuste_caixa' para valores reconciliadores.")
+    label: str = Field(description="Rótulo legível para exibição no gráfico.")
+    value: CanonicalDecimal = Field(description="Valor numérico formatado como decimal canônico.")
+    unit: AnaliseUnit = Field(description="Unidade do valor.")
+    role: AnaliseCashBridgeRole = Field(
+        description="Papel lógico do item na ponte de caixa."
+    )
+    evidence_ids: list[str] = Field(
+        default_factory=list,
+        description="Lista de referências a evidências associadas a este item."
+    )
+
+
+class AnalisePonteCaixaPeriodo(BaseModel):
+    period_id: str = Field(description="Identificador do período da ponte de caixa.")
+    unit: AnaliseUnit = Field(description="Unidade padrão considerada no período.")
+    items: list[AnalisePonteCaixaItem] = Field(
+        default_factory=list,
+        description="Lista ordenada de itens reconciliadores de caixa."
+    )
+    unavailable_reason: AnalisePonteCaixaUnavailableReason | None = Field(
+        default=None,
+        description="Informação de erro caso a conciliação do período não tenha dados suficientes."
+    )
+
+
+class AnalisePainelPosicaoFinanceira(BaseModel):
+    monetary_series: list[AnaliseSeriesObservation] = Field(
+        default_factory=list,
+        description="Observações monetárias do pilar de caixa e posição financeira, preservando proveniência."
+    )
+    ratio_series: list[AnaliseSeriesObservation] = Field(
+        default_factory=list,
+        description="Observações de razões/índices do pilar de caixa e posição financeira, preservando proveniência."
+    )
+
+
 class AnaliseStageCaixaSolidez(BaseModel):
     """
     Etapa 3 (Caixa e Solidez): Geração de Caixa, Endividamento e Liquidez.
@@ -1046,6 +1099,14 @@ class AnaliseStageCaixaSolidez(BaseModel):
     evidence_ids: list[str] = Field(
         default_factory=list,
         description="Identificadores de evidência contidos nesta etapa."
+    )
+    ponte_caixa: list[AnalisePonteCaixaPeriodo] = Field(
+        default_factory=list,
+        description="Ponte de caixa calculada pelo backend por período, quando os componentes são semanticamente compatíveis."
+    )
+    painel_posicao_financeira: AnalisePainelPosicaoFinanceira = Field(
+        default_factory=AnalisePainelPosicaoFinanceira,
+        description="Separação canônica entre séries monetárias e séries de razão/índice para posição financeira."
     )
 
 
@@ -1110,6 +1171,29 @@ class AnaliseFundamentalistaEtapas(BaseModel):
     governanca_conclusao: AnaliseStageGovernancaConclusao = Field(description="Etapa 4: Práticas de governança, remuneração, eventos IPE e integridade.")
 
 
+class AnaliseEventBucket(BaseModel):
+    bucket: str = Field(description="Identificador do agrupamento temporal (`YYYY` ou `YYYY-MM`).", examples=["2025"])
+    start_date: date = Field(description="Data inicial do bucket.")
+    end_date: date = Field(description="Data final do bucket, limitada por `as_of` quando aplicável.")
+    total: int = Field(description="Quantidade total de eventos no bucket.")
+    by_family: dict[str, int] = Field(default_factory=dict, description="Contagem de eventos por família.")
+    by_severity: dict[str, int] = Field(default_factory=dict, description="Contagem de eventos por severidade.")
+    has_more: bool = Field(description="Indica se há eventos detalhados consultáveis para o bucket.")
+
+
+class AnaliseEvidenceDossierItem(BaseModel):
+    group: AnaliseEvidenceDossierGroup = Field(description="Grupo factual do dossiê: dados disponíveis, pontos de atenção ou limitações.")
+    display_rank: int = Field(description="Ordem determinística sugerida para exibição.")
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo da evidência resumida.")
+    label: str = Field(description="Rótulo factual curto.")
+    summary: str = Field(description="Resumo factual, sem inferir recomendação, explicação econômica ou avaliação qualitativa.")
+    period_id: str | None = Field(default=None, description="Período associado, quando aplicável.")
+    occurred_at: date | None = Field(default=None, description="Data de ocorrência ou protocolo, quando aplicável.")
+    evidence_id: str | None = Field(default=None, description="Identificador opaco da evidência associada.")
+    source_status: AnaliseEvidenceSourceStatus = Field(description="Estado factual da fonte usada para compor o item.")
+    link_documento: str | None = Field(default=None, description="Link do documento oficial, quando disponível.")
+
+
 class AnaliseFundamentalistaResposta(BaseModel):
     """
     Payload unificado e estruturado do Relatório de Análise Fundamentalista.
@@ -1144,6 +1228,27 @@ class AnaliseFundamentalistaResposta(BaseModel):
         default=None,
         description="Grafo de linhagem factual contendo nós e arestas direcionadas (presente apenas se include=evidence_graph)."
     )
+    event_buckets: list[AnaliseEventBucket] = Field(
+        default_factory=list,
+        description="Agrupamentos agregados de eventos oficiais por período, família e severidade."
+    )
+    evidence_dossier: list[AnaliseEvidenceDossierItem] = Field(
+        default_factory=list,
+        description="Dossiê factual priorizado para apoiar a UI sem exigir inferências no frontend."
+    )
+
+
+class AnaliseFundamentalistaEventosResposta(BaseModel):
+    companhia: AnaliseCompanhiaResumo
+    calculation_version: CalculationVersion
+    escopo: AnaliseEscopo
+    periodicidade: AnalisePeriodicidade
+    base_periodo: AnaliseBasePeriodo
+    horizonte_anos: int
+    as_of: date | None = Field(default=None, description="Data de corte informacional aplicada.")
+    bucket: str | None = Field(default=None, description="Bucket temporal filtrado (`YYYY` ou `YYYY-MM`).")
+    items: list[AnaliseEvento] = Field(default_factory=list, description="Eventos ordenados do mais recente para o mais antigo.")
+    next_cursor: str | None = Field(default=None, description="Cursor opaco para próxima página, quando houver.")
 
 
 class AnaliseEvidenceDocumentDetails(BaseModel):
@@ -1178,8 +1283,8 @@ class AnaliseEvidenceRelationship(BaseModel):
     Relacionamento lógico documentado para fins de explicabilidade acionável de uma evidência.
     """
     target_id: str = Field(
-        description="ID da evidência ou fórmula relacionada de destino.",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="ID da evidência ou fórmula relacionada de destino. Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
     relation_type: str = Field(
         description="Descrição técnica do conector lógico.",
@@ -1196,8 +1301,8 @@ class AnaliseFundamentalistaEvidenciaDetalhe(BaseModel):
     Payload completo de auditoria sob demanda para uma evidência factual específica.
     """
     evidence_id: str = Field(
-        description="Identificador único e estável da evidência consultada.",
-        examples=["ev::9512::metric::receita_liquida::FY2025"]
+        description="Identificador único e estável da evidência consultada. Deve ser tratado de forma opaca pelo cliente.",
+        examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
     )
     type: Literal["observation", "signal", "event", "document", "restatement"] = Field(
         description="Tipo semântico da evidência, definindo o preenchimento dos blocos opcionais."
@@ -1229,3 +1334,8 @@ class AnaliseFundamentalistaEvidenciaDetalhe(BaseModel):
     )
 
 
+class AnaliseEvidenceTrailResponse(BaseModel):
+    root_evidence_id: str = Field(description="Identificador opaco da evidência raiz solicitada.")
+    nodes: list[AnaliseEvidenceGraphNode] = Field(default_factory=list, description="Nós da trilha focal limitada.")
+    edges: list[AnaliseEvidenceGraphEdge] = Field(default_factory=list, description="Relações factuais adjacentes à evidência raiz.")
+    truncated: bool = Field(description="Indica se a resposta foi truncada por limite de profundidade ou quantidade de nós.")
