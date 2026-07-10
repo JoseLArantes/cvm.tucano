@@ -51,8 +51,16 @@ from app.schemas.analise import (
     AnaliseEscopo,
     AnaliseEvento,
     AnaliseEventosResposta,
+    AnaliseEvidenceDocumentDetails,
+    AnaliseEvidenceGraph,
+    AnaliseEvidenceGraphEdge,
+    AnaliseEvidenceGraphNode,
     AnaliseEvidenceItem,
+    AnaliseEvidenceRelationship,
     AnaliseForm,
+    AnaliseFundamentalistaEtapas,
+    AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseIssue,
     AnaliseLinkSet,
@@ -83,9 +91,14 @@ from app.schemas.analise import (
     AnaliseSeriesUnavailable,
     AnaliseSignal,
     AnaliseSinaisResposta,
+    AnaliseStageCaixaSolidez,
+    AnaliseStageGovernancaConclusao,
+    AnaliseStagePontoPartida,
+    AnaliseStageResultadoEficiencia,
     AnaliseTemporalObservation,
     AnaliseUnit,
     AnaliseValueSource,
+    CompactEvidenceRef,
 )
 from app.services.financeiro_valores import valor_conta_ajustado
 
@@ -5442,3 +5455,580 @@ def materializar_analise_companhia(
         }
         db.commit()
         raise
+
+
+def obter_fundamentalista(
+    db: Session,
+    companhia: Companhia,
+    *,
+    scope: AnaliseEscopo = "consolidated",
+    periodicidade: AnalisePeriodicidade = "annual",
+    base_periodo: AnaliseBasePeriodo = "fy",
+    horizonte_anos: int = 5,
+    as_of: date | None = None,
+    include: str | None = None,
+) -> AnaliseFundamentalistaResposta:
+    RESULT_METRICS = ["receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido", "margem_liquida"]
+    CASH_METRICS = [
+        "caixa_operacional",
+        "capex",
+        "caixa_livre",
+        "caixa_equivalentes",
+        "divida_bruta",
+        "divida_liquida",
+        "alavancagem",
+        "liquidez_corrente",
+        "conversao_lucro_caixa",
+    ]
+    ALL_METRICS = list(dict.fromkeys(RESULT_METRICS + CASH_METRICS))
+
+    manifest_res = obter_manifesto(db, companhia, scope=scope, as_of=as_of)
+    coverage_res = obter_coverage(
+        db,
+        companhia,
+        scope=scope,
+        as_of=as_of,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+    )
+    series_res = obter_series(
+        db,
+        companhia,
+        metricas=ALL_METRICS,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+        horizonte_anos=horizonte_anos,
+    )
+    comparacoes_res = obter_comparacoes(
+        db,
+        companhia,
+        metricas=ALL_METRICS,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+        horizonte_anos=horizonte_anos,
+    )
+    qualidade_res = obter_qualidade(db, companhia, periodicidade=periodicidade, scope=scope, as_of=as_of)
+    sinais_res = obter_sinais(db, companhia, scope=scope, as_of=as_of)
+    eventos_res = obter_eventos(db, companhia)
+    restatements_res = obter_restatements(db, companhia, scope=scope, as_of=as_of)
+
+    governanca_res = obter_governanca(db, companhia, scope=scope, as_of=as_of, horizonte_anos=horizonte_anos)
+    pessoas_res = None
+    try:
+        pessoas_res = obter_pessoas(db, companhia, scope=scope, as_of=as_of, horizonte_anos=horizonte_anos)
+    except Exception:
+        pass
+
+    retrato_metric_ids = [m_id for m_id, spec in METRIC_SPECS.items() if spec.period_nature == "instant"]
+    ponto_partida = AnaliseStagePontoPartida(
+        identidade_companhia=manifest_res.companhia,
+        recorte_efetivo={
+            "escopo": scope,
+            "periodicidade": periodicidade,
+            "base_periodo": base_periodo,
+            "horizonte_anos": horizonte_anos,
+            "as_of": as_of.isoformat() if as_of else None,
+            "calculation_version": CALCULATION_VERSION,
+            "resolution_mode": series_res.resolution.mode,
+        },
+        periodos_disponiveis=manifest_res.periodos_disponiveis,
+        cobertura=coverage_res.periodos,
+        qualidade=qualidade_res.qualidade,
+        auditor=companhia.auditor,
+        cnpj_auditor=companhia.cnpj_auditor,
+        setor=companhia.setor_atividade,
+        controle=companhia.controle_acionario,
+        situacao_registro=companhia.situacao_registro,
+        metricas_retrato_disponiveis=retrato_metric_ids,
+    )
+
+    res_obs = [obs for obs in series_res.observacoes if obs.metric_id in RESULT_METRICS]
+    res_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in RESULT_METRICS]
+    res_evidence_ids = []
+    for obs in res_obs:
+        res_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{obs.metric_id}::{obs.period_id}")
+    for comp in res_comps:
+        for ev in comp.evidence:
+            if ev.metric_id and ev.period_id:
+                res_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}")
+    res_evidence_ids = sorted(list(set(res_evidence_ids)))
+
+    resultado_eficiencia = AnaliseStageResultadoEficiencia(
+        series=res_obs,
+        comparacoes=res_comps,
+        evidence_ids=res_evidence_ids,
+    )
+
+    cash_obs = [obs for obs in series_res.observacoes if obs.metric_id in CASH_METRICS]
+    cash_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in CASH_METRICS]
+    cash_rules = {"ALAVANCAGEM_CRITICA", "DEBITO_CRESCENTE", "LIQUIDEZ_ALERTA", "CAIXA_OPERACIONAL_NEGATIVO"}
+    cash_sinais = [sig for sig in sinais_res.sinais if sig.rule_id in cash_rules or any(ev.metric_id in CASH_METRICS for ev in sig.evidence)]
+    
+    cash_restatements = []
+    cash_accounts: set[str] = set()
+    for m in CASH_METRICS:
+        cash_accounts.update(METRIC_SPECS[m].candidate_accounts)
+    for item in restatements_res.restatements:
+        if any(acc.account_code in cash_accounts for acc in item.changed_accounts):
+            cash_restatements.append(item)
+
+    cash_evidence_ids = []
+    for obs in cash_obs:
+        cash_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{obs.metric_id}::{obs.period_id}")
+    for comp in cash_comps:
+        for ev in comp.evidence:
+            if ev.metric_id and ev.period_id:
+                cash_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}")
+    for sig in cash_sinais:
+        cash_evidence_ids.append(f"ev::{companhia.codigo_cvm}::signal::{sig.rule_id}::{sig.period_id}")
+        for ev in sig.evidence:
+            if ev.metric_id and ev.period_id:
+                cash_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}")
+    for r in cash_restatements:
+        cash_evidence_ids.append(f"ev::{companhia.codigo_cvm}::restatement::{r.period_id}::{r.current_version}")
+    cash_evidence_ids = sorted(list(set(cash_evidence_ids)))
+
+    caixa_solidez = AnaliseStageCaixaSolidez(
+        series=cash_obs,
+        comparacoes=cash_comps,
+        sinais=cash_sinais,
+        reapresentacoes=cash_restatements,
+        evidence_ids=cash_evidence_ids,
+    )
+
+    gov_sinais = [sig for sig in sinais_res.sinais if sig not in cash_sinais]
+    gov_restatements = [r for r in restatements_res.restatements if r not in cash_restatements]
+    ipe_eventos = [evt for evt in eventos_res.eventos if evt.family == "IPE"]
+
+    vlmo_exists = False
+    try:
+        vlmo_count = db.scalar(
+            select(func.count(VlmoConsolidado.id)).where(VlmoConsolidado.cnpj_companhia == companhia.cnpj_companhia)
+        ) or 0
+        vlmo_exists = vlmo_count > 0
+    except Exception:
+        pass
+
+    limites = []
+    for issue in qualidade_res.qualidade.issues:
+        if issue.severity in ("warning", "critical"):
+            limites.append(f"[{issue.severity.upper()}] {issue.message} (Períodos: {', '.join(issue.affected_period_ids)})")
+
+    gov_evidence_ids = []
+    for gov_obs in governanca_res.observacoes:
+        gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{gov_obs.metric_id}::{gov_obs.period_id}")
+    if pessoas_res:
+        for p_obs in pessoas_res.observacoes:
+            gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{p_obs.metric_id}::{p_obs.period_id}")
+    for sig in gov_sinais:
+        gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::signal::{sig.rule_id}::{sig.period_id}")
+        for ev in sig.evidence:
+            if ev.metric_id and ev.period_id:
+                gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}")
+    for r in gov_restatements:
+        gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::restatement::{r.period_id}::{r.current_version}")
+    for evt in ipe_eventos:
+        gov_evidence_ids.append(f"ev::{companhia.codigo_cvm}::event::{evt.event_id}")
+    gov_evidence_ids = sorted(list(set(gov_evidence_ids)))
+
+    governanca_conclusao = AnaliseStageGovernancaConclusao(
+        governanca=governanca_res.observacoes,
+        pessoas=pessoas_res.observacoes if pessoas_res else None,
+        eventos_ipe=ipe_eventos,
+        vlmo_disponivel=vlmo_exists,
+        estrutura_controle=companhia.controle_acionario,
+        sinais=gov_sinais,
+        problemas_qualidade=qualidade_res.qualidade.issues,
+        reapresentacoes=gov_restatements,
+        limites_analiticos=limites,
+        evidence_ids=gov_evidence_ids,
+    )
+
+    etapas = AnaliseFundamentalistaEtapas(
+        ponto_partida=ponto_partida,
+        resultado_eficiencia=resultado_eficiencia,
+        caixa_solidez=caixa_solidez,
+        governanca_conclusao=governanca_conclusao,
+    )
+
+    execution_id_part = series_res.resolution.materialization_execution_id or "runtime"
+    report_id = f"rep_{companhia.codigo_cvm}_{scope}_{periodicidade}_{base_periodo}_{horizonte_anos}_{as_of.isoformat() if as_of else 'latest'}_{CALCULATION_VERSION}_{execution_id_part}"
+
+    all_gathered_ids = sorted(list(set(res_evidence_ids + cash_evidence_ids + gov_evidence_ids)))
+    evidence_index = {}
+
+    for ev_id in all_gathered_ids:
+        parts = ev_id.split("::")
+        if len(parts) >= 5:
+            ev_type = parts[2]
+            if ev_type == "metric":
+                metric_id = parts[3]
+                period_id = parts[4]
+                evidence_index[ev_id] = CompactEvidenceRef(
+                    id=ev_id,
+                    type="observation",
+                    label=f"Valor de {METRIC_SPECS.get(metric_id, MetricSpec(metric_id, metric_id, 'flow', 'BRL', 'duration')).nome} no período {period_id}",
+                    period_id=period_id,
+                )
+            elif ev_type == "signal":
+                rule_id = parts[3]
+                period_id = parts[4]
+                title = rule_id
+                for sig in sinais_res.sinais:
+                    if sig.rule_id == rule_id and sig.period_id == period_id:
+                        title = sig.title
+                        break
+                evidence_index[ev_id] = CompactEvidenceRef(
+                    id=ev_id,
+                    type="signal",
+                    label=f"Sinal: {title}",
+                    period_id=period_id,
+                )
+            elif ev_type == "restatement":
+                period_id = parts[3]
+                version = parts[4] if len(parts) > 4 else ""
+                evidence_index[ev_id] = CompactEvidenceRef(
+                    id=ev_id,
+                    type="restatement",
+                    label=f"Reapresentação do período {period_id} (Versão {version})",
+                    period_id=period_id,
+                )
+        elif len(parts) >= 4:
+            ev_type = parts[2]
+            if ev_type == "event":
+                event_id = parts[3]
+                title = "Evento"
+                period_id = None
+                for evt in eventos_res.eventos:
+                    if evt.event_id == event_id:
+                        title = evt.title
+                        period_id = evt.period_id
+                        break
+                evidence_index[ev_id] = CompactEvidenceRef(
+                    id=ev_id,
+                    type="event",
+                    label=f"Evento: {title}",
+                    period_id=period_id,
+                )
+
+    evidence_graph = None
+    if include == "evidence_graph":
+        nodes = []
+        edges = []
+        node_ids = set()
+
+        def add_node(
+            nid: str,
+            ntype: Literal["observation", "signal", "event", "document", "restatement"],
+            nlabel: str,
+            nperiod: str | None = None,
+            nsev: str | None = None,
+            nevid: str | None = None,
+        ) -> None:
+            if nid not in node_ids:
+                nodes.append(AnaliseEvidenceGraphNode(id=nid, type=ntype, label=nlabel, period_id=nperiod, severity=nsev, evidence_id=nevid))
+                node_ids.add(nid)
+
+        for ev_id, ref in evidence_index.items():
+            add_node(ev_id, ref.type, ref.label, ref.period_id, None, ev_id)
+
+        for obs in series_res.observacoes:
+            obs_ev_id = f"ev::{companhia.codigo_cvm}::metric::{obs.metric_id}::{obs.period_id}"
+            for prov in obs.provenance:
+                doc_id = str(prov.document_id) if prov.document_id else "unknown"
+                doc_node_id = f"ev::{companhia.codigo_cvm}::document::{doc_id}"
+                doc_label = f"Formulário {prov.form} v{prov.version or 1}"
+                add_node(doc_node_id, "document", doc_label, obs.period_id, None, None)
+                edges.append(AnaliseEvidenceGraphEdge(
+                    id=f"edge_{obs_ev_id}_reported_{doc_node_id}",
+                    source=obs_ev_id,
+                    target=doc_node_id,
+                    relation="reportada_em",
+                ))
+
+            spec = METRIC_SPECS.get(obs.metric_id)
+            if spec and spec.formula:
+                for dep_id in METRIC_SPECS:
+                    if dep_id in spec.formula and dep_id != obs.metric_id:
+                        dep_ev_id = f"ev::{companhia.codigo_cvm}::metric::{dep_id}::{obs.period_id}"
+                        if dep_ev_id in evidence_index:
+                            edges.append(AnaliseEvidenceGraphEdge(
+                                id=f"edge_{obs_ev_id}_derived_{dep_ev_id}",
+                                source=obs_ev_id,
+                                target=dep_ev_id,
+                                relation="derivada_de",
+                            ))
+
+        for comp in comparacoes_res.comparacoes:
+            if comp.status == "available" and comp.comparable_period_id:
+                source_ev_id = f"ev::{companhia.codigo_cvm}::metric::{comp.metric_id}::{comp.period_id}"
+                target_ev_id = f"ev::{companhia.codigo_cvm}::metric::{comp.metric_id}::{comp.comparable_period_id}"
+                if source_ev_id in evidence_index and target_ev_id in evidence_index:
+                    edges.append(AnaliseEvidenceGraphEdge(
+                        id=f"edge_{source_ev_id}_compare_{target_ev_id}",
+                        source=source_ev_id,
+                        target=target_ev_id,
+                        relation="comparada_com",
+                    ))
+
+        for sig in sinais_res.sinais:
+            sig_ev_id = f"ev::{companhia.codigo_cvm}::signal::{sig.rule_id}::{sig.period_id}"
+            if sig_ev_id in evidence_index:
+                for ev in sig.evidence:
+                    if ev.metric_id and ev.period_id:
+                        obs_ev_id = f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}"
+                        if obs_ev_id in evidence_index:
+                            edges.append(AnaliseEvidenceGraphEdge(
+                                id=f"edge_{sig_ev_id}_trigger_{obs_ev_id}",
+                                source=sig_ev_id,
+                                target=obs_ev_id,
+                                relation="acionou_sinal",
+                            ))
+
+        for rest in restatements_res.restatements:
+            rest_ev_id = f"ev::{companhia.codigo_cvm}::restatement::{rest.period_id}::{rest.current_version}"
+            if rest_ev_id in evidence_index:
+                for changed in rest.changed_accounts:
+                    for m_id, spec in METRIC_SPECS.items():
+                        if changed.account_code in spec.candidate_accounts:
+                            obs_ev_id = f"ev::{companhia.codigo_cvm}::metric::{m_id}::{rest.period_id}"
+                            if obs_ev_id in evidence_index:
+                                edges.append(AnaliseEvidenceGraphEdge(
+                                    id=f"edge_{obs_ev_id}_restated_{rest_ev_id}",
+                                    source=obs_ev_id,
+                                    target=rest_ev_id,
+                                    relation="reapresentada_por",
+                                ))
+
+        evidence_graph = AnaliseEvidenceGraph(nodes=nodes, edges=edges)
+
+    return AnaliseFundamentalistaResposta(
+        report_id=report_id,
+        report_version="1.0.0",
+        companhia=manifest_res.companhia,
+        contexto=manifest_res.contexto_padrao,
+        qualidade=qualidade_res.qualidade,
+        resolution=series_res.resolution,
+        metodologia={
+            "motor_versao": CALCULATION_VERSION,
+            "etapas_definicao": {
+                "ponto_partida": "Identidade e qualidade cadastral/cobertura",
+                "resultado_eficiencia": "Receitas, lucros e margens operacionais",
+                "caixa_solidez": "Fluxo de caixa, endividamento, liquidez e alavancagem",
+                "governanca_conclusao": "CGVN, IPE, VLMO, e integridade dos relatórios",
+            },
+        },
+        etapas=etapas,
+        evidence_index=evidence_index,
+        evidence_graph=evidence_graph,
+    )
+
+
+def obter_evidencia_detalhe(
+    db: Session,
+    companhia: Companhia,
+    evidence_id: str,
+) -> AnaliseFundamentalistaEvidenciaDetalhe:
+    parts = evidence_id.split("::")
+    if len(parts) < 4 or parts[0] != "ev":
+        raise ValueError("Formato de evidence_id invalido.")
+    
+    try:
+        cvm_code = int(parts[1])
+    except ValueError as e:
+        raise ValueError("Codigo CVM no evidence_id invalido.") from e
+        
+    if cvm_code != companhia.codigo_cvm:
+        raise PermissionError("A evidencia solicitada nao pertence a companhia indicada.")
+
+    ev_type = parts[2]
+    if ev_type == "metric":
+        metric_id = parts[3]
+        period_id = parts[4]
+        
+        series_res = obter_series(
+            db,
+            companhia,
+            metricas=[metric_id],
+            periodicidade="quarterly" if "-Q" in period_id else "annual",
+            base_periodo="quarter" if "-Q" in period_id else "fy",
+            scope="consolidated",
+        )
+        matched_obs = None
+        for obs in series_res.observacoes:
+            if obs.period_id == period_id:
+                matched_obs = obs
+                break
+                
+        if matched_obs is None:
+            raise KeyError(f"Observacao {metric_id} para o periodo {period_id} nao encontrada.")
+
+        spec = METRIC_SPECS.get(metric_id)
+        metric_item = None
+        if spec:
+            metric_item = AnaliseMetricaCatalogoItem(
+                id=spec.metric_id,
+                nome=spec.nome,
+                type=spec.metric_type,
+                unit=spec.unit,
+                formula=spec.formula,
+                direction=spec.direction,
+                contas_cvm_candidatas=list(spec.candidate_accounts),
+                estrategia_resolucao=spec.strategy,
+                disponibilidades=list(spec.bases),
+                period_nature=spec.period_nature,
+                vertical_denominator_metric_id=spec.vertical_denominator_metric_id,
+                limitations=list(spec.limitations),
+                calculation_version=CALCULATION_VERSION,
+            )
+
+        doc_details = None
+        if matched_obs.provenance:
+            prov = matched_obs.provenance[0]
+            doc_details = AnaliseEvidenceDocumentDetails(
+                form=prov.form,
+                document_id=prov.document_id,
+                version=prov.version,
+                filed_at=prov.filed_at,
+                link_download=prov.link_download,
+            )
+
+        relationships = []
+        if spec and spec.formula:
+            relationships.append(AnaliseEvidenceRelationship(
+                target_id=f"formula_{spec.formula}",
+                relation_type="derivada_de",
+                note=f"Calculado com base na formula: {spec.formula}"
+            ))
+
+        return AnaliseFundamentalistaEvidenciaDetalhe(
+            evidence_id=evidence_id,
+            type="observation",
+            label=f"Métrica {metric_id} no período {period_id}",
+            period_id=period_id,
+            metric=metric_item,
+            observation=matched_obs,
+            document=doc_details,
+            relationships=relationships,
+        )
+
+    elif ev_type == "signal":
+        rule_id = parts[3]
+        period_id = parts[4]
+
+        sinais_res = obter_sinais(db, companhia)
+        matched_sig = None
+        for sig in sinais_res.sinais:
+            if sig.rule_id == rule_id and sig.period_id == period_id:
+                matched_sig = sig
+                break
+
+        if matched_sig is None:
+            raise KeyError("Sinal nao encontrado.")
+
+        relationships = []
+        for ev in matched_sig.evidence:
+            if ev.metric_id and ev.period_id:
+                relationships.append(AnaliseEvidenceRelationship(
+                    target_id=f"ev::{companhia.codigo_cvm}::metric::{ev.metric_id}::{ev.period_id}",
+                    relation_type="acionou_sinal",
+                    note=f"Métrica de suporte: {ev.metric_id}"
+                ))
+
+        return AnaliseFundamentalistaEvidenciaDetalhe(
+            evidence_id=evidence_id,
+            type="signal",
+            label=f"Sinal: {matched_sig.title}",
+            period_id=period_id,
+            relationships=relationships,
+        )
+
+    elif ev_type == "event":
+        event_id = parts[3]
+        eventos_res = obter_eventos(db, companhia)
+        matched_evt = None
+        for evt in eventos_res.eventos:
+            if evt.event_id == event_id:
+                matched_evt = evt
+                break
+
+        if matched_evt is None:
+            raise KeyError("Evento nao encontrado.")
+
+        relationships = []
+        if matched_evt.link_documento:
+            relationships.append(AnaliseEvidenceRelationship(
+                target_id=matched_evt.link_documento,
+                relation_type="relacionada_a_evento",
+                note="Link externo do documento do evento"
+            ))
+
+        doc_details = None
+        if matched_evt.link_documento:
+            doc_details = AnaliseEvidenceDocumentDetails(
+                form="DFP" if "dfp" in matched_evt.link_documento.lower() else "ITR",
+                document_id=None,
+                version=None,
+                filed_at=matched_evt.occurred_at,
+                link_download=matched_evt.link_documento,
+            )
+
+        return AnaliseFundamentalistaEvidenciaDetalhe(
+            evidence_id=evidence_id,
+            type="event",
+            label=f"Evento: {matched_evt.title}",
+            period_id=matched_evt.period_id,
+            relationships=relationships,
+            document=doc_details,
+        )
+
+    elif ev_type == "restatement":
+        period_id = parts[3]
+        version = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else None
+
+        restatements_res = obter_restatements(db, companhia)
+        matched_rest = None
+        for r in restatements_res.restatements:
+            if r.period_id == period_id and (version is None or r.current_version == version):
+                matched_rest = r
+                break
+
+        if matched_rest is None:
+            raise KeyError("Reapresentação nao encontrada.")
+
+        relationships = []
+        for changed in matched_rest.changed_accounts:
+            relationships.append(AnaliseEvidenceRelationship(
+                target_id=f"conta_{changed.account_code}",
+                relation_type="reapresentada_por",
+                note=f"Conta alterada: {changed.account_code}. Anterior: {changed.before_value}, Atual: {changed.after_value}"
+            ))
+
+        doc_details = None
+        if matched_rest.document_link:
+            doc_details = AnaliseEvidenceDocumentDetails(
+                form=matched_rest.form,
+                document_id=None,
+                version=matched_rest.current_version,
+                filed_at=matched_rest.restated_at,
+                link_download=matched_rest.document_link,
+            )
+
+        return AnaliseFundamentalistaEvidenciaDetalhe(
+            evidence_id=evidence_id,
+            type="restatement",
+            label=f"Reapresentação do período {period_id}",
+            period_id=period_id,
+            relationships=relationships,
+            document=doc_details,
+        )
+
+    else:
+        raise ValueError("Tipo de evidencia nao suportado ou desconhecido.")
+
+

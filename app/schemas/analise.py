@@ -836,3 +836,125 @@ class AnaliseRestatementsResposta(BaseModel):
     calculation_version: CalculationVersion
     restatements: list[AnaliseRestatementItem]
     issues: list[AnaliseIssue] = Field(default_factory=list)
+
+
+class CompactEvidenceRef(BaseModel):
+    id: str = Field(description="Identificador estável e determinístico da evidência.")
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de entidade da evidência.")
+    label: str = Field(description="Rótulo amigável em português para exibição.")
+    period_id: str | None = Field(default=None, description="Período associado à evidência, quando houver.")
+
+
+class AnaliseEvidenceGraphNode(BaseModel):
+    id: str = Field(description="Identificador do nó.")
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de nó.")
+    label: str = Field(description="Rótulo curto em português.")
+    period_id: str | None = Field(default=None, description="Período correspondente.")
+    severity: str | None = Field(default=None, description="Severidade, aplicável a sinais/eventos.")
+    evidence_id: str | None = Field(default=None, description="Identificador correspondente na lista de evidências.")
+
+
+class AnaliseEvidenceGraphEdge(BaseModel):
+    id: str = Field(description="Identificador único da aresta.")
+    source: str = Field(description="Identificador do nó de origem.")
+    target: str = Field(description="Identificador do nó de destino.")
+    relation: Literal[
+        "derivada_de",
+        "comparada_com",
+        "reportada_em",
+        "acionou_sinal",
+        "reapresentada_por",
+        "relacionada_a_evento",
+    ] = Field(description="Tipo de relação factual.")
+
+
+class AnaliseEvidenceGraph(BaseModel):
+    nodes: list[AnaliseEvidenceGraphNode] = Field(default_factory=list)
+    edges: list[AnaliseEvidenceGraphEdge] = Field(default_factory=list)
+
+
+class AnaliseStagePontoPartida(BaseModel):
+    identidade_companhia: AnaliseCompanhiaResumo
+    recorte_efetivo: dict[str, object] = Field(description="Parâmetros de recortagem e materialização efetivos.")
+    periodos_disponiveis: list[AnalisePeriodoDisponivel] = Field(default_factory=list)
+    cobertura: list[AnaliseCoveragePeriodoItem] = Field(default_factory=list)
+    qualidade: AnaliseQualidadeResumo
+    auditor: str | None = Field(default=None, description="Nome do auditor cadastrado.")
+    cnpj_auditor: str | None = Field(default=None, description="CNPJ do auditor cadastrado.")
+    setor: str | None = Field(default=None, description="Setor de atividade cadastrado.")
+    controle: str | None = Field(default=None, description="Controle acionário cadastrado.")
+    situacao_registro: str | None = Field(default=None, description="Situação cadastral do registro.")
+    metricas_retrato_disponiveis: list[str] = Field(default_factory=list, description="Lista de métricas de retrato disponíveis.")
+
+
+class AnaliseStageResultadoEficiencia(BaseModel):
+    series: list[AnaliseSeriesObservation] = Field(default_factory=list)
+    comparacoes: list[AnaliseComparacaoItem] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnaliseStageCaixaSolidez(BaseModel):
+    series: list[AnaliseSeriesObservation] = Field(default_factory=list)
+    comparacoes: list[AnaliseComparacaoItem] = Field(default_factory=list)
+    sinais: list[AnaliseSignal] = Field(default_factory=list)
+    reapresentacoes: list[AnaliseRestatementItem] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnaliseStageGovernancaConclusao(BaseModel):
+    governanca: list[AnaliseTemporalObservation] = Field(default_factory=list)
+    pessoas: list[AnaliseTemporalObservation] | None = Field(default=None, description="Dados de pessoas e remuneração, se disponíveis.")
+    eventos_ipe: list[AnaliseEvento] = Field(default_factory=list)
+    vlmo_disponivel: bool = Field(description="Indica se há dados cadastrados de VLMO.")
+    estrutura_controle: str | None = Field(default=None, description="Estrutura de controle societário.")
+    sinais: list[AnaliseSignal] = Field(default_factory=list)
+    problemas_qualidade: list[AnaliseIssue] = Field(default_factory=list)
+    reapresentacoes: list[AnaliseRestatementItem] = Field(default_factory=list)
+    limites_analiticos: list[str] = Field(default_factory=list, description="Limitações e avisos de consistência.")
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class AnaliseFundamentalistaEtapas(BaseModel):
+    ponto_partida: AnaliseStagePontoPartida
+    resultado_eficiencia: AnaliseStageResultadoEficiencia
+    caixa_solidez: AnaliseStageCaixaSolidez
+    governanca_conclusao: AnaliseStageGovernancaConclusao
+
+
+class AnaliseFundamentalistaResposta(BaseModel):
+    report_id: str = Field(description="Identificador determinístico único do relatório.")
+    report_version: str = Field(description="Versão de cálculo/layout do relatório.")
+    companhia: AnaliseCompanhiaResumo
+    contexto: AnaliseContextoPadrao
+    qualidade: AnaliseQualidadeResumo
+    resolution: AnaliseResolutionMetadata
+    metodologia: dict[str, object] = Field(description="Premissas metodológicas do cálculo.")
+    etapas: AnaliseFundamentalistaEtapas
+    evidence_index: dict[str, CompactEvidenceRef] = Field(default_factory=dict)
+    evidence_graph: AnaliseEvidenceGraph | None = Field(default=None, description="Grafo de evidências opcional.")
+
+
+class AnaliseEvidenceDocumentDetails(BaseModel):
+    form: AnaliseForm = Field(description="Formulário do documento.")
+    document_id: int | None = Field(default=None, description="ID do documento.")
+    version: int | None = Field(default=None, description="Versão do documento.")
+    filed_at: date | None = Field(default=None, description="Data de entrega do documento.")
+    link_download: str | None = Field(default=None, description="Link para download oficial na CVM.")
+
+
+class AnaliseEvidenceRelationship(BaseModel):
+    target_id: str = Field(description="Identificador da evidência/aresta alvo.")
+    relation_type: str = Field(description="Descrição da relação.")
+    note: str = Field(description="Explicação da relação.")
+
+
+class AnaliseFundamentalistaEvidenciaDetalhe(BaseModel):
+    evidence_id: str = Field(description="Identificador único da evidência.")
+    type: Literal["observation", "signal", "event", "document", "restatement"] = Field(description="Tipo de evidência.")
+    label: str = Field(description="Título amigável.")
+    period_id: str | None = Field(default=None, description="Período correspondente.")
+    metric: AnaliseMetricaCatalogoItem | None = Field(default=None, description="Catálogo da métrica, se aplicável.")
+    observation: AnaliseSeriesObservation | None = Field(default=None, description="Valor canônico e proveniência, se aplicável.")
+    document: AnaliseEvidenceDocumentDetails | None = Field(default=None, description="Detalhes documentais, se aplicável.")
+    relationships: list[AnaliseEvidenceRelationship] = Field(default_factory=list, description="Lista de relacionamentos a partir deste fato.")
+

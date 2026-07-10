@@ -353,3 +353,37 @@ Parametros:
 | `as_of` | string | Data de corte informacional em `AAAA-MM-DD` |
 | `metricas` | string | Lista CSV opcional de metricas a priorizar |
 | `incluir_eventos` | boolean | Controla a inclusao dos eventos recentes |
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+Retorna um relatório analítico fundamentalista consolidado estruturado em quatro etapas (pilares) para subsidiar a jornada do usuário. Esse endpoint unifica dados de séries temporais, comparações prontas, qualidade de dados, sinais e eventos para o recorte solicitado em uma única chamada.
+
+Parâmetros:
+
+| Nome | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- |
+| `escopo` | string | `consolidated` | `consolidated` ou `individual` |
+| `periodicidade` | string | `annual` | `annual` ou `quarterly` |
+| `base_periodo` | string | `fy` | `fy`, `quarter` ou `ytd` |
+| `horizonte_anos` | integer | `5` | Horizonte anual máximo de pontos a retornar |
+| `as_of` | string | ausente | Data de corte informacional em `AAAA-MM-DD` |
+| `include` | string | ausente | Informar `evidence_graph` para incluir o grafo de proveniência no payload |
+
+O payload de resposta contém:
+- `report_id`: identificador determinístico único para o recorte
+- `report_version`: versão do cálculo/motor analítico
+- `companhia`, `contexto`, `qualidade`, `resolution`
+- `etapas`: objeto com `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao`
+- `evidence_index`: mapa chave-valor de referências compactas para todas as evidências acionadas no relatório
+- `evidence_graph`: grafo estruturado de arestas e nós expressando relações factuais de dados e documentos (quando `include=evidence_graph`)
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}`
+
+Resolve os detalhes factuais sob demanda para uma determinada evidência da companhia. Permite fazer a rastreabilidade (audit trail) de qualquer dado exibido na tela, conectando o relatório aos arquivos e contas oficiais da CVM.
+
+O endpoint valida se a evidência de fato pertence à companhia solicitada. Retorna:
+- Métricas e fórmulas aplicadas (se aplicável)
+- Contas CVM e demonstração de origem
+- Metadados do documento/formulário entregue na CVM com link de download direto
+- Relação com outras comparações, sinais ou reapresentações do relatório
+

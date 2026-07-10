@@ -9,6 +9,20 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-10 - Análise Fundamentalista Explicável
+
+### Endpoints novos
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista` (Relatório fundamentalista completo)
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}` (Detalhar evidência sob demanda)
+
+### Comportamento entregue
+
+- O relatório de análise fundamentalista unifica a leitura analítica em uma resposta composta por quatro pilares: `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao`.
+- Retorna `evidence_index` com referências compactas mapeando IDs determinísticos de evidências.
+- Suporta parâmetro `include=evidence_graph` para retornar um grafo completo com nós e arestas representando relações factuais entre dados, documentos, sinais e restatements.
+- Rota de evidências sob demanda resolve contas CVM, metadados do documento e links para download direto na CVM, com validação de pertencimento à companhia.
+
 ## 2026-07-09 - Datas oficiais no Radar Informativo Tucano CVM
 
 ### Superficie afetada

@@ -722,8 +722,44 @@ Cada conta alterada inclui:
 | `statement_type` | string | Tipo da demonstração |
 | `order` | string | Valor de `ordem_exercicio` |
 | `start_date` | string | Data inicial da observação |
-| `end_date` | string | Data final da observação |
 | `before_value` | string | Valor anterior |
 | `after_value` | string | Valor reapresentado |
 | `absolute_change` | string | Diferença absoluta |
 | `relative_change` | string | Variação relativa |
+
+## Relatório Fundamentalista
+
+`AnaliseFundamentalistaResposta` descreve a resposta completa e unificada para o relatório fundamentalista da companhia.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `report_id` | string | Identificador único e determinístico do relatório |
+| `report_version` | string | Versão de layout/motor de cálculo do relatório |
+| `companhia` | object | Resumo cadastral da companhia |
+| `contexto` | object | Contexto padrão (período sugerido, escopo, periodicidade) |
+| `qualidade` | object | Resumo consolidado de qualidade do contexto |
+| `resolution` | object | Metadados de resolução do resolvedor (`canonical` ou `runtime_fallback`) |
+| `metodologia` | object | Metadados descrevendo premissas metodológicas e versões aplicadas |
+| `etapas` | object | Estrutura contendo os pilares: `ponto_partida`, `resultado_eficiencia`, `caixa_solidez` e `governanca_conclusao` |
+| `evidence_index` | object | Mapa de identificador estável para referências compactas das evidências |
+| `evidence_graph` | object | Grafo opcional com nós (`nodes`) e arestas (`edges`) expressando relacionamentos |
+
+## Evidência sob Demanda
+
+`AnaliseFundamentalistaEvidenciaDetalhe` fornece os detalhes completos de uma evidência para auditoria.
+
+Campos principais:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `evidence_id` | string | Identificador único e estável da evidência |
+| `type` | string | Tipo de evidência: `observation`, `signal`, `event`, `document` ou `restatement` |
+| `label` | string | Rótulo amigável em português para exibição |
+| `period_id` | string | Período correspondente (se aplicável) |
+| `metric` | object | Metadados e catálogo da métrica (para observações) |
+| `observation` | object | Observação canônica correspondente contendo valor, unidade e proveniência (para observações) |
+| `document` | object | Formulário, versão, data de entrega e link de download na CVM (se aplicável) |
+| `relationships` | array | Lista de arestas/relacionamentos a partir desta evidência |
+

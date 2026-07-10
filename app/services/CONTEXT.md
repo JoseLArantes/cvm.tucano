@@ -29,6 +29,12 @@ For ingestion internals, also read `app/services/ingestion/CONTEXT.md`.
 - **Radar Informativo Tucano CVM** means the consultative feed of public institutional or regulatory CVM updates, separate from canonical ingestion and analysis.
 - **Monitored channel** means a public CVM page watched by Radar Informativo Tucano CVM, such as news or data-portal updates. Avoid using **Source** for this concept because ingestion uses Source for structured CVM datasets.
 - **Radar item** means one normalized public update emitted by Radar Informativo Tucano CVM with a canonical URL, classification signals, and publication/capture timestamps.
+- **Análise Fundamentalista** (Fundamental Analysis) means a multi-stage, explainable analysis layer compiled into a single, authenticated response covering four stages (pilares).
+- **Pilar** (Stage) means one of the four mandatory stages composing the Fundamental Analysis report: ponto_partida, resultado_eficiencia, caixa_solidez, governanca_conclusao.
+- **Evidência** (Evidence) means a deterministic, traceable factual element (e.g., metric observation, signal, event, or document) with a stable, deterministic `evidence_id`.
+- **Lacuna Analítica** (Analytical Gap) means an explicit unavailability of financial or institutional data, represented as unavailable rather than estimated or zeroed.
+- **Conclusão Neutra** (Neutral Conclusion) means delivering only factual, objective information and data provenance without generating investment scores, recommendations, or qualitative advice.
+
 
 ## Operational rules
 

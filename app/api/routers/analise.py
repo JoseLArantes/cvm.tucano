@@ -24,6 +24,8 @@ from app.schemas.analise import (
     AnaliseCoverageResposta,
     AnaliseEscopo,
     AnaliseEventosResposta,
+    AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
     AnaliseMaterializacaoAnoStatus,
@@ -73,6 +75,8 @@ from app.services.analise import (
     obter_coverage,
     obter_estado_gate_materializacao,
     obter_eventos,
+    obter_evidencia_detalhe,
+    obter_fundamentalista,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
@@ -1546,3 +1550,64 @@ def obter_analise_restatements(
 ) -> AnaliseRestatementsResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     return obter_restatements(db, companhia, scope=escopo, as_of=date.fromisoformat(as_of) if as_of else None)
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista",
+    response_model=AnaliseFundamentalistaResposta,
+    summary="Relatório de Análise Fundamentalista da Companhia",
+    description="Retorna o relatório analítico estruturado composto por ponto de partida, resultado, caixa e governança.",
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalista",
+)
+def obter_analise_fundamentalista(
+    codigo_cvm: int,
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade: `annual` ou `quarterly`.")] = "annual",
+    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal: `fy`, `quarter` ou `ytd`.")] = "fy",
+    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo a retornar.", ge=1, le=20)] = 5,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    include: Annotated[str | None, Query(description="Parâmetro opcional de inclusão. Use `evidence_graph` para obter o grafo.")] = None,
+) -> AnaliseFundamentalistaResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    if periodicidade == "annual" and base_periodo != "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'annual', a base de periodo deve ser 'fy'.")
+    if periodicidade == "quarterly" and base_periodo == "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'quarterly', a base de periodo deve ser 'quarter' ou 'ytd'.")
+
+    return obter_fundamentalista(
+        db,
+        companhia,
+        scope=escopo,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+        as_of=date.fromisoformat(as_of) if as_of else None,
+        include=include,
+    )
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}",
+    response_model=AnaliseFundamentalistaEvidenciaDetalhe,
+    summary="Detalhar Evidência sob Demanda",
+    description="Retorna os detalhes factuais, contas e proveniência de uma evidência específica da companhia.",
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEvidencia",
+)
+def obter_analise_fundamentalista_evidencia(
+    codigo_cvm: int,
+    evidence_id: str,
+    db: DbSession,
+) -> AnaliseFundamentalistaEvidenciaDetalhe:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    try:
+        return obter_evidencia_detalhe(db, companhia, evidence_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
