@@ -947,6 +947,20 @@ class AnaliseEvidenceGraph(BaseModel):
     )
 
 
+class AnaliseRecorteEfetivo(BaseModel):
+    """
+    Parâmetros de consulta e metadados sobre como o relatório foi estruturado pelo motor analítico.
+    """
+    escopo: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    periodicidade: AnalisePeriodicidade = Field(description="Periodicidade solicitada.")
+    base_periodo: AnaliseBasePeriodo = Field(description="Base do período de origem.")
+    base_efetiva: Literal["fy", "quarter", "ytd", "ttm"] = Field(description="Base efetiva de cálculo utilizada pelo motor analítico.")
+    horizonte_anos: int = Field(description="Horizonte temporal de anos considerado.")
+    as_of: date | None = Field(default=None, description="Ponto de corte temporal considerado.")
+    calculation_version: str = Field(description="Versão do motor de cálculo analítico.")
+    resolution_mode: Literal["canonical", "runtime_fallback"] = Field(description="Modo de resolução das séries temporais (canonical ou runtime_fallback).")
+
+
 class AnaliseStagePontoPartida(BaseModel):
     """
     Etapa 1 (Ponto de Partida): Qualidade Cadastral e Cobertura de Dados.
@@ -957,15 +971,8 @@ class AnaliseStagePontoPartida(BaseModel):
     identidade_companhia: AnaliseCompanhiaResumo = Field(
         description="Informações cadastrais e identificadores da companhia na CVM e CNPJ."
     )
-    recorte_efetivo: dict[str, object] = Field(
-        description="Parâmetros de consulta e metadados sobre como este relatório foi estruturado pelo motor analítico.",
-        examples=[{
-            "escopo": "consolidated",
-            "periodicidade": "annual",
-            "base_periodo": "fy",
-            "horizonte_anos": 5,
-            "resolution_mode": "canonical"
-        }]
+    recorte_efetivo: AnaliseRecorteEfetivo = Field(
+        description="Parâmetros de consulta e metadados sobre como este relatório foi estruturado pelo motor analítico."
     )
     periodos_disponiveis: list[AnalisePeriodoDisponivel] = Field(
         default_factory=list,
@@ -1194,6 +1201,363 @@ class AnaliseEvidenceDossierItem(BaseModel):
     link_documento: str | None = Field(default=None, description="Link do documento oficial, quando disponível.")
 
 
+class DiagnosticoFundamentalObservation(BaseModel):
+    metric: str = Field(description="Identificador único da métrica analisada.")
+    current_value: CanonicalDecimal | None = Field(default=None, description="Valor observado no período atual.")
+    comparison_value: CanonicalDecimal | None = Field(default=None, description="Valor no período comparável.")
+    change: CanonicalDecimal | None = Field(default=None, description="Variação absoluta ou percentual calculada.")
+    change_unit: str = Field(description="Unidade de medida da variação (ex.: 'percentage_points', 'percent', 'BRL').")
+    trend: Literal["expanding", "contracting", "stable", "volatile", "insufficient_history"] = Field(
+        description="Direção ou comportamento observado da métrica."
+    )
+    statement: str = Field(description="Mensagem factual descrevendo a métrica e a variação observada.")
+
+
+class DiagnosticoFundamentalDimensao(BaseModel):
+    dimension: Literal["crescimento", "rentabilidade", "conversao_caixa", "solidez_financeira", "alocacao_capital", "qualidade_comparabilidade"] = Field(
+        description="Dimensão de diagnóstico fundamental avaliada."
+    )
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Estado de disponibilidade dos dados para esta dimensão."
+    )
+    observations: list[DiagnosticoFundamentalObservation] = Field(
+        default_factory=list,
+        description="Observações factuais de métricas disponíveis para a dimensão."
+    )
+
+
+class DiagnosticoFundamental(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Estado geral de disponibilidade do diagnóstico fundamental."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas ao diagnóstico.")
+    dimensoes: list[DiagnosticoFundamentalDimensao] = Field(
+        default_factory=list,
+        description="Dimensões do diagnóstico fundamental."
+    )
+
+
+class ResultBridgeItem(BaseModel):
+    metric_id: str = Field(description="Identificador da métrica ou etapa do resultado reconciliada.")
+    label: str = Field(description="Rótulo legível do item da ponte.")
+    current_value: CanonicalDecimal | None = Field(default=None, description="Valor no período atual.")
+    comparison_value: CanonicalDecimal | None = Field(default=None, description="Valor no período comparável.")
+    change: CanonicalDecimal | None = Field(default=None, description="Diferença absoluta apurada.")
+    pct_change: CanonicalDecimal | None = Field(default=None, description="Diferença percentual apurada (em decimal).")
+    status: Literal["available", "unavailable"] = Field(description="Status de preenchimento deste item.")
+
+
+class ResultBridge(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade da ponte de resultados."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    items: list[ResultBridgeItem] = Field(default_factory=list, description="Itens da ponte de resultados.")
+
+
+class MarginStackItem(BaseModel):
+    margin_type: Literal["bruta", "ebitda", "ebit", "antes_tributos", "liquida"] = Field(
+        description="Tipo de margem calculada."
+    )
+    label: str = Field(description="Nome amigável da margem.")
+    current_value: CanonicalDecimal | None = Field(default=None, description="Valor da margem no período corrente.")
+    comparison_value: CanonicalDecimal | None = Field(default=None, description="Valor da margem no período comparativo.")
+    change_pp: CanonicalDecimal | None = Field(default=None, description="Variação calculada em pontos percentuais (pp).")
+    series: list[AnaliseSeriesObservation] = Field(
+        default_factory=list,
+        description="Histórico temporal detalhado dessa margem."
+    )
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade desta margem específica."
+    )
+    formula: str = Field(description="Fórmula matemática declarativa aplicada.")
+    limitations: list[str] = Field(default_factory=list, description="Restrições ou ressalvas metodológicas específicas.")
+
+
+class MarginStack(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade da pilha de margens."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    margins: list[MarginStackItem] = Field(default_factory=list, description="Itens da pilha de margens.")
+
+
+class SegmentPanelItem(BaseModel):
+    name: str = Field(description="Nome do segmento operacional conforme reportado pelo emissor.")
+    receita_terceiros: CanonicalDecimal | None = Field(default=None, description="Receita originada de terceiros.")
+    receita_intersegmentos: CanonicalDecimal | None = Field(default=None, description="Receitas entre segmentos.")
+    receita_total: CanonicalDecimal | None = Field(default=None, description="Soma das receitas de terceiros e intersegmentos.")
+    resultado: CanonicalDecimal | None = Field(default=None, description="Resultado atribuído ao segmento.")
+    ebitda: CanonicalDecimal | None = Field(default=None, description="EBITDA atribuído ao segmento.")
+    margem: CanonicalDecimal | None = Field(default=None, description="Margem do segmento.")
+    ativos: CanonicalDecimal | None = Field(default=None, description="Ativos alocados ao segmento.")
+    capex: CanonicalDecimal | None = Field(default=None, description="CAPEX realizado no segmento.")
+    participacao_consolidado: CanonicalDecimal | None = Field(default=None, description="Fração de representatividade no consolidado.")
+    comparacao_anterior: CanonicalDecimal | None = Field(default=None, description="Variação contra o período comparável anterior.")
+
+
+class SegmentPanel(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de segmentos."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    segmentos: list[SegmentPanelItem] = Field(default_factory=list, description="Segmentos operacionais encontrados.")
+    eliminacoes_reconciliacoes: str | None = Field(default=None, description="Fatos relativos às eliminações e conciliação dos segmentos.")
+
+
+class ComparabilityItemDetail(BaseModel):
+    category: str = Field(description="Categoria do item contábil ou evento (ex. 'impairment', 'provisao_material').")
+    description: str = Field(description="Descrição factual do item contida nas demonstrações.")
+    value: CanonicalDecimal | None = Field(default=None, description="Impacto financeiro do item.")
+    unit: str = Field(description="Unidade do valor (ex.: 'BRL').")
+    period_id: str = Field(description="Período em que o item ocorreu.")
+    line_affected: str = Field(description="Linha contábil afetada.")
+    cash_effect: Literal["cash", "non_cash", "unknown"] = Field(description="Indicação se há efeito financeiro imediato em caixa.")
+    classification: Literal["explicitly_non_recurring", "comparability_relevant", "accounting_remeasurement", "unknown_recurrence"] = Field(
+        description="Classificação de recorrência ou relevância contábil."
+    )
+    evidence_ids: list[str] = Field(default_factory=list, description="Lista de referências de proveniência factual.")
+
+
+class ComparabilityItems(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade de itens que prejudicam a comparabilidade."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    items: list[ComparabilityItemDetail] = Field(default_factory=list, description="Detalhamento dos itens identificados.")
+
+
+class CashReconciliationItem(BaseModel):
+    item_id: str = Field(description="ID do componente (ex.: 'lucro_liquido', 'capex', 'var_estoques').")
+    label: str = Field(description="Rótulo amigável do item.")
+    value: CanonicalDecimal | None = Field(default=None, description="Valor do fluxo ou saldo apurado.")
+    unit: str = Field(description="Unidade monetária do valor.")
+    item_type: Literal["flow", "stock", "subtotal", "adjustment"] = Field(description="Natureza analítica do componente.")
+    status: Literal["available", "unavailable"] = Field(description="Indica se o dado foi explicitamente encontrado ou é nulo.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências vinculadas.")
+
+
+class CashReconciliation(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de reconciliação de caixa."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    reconciliation_items: list[CashReconciliationItem] = Field(default_factory=list, description="Componentes da reconciliação de caixa.")
+
+
+class WorkingCapitalItem(BaseModel):
+    metric_id: str = Field(description="ID da métrica de capital de giro (ex.: 'contas_receber', 'estoques').")
+    label: str = Field(description="Rótulo legível.")
+    current_balance: CanonicalDecimal | None = Field(default=None, description="Saldo no período atual.")
+    comparison_balance: CanonicalDecimal | None = Field(default=None, description="Saldo no período de comparação.")
+    variation: CanonicalDecimal | None = Field(default=None, description="Variação monetária calculada (saldo atual - anterior).")
+    cash_flow_impact: CanonicalDecimal | None = Field(default=None, description="Impacto líquido no fluxo de caixa.")
+    days_outstanding: CanonicalDecimal | None = Field(default=None, description="Prazo médio apurado (ex. DSO, DOH, DPO).")
+    days_unit: str | None = Field(default=None, description="Unidade do prazo (ex.: 'dias').")
+
+
+class WorkingCapitalPanel(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de capital de giro."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    items: list[WorkingCapitalItem] = Field(default_factory=list, description="Detalhamento das contas do capital de giro.")
+    net_operating_working_capital: CanonicalDecimal | None = Field(default=None, description="Capital de giro operacional líquido total.")
+
+
+class DebtMaturityFaixa(BaseModel):
+    faixa: Literal["ate_12_meses", "1_a_2_anos", "2_a_3_anos", "3_a_5_anos", "acima_5_anos"] = Field(description="Faixa temporal do cronograma.")
+    value: CanonicalDecimal = Field(description="Montante total de vencimento da dívida nesta faixa.")
+    currency: str = Field(description="Moeda associada.")
+
+
+class DebtProfile(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do perfil de dívida."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    
+    caixa_e_equivalentes: CanonicalDecimal | None = Field(default=None, description="Caixa e equivalentes.")
+    aplicacoes_financeiras: CanonicalDecimal | None = Field(default=None, description="Aplicações financeiras de curto prazo.")
+    divida_bruta: CanonicalDecimal | None = Field(default=None, description="Dívida bruta total.")
+    divida_liquida: CanonicalDecimal | None = Field(default=None, description="Dívida líquida total.")
+    divida_curto_prazo: CanonicalDecimal | None = Field(default=None, description="Dívida circulante.")
+    divida_longo_prazo: CanonicalDecimal | None = Field(default=None, description="Dívida não circulante.")
+    arrendamentos: CanonicalDecimal | None = Field(default=None, description="Passivos de arrendamentos contábeis.")
+    divida_ajustada_com_arrendamentos: CanonicalDecimal | None = Field(default=None, description="Dívida total incluindo arrendamentos.")
+    
+    cronograma_vencimentos: list[DebtMaturityFaixa] = Field(default_factory=list, description="Cronograma de vencimentos por faixa.")
+    moedas: list[str] = Field(default_factory=list, description="Moedas de indexação.")
+    indexadores: list[str] = Field(default_factory=list, description="Indexadores da dívida.")
+    garantias: list[str] = Field(default_factory=list, description="Tipos de garantias declaradas.")
+    covenants: list[str] = Field(default_factory=list, description="Informações sobre cláusulas restritivas.")
+    inadimplencia_ou_descumprimento: bool = Field(default=False, description="Flag indicando inadimplemento contratual.")
+    alavancagem: CanonicalDecimal | None = Field(default=None, description="Métrica de alavancagem calculada (ex.: Dívida Líquida / EBITDA).")
+
+
+class ProvisionItem(BaseModel):
+    category: str = Field(description="Categoria da obrigação (ex.: 'processos_judiciais', 'ambiental', 'barragens').")
+    saldo_inicial: CanonicalDecimal | None = Field(default=None)
+    adicoes: CanonicalDecimal | None = Field(default=None)
+    reversoes: CanonicalDecimal | None = Field(default=None)
+    pagamentos: CanonicalDecimal | None = Field(default=None)
+    atualizacao_financeira: CanonicalDecimal | None = Field(default=None)
+    efeito_cambial: CanonicalDecimal | None = Field(default=None)
+    saldo_final: CanonicalDecimal | None = Field(default=None)
+    parcela_corrente: CanonicalDecimal | None = Field(default=None)
+    parcela_nao_corrente: CanonicalDecimal | None = Field(default=None)
+    passivo_contingente_divulgado: CanonicalDecimal | None = Field(default=None, description="Passivos contingentes associados divulgados mas não provisionados.")
+    limitacao_mensuracao: list[str] = Field(default_factory=list)
+
+
+class ProvisionPanel(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de provisões."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    provisoes: list[ProvisionItem] = Field(default_factory=list, description="Detalhamento das provisões contábeis.")
+
+
+class CapitalAllocationItem(BaseModel):
+    allocation_id: str = Field(description="Identificador (ex.: 'capex_organico', 'dividendos', 'recompra').")
+    label: str = Field(description="Rótulo amigável.")
+    value: CanonicalDecimal = Field(description="Valor alocado.")
+    unit: str = Field(description="Unidade monetária.")
+    percentage_of_operating_cash: CanonicalDecimal | None = Field(default=None, description="Porcentagem correspondente sobre o caixa operacional gerado.")
+
+
+class CapitalAllocation(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de alocação de capital."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    allocations: list[CapitalAllocationItem] = Field(default_factory=list, description="Detalhamento das destinações do fluxo de caixa.")
+
+
+class AccountingJudgmentItem(BaseModel):
+    theme: str = Field(description="Área contábil afetada (ex.: 'impairment', 'vida_util').")
+    description: str = Field(description="Comentário descritivo ou premissa adotada pela companhia.")
+    exposed_value: CanonicalDecimal | None = Field(default=None, description="Impacto monetário exposto.")
+    premissas_sensibilidades: str | None = Field(default=None, description="Sensibilidades informadas pela companhia.")
+    assurance_level: Literal["audit", "limited_review", "none", "unknown"] = Field(default="unknown", description="Nível de asseguração contábil.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências de auditoria associadas.")
+    limitations: list[str] = Field(default_factory=list, description="Restrições do julgamento.")
+
+
+class AccountingJudgments(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade dos julgamentos contábeis."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    judgments: list[AccountingJudgmentItem] = Field(default_factory=list, description="Julgamentos de estimativas e parecer de auditoria.")
+
+
+class MaterialChangeItem(BaseModel):
+    event_date: date | None = Field(default=None, description="Data da ocorrência ou protocolo.")
+    category: str = Field(description="Categoria do evento.")
+    title: str = Field(description="Título curto do evento.")
+    summary: str = Field(description="Resumo factual do ocorrido.")
+    related_value: CanonicalDecimal | None = Field(default=None, description="Valor monetário associado ao evento.")
+    period_affected: str | None = Field(default=None, description="Período contábil impactado.")
+    related_metrics: list[str] = Field(default_factory=list, description="Métricas de suporte afetadas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências correspondentes.")
+
+
+class MaterialChanges(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade do painel de mudanças materiais."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    changes: list[MaterialChangeItem] = Field(default_factory=list, description="Linha do tempo analítica com fatos financeiramente relevantes.")
+
+
+class NeutralConclusion(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade da conclusão neutra."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências de suporte às conclusões.")
+    
+    supported_fundamentals: list[str] = Field(default_factory=list, description="Afirmações neutras sobre tendências dos fundamentos da companhia.")
+    pressure_points: list[str] = Field(default_factory=list, description="Fatos representando pontos de pressão financeira ou operacional.")
+    cyclical_or_comparability_factors: list[str] = Field(default_factory=list, description="Fatores exógenos ou contábeis que desafiam a comparabilidade direta.")
+    analysis_limits: list[str] = Field(default_factory=list, description="Limites que impedem inferências definitivas baseadas nos dados.")
+    observed_changes: list[str] = Field(default_factory=list, description="Lista de mudanças factuais observadas nos indicadores sem julgamento de valor.")
+
+
+class NextFilingWatchlistItem(BaseModel):
+    metric: str = Field(description="Identificador da métrica a monitorar.")
+    reason: str = Field(description="Fato que justifica o monitoramento.")
+    last_value: CanonicalDecimal | None = Field(default=None, description="Último valor registrado.")
+    comparison_value: CanonicalDecimal | None = Field(default=None, description="Valor comparável anterior.")
+    recent_trend: str = Field(description="Direção ou padrão recente constatado.")
+    condition_to_watch: str = Field(description="Condição factual sugerida para observação no próximo relatório.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+
+
+class NextFilingWatchlist(BaseModel):
+    status: Literal["available", "partial", "unavailable", "not_applicable"] = Field(
+        description="Disponibilidade da lista de acompanhamento de próximos resultados."
+    )
+    period_id: str | None = Field(default=None, description="Período do relatório.")
+    comparison_period_id: str | None = Field(default=None, description="Período de comparação.")
+    scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
+    limitations: list[str] = Field(default_factory=list, description="Lista de limitações factuais encontradas.")
+    evidence_ids: list[str] = Field(default_factory=list, description="Evidências associadas.")
+    items: list[NextFilingWatchlistItem] = Field(default_factory=list, description="Itens de monitoramento para a próxima divulgação.")
+
+
 class AnaliseFundamentalistaResposta(BaseModel):
     """
     Payload unificado e estruturado do Relatório de Análise Fundamentalista.
@@ -1236,6 +1600,21 @@ class AnaliseFundamentalistaResposta(BaseModel):
         default_factory=list,
         description="Dossiê factual priorizado para apoiar a UI sem exigir inferências no frontend."
     )
+    diagnostico_fundamental: DiagnosticoFundamental | None = Field(default=None, description="Diagnóstico fundamental da companhia.")
+    result_bridge: ResultBridge | None = Field(default=None, description="Ponte de resultados operacionais.")
+    margin_stack: MarginStack | None = Field(default=None, description="Pilha de margens de rentabilidade.")
+    segment_panel: SegmentPanel | None = Field(default=None, description="Painel de segmentos operacionais.")
+    comparability_items: ComparabilityItems | None = Field(default=None, description="Itens que prejudicam a comparabilidade contábil.")
+    cash_reconciliation: CashReconciliation | None = Field(default=None, description="Painel de reconciliação de caixa.")
+    working_capital_panel: WorkingCapitalPanel | None = Field(default=None, description="Painel de capital de giro.")
+    debt_profile: DebtProfile | None = Field(default=None, description="Perfil de endividamento da companhia.")
+    provision_panel: ProvisionPanel | None = Field(default=None, description="Painel de provisões contábeis.")
+    capital_allocation: CapitalAllocation | None = Field(default=None, description="Painel de alocação de capital.")
+    accounting_judgments: AccountingJudgments | None = Field(default=None, description="Estimativas e julgamentos contábeis materiais.")
+    material_changes: MaterialChanges | None = Field(default=None, description="Painel de mudanças materiais financeiras.")
+    neutral_conclusion: NeutralConclusion | None = Field(default=None, description="Conclusão analítica neutra.")
+    next_filing_watchlist: NextFilingWatchlist | None = Field(default=None, description="Lista de acompanhamento para o próximo resultado.")
+
 
 
 class AnaliseFundamentalistaEventosResposta(BaseModel):

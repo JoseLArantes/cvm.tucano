@@ -34,6 +34,7 @@ from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.vlmo import VlmoConsolidado
 from app.schemas.analise import (
+    AccountingJudgments,
     AnaliseBasePeriodo,
     AnaliseBriefReferencias,
     AnaliseBriefResposta,
@@ -88,6 +89,7 @@ from app.schemas.analise import (
     AnaliseProvenienciaItem,
     AnaliseQualidadeResposta,
     AnaliseQualidadeResumo,
+    AnaliseRecorteEfetivo,
     AnaliseResolutionMetadata,
     AnaliseRestatementContaAlterada,
     AnaliseRestatementItem,
@@ -107,7 +109,30 @@ from app.schemas.analise import (
     AnaliseTemporalObservation,
     AnaliseUnit,
     AnaliseValueSource,
+    CapitalAllocation,
+    CapitalAllocationItem,
+    CashReconciliation,
+    CashReconciliationItem,
     CompactEvidenceRef,
+    ComparabilityItemDetail,
+    ComparabilityItems,
+    DebtProfile,
+    DiagnosticoFundamental,
+    DiagnosticoFundamentalDimensao,
+    DiagnosticoFundamentalObservation,
+    MarginStack,
+    MarginStackItem,
+    MaterialChangeItem,
+    MaterialChanges,
+    NeutralConclusion,
+    NextFilingWatchlist,
+    NextFilingWatchlistItem,
+    ProvisionPanel,
+    ResultBridge,
+    ResultBridgeItem,
+    SegmentPanel,
+    WorkingCapitalItem,
+    WorkingCapitalPanel,
 )
 from app.services.financeiro_valores import valor_conta_ajustado
 
@@ -327,7 +352,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("1",),
         direction="higher_is_better",
         strategy="Seleciona o saldo do ativo total na data de referência do período.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "ativo_circulante": MetricSpec(
@@ -339,7 +364,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("1.01",),
         direction="higher_is_better",
         strategy="Seleciona o saldo do ativo circulante na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "caixa_equivalentes": MetricSpec(
@@ -351,7 +376,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("1.01.01",),
         direction="higher_is_better",
         strategy="Seleciona o saldo de caixa e equivalentes na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "passivo_total": MetricSpec(
@@ -363,7 +388,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("2",),
         direction="lower_is_better",
         strategy="Seleciona o saldo do passivo total na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "divida_bruta": MetricSpec(
@@ -375,7 +400,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("2.01.04", "2.02.01"),
         direction="lower_is_better",
         strategy="Soma passivos financeiros de curto e longo prazo na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "passivo_circulante": MetricSpec(
@@ -387,7 +412,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("2.01",),
         direction="lower_is_better",
         strategy="Seleciona o saldo do passivo circulante na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "patrimonio_liquido": MetricSpec(
@@ -399,7 +424,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         candidate_accounts=("2.03",),
         direction="higher_is_better",
         strategy="Seleciona o saldo do patrimônio líquido na data de referência.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "margem_liquida": MetricSpec(
@@ -446,7 +471,7 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         formula="divida_bruta - caixa_equivalentes",
         direction="lower_is_better",
         strategy="Calculada como dívida bruta menos caixa e equivalentes.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         vertical_denominator_metric_id="ativo_total",
     ),
     "alavancagem": MetricSpec(
@@ -482,8 +507,30 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         formula="ativo_circulante / passivo_circulante",
         direction="higher_is_better",
         strategy="Calculada pela divisão de ativo circulante por passivo circulante na mesma data.",
-        bases=("fy", "quarter"),
+        bases=("fy", "quarter", "ytd"),
         limitations=("Retornada como razão decimal canônica com `unit=ratio`.",),
+    ),
+    "roe": MetricSpec(
+        metric_id="roe",
+        nome="ROE",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="lucro_liquido / patrimonio_liquido",
+        direction="higher_is_better",
+        strategy="Calculado como lucro líquido dividido por patrimônio líquido.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "roa": MetricSpec(
+        metric_id="roa",
+        nome="ROA",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="lucro_liquido / ativo_total",
+        direction="higher_is_better",
+        strategy="Calculado como lucro líquido dividido por ativo total.",
+        bases=("fy", "quarter", "ytd"),
     ),
 }
 
@@ -495,6 +542,8 @@ METRIC_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "alavancagem": ("divida_liquida", "ebitda"),
     "conversao_lucro_caixa": ("caixa_operacional", "lucro_liquido"),
     "liquidez_corrente": ("ativo_circulante", "passivo_circulante"),
+    "roe": ("lucro_liquido", "patrimonio_liquido"),
+    "roa": ("lucro_liquido", "ativo_total"),
 }
 
 
@@ -1200,7 +1249,7 @@ def _resolve_base_metric_for_period(
                     metric_id=spec.metric_id,
                     spec=spec,
                     periodicidade="quarterly",
-                    base_periodo="quarter",
+                    base_periodo=base_periodo,
                     row=row,
                     doc=doc,
                     scope=scope,
@@ -1655,6 +1704,84 @@ def _resolve_series_facts(
                         reason_code="MISSING_FORMULA_COMPONENT",
                         message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
                         missing=["ativo_circulante", "passivo_circulante"],
+                    )
+                )
+            elif metric_id == "roe":
+                lucro = facts_by_metric_period.get(("lucro_liquido", period_id))
+                patrimonio = facts_by_metric_period.get(("patrimonio_liquido", period_id))
+                if lucro and patrimonio:
+                    ratio = _safe_div(lucro.value, patrimonio.value)
+                    if ratio is not None:
+                        facts_by_metric_period[(metric_id, period_id)] = ResolvedFact(
+                            metric_id=metric_id,
+                            period_id=period_id,
+                            fiscal_year=year,
+                            quarter=quarter,
+                            period_nature=spec.period_nature,
+                            period_basis=base_periodo,
+                            start_date=lucro.start_date,
+                            end_date=lucro.end_date,
+                            value=ratio,
+                            unit=spec.unit,
+                            scope=scope,
+                            form="DERIVED",
+                            version=max(filter(None, [lucro.version, patrimonio.version]), default=None),
+                            restated=lucro.restated or patrimonio.restated,
+                            value_source="derived_from_formula",
+                            comparables=AnaliseComparables(
+                                yoy_period_id=lucro.comparables.yoy_period_id,
+                                qoq_period_id=lucro.comparables.qoq_period_id,
+                            ),
+                            provenance=[*lucro.provenance, *patrimonio.provenance],
+                        )
+                        continue
+                unavailable.append(
+                    AnaliseSeriesUnavailable(
+                        metric_id=metric_id,
+                        period_id=period_id,
+                        status="unavailable",
+                        reason_code="MISSING_FORMULA_COMPONENT",
+                        message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
+                        missing=["lucro_liquido", "patrimonio_liquido"],
+                    )
+                )
+            elif metric_id == "roa":
+                lucro = facts_by_metric_period.get(("lucro_liquido", period_id))
+                ativo = facts_by_metric_period.get(("ativo_total", period_id))
+                if lucro and ativo:
+                    ratio = _safe_div(lucro.value, ativo.value)
+                    if ratio is not None:
+                        facts_by_metric_period[(metric_id, period_id)] = ResolvedFact(
+                            metric_id=metric_id,
+                            period_id=period_id,
+                            fiscal_year=year,
+                            quarter=quarter,
+                            period_nature=spec.period_nature,
+                            period_basis=base_periodo,
+                            start_date=lucro.start_date,
+                            end_date=lucro.end_date,
+                            value=ratio,
+                            unit=spec.unit,
+                            scope=scope,
+                            form="DERIVED",
+                            version=max(filter(None, [lucro.version, ativo.version]), default=None),
+                            restated=lucro.restated or ativo.restated,
+                            value_source="derived_from_formula",
+                            comparables=AnaliseComparables(
+                                yoy_period_id=lucro.comparables.yoy_period_id,
+                                qoq_period_id=lucro.comparables.qoq_period_id,
+                            ),
+                            provenance=[*lucro.provenance, *ativo.provenance],
+                        )
+                        continue
+                unavailable.append(
+                    AnaliseSeriesUnavailable(
+                        metric_id=metric_id,
+                        period_id=period_id,
+                        status="unavailable",
+                        reason_code="MISSING_FORMULA_COMPONENT",
+                        message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
+                        missing=["lucro_liquido", "ativo_total"],
                     )
                 )
 
@@ -3678,6 +3805,1017 @@ def _build_ponte_caixa(
         bridges.append(AnalisePonteCaixaPeriodo(period_id=period_id, unit="BRL", items=items))
 
     return bridges
+
+
+def _get_opening_period_id(period_id: str, base_periodo: str) -> str | None:
+    if period_id.startswith("FY") and period_id[2:].isdigit():
+        year = int(period_id[2:])
+        return f"FY{year - 1}"
+    if "-YTDQ" in period_id:
+        try:
+            parts = period_id.split("-YTDQ")
+            year_part = parts[0]
+            q_part = parts[1]
+            if year_part.isdigit():
+                return f"{int(year_part) - 1}-YTDQ{q_part}"
+        except Exception:
+            return None
+    elif "-Q" in period_id:
+        try:
+            parts = period_id.split("-Q")
+            year_part = parts[0]
+            q_part = parts[1]
+            if year_part.isdigit():
+                return f"{int(year_part) - 1}-Q{q_part}"
+        except Exception:
+            return None
+    return None
+
+
+def _get_ttm_value(
+    metric_id: str,
+    period_id: str,
+    base_periodo: AnaliseBasePeriodo,
+    obs_lookup: dict[tuple[str, str], Decimal],
+) -> Decimal | None:
+    if base_periodo == "fy":
+        return obs_lookup.get((metric_id, period_id))
+
+    if base_periodo == "ytd":
+        if "-YTDQ" in period_id:
+            try:
+                year_part, q_part = period_id.split("-YTDQ")
+                year = int(year_part)
+                q = int(q_part)
+            except ValueError:
+                return None
+            
+            ytd_atual = obs_lookup.get((metric_id, period_id))
+            fy_anterior = obs_lookup.get((metric_id, f"FY{year - 1}"))
+            ytd_anterior = obs_lookup.get((metric_id, f"{year - 1}-YTDQ{q}"))
+            
+            if ytd_atual is not None and fy_anterior is not None and ytd_anterior is not None:
+                return ytd_atual + fy_anterior - ytd_anterior
+            return None
+
+    if base_periodo == "quarter":
+        if "-Q" in period_id:
+            try:
+                year_part, q_part = period_id.split("-Q")
+                year = int(year_part)
+                q = int(q_part)
+            except ValueError:
+                return None
+            
+            quarters = []
+            for i in range(4):
+                curr_q = q - i
+                curr_y = year
+                while curr_q <= 0:
+                    curr_q += 4
+                    curr_y -= 1
+                quarters.append(f"{curr_y}-Q{curr_q}")
+                
+            vals = [obs_lookup.get((metric_id, q_id)) for q_id in quarters]
+            if all(v is not None for v in vals):
+                return sum((v for v in vals if v is not None), Decimal(0))
+            return None
+
+    return None
+
+
+def _get_period_id_12_months_ago(
+    period_id: str,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+) -> str | None:
+    if periodicidade == "annual":
+        if period_id.startswith("FY"):
+            try:
+                year = int(period_id[2:])
+                return f"FY{year - 1}"
+            except ValueError:
+                return None
+    elif periodicidade == "quarterly":
+        if base_periodo == "ytd":
+            if "-YTDQ" in period_id:
+                try:
+                    year_part, q_part = period_id.split("-YTDQ")
+                    year = int(year_part)
+                    return f"{year - 1}-YTDQ{q_part}"
+                except ValueError:
+                    return None
+        elif base_periodo == "quarter":
+            if "-Q" in period_id:
+                try:
+                    year_part, q_part = period_id.split("-Q")
+                    year = int(year_part)
+                    return f"{year - 1}-Q{q_part}"
+                except ValueError:
+                    return None
+    return None
+
+
+def _get_period_value_for_basis(
+    metric_id: str,
+    period_id: str,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    obs_lookup: dict[tuple[str, str], Decimal],
+) -> Decimal | None:
+    if metric_id == "roe":
+        lucro_val = _get_ttm_value("lucro_liquido", period_id, base_periodo, obs_lookup) if periodicidade == "quarterly" else obs_lookup.get(("lucro_liquido", period_id))
+        patrimonio_atual = obs_lookup.get(("patrimonio_liquido", period_id))
+        prev_p = _get_period_id_12_months_ago(period_id, periodicidade, base_periodo)
+        patrimonio_anterior = obs_lookup.get(("patrimonio_liquido", prev_p)) if prev_p else None
+        if lucro_val is not None and patrimonio_atual is not None:
+            patrimonio_medio = (patrimonio_atual + patrimonio_anterior) / 2 if patrimonio_anterior is not None else patrimonio_atual
+            return _safe_div(lucro_val, patrimonio_medio)
+        return None
+
+    if metric_id == "roa":
+        lucro_val = _get_ttm_value("lucro_liquido", period_id, base_periodo, obs_lookup) if periodicidade == "quarterly" else obs_lookup.get(("lucro_liquido", period_id))
+        ativo_atual = obs_lookup.get(("ativo_total", period_id))
+        prev_p = _get_period_id_12_months_ago(period_id, periodicidade, base_periodo)
+        ativo_anterior = obs_lookup.get(("ativo_total", prev_p)) if prev_p else None
+        if lucro_val is not None and ativo_atual is not None:
+            ativo_medio = (ativo_atual + ativo_anterior) / 2 if ativo_anterior is not None else ativo_atual
+            return _safe_div(lucro_val, ativo_medio)
+        return None
+
+    if periodicidade == "annual":
+        return obs_lookup.get((metric_id, period_id))
+    
+    spec = METRIC_SPECS.get(metric_id)
+    if not spec:
+        return obs_lookup.get((metric_id, period_id))
+    
+    if spec.metric_type == "ratio":
+        if metric_id in ("margem_bruta", "margem_ebitda", "margem_ebit", "margem_liquida"):
+            num_id = {
+                "margem_bruta": "lucro_bruto",
+                "margem_ebitda": "ebitda",
+                "margem_ebit": "ebit",
+                "margem_liquida": "lucro_liquido",
+            }[metric_id]
+            num_ttm = _get_ttm_value(num_id, period_id, base_periodo, obs_lookup)
+            den_ttm = _get_ttm_value("receita_liquida", period_id, base_periodo, obs_lookup)
+            return _safe_div(num_ttm, den_ttm) if (num_ttm is not None and den_ttm is not None) else None
+
+        if metric_id == "conversao_lucro_caixa":
+            caixa_ttm = _get_ttm_value("caixa_operacional", period_id, base_periodo, obs_lookup)
+            lucro_ttm = _get_ttm_value("lucro_liquido", period_id, base_periodo, obs_lookup)
+            return _safe_div(caixa_ttm, lucro_ttm) if (caixa_ttm is not None and lucro_ttm is not None) else None
+
+        if metric_id == "alavancagem":
+            divida = obs_lookup.get(("divida_liquida", period_id))
+            ebitda_ttm = _get_ttm_value("ebitda", period_id, base_periodo, obs_lookup)
+            return _safe_div(divida, ebitda_ttm) if (divida is not None and ebitda_ttm is not None) else None
+
+        return obs_lookup.get((metric_id, period_id))
+
+    is_flow = spec.period_nature == "duration" and spec.unit == "BRL"
+    if is_flow:
+        return _get_ttm_value(metric_id, period_id, base_periodo, obs_lookup)
+    else:
+        return obs_lookup.get((metric_id, period_id))
+
+
+def _build_diagnostico_fundamental(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> DiagnosticoFundamental:
+    if not active_periods:
+        return DiagnosticoFundamental(
+            status="unavailable",
+            scope=scope,
+            limitations=["Nenhum período ativo encontrado no horizonte solicitado."],
+        )
+    
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+    
+    def get_val(metric: str, p: str | None) -> Decimal | None:
+        if not p:
+            return None
+        return _get_period_value_for_basis(metric, p, periodicidade, base_periodo, obs_lookup)
+
+    dimensoes = []
+    
+    change: Decimal | None = None
+    trend: Literal["expanding", "contracting", "stable", "volatile", "insufficient_history"] = "stable"
+
+    # 1. Crescimento (receita_liquida)
+    curr_rev = get_val("receita_liquida", latest_p)
+    prev_rev = get_val("receita_liquida", prev_p)
+    if curr_rev is not None and prev_rev is not None:
+        change = curr_rev - prev_rev
+        trend = "expanding" if change > 0 else ("contracting" if change < 0 else "stable")
+        statement = "A receita líquida expandiu em relação ao período comparável." if change > 0 else (
+            "A receita líquida contraiu em relação ao período comparável." if change < 0 else
+            "A receita líquida permaneceu estável."
+        )
+        obs = [DiagnosticoFundamentalObservation(
+            metric="receita_liquida",
+            current_value=curr_rev,
+            comparison_value=prev_rev,
+            change=change,
+            change_unit="BRL",
+            trend=trend,
+            statement=statement,
+        )]
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="crescimento",
+            status="available",
+            observations=obs,
+        ))
+    else:
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="crescimento",
+            status="unavailable",
+            observations=[],
+        ))
+
+    # 2. Rentabilidade (margem_liquida)
+    curr_margin = get_val("margem_liquida", latest_p)
+    prev_margin = get_val("margem_liquida", prev_p)
+    if curr_margin is not None and prev_margin is not None:
+        change = curr_margin - prev_margin
+        trend = "expanding" if change > 0 else ("contracting" if change < 0 else "stable")
+        statement = "A margem líquida expandiu em relação ao período anterior." if change > 0 else (
+            "A margem líquida contraiu em relação ao período anterior." if change < 0 else
+            "A margem líquida permaneceu estável."
+        )
+        obs = [DiagnosticoFundamentalObservation(
+            metric="margem_liquida",
+            current_value=curr_margin,
+            comparison_value=prev_margin,
+            change=change,
+            change_unit="percentage_points",
+            trend=trend,
+            statement=statement,
+        )]
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="rentabilidade",
+            status="available",
+            observations=obs,
+        ))
+    else:
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="rentabilidade",
+            status="unavailable",
+            observations=[],
+        ))
+
+    # 3. Conversão em caixa (conversao_lucro_caixa)
+    curr_conv = get_val("conversao_lucro_caixa", latest_p)
+    prev_conv = get_val("conversao_lucro_caixa", prev_p)
+    if curr_conv is not None:
+        change = curr_conv - prev_conv if prev_conv is not None else None
+        trend = "expanding" if (change is not None and change > 0) else ("contracting" if (change is not None and change < 0) else "stable")
+        statement = f"A conversão de lucro em caixa variou de {prev_conv} para {curr_conv}." if prev_conv is not None else f"A conversão de lucro em caixa registrou {curr_conv} no período."
+        obs = [DiagnosticoFundamentalObservation(
+            metric="conversao_lucro_caixa",
+            current_value=curr_conv,
+            comparison_value=prev_conv,
+            change=change,
+            change_unit="percentage_points",
+            trend=trend,
+            statement=statement,
+        )]
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="conversao_caixa",
+            status="available",
+            observations=obs,
+        ))
+    else:
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="conversao_caixa",
+            status="unavailable",
+            observations=[],
+        ))
+
+    # 4. Solidez financeira (alavancagem)
+    curr_alav = get_val("alavancagem", latest_p)
+    prev_alav = get_val("alavancagem", prev_p)
+    if curr_alav is not None:
+        change = curr_alav - prev_alav if prev_alav is not None else None
+        trend = "expanding" if (change is not None and change > 0) else ("contracting" if (change is not None and change < 0) else "stable")
+        statement = f"A alavancagem financeira variou de {prev_alav} para {curr_alav}." if prev_alav is not None else f"A alavancagem financeira registrada no período é de {curr_alav}."
+        obs = [DiagnosticoFundamentalObservation(
+            metric="alavancagem",
+            current_value=curr_alav,
+            comparison_value=prev_alav,
+            change=change,
+            change_unit="ratio",
+            trend=trend,
+            statement=statement,
+        )]
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="solidez_financeira",
+            status="available",
+            observations=obs,
+        ))
+    else:
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="solidez_financeira",
+            status="unavailable",
+            observations=[],
+        ))
+
+    # 5. Alocação de capital (capex)
+    curr_capex = get_val("capex", latest_p)
+    prev_capex = get_val("capex", prev_p)
+    if curr_capex is not None:
+        change = curr_capex - prev_capex if prev_capex is not None else None
+        trend = "expanding" if (change is not None and curr_capex is not None and prev_capex is not None and abs(curr_capex) > abs(prev_capex)) else "contracting"
+        statement = "O volume de CAPEX aumentou no período." if trend == "expanding" else "O volume de CAPEX diminuiu ou ficou estável."
+        obs = [DiagnosticoFundamentalObservation(
+            metric="capex",
+            current_value=curr_capex,
+            comparison_value=prev_capex,
+            change=change,
+            change_unit="BRL",
+            trend=trend,
+            statement=statement,
+        )]
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="alocacao_capital",
+            status="available",
+            observations=obs,
+        ))
+    else:
+        dimensoes.append(DiagnosticoFundamentalDimensao(
+            dimension="alocacao_capital",
+            status="unavailable",
+            observations=[],
+        ))
+
+    # 6. Qualidade/comparabilidade do resultado
+    dimensoes.append(DiagnosticoFundamentalDimensao(
+        dimension="qualidade_comparabilidade",
+        status="not_applicable",
+        observations=[],
+    ))
+
+    limitations = []
+    if any(d.status == "unavailable" for d in dimensoes):
+        limitations.append("Algumas dimensões não puderam ser totalmente preenchidas por falta de pontos de dados no histórico.")
+
+    ev_ids = []
+    for metric_id in ["receita_liquida", "margem_liquida", "conversao_lucro_caixa", "alavancagem", "capex"]:
+        for p in [latest_p, prev_p]:
+            if p and (metric_id, p) in obs_lookup:
+                ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, metric_id, p))
+
+    return DiagnosticoFundamental(
+        status="available" if all(d.status == "available" for d in dimensoes) else "partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=limitations,
+        evidence_ids=sorted(list(set(ev_ids))),
+        dimensoes=dimensoes,
+    )
+
+
+def _build_result_bridge(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> ResultBridge | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    metrics = [
+        ("receita_liquida", "Receita Líquida"),
+        ("lucro_bruto", "Lucro Bruto"),
+        ("ebit", "EBIT / Resultado Operacional"),
+        ("ebitda", "EBITDA"),
+        ("lucro_liquido", "Lucro Líquido"),
+    ]
+
+    items = []
+    ev_ids = []
+    for m_id, label in metrics:
+        curr_val = _get_period_value_for_basis(m_id, latest_p, periodicidade, base_periodo, obs_lookup)
+        prev_val = _get_period_value_for_basis(m_id, prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+        
+        if curr_val is not None:
+            change = curr_val - prev_val if prev_val is not None else None
+            pct = (change / prev_val) if (change is not None and prev_val is not None and prev_val != 0) else None
+            items.append(ResultBridgeItem(
+                metric_id=m_id,
+                label=label,
+                current_value=curr_val,
+                comparison_value=prev_val,
+                change=change,
+                pct_change=pct,
+                status="available",
+            ))
+            ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m_id, latest_p))
+            if prev_p:
+                ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m_id, prev_p))
+        else:
+            items.append(ResultBridgeItem(
+                metric_id=m_id,
+                label=label,
+                status="unavailable",
+            ))
+
+    limitations = []
+    if any(item.status == "unavailable" for item in items):
+        limitations.append("Algumas etapas da reconciliação de resultado não foram encontradas nas demonstrações.")
+
+    return ResultBridge(
+        status="available" if all(item.status == "available" for item in items) else "partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=limitations,
+        evidence_ids=sorted(list(set(ev_ids))),
+        items=items,
+    )
+
+
+def _build_margin_stack(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    series_res: AnaliseSeriesResposta,
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> MarginStack | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    margins_to_calc: list[tuple[Literal["bruta", "ebitda", "ebit", "antes_tributos", "liquida"], str, str, str]] = [
+        ("bruta", "lucro_bruto", "Margem Bruta", "lucro_bruto / receita_liquida"),
+        ("ebitda", "ebitda", "Margem EBITDA", "ebitda / receita_liquida"),
+        ("ebit", "ebit", "Margem EBIT/Operacional", "ebit / receita_liquida"),
+        ("liquida", "lucro_liquido", "Margem Líquida", "lucro_liquido / receita_liquida"),
+    ]
+
+    items = []
+    ev_ids = []
+    for m_type, num_id, label, formula in margins_to_calc:
+        curr_num = _get_period_value_for_basis(num_id, latest_p, periodicidade, base_periodo, obs_lookup)
+        curr_den = _get_period_value_for_basis("receita_liquida", latest_p, periodicidade, base_periodo, obs_lookup)
+        prev_num = _get_period_value_for_basis(num_id, prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+        prev_den = _get_period_value_for_basis("receita_liquida", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+
+        curr_margin = (curr_num / curr_den) if (curr_num is not None and curr_den) else None
+        prev_margin = (prev_num / prev_den) if (prev_num is not None and prev_den) else None
+
+        margin_series = []
+        for p in active_periods:
+            num = _get_period_value_for_basis(num_id, p, periodicidade, base_periodo, obs_lookup)
+            den = _get_period_value_for_basis("receita_liquida", p, periodicidade, base_periodo, obs_lookup)
+            if num is not None and den:
+                val = num / den
+                ref_obs = None
+                for obs in series_res.observacoes:
+                    if obs.period_id == p and obs.metric_id == "receita_liquida":
+                        ref_obs = obs
+                        break
+                if ref_obs:
+                    margin_series.append(AnaliseSeriesObservation(
+                        metric_id=f"margem_{m_type}",
+                        period_id=p,
+                        fiscal_year=ref_obs.fiscal_year,
+                        quarter=ref_obs.quarter,
+                        period_nature=ref_obs.period_nature,
+                        period_basis=ref_obs.period_basis,
+                        start_date=ref_obs.start_date,
+                        end_date=ref_obs.end_date,
+                        value=val,
+                        unit="ratio",
+                        scope=ref_obs.scope,
+                        form="DERIVED",
+                        version=ref_obs.version,
+                        restated=ref_obs.restated,
+                        value_source="derived_from_formula",
+                        comparables=ref_obs.comparables,
+                        provenance=[],
+                    ))
+
+        if curr_margin is not None:
+            change = curr_margin - prev_margin if prev_margin is not None else None
+            items.append(MarginStackItem(
+                margin_type=m_type,
+                label=label,
+                current_value=curr_margin,
+                comparison_value=prev_margin,
+                change_pp=change,
+                series=margin_series,
+                status="available",
+                formula=formula,
+                limitations=[],
+            ))
+            ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, num_id, latest_p))
+            ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "receita_liquida", latest_p))
+        else:
+            items.append(MarginStackItem(
+                margin_type=m_type,
+                label=label,
+                status="unavailable",
+                formula=formula,
+                limitations=["Numerador ou denominador ausente no período."],
+            ))
+
+    return MarginStack(
+        status="available" if all(item.status == "available" for item in items) else "partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=[],
+        evidence_ids=sorted(list(set(ev_ids))),
+        margins=items,
+    )
+
+
+def _build_segment_panel(
+    companhia: Companhia,
+    active_periods: list[str],
+    scope: AnaliseEscopo,
+) -> SegmentPanel | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    return SegmentPanel(
+        status="unavailable",
+        period_id=latest_p,
+        scope=scope,
+        limitations=["A abertura segmentada de receitas e resultados não está estruturada atualmente no banco de dados relacional."],
+        segmentos=[],
+    )
+
+
+def _build_comparability_items(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    restatements: list[AnaliseRestatementItem],
+    active_periods: list[str],
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> ComparabilityItems | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    items = []
+    ev_ids = []
+    for r in restatements:
+        if r.period_id == latest_p:
+            for chg in r.changed_accounts:
+                ev_id = _make_fundamentalista_evidence_id(companhia, "restatement", scope, as_of, base_periodo, r.period_id, str(r.current_version))
+                after_val = chg.after_value
+                before_val = chg.before_value
+                val = None
+                if after_val is not None and before_val is not None:
+                    val = after_val - before_val
+                items.append(ComparabilityItemDetail(
+                    category="accounting_remeasurement",
+                    description=f"Retificação / Reapresentação contábil na conta {chg.account_code}.",
+                    value=val,
+                    unit="BRL",
+                    period_id=r.period_id,
+                    line_affected=chg.account_code,
+                    cash_effect="unknown",
+                    classification="accounting_remeasurement",
+                    evidence_ids=[ev_id],
+                ))
+                ev_ids.append(ev_id)
+
+    return ComparabilityItems(
+        status="available" if items else "not_applicable",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Processamento limitado a reapresentações de contas CVM mapeadas no fluxo de caixa."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        items=items,
+    )
+
+
+def _build_cash_reconciliation(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> CashReconciliation | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    reconciliation_steps: list[tuple[str, str, Literal["flow", "stock", "subtotal", "adjustment"]]] = [
+        ("lucro_liquido", "Lucro Líquido", "flow"),
+        ("depreciacao_amortizacao", "Ajuste de Depreciação e Amortização", "adjustment"),
+        ("caixa_operacional", "Caixa Líquido Operacional", "subtotal"),
+        ("capex", "Desembolsos de CAPEX", "flow"),
+        ("caixa_livre", "Geração de Caixa Livre", "subtotal"),
+        ("caixa_equivalentes", "Saldo Final de Caixa", "stock"),
+    ]
+
+    items = []
+    ev_ids = []
+    for m_id, label, item_type in reconciliation_steps:
+        val = _get_period_value_for_basis(m_id, latest_p, periodicidade, base_periodo, obs_lookup)
+        if val is not None:
+            items.append(CashReconciliationItem(
+                item_id=m_id,
+                label=label,
+                value=val,
+                unit="BRL",
+                item_type=item_type,
+                status="available",
+                evidence_ids=[_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m_id, latest_p)],
+            ))
+            ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m_id, latest_p))
+        else:
+            items.append(CashReconciliationItem(
+                item_id=m_id,
+                label=label,
+                unit="BRL",
+                item_type=item_type,
+                status="unavailable",
+                evidence_ids=[],
+            ))
+
+    return CashReconciliation(
+        status="available" if all(item.status == "available" for item in items) else "partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["A conciliação detalhada de variações de capital de giro não foi individualizada."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        reconciliation_items=items,
+    )
+
+
+def _build_working_capital_panel(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> WorkingCapitalPanel | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    items = []
+    ev_ids = []
+
+    curr_ac = _get_period_value_for_basis("ativo_circulante", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_ac = _get_period_value_for_basis("ativo_circulante", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_ac is not None:
+        items.append(WorkingCapitalItem(
+            metric_id="ativo_circulante",
+            label="Ativo Circulante",
+            current_balance=curr_ac,
+            comparison_balance=prev_ac,
+            variation=curr_ac - prev_ac if prev_ac is not None else None,
+        ))
+        ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "ativo_circulante", latest_p))
+
+    curr_pc = _get_period_value_for_basis("passivo_circulante", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_pc = _get_period_value_for_basis("passivo_circulante", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_pc is not None:
+        items.append(WorkingCapitalItem(
+            metric_id="passivo_circulante",
+            label="Passivo Circulante",
+            current_balance=curr_pc,
+            comparison_balance=prev_pc,
+            variation=curr_pc - prev_pc if prev_pc is not None else None,
+        ))
+        ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "passivo_circulante", latest_p))
+
+    net_wc = None
+
+    return WorkingCapitalPanel(
+        status="partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Contas detalhadas de estoques e fornecedores não foram individualizadas; exibindo saldos circulantes agregados. O capital de giro operacional líquido está nulo devido à ausência de contas operacionais estruturadas."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        items=items,
+        net_operating_working_capital=net_wc,
+    )
+
+
+def _build_debt_profile(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> DebtProfile | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    curr_caixa = _get_period_value_for_basis("caixa_equivalentes", latest_p, periodicidade, base_periodo, obs_lookup)
+    curr_db = _get_period_value_for_basis("divida_bruta", latest_p, periodicidade, base_periodo, obs_lookup)
+    curr_dl = _get_period_value_for_basis("divida_liquida", latest_p, periodicidade, base_periodo, obs_lookup)
+    curr_alav = _get_period_value_for_basis("alavancagem", latest_p, periodicidade, base_periodo, obs_lookup)
+
+    ev_ids = []
+    for m in ["caixa_equivalentes", "divida_bruta", "divida_liquida", "alavancagem"]:
+        if (m, latest_p) in obs_lookup:
+            ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m, latest_p))
+
+    return DebtProfile(
+        status="partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Cronograma de vencimentos de longo prazo e passivos de arrendamentos mercantil (leasing) não individualizados contabilisticamente."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        caixa_e_equivalentes=curr_caixa,
+        divida_bruta=curr_db,
+        divida_liquida=curr_dl,
+        alavancagem=curr_alav,
+    )
+
+
+def _build_provision_panel(
+    companhia: Companhia,
+    active_periods: list[str],
+    scope: AnaliseEscopo,
+) -> ProvisionPanel | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    return ProvisionPanel(
+        status="unavailable",
+        period_id=latest_p,
+        scope=scope,
+        limitations=["Dados sobre saldo, adições e pagamentos de provisões judiciais ou ambientais não estão estruturados em formato relacional."],
+        provisoes=[],
+    )
+
+
+def _build_capital_allocation(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> CapitalAllocation | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    curr_capex = _get_period_value_for_basis("capex", latest_p, periodicidade, base_periodo, obs_lookup)
+    curr_fco = _get_period_value_for_basis("caixa_operacional", latest_p, periodicidade, base_periodo, obs_lookup)
+
+    allocations = []
+    ev_ids = []
+    if curr_capex is not None:
+        pct = None
+        if curr_fco:
+            pct = abs(curr_capex) / curr_fco
+        allocations.append(CapitalAllocationItem(
+            allocation_id="capex",
+            label="Investimentos em Ativos Imobilizados e Intangíveis (CAPEX)",
+            value=curr_capex,
+            unit="BRL",
+            percentage_of_operating_cash=pct,
+        ))
+        ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "capex", latest_p))
+
+    return CapitalAllocation(
+        status="partial" if allocations else "unavailable",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Distribuição detalhada de dividendos, recompras e emissões/amortizações de dívidas não individualizadas no painel de alocação."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        allocations=allocations,
+    )
+
+
+def _build_accounting_judgments(
+    companhia: Companhia,
+    active_periods: list[str],
+    scope: AnaliseEscopo,
+) -> AccountingJudgments | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    return AccountingJudgments(
+        status="unavailable",
+        period_id=latest_p,
+        scope=scope,
+        limitations=["As estimativas e julgamentos contábeis contidos nas notas explicativas do emissor não estão disponíveis em formato de dados estruturados."],
+        judgments=[],
+    )
+
+
+def _build_material_changes(
+    companhia: Companhia,
+    sinais: list[AnaliseSignal],
+    restatements: list[AnaliseRestatementItem],
+    active_periods: list[str],
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> MaterialChanges | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    changes = []
+    ev_ids = []
+
+    for r in restatements:
+        if r.period_id == latest_p:
+            ev_id = _make_fundamentalista_evidence_id(companhia, "restatement", scope, as_of, base_periodo, r.period_id, str(r.current_version))
+            changes.append(MaterialChangeItem(
+                event_date=r.restated_at,
+                category="restatement",
+                title=f"Reapresentação Financeira do Período {r.period_id}",
+                summary=f"O emissor reapresentou as demonstrações do período {r.period_id} (versão atual {r.current_version}).",
+                period_affected=r.period_id,
+                evidence_ids=[ev_id],
+            ))
+            ev_ids.append(ev_id)
+
+    for s in sinais:
+        if s.period_id == latest_p and s.severity == "critical":
+            ev_id = _make_fundamentalista_evidence_id(companhia, "signal", scope, as_of, base_periodo, s.rule_id, s.period_id)
+            changes.append(MaterialChangeItem(
+                event_date=None,
+                category="signal",
+                title=f"Alerta Crítico: {s.title}",
+                summary=s.explanation,
+                period_affected=s.period_id,
+                evidence_ids=[ev_id],
+            ))
+            ev_ids.append(ev_id)
+
+    return MaterialChanges(
+        status="available" if changes else "not_applicable",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Linha do tempo baseada exclusivamente em reapresentações e sinais de alavancagem crítica disparados."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        changes=changes,
+    )
+
+
+def _build_neutral_conclusion(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> NeutralConclusion | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    observed = []
+    limits = [
+        "A análise baseia-se exclusivamente em demonstrações financeiras estruturadas e não considera aspectos estratégicos ou operacionais qualitativos."
+    ]
+
+    curr_rev = _get_period_value_for_basis("receita_liquida", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_rev = _get_period_value_for_basis("receita_liquida", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_rev is not None:
+        if prev_rev is not None:
+            observed.append(f"A receita líquida variou de {prev_rev} para {curr_rev} no período de comparação.")
+        else:
+            observed.append(f"A receita líquida registrada no período é de {curr_rev}.")
+
+    curr_alav = _get_period_value_for_basis("alavancagem", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_alav = _get_period_value_for_basis("alavancagem", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_alav is not None:
+        if prev_alav is not None:
+            observed.append(f"A alavancagem financeira variou de {prev_alav} para {curr_alav} no período de comparação.")
+        else:
+            observed.append(f"A alavancagem financeira registrada no período é de {curr_alav}.")
+
+    curr_liquidez = _get_period_value_for_basis("liquidez_corrente", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_liquidez = _get_period_value_for_basis("liquidez_corrente", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_liquidez is not None:
+        if prev_liquidez is not None:
+            observed.append(f"O índice de liquidez corrente variou de {prev_liquidez} para {curr_liquidez} no período de comparação.")
+        else:
+            observed.append(f"O índice de liquidez corrente registrado no período é de {curr_liquidez}.")
+
+    ev_ids = []
+    for m in ["receita_liquida", "alavancagem", "liquidez_corrente"]:
+        for p in [latest_p, prev_p]:
+            if p and (m, p) in obs_lookup:
+                ev_ids.append(_make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, m, p))
+
+    return NeutralConclusion(
+        status="available" if observed else "partial",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=limits,
+        evidence_ids=sorted(list(set(ev_ids))),
+        supported_fundamentals=[],
+        pressure_points=[],
+        cyclical_or_comparability_factors=[],
+        analysis_limits=limits,
+        observed_changes=observed,
+    )
+
+
+def _build_next_filing_watchlist(
+    companhia: Companhia,
+    obs_lookup: dict[tuple[str, str], Decimal],
+    active_periods: list[str],
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    as_of: date | None,
+) -> NextFilingWatchlist | None:
+    if not active_periods:
+        return None
+    latest_p = active_periods[-1]
+    prev_p = _get_opening_period_id(latest_p, base_periodo)
+
+    items = []
+    ev_ids = []
+
+    curr_alav = _get_period_value_for_basis("alavancagem", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_alav = _get_period_value_for_basis("alavancagem", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_alav is not None and prev_alav is not None and curr_alav > prev_alav:
+        ev_id = _make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "alavancagem", latest_p)
+        items.append(NextFilingWatchlistItem(
+            metric="alavancagem",
+            reason="A alavancagem financeira da companhia registrou variação positiva no último período.",
+            last_value=curr_alav,
+            recent_trend="Aumento",
+            condition_to_watch="Monitoramento do EBITDA e do endividamento no próximo período.",
+            evidence_ids=[ev_id],
+        ))
+        ev_ids.append(ev_id)
+
+    curr_liquidez = _get_period_value_for_basis("liquidez_corrente", latest_p, periodicidade, base_periodo, obs_lookup)
+    prev_liquidez = _get_period_value_for_basis("liquidez_corrente", prev_p, periodicidade, base_periodo, obs_lookup) if prev_p else None
+    if curr_liquidez is not None and prev_liquidez is not None and curr_liquidez < prev_liquidez:
+        ev_id = _make_fundamentalista_evidence_id(companhia, "metric", scope, as_of, base_periodo, "liquidez_corrente", latest_p)
+        items.append(NextFilingWatchlistItem(
+            metric="liquidez_corrente",
+            reason="O índice de liquidez corrente registrou variação negativa no último período.",
+            last_value=curr_liquidez,
+            recent_trend="Redução",
+            condition_to_watch="Acompanhamento da capacidade de pagamento de curto prazo no próximo período.",
+            evidence_ids=[ev_id],
+        ))
+        ev_ids.append(ev_id)
+
+    return NextFilingWatchlist(
+        status="available" if items else "not_applicable",
+        period_id=latest_p,
+        comparison_period_id=prev_p,
+        scope=scope,
+        limitations=["Fatores de atenção gerados automaticamente com base na comparação temporal de liquidez e alavancagem financeira."],
+        evidence_ids=sorted(list(set(ev_ids))),
+        items=items,
+    )
 
 
 def _bucket_bounds(bucket: str, as_of: date | None) -> tuple[date, date]:
@@ -5887,7 +7025,7 @@ def obter_fundamentalista(
     def make_ev_id(ev_type: str, *parts: str) -> str:
         return _make_fundamentalista_evidence_id(companhia, ev_type, scope, as_of, base_periodo, *parts)
 
-    RESULT_METRICS = ["receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido", "margem_liquida"]
+    RESULT_METRICS = ["receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido", "margem_liquida", "roe", "roa"]
     CASH_METRICS = [
         "caixa_operacional",
         "capex",
@@ -5898,10 +7036,16 @@ def obter_fundamentalista(
         "alavancagem",
         "liquidez_corrente",
         "conversao_lucro_caixa",
+        "ativo_circulante",
+        "passivo_circulante",
+        "ativo_total",
+        "patrimonio_liquido",
     ]
-    ALL_METRICS = list(dict.fromkeys(RESULT_METRICS + CASH_METRICS))
+    DERIVED_METRICS = ["roe", "roa"]
+    ALL_METRICS = list(dict.fromkeys(RESULT_METRICS + CASH_METRICS + DERIVED_METRICS))
 
     manifest_res = obter_manifesto(db, companhia, scope=scope, as_of=as_of)
+    context = _load_context(db, companhia, scope=scope, as_of=as_of)
     coverage_res = obter_coverage(
         db,
         companhia,
@@ -5919,7 +7063,7 @@ def obter_fundamentalista(
         base_periodo=base_periodo,
         scope=scope,
         as_of=as_of,
-        horizonte_anos=horizonte_anos,
+        horizonte_anos=horizonte_anos + 2,
     )
     comparacoes_res = obter_comparacoes(
         db,
@@ -5929,13 +7073,64 @@ def obter_fundamentalista(
         base_periodo=base_periodo,
         scope=scope,
         as_of=as_of,
-        horizonte_anos=horizonte_anos,
+        horizonte_anos=horizonte_anos + 2,
     )
     qualidade_res = obter_qualidade(db, companhia, periodicidade=periodicidade, scope=scope, as_of=as_of)
     sinais_res = obter_sinais(db, companhia, scope=scope, as_of=as_of)
     eventos_res = obter_eventos(db, companhia, as_of=as_of)
     restatements_res = obter_restatements(db, companhia, scope=scope, as_of=as_of)
 
+    obs_lookup = {(obs.metric_id, obs.period_id): obs.value for obs in series_res.observacoes if obs.value is not None}
+    if periodicidade == "quarterly":
+        try:
+            annual_series_res = obter_series(
+                db,
+                companhia,
+                metricas=ALL_METRICS,
+                periodicidade="annual",
+                base_periodo="fy",
+                scope=scope,
+                as_of=as_of,
+                horizonte_anos=horizonte_anos + 3,
+            )
+            for obs in annual_series_res.observacoes:
+                if obs.value is not None:
+                    obs_lookup[(obs.metric_id, obs.period_id)] = obs.value
+        except Exception:
+            pass
+
+    # Recalculate observations
+    for obs in series_res.observacoes:
+        recalc_val = _get_period_value_for_basis(obs.metric_id, obs.period_id, periodicidade, base_periodo, obs_lookup)
+        if recalc_val is not None:
+            obs.value = recalc_val
+
+    # Recalculate comparisons
+    for comp in comparacoes_res.comparacoes:
+        curr_val = _get_period_value_for_basis(comp.metric_id, comp.period_id, periodicidade, base_periodo, obs_lookup)
+        prev_val = _get_period_value_for_basis(comp.metric_id, comp.comparable_period_id, periodicidade, base_periodo, obs_lookup) if comp.comparable_period_id else None
+        
+        comp.current_value = curr_val
+        comp.comparable_value = prev_val
+        
+        if curr_val is not None and prev_val is not None:
+            spec = METRIC_SPECS.get(comp.metric_id)
+            is_ratio = spec.metric_type == "ratio" if spec else False
+            
+            comp.absolute_change = curr_val - prev_val
+            if is_ratio:
+                comp.percentage_point_change = curr_val - prev_val
+                comp.relative_change = None
+            else:
+                if prev_val != 0:
+                    comp.relative_change = (curr_val - prev_val) / prev_val
+                else:
+                    comp.relative_change = None
+                comp.percentage_point_change = None
+        else:
+            comp.absolute_change = None
+            comp.relative_change = None
+            comp.percentage_point_change = None
     governanca_res = obter_governanca(db, companhia, scope=scope, as_of=as_of, horizonte_anos=horizonte_anos)
     pessoas_res = None
     try:
@@ -5943,18 +7138,25 @@ def obter_fundamentalista(
     except Exception:
         pass
 
+    active_periods = [
+        _period_id_for(periodicidade, base_periodo, year, quarter)
+        for year, quarter in _candidate_periods(context, periodicidade, base_periodo, horizonte_anos)
+    ]
+
+
     retrato_metric_ids = [m_id for m_id, spec in METRIC_SPECS.items() if spec.period_nature == "instant"]
     ponto_partida = AnaliseStagePontoPartida(
         identidade_companhia=manifest_res.companhia,
-        recorte_efetivo={
-            "escopo": scope,
-            "periodicidade": periodicidade,
-            "base_periodo": base_periodo,
-            "horizonte_anos": horizonte_anos,
-            "as_of": as_of.isoformat() if as_of else None,
-            "calculation_version": CALCULATION_VERSION,
-            "resolution_mode": series_res.resolution.mode,
-        },
+        recorte_efetivo=AnaliseRecorteEfetivo(
+            escopo=scope,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            base_efetiva="ttm" if periodicidade == "quarterly" else base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of,
+            calculation_version=CALCULATION_VERSION,
+            resolution_mode=series_res.resolution.mode,
+        ),
         periodos_disponiveis=manifest_res.periodos_disponiveis,
         cobertura=coverage_res.periodos,
         qualidade=qualidade_res.qualidade,
@@ -5966,8 +7168,8 @@ def obter_fundamentalista(
         metricas_retrato_disponiveis=retrato_metric_ids,
     )
 
-    res_obs = [obs for obs in series_res.observacoes if obs.metric_id in RESULT_METRICS]
-    res_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in RESULT_METRICS]
+    res_obs = [obs for obs in series_res.observacoes if obs.metric_id in RESULT_METRICS and obs.period_id in active_periods]
+    res_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in RESULT_METRICS and comp.period_id in active_periods]
     res_evidence_ids = []
     for obs in res_obs:
         res_evidence_ids.append(make_ev_id("metric", obs.metric_id, obs.period_id))
@@ -5983,8 +7185,8 @@ def obter_fundamentalista(
         evidence_ids=res_evidence_ids,
     )
 
-    cash_obs = [obs for obs in series_res.observacoes if obs.metric_id in CASH_METRICS]
-    cash_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in CASH_METRICS]
+    cash_obs = [obs for obs in series_res.observacoes if obs.metric_id in CASH_METRICS and obs.period_id in active_periods]
+    cash_comps = [comp for comp in comparacoes_res.comparacoes if comp.metric_id in CASH_METRICS and comp.period_id in active_periods]
     cash_rules = {"ALAVANCAGEM_CRITICA", "DEBITO_CRESCENTE", "LIQUIDEZ_ALERTA", "CAIXA_OPERACIONAL_NEGATIVO"}
     cash_sinais = [sig for sig in sinais_res.sinais if sig.rule_id in cash_rules or any(ev.metric_id in CASH_METRICS for ev in sig.evidence)]
     
@@ -6083,10 +7285,148 @@ def obter_fundamentalista(
         governanca_conclusao=governanca_conclusao,
     )
 
+
+
+    diagnostico_fundamental = _build_diagnostico_fundamental(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    result_bridge = _build_result_bridge(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    margin_stack = _build_margin_stack(
+        companhia,
+        obs_lookup=obs_lookup,
+        series_res=series_res,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    segment_panel = _build_segment_panel(
+        companhia,
+        active_periods=active_periods,
+        scope=scope,
+    )
+    comparability_items = _build_comparability_items(
+        companhia,
+        obs_lookup=obs_lookup,
+        restatements=restatements_res.restatements,
+        active_periods=active_periods,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    cash_reconciliation = _build_cash_reconciliation(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    working_capital_panel = _build_working_capital_panel(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    debt_profile = _build_debt_profile(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    provision_panel = _build_provision_panel(
+        companhia,
+        active_periods=active_periods,
+        scope=scope,
+    )
+    capital_allocation = _build_capital_allocation(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    accounting_judgments = _build_accounting_judgments(
+        companhia,
+        active_periods=active_periods,
+        scope=scope,
+    )
+    material_changes = _build_material_changes(
+        companhia,
+        sinais=sinais_res.sinais,
+        restatements=restatements_res.restatements,
+        active_periods=active_periods,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    neutral_conclusion = _build_neutral_conclusion(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+    next_filing_watchlist = _build_next_filing_watchlist(
+        companhia,
+        obs_lookup=obs_lookup,
+        active_periods=active_periods,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=scope,
+        as_of=as_of,
+    )
+
+    new_blocks_ev_ids = []
+    for block in [
+        diagnostico_fundamental,
+        result_bridge,
+        margin_stack,
+        segment_panel,
+        comparability_items,
+        cash_reconciliation,
+        working_capital_panel,
+        debt_profile,
+        provision_panel,
+        capital_allocation,
+        accounting_judgments,
+        material_changes,
+        neutral_conclusion,
+        next_filing_watchlist,
+    ]:
+        if block and hasattr(block, "evidence_ids") and block.evidence_ids:
+            new_blocks_ev_ids.extend(block.evidence_ids)
+
     execution_id_part = series_res.resolution.materialization_execution_id or "runtime"
     report_id = f"rep_{companhia.codigo_cvm}_{scope}_{periodicidade}_{base_periodo}_{horizonte_anos}_{as_of.isoformat() if as_of else 'latest'}_{CALCULATION_VERSION}_{execution_id_part}"
 
-    all_gathered_ids = sorted(list(set(res_evidence_ids + cash_evidence_ids + gov_evidence_ids)))
+    all_gathered_ids = sorted(list(set(res_evidence_ids + cash_evidence_ids + gov_evidence_ids + new_blocks_ev_ids)))
     evidence_index = {}
 
     for ev_id in all_gathered_ids:
@@ -6264,6 +7604,20 @@ def obter_fundamentalista(
         evidence_graph=evidence_graph,
         event_buckets=event_buckets,
         evidence_dossier=evidence_dossier,
+        diagnostico_fundamental=diagnostico_fundamental,
+        result_bridge=result_bridge,
+        margin_stack=margin_stack,
+        segment_panel=segment_panel,
+        comparability_items=comparability_items,
+        cash_reconciliation=cash_reconciliation,
+        working_capital_panel=working_capital_panel,
+        debt_profile=debt_profile,
+        provision_panel=provision_panel,
+        capital_allocation=capital_allocation,
+        accounting_judgments=accounting_judgments,
+        material_changes=material_changes,
+        neutral_conclusion=neutral_conclusion,
+        next_filing_watchlist=next_filing_watchlist,
     )
 
 

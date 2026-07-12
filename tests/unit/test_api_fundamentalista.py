@@ -130,6 +130,7 @@ def _seed_analise_v2(db: Session) -> Companhia:
         _doc(cia, agora, form="ITR", ref=date(2025, 6, 30), version=1, document_id=9102, filed_at=date(2025, 8, 8)),
         _doc(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, document_id=9103, filed_at=date(2025, 11, 8)),
         _doc(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, document_id=8103, filed_at=date(2024, 11, 8)),
+        _doc(cia, agora, form="ITR", ref=date(2023, 9, 30), version=1, document_id=7103, filed_at=date(2023, 11, 8)),
     ]
     db.add_all(docs)
     db.commit()
@@ -211,6 +212,22 @@ def _seed_analise_v2(db: Session) -> Companhia:
         _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.11", value="7000000", start=date(2025, 7, 1), end=date(2025, 9, 30)),
         _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.01", value="120000000", start=date(2024, 7, 1), end=date(2024, 9, 30)),
         _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.11", value="18000000", start=date(2024, 7, 1), end=date(2024, 9, 30)),
+        _row(cia, agora, form="DFP", ref=date(2024, 12, 31), version=1, account="1", value="500000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2024, 12, 31)),
+        _row(cia, agora, form="DFP", ref=date(2024, 12, 31), version=1, account="2.03", value="200000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2024, 12, 31)),
+        _row(cia, agora, form="DFP", ref=date(2025, 12, 31), version=1, account="1", value="550000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2025, 12, 31)),
+        _row(cia, agora, form="DFP", ref=date(2025, 12, 31), version=1, account="2.03", value="220000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2025, 12, 31)),
+        _row(cia, agora, form="DFP", ref=date(2025, 12, 31), version=2, account="1", value="550000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2025, 12, 31)),
+        _row(cia, agora, form="DFP", ref=date(2025, 12, 31), version=2, account="2.03", value="220000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2025, 12, 31)),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="1", value="540000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2025, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="2.03", value="215000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2025, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="1", value="480000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2024, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="2.03", value="195000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2024, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.01", value="360000000", start=date(2024, 1, 1), end=date(2024, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2024, 9, 30), version=1, account="3.11", value="18000000", start=date(2024, 1, 1), end=date(2024, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2023, 9, 30), version=1, account="1", value="460000000", statement_type="balanco_patrimonial_ativo", start=None, end=date(2023, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2023, 9, 30), version=1, account="2.03", value="180000000", statement_type="balanco_patrimonial_passivo", start=None, end=date(2023, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2023, 9, 30), version=1, account="3.01", value="330000000", start=date(2023, 1, 1), end=date(2023, 9, 30)),
+        _row(cia, agora, form="ITR", ref=date(2023, 9, 30), version=1, account="3.11", value="21000000", start=date(2023, 1, 1), end=date(2023, 9, 30)),
 
         # Seed rows for scope="individual" YTD Q3
         _row(cia, agora, form="ITR", ref=date(2025, 9, 30), version=1, account="3.01", value="350000000", start=date(2025, 1, 1), end=date(2025, 9, 30), scope="individual"),
@@ -602,3 +619,214 @@ def test_fundamentalista_openapi_exposes_additive_contract_without_causal_langua
     assert "AnalisePainelPosicaoFinanceira" in schemas
     assert "AnaliseEvidenceDossierItem" in schemas
     assert "AnaliseEvidenceTrailResponse" in schemas
+
+
+def test_fundamentalista_additive_blocks_and_ttm_verification(db_session: Session, client: TestClient) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+
+    # 1. Fetch annual report
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "escopo": "consolidated",
+            "as_of": "2026-06-01"
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify all 14 blocks are present in the response
+    assert "diagnostico_fundamental" in data
+    assert "result_bridge" in data
+    assert "margin_stack" in data
+    assert "segment_panel" in data
+    assert "comparability_items" in data
+    assert "cash_reconciliation" in data
+    assert "working_capital_panel" in data
+    assert "debt_profile" in data
+    assert "provision_panel" in data
+    assert "capital_allocation" in data
+    assert "accounting_judgments" in data
+    assert "material_changes" in data
+    assert "neutral_conclusion" in data
+    assert "next_filing_watchlist" in data
+
+    # 2. Check diagnostico_fundamental
+    diag = data["diagnostico_fundamental"]
+    assert diag["status"] in ("available", "partial")
+    assert diag["scope"] == "consolidated"
+    assert len(diag["dimensoes"]) > 0
+    dim_names = [d["dimension"] for d in diag["dimensoes"]]
+    assert "crescimento" in dim_names
+    assert "rentabilidade" in dim_names
+    assert "conversao_caixa" in dim_names
+    assert "solidez_financeira" in dim_names
+    assert "alocacao_capital" in dim_names
+    assert "qualidade_comparabilidade" in dim_names
+
+    # 3. Check result_bridge
+    bridge = data["result_bridge"]
+    assert bridge["status"] in ("available", "partial")
+    assert len(bridge["items"]) > 0
+
+    # 4. Check margin_stack
+    margin = data["margin_stack"]
+    assert margin["status"] in ("available", "partial")
+    margins_types = [m["margin_type"] for m in margin["margins"]]
+    assert "bruta" in margins_types
+    assert "ebitda" in margins_types
+    assert "ebit" in margins_types
+    assert "liquida" in margins_types
+
+    # 5. Check segment_panel
+    seg = data["segment_panel"]
+    assert seg["status"] == "unavailable"
+    assert len(seg["limitations"]) > 0
+
+    # 6. Check comparability_items
+    comp = data["comparability_items"]
+    assert comp["status"] in ("available", "partial", "not_applicable")
+
+    # 7. Check cash_reconciliation
+    cash_recon = data["cash_reconciliation"]
+    assert cash_recon["status"] in ("available", "partial")
+
+    # 8. Check working_capital_panel
+    wc = data["working_capital_panel"]
+    assert wc["status"] in ("available", "partial")
+    assert wc["net_operating_working_capital"] is None
+
+    # 9. Check debt_profile
+    debt = data["debt_profile"]
+    assert debt["status"] in ("available", "partial")
+    assert debt["divida_bruta"] is not None
+    assert debt["divida_liquida"] is not None
+
+    # 10. Check provision_panel
+    prov = data["provision_panel"]
+    assert prov["status"] == "unavailable"
+    assert len(prov["limitations"]) > 0
+
+    # 11. Check capital_allocation
+    cap = data["capital_allocation"]
+    assert cap["status"] in ("available", "partial")
+
+    # 12. Check accounting_judgments
+    judgment = data["accounting_judgments"]
+    assert judgment["status"] == "unavailable"
+    assert len(judgment["limitations"]) > 0
+
+    # 13. Check neutral_conclusion (Verify neutrality and absence of opinion/valuation/score)
+    conc = data["neutral_conclusion"]
+    assert conc["status"] in ("available", "partial")
+    for text in conc["supported_fundamentals"] + conc["pressure_points"] + conc["analysis_limits"] + conc.get("observed_changes", []):
+        lower_text = text.lower()
+        # Verify no buy/sell recommendation keywords
+        assert "compra" not in lower_text
+        assert "venda" not in lower_text
+        assert "recomendação" not in lower_text
+        assert "barato" not in lower_text
+        assert "caro" not in lower_text
+
+    # 14. Check next_filing_watchlist
+    watch = data["next_filing_watchlist"]
+    assert watch["status"] in ("available", "partial", "not_applicable")
+
+
+def test_fundamentalista_ttm_roe_roa_mathematical_precision(db_session: Session, client: TestClient) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+
+    # 1. Fetch quarterly TTM report
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={
+            "periodicidade": "quarterly",
+            "base_periodo": "ytd",
+            "escopo": "consolidated",
+            "as_of": "2025-11-15"
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+    data = response.json()
+
+    # Verify TTM Margins are recalculated and not summed
+    margin_stack = data["margin_stack"]
+    margins = {m["margin_type"]: m for m in margin_stack["margins"]}
+    liquida = margins["liquida"]
+    assert liquida["current_value"] is not None
+    # Numerator TTM (lucro) = 24M + 36.734M - 18M = 42,734,000
+    # Denominator TTM (receita) = 370.178M + 490.829M - 360M = 501,007,000
+    # Expected TTM Margin = 42,734,000 / 501,007,000 = 0.085296213...
+    assert abs(float(liquida["current_value"]) - 0.085296213) < 1e-5
+    # Comparison TTM Margin (2024-YTDQ3) = 28,000,000 / 485,000,000 = 0.057731958...
+    assert abs(float(liquida["comparison_value"]) - 0.057731958) < 1e-5
+    assert abs(float(liquida["change_pp"]) - 0.02756425) < 1e-5
+
+    # Verify TTM ROE and ROA under etapas.resultado_eficiencia.series
+    series = {s["metric_id"]: s for s in data["etapas"]["resultado_eficiencia"]["series"] if s["period_id"] == "2025-YTDQ3"}
+    # TTM ROE = 42,734,000 / average(215M, 195M) = 42,734,000 / 205,000,000 = 0.208458536...
+    assert abs(float(series["roe"]["value"]) - 0.208458536) < 1e-5
+    # TTM ROA = 42,734,000 / average(540M, 480M) = 42,734,000 / 510,000,000 = 0.083792156...
+    assert abs(float(series["roa"]["value"]) - 0.083792156) < 1e-5
+
+    # 2. Fetch annual report to verify annual ROE and ROA averages
+    response_ann = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        params={
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "escopo": "consolidated",
+            "as_of": "2026-06-01"
+        },
+        headers=headers,
+    )
+    assert response_ann.status_code == 200
+    data_ann = response_ann.json()
+
+    series_ann = {s["metric_id"]: s for s in data_ann["etapas"]["resultado_eficiencia"]["series"] if s["period_id"] == "FY2025"}
+    # Profit FY2025 = 38,100,000
+    # Patrimonio FY2025 = 220,000,000, Patrimonio FY2024 = 200,000,000, Average = 210,000,000
+    # Annual ROE = 38,100,000 / 210,000,000 = 0.181428571...
+    assert abs(float(series_ann["roe"]["value"]) - 0.181428571) < 1e-5
+    # Ativo FY2025 = 550,000,000, Ativo FY2024 = 500,000,000, Average = 525,000,000
+    # Annual ROA = 38,100,000 / 525,000,000 = 0.072571428...
+    assert abs(float(series_ann["roa"]["value"]) - 0.072571428) < 1e-5
+
+    # 3. Verify neutral observed_changes
+    conc = data["neutral_conclusion"]
+    assert conc["status"] == "available"
+    assert len(conc["observed_changes"]) > 0
+    for text in conc["observed_changes"]:
+        assert "variação" in text or "variou" in text
+        # Confirm no universal thresholds
+        assert "alerta" not in text
+        assert "sob controle" not in text
+
+
+def test_fundamentalista_openapi_includes_new_block_schemas(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    openapi = response.json()
+    schemas = openapi["components"]["schemas"]
+    
+    assert "DiagnosticoFundamental" in schemas
+    assert "ResultBridge" in schemas
+    assert "MarginStack" in schemas
+    assert "SegmentPanel" in schemas
+    assert "ComparabilityItems" in schemas
+    assert "CashReconciliation" in schemas
+    assert "WorkingCapitalPanel" in schemas
+    assert "DebtProfile" in schemas
+    assert "ProvisionPanel" in schemas
+    assert "CapitalAllocation" in schemas
+    assert "AccountingJudgments" in schemas
+    assert "MaterialChanges" in schemas
+    assert "NeutralConclusion" in schemas
+    assert "NextFilingWatchlist" in schemas
+

@@ -9,6 +9,23 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-12 - Precisão Contábil, Temporal e Neutralidade na Análise Fundamentalista
+
+### Superfícies afetadas
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- **Cálculo de TTM Preciso para Razões (Anual e Trimestral)**: Indicadores percentuais e múltiplos (margens, ROE, ROA, alavancagem, conversão de lucro em caixa) passam a ser recalculados a partir de seus componentes TTM ou saldos médios (ao invés de somados linearmente). O ROE e o ROA anuais (FY) também passam a ser calculados pela média de abertura e encerramento do patrimônio líquido/ativo total.
+- **ROE e ROA com Saldos Médios**: O cálculo de ROE e ROA em bases trimestrais passa a utilizar a média aritmética entre o saldo atual e o saldo de 12 meses atrás nos denominadores (patrimônio líquido e ativo total).
+- **Capital de Giro Operacional**: O campo `net_operating_working_capital` passa a retornar `null` (ausente) devido à limitação factual de dados operacionais estruturados nas tabelas atuais do backend, evitando falsas aproximações.
+- **Consistência Temporal de Mudanças Materiais**: O campo `event_date` nos itens de mudanças materiais passa a aceitar `null` e não utiliza mais a data de execução (`date.today()`) para eventos sem data explícita, mantendo a consistência temporal sob cortes históricos `as_of`.
+- **Prevenção de Falsas Diferenças Contábeis**: Ausências de valores (`before_value` ou `after_value`) em reapresentações contábeis não são convertidas em zero, retornando `null` no impacto financeiro final. O efeito imediato em caixa é classificado como `unknown` (desconhecido).
+- **Fatores de Atenção e Conclusões Factualmente Neutros**: Remoção de adjetivações e limiares universais arbitrários (como limite de 3x para alavancagem ou palavras avaliativas como "sob controle", "alerta", "robusta").
+- **Novo Campo `observed_changes` em `NeutralConclusion`**: Criado o campo `observed_changes: list[str]` na resposta para abrigar variações factuais isoladas (receita, alavancagem, liquidez) sem agrupá-las arbitrariamente sob "fundamentos suportados" ou "pontos de pressão".
+- **Tipagem de `recorte_efetivo`**: A propriedade `recorte_efetivo` da etapa 1 passa a ser tipada formalmente pelo modelo `AnaliseRecorteEfetivo` (eliminando a definição genérica de dicionário aberto). Os campos `base_efetiva`, `resolution_mode` e `as_of` dentro do recorte passam a usar tipos formais (`Literal` e `date`), sendo serializados com precisão nas respostas e documentados no OpenAPI. Exposição da base efetiva de cálculo utilizada pelo motor analítico (retornando `"ttm"` para consultas trimestrais e o próprio `base_periodo` nos demais casos).
+
 ## 2026-07-10 - Evoluções Aditivas da Análise Fundamentalista
 
 ### Superfícies afetadas
