@@ -9,6 +9,66 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-15 - Saúde, histórico e resolução das checagens de atualizações
+
+### Superfícies afetadas
+
+- `GET /updates/scanner/status`
+- `GET /updates/scanner/runs`
+- `GET /updates/scanner/runs/latest`
+- `GET /updates/scanner/runs/{scan_run_id}`
+- `POST /updates/scanner/run`
+- `GET /updates/pending`
+- `GET /updates/pending/{id}`
+- `GET /updates/summary`
+- `POST /updates/pending/{id}/acknowledge-reference`
+
+### Comportamento entregue
+
+- toda varredura automática ou manual é persistida, mesmo quando nenhuma atualização é detectada;
+- o novo `GET /updates/scanner/runs` lista o histórico paginado e aceita filtro por `status`;
+- cada execução identifica `summary.trigger`, `summary.coverage_status`, os contadores de decisão e `summary.items` por fonte/ano;
+- `/scanner/status` adiciona `health_status`, cobertura, contadores, janela de obsolescência e fontes sem escopo;
+- `/scanner/status` também informa `scanner_enabled`, `schedule_enabled`, `schedule_status` e a última execução agendada; uma execução manual não mascara um job diário obsoleto;
+- anos monitorados passam a ser derivados das ingestões bem-sucedidas, sem depender de `ANOS_INICIAIS_*`;
+- probes inconclusivos não resolvem nem ocultam uma atualização pendente existente;
+- `cadastro` usa comparação SHA-256 em streaming quando os headers HTTP não permitem uma decisão conclusiva.
+- análise com `total_changes=0` passa a usar `status=content_unchanged`, sem classificá-la como pronta para ingestão;
+- pendências expõem `content_changed` e `recommended_action`; a ação canônica desse caso é `update_reference`;
+- o novo `POST /updates/pending/{id}/acknowledge-reference` registra a referência remota e responde `ingestion_triggered=false`;
+- após reconhecimento, o status é `reference_updated` e o scanner deixa de redetectar os mesmos headers enquanto a ingestão canônica permanecer vigente;
+- `GET /updates/summary` adiciona `reference_update_count`.
+
+### Orientação para clientes
+
+- uma lista vazia em `/updates/pending` significa apenas que não há mudança confirmada pendente;
+- para afirmar que não houve novidade, valide `health_status=healthy`, `coverage_status=complete`, `inconclusive_count=0` e `error_count=0`;
+- mostre `summary.items[].decision_reason` quando a cobertura estiver degradada.
+- para `content_unchanged`, apresente **Atualizar referência** em vez de **Aprovar e ingerir**;
+- não trate igualdade de contagem de linhas como evidência suficiente: o backend só retorna `content_changed=false` após equivalência SHA-256;
+- **Descartar** não atualiza a referência e pode permitir que o mesmo artefato reapareça.
+
+## 2026-07-13 - Entrega eficiente do relatório fundamentalista
+
+### Superfície afetada
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- URL, query params e schema JSON permanecem inalterados.
+- respostas passam a incluir `ETag`, `Cache-Control: private`, `X-Analise-Source` e `X-Analise-Generation`;
+- clientes podem enviar `If-None-Match` com o `ETag` anterior e receber `304 Not Modified` sem corpo quando o relatório não mudou;
+- `X-Analise-Source` pode ser `redis_cache`, `redis_cache_wait`, `db_snapshot`, `compiled_canonical` ou `compiled_runtime`;
+- `X-Analise-Generation` informa o UUID da materialização canônica vigente ou `runtime` quando não há geração canônica;
+- o read model e o cache de entrega não alteram `resolution.mode`: a resposta continua informando `canonical` ou `runtime_fallback` conforme a camada analítica utilizada.
+
+### Orientação para clientes
+
+- tratar `304` como reutilização válida do payload associado ao `ETag` enviado;
+- não usar `X-Analise-Source` para decidir semântica financeira ou renderização; o campo existe para diagnóstico operacional;
+- não armazenar a resposta autenticada em cache público compartilhado.
+
 ## 2026-07-12 - Precisão Contábil, Temporal e Neutralidade na Análise Fundamentalista
 
 ### Superfícies afetadas

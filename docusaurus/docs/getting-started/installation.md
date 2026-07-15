@@ -94,11 +94,32 @@ Resposta esperada:
 |----------|-----------|---------|
 | `DATABASE_URL` | URL de conexão PostgreSQL | `postgresql://user:pass@host:5432/db` |
 | `REDIS_URL` | URL de conexão Redis | `redis://host:6379/0` |
+| `DB_POOL_SIZE` | Conexões persistentes por processo da aplicação | `2` |
+| `DB_MAX_OVERFLOW` | Conexões adicionais temporárias por processo | `1` |
+| `DB_POOL_TIMEOUT_SECONDS` | Espera máxima por uma conexão livre | `5` |
+| `DB_POOL_RECYCLE_SECONDS` | Idade máxima antes de reciclar uma conexão | `1800` |
 | `LOG_LEVEL` | Nível de log | `INFO`, `DEBUG`, `WARNING` |
 | `AMBIENTE` | Ambiente de execução | `development`, `production` |
 | `BACKEND_CORS_ORIGINS` | Origins liberadas para navegadores, separadas por vírgula | `http://localhost:3000,http://localhost:5173` |
 
 `BACKEND_CORS_ORIGINS` deve conter apenas origins completas no formato `scheme://host[:port]`, sem path. Quando vazio, o middleware CORS não é habilitado.
+
+O pool é criado por processo. Dimensione o total como a soma de `(DB_POOL_SIZE + DB_MAX_OVERFLOW)` para cada processo da API, ingestão, materialização e demais consumidores SQLAlchemy. Em bancos pequenos, mantenha esse orçamento abaixo de `max_connections` com margem para Alembic e operação administrativa.
+
+### Entrega da Análise Fundamentalista
+
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `ANALISE_FUNDAMENTALISTA_SNAPSHOT_ENABLED` | Lê e persiste o read model canônico do relatório agregado. | `true` |
+| `ANALISE_FUNDAMENTALISTA_PREWARM_ENABLED` | Compila o recorte padrão após materialização canônica bem-sucedida. | `true` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_ENABLED` | Ativa a cópia de entrega no Redis e o singleflight de cache miss. | `false` no código; `true` no `.env.example` e Helm |
+| `ANALISE_FUNDAMENTALISTA_CACHE_TTL_SECONDS` | TTL do payload canônico no Redis. | `21600` |
+| `ANALISE_FUNDAMENTALISTA_RUNTIME_CACHE_TTL_SECONDS` | TTL curto para resposta `runtime_fallback`. | `60` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_LOCK_SECONDS` | Validade do lock de compilação concorrente. | `120` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_WAIT_SECONDS` | Espera por outro request que esteja compilando o mesmo contexto. | `15` |
+| `ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS` | `max-age` privado enviado no `Cache-Control`. | `60` |
+
+Redis não armazena estado canônico. Se ele estiver indisponível, a API continua atendendo pelo read model PostgreSQL ou pelo compilador do service. O prewarm aumenta o trabalho do worker de materialização somente uma vez por companhia/escopo e evita recomposição no caminho comum da API.
 
 ### MCP Analitico Read-Only
 

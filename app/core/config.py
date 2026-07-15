@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str = Field(default="postgresql+psycopg://cvm:cvm@localhost:5432/cvm", alias="DATABASE_URL")
+    database_pool_size: int = Field(default=2, ge=1, alias="DB_POOL_SIZE")
+    database_max_overflow: int = Field(default=1, ge=0, alias="DB_MAX_OVERFLOW")
+    database_pool_timeout_seconds: float = Field(default=5.0, gt=0, alias="DB_POOL_TIMEOUT_SECONDS")
+    database_pool_recycle_seconds: int = Field(default=1800, ge=0, alias="DB_POOL_RECYCLE_SECONDS")
     redis_url: str = Field(default="redis://localhost:6389/0", alias="REDIS_URL")
     cvm_base_url: str = Field(default="https://dados.cvm.gov.br/dados", alias="CVM_BASE_URL")
     api_token: str = Field(
@@ -146,6 +150,43 @@ class Settings(BaseSettings):
         default="agendada,em_execucao,aguardando_ingestao",
         alias="ANALISE_MATERIALIZACAO_BLOCKING_SYNC_STATUSES",
     )
+    analise_fundamentalista_snapshot_enabled: bool = Field(
+        default=True,
+        alias="ANALISE_FUNDAMENTALISTA_SNAPSHOT_ENABLED",
+    )
+    analise_fundamentalista_prewarm_enabled: bool = Field(
+        default=True,
+        alias="ANALISE_FUNDAMENTALISTA_PREWARM_ENABLED",
+    )
+    analise_fundamentalista_cache_enabled: bool = Field(
+        default=False,
+        alias="ANALISE_FUNDAMENTALISTA_CACHE_ENABLED",
+    )
+    analise_fundamentalista_cache_ttl_seconds: int = Field(
+        default=21600,
+        ge=1,
+        alias="ANALISE_FUNDAMENTALISTA_CACHE_TTL_SECONDS",
+    )
+    analise_fundamentalista_runtime_cache_ttl_seconds: int = Field(
+        default=60,
+        ge=1,
+        alias="ANALISE_FUNDAMENTALISTA_RUNTIME_CACHE_TTL_SECONDS",
+    )
+    analise_fundamentalista_cache_lock_seconds: int = Field(
+        default=120,
+        ge=1,
+        alias="ANALISE_FUNDAMENTALISTA_CACHE_LOCK_SECONDS",
+    )
+    analise_fundamentalista_cache_wait_seconds: float = Field(
+        default=15.0,
+        ge=0,
+        alias="ANALISE_FUNDAMENTALISTA_CACHE_WAIT_SECONDS",
+    )
+    analise_fundamentalista_http_cache_max_age_seconds: int = Field(
+        default=60,
+        ge=0,
+        alias="ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS",
+    )
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
     ingestion_phase_stale_after_seconds: int = Field(
@@ -213,6 +254,11 @@ class Settings(BaseSettings):
     updates_service_enabled: bool = Field(default=True, alias="UPDATES_SERVICE_ENABLED")
     auto_trigger_updates: bool = Field(default=False, alias="AUTO_TRIGGER_UPDATES")
     auto_analyze_on_detect: bool = Field(default=True, alias="AUTO_ANALYZE_ON_DETECT")
+    updates_scanner_stale_after_hours: int = Field(
+        default=36,
+        ge=1,
+        alias="UPDATES_SCANNER_STALE_AFTER_HOURS",
+    )
     session_timeout_hours: int = Field(default=24, alias="SESSION_TIMEOUT_HOURS")
     temp_dir: str = Field(default="data/temp_updates", alias="TEMP_DIR")
     public_companies_cvm: str = Field(default="", alias="PUBLIC_COMPANIES_CVM")

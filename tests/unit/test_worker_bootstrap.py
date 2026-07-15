@@ -226,6 +226,9 @@ def test_celery_routes_isolam_ingestao_e_materializacao() -> None:
     assert routes["app.worker.tasks.disparar_dependentes_task"]["queue"] == "ingestion_control"
     assert routes["app.worker.tasks.finalizar_sincronizacao_zip_task"]["queue"] == "ingestion_control"
     assert routes["app.worker.tasks.sincronizar_member_task"]["queue"] == "ingestion"
+    assert routes["app.updates.tasks.run_daily_scanner_task"]["queue"] == "ingestion_control"
+    assert routes["app.updates.tasks.run_deep_analysis_task"]["queue"] == "ingestion_control"
+    assert routes["app.updates.tasks.cleanup_temp_files_task"]["queue"] == "ingestion_control"
     assert routes["app.worker.tasks.materializar_analise_campanha_task"]["queue"] == "analise_materializacao"
     assert routes["app.worker.tasks.materializar_analise_chunk_task"]["queue"] == "analise_materializacao"
 
@@ -233,9 +236,21 @@ def test_celery_routes_isolam_ingestao_e_materializacao() -> None:
 def test_construir_beat_schedule_updates_modo(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = get_settings()
     monkeypatch.setattr(settings, "auto_trigger_updates", False)
+    monkeypatch.setattr(settings, "updates_service_enabled", True)
 
     schedule = construir_beat_schedule()
 
     assert "sincronizar-cadastro-diario" not in schedule
     assert "cvm-updates-scanner" in schedule
     assert "cvm-updates-temp-cleanup" in schedule
+
+
+def test_construir_beat_schedule_respeita_updates_desabilitado(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auto_trigger_updates", False)
+    monkeypatch.setattr(settings, "updates_service_enabled", False)
+
+    schedule = construir_beat_schedule()
+
+    assert "cvm-updates-scanner" not in schedule
+    assert "cvm-updates-temp-cleanup" not in schedule

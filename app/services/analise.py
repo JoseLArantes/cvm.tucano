@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -12,6 +13,8 @@ from decimal import Decimal
 from typing import Any, Literal, cast
 
 from sqlalchemy import and_, delete, desc, func, insert, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -19,6 +22,7 @@ from app.core.config import get_settings
 from app.models.analise import (
     AnaliseContextoRevision,
     AnaliseFatoRevision,
+    AnaliseFundamentalistaSnapshot,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -137,7 +141,9 @@ from app.schemas.analise import (
 from app.services.financeiro_valores import valor_conta_ajustado
 
 CALCULATION_VERSION: Literal["2026.2"] = "2026.2"
+FUNDAMENTALISTA_REPORT_VERSION = "1.1.0"
 _settings = get_settings()
+logger = logging.getLogger(__name__)
 DB_SCOPE_TO_API: dict[str, AnaliseEscopo] = {"consolidado": "consolidated", "individual": "individual"}
 API_SCOPE_TO_DB: dict[AnaliseEscopo, str] = {"consolidated": "consolidado", "individual": "individual"}
 FORM_FLOW_PRIORITY = ("ITR", "DFP")
@@ -145,6 +151,51 @@ _MATERIALIZACAO_ACTIVE_CAMPAIGN_STATUSES = {"pending", "running"}
 _MATERIALIZACAO_ACTIVE_ITEM_STATUSES = {"pending", "running"}
 _MATERIALIZACAO_ACTIVE_CHUNK_STATUSES = {"queued", "running"}
 _MATERIALIZACAO_TERMINAL_CHUNK_STATUSES = {"success", "failed", "stale", "cancelled"}
+_ANALYSIS_SESSION_CACHE_LIMIT = 4
+
+
+@dataclass(frozen=True)
+class FundamentalistaServiceResult:
+    response: AnaliseFundamentalistaResposta
+    source: Literal["db_snapshot", "compiled_canonical", "compiled_runtime"]
+    generation: str
+    fingerprint: str
+
+
+def clear_analysis_session_cache(db: Session) -> None:
+    db.info.pop("analysis_service_cache", None)
+
+
+def _analysis_cache_get(db: Session, namespace: str, key: tuple[Any, ...]) -> tuple[bool, Any]:
+    root = db.info.get("analysis_service_cache")
+    if not isinstance(root, dict):
+        return False, None
+    if root.get("transaction") is not db.get_transaction():
+        clear_analysis_session_cache(db)
+        return False, None
+    bucket = root.get(namespace)
+    if not isinstance(bucket, OrderedDict) or key not in bucket:
+        return False, None
+    value = bucket.pop(key)
+    bucket[key] = value
+    return True, value
+
+
+def _analysis_cache_set(db: Session, namespace: str, key: tuple[Any, ...], value: Any) -> Any:
+    transaction = db.get_transaction()
+    root = db.info.get("analysis_service_cache")
+    if not isinstance(root, dict) or root.get("transaction") is not transaction:
+        root = {"transaction": transaction}
+        db.info["analysis_service_cache"] = root
+    bucket = root.setdefault(namespace, OrderedDict())
+    if not isinstance(bucket, OrderedDict):
+        bucket = OrderedDict()
+        root[namespace] = bucket
+    bucket[key] = value
+    bucket.move_to_end(key)
+    while len(bucket) > _ANALYSIS_SESSION_CACHE_LIMIT:
+        bucket.popitem(last=False)
+    return value
 
 
 @dataclass(frozen=True)
@@ -794,6 +845,10 @@ def _latest_document_subquery(cnpj: str, as_of: date | None) -> Any:
 
 
 def _load_context(db: Session, companhia: Companhia, scope: AnaliseEscopo, as_of: date | None) -> ContextData:
+    cache_key = (companhia.id, companhia.codigo_cvm, scope, as_of)
+    found, cached = _analysis_cache_get(db, "context", cache_key)
+    if found:
+        return cast(ContextData, cached)
     doc_sq = _latest_document_subquery(companhia.cnpj_companhia, as_of)
     rows = [
         (row, doc)
@@ -844,7 +899,22 @@ def _load_context(db: Session, companhia: Companhia, scope: AnaliseEscopo, as_of
 
     periodos_disponiveis = _available_periods(rows, scope)
     qualidade = _build_quality(db, companhia, rows, documents, scope, periodos_disponiveis)
-    return ContextData(companhia=companhia, rows=rows, documents=documents, qualidade=qualidade, periodos_disponiveis=periodos_disponiveis, issues=list(qualidade.issues))
+    return cast(
+        ContextData,
+        _analysis_cache_set(
+            db,
+            "context",
+            cache_key,
+            ContextData(
+                companhia=companhia,
+                rows=rows,
+                documents=documents,
+                qualidade=qualidade,
+                periodos_disponiveis=periodos_disponiveis,
+                issues=list(qualidade.issues),
+            ),
+        ),
+    )
 
 
 def _available_periods(rows: list[tuple[DemonstracaoFinanceira, DocumentoFinanceiro]], scope: AnaliseEscopo) -> list[AnalisePeriodoDisponivel]:
@@ -1900,7 +1970,11 @@ def _latest_successful_materialization(
     companhia: Companhia,
     scope: AnaliseEscopo,
 ) -> AnaliseMaterializacaoExecucao | None:
-    return db.scalar(
+    cache_key = (companhia.id, companhia.codigo_cvm, scope, CALCULATION_VERSION)
+    found, cached = _analysis_cache_get(db, "latest_materialization", cache_key)
+    if found:
+        return cast(AnaliseMaterializacaoExecucao | None, cached)
+    execution = db.scalar(
         select(AnaliseMaterializacaoExecucao)
         .where(
             AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
@@ -1912,6 +1986,10 @@ def _latest_successful_materialization(
         .order_by(AnaliseMaterializacaoExecucao.finished_at.desc(), AnaliseMaterializacaoExecucao.created_at.desc())
         .limit(1)
     )
+    return cast(
+        AnaliseMaterializacaoExecucao | None,
+        _analysis_cache_set(db, "latest_materialization", cache_key, execution),
+    )
 
 
 def _context_revision_for_as_of(
@@ -1920,9 +1998,16 @@ def _context_revision_for_as_of(
     scope: AnaliseEscopo,
     as_of: date | None,
 ) -> tuple[AnaliseMaterializacaoExecucao, AnaliseContextoRevision] | None:
+    cache_key = (companhia.id, companhia.codigo_cvm, scope, CALCULATION_VERSION, as_of)
+    found, cached = _analysis_cache_get(db, "context_revision", cache_key)
+    if found:
+        return cast(tuple[AnaliseMaterializacaoExecucao, AnaliseContextoRevision] | None, cached)
     execucao = _latest_successful_materialization(db, companhia, scope)
     if execucao is None:
-        return None
+        return cast(
+            tuple[AnaliseMaterializacaoExecucao, AnaliseContextoRevision] | None,
+            _analysis_cache_set(db, "context_revision", cache_key, None),
+        )
     stmt = (
         select(AnaliseContextoRevision)
         .where(
@@ -1941,8 +2026,14 @@ def _context_revision_for_as_of(
     stmt = stmt.order_by(AnaliseContextoRevision.known_from.desc()).limit(1)
     revision = db.scalar(stmt)
     if revision is None:
-        return None
-    return execucao, revision
+        return cast(
+            tuple[AnaliseMaterializacaoExecucao, AnaliseContextoRevision] | None,
+            _analysis_cache_set(db, "context_revision", cache_key, None),
+        )
+    return cast(
+        tuple[AnaliseMaterializacaoExecucao, AnaliseContextoRevision],
+        _analysis_cache_set(db, "context_revision", cache_key, (execucao, revision)),
+    )
 
 
 def _series_from_canonical(
@@ -2148,11 +2239,18 @@ def _fact_revisions_by_period(
     scope: AnaliseEscopo,
     as_of: date | None,
 ) -> dict[str, list[AnaliseFatoRevision]]:
+    cache_key = (companhia.id, companhia.codigo_cvm, scope, CALCULATION_VERSION, as_of)
+    found, cached = _analysis_cache_get(db, "facts_by_period", cache_key)
+    if found:
+        return cast(dict[str, list[AnaliseFatoRevision]], cached)
     revisions = db.scalars(_current_fact_revisions_stmt(companhia, scope, as_of)).all()
     by_period: dict[str, list[AnaliseFatoRevision]] = defaultdict(list)
     for revision in revisions:
         by_period[revision.period_id].append(revision)
-    return by_period
+    return cast(
+        dict[str, list[AnaliseFatoRevision]],
+        _analysis_cache_set(db, "facts_by_period", cache_key, by_period),
+    )
 
 
 def _periodo_sort_key(period_id: str, periodos: dict[str, AnalisePeriodoDisponivel]) -> tuple[int, int, str]:
@@ -2830,17 +2928,19 @@ def obter_comparacoes(
     scope: AnaliseEscopo = "consolidated",
     as_of: date | None = None,
     horizonte_anos: int | None = None,
+    series: AnaliseSeriesResposta | None = None,
 ) -> AnaliseComparacoesResposta:
-    series = obter_series(
-        db,
-        companhia,
-        metricas=metricas,
-        periodicidade=periodicidade,
-        base_periodo=base_periodo,
-        scope=scope,
-        as_of=as_of,
-        horizonte_anos=horizonte_anos,
-    )
+    if series is None:
+        series = obter_series(
+            db,
+            companhia,
+            metricas=metricas,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            scope=scope,
+            as_of=as_of,
+            horizonte_anos=horizonte_anos,
+        )
     fact_map = _fact_map(series)
     items: list[AnaliseComparacaoItem] = []
 
@@ -3085,10 +3185,29 @@ def obter_sinais(
     *,
     scope: AnaliseEscopo = "consolidated",
     as_of: date | None = None,
+    annual_series: AnaliseSeriesResposta | None = None,
+    quarterly_series: AnaliseSeriesResposta | None = None,
+    restatements_res: AnaliseRestatementsResposta | None = None,
 ) -> AnaliseSinaisResposta:
-    annual = obter_series(db, companhia, metricas=["receita_liquida", "lucro_liquido", "caixa_operacional", "margem_liquida", "liquidez_corrente"], periodicidade="annual", base_periodo="fy", scope=scope, as_of=as_of)
-    quarterly = obter_series(db, companhia, metricas=["margem_liquida"], periodicidade="quarterly", base_periodo="quarter", scope=scope, as_of=as_of)
-    restatements = obter_restatements(db, companhia, scope=scope, as_of=as_of)
+    annual = annual_series or obter_series(
+        db,
+        companhia,
+        metricas=["receita_liquida", "lucro_liquido", "caixa_operacional", "margem_liquida", "liquidez_corrente"],
+        periodicidade="annual",
+        base_periodo="fy",
+        scope=scope,
+        as_of=as_of,
+    )
+    quarterly = quarterly_series or obter_series(
+        db,
+        companhia,
+        metricas=["margem_liquida"],
+        periodicidade="quarterly",
+        base_periodo="quarter",
+        scope=scope,
+        as_of=as_of,
+    )
+    restatements = restatements_res or obter_restatements(db, companhia, scope=scope, as_of=as_of)
 
     signals: list[AnaliseSignal] = []
 
@@ -3558,6 +3677,22 @@ def obter_restatements(
     for doc in documents:
         by_key[(doc.tipo_formulario, doc.data_referencia)].append(doc)
 
+    demonstration_rows = db.scalars(
+        select(DemonstracaoFinanceira)
+        .where(
+            DemonstracaoFinanceira.cnpj_companhia == companhia.cnpj_companhia,
+            DemonstracaoFinanceira.escopo_demonstracao == API_SCOPE_TO_DB[scope],
+        )
+        .order_by(
+            DemonstracaoFinanceira.tipo_formulario,
+            DemonstracaoFinanceira.data_referencia,
+            DemonstracaoFinanceira.versao,
+        )
+    ).all()
+    rows_by_version: dict[tuple[str, date, int], list[DemonstracaoFinanceira]] = defaultdict(list)
+    for row in demonstration_rows:
+        rows_by_version[(row.tipo_formulario, row.data_referencia, row.versao)].append(row)
+
     items: list[AnaliseRestatementItem] = []
     issues: list[AnaliseIssue] = []
 
@@ -3566,24 +3701,8 @@ def obter_restatements(
         if len(versions) < 2:
             continue
         for previous_doc, current_doc in zip(versions, versions[1:], strict=False):
-            previous_rows = db.scalars(
-                select(DemonstracaoFinanceira).where(
-                    DemonstracaoFinanceira.cnpj_companhia == companhia.cnpj_companhia,
-                    DemonstracaoFinanceira.tipo_formulario == form,
-                    DemonstracaoFinanceira.data_referencia == data_referencia,
-                    DemonstracaoFinanceira.versao == previous_doc.versao,
-                    DemonstracaoFinanceira.escopo_demonstracao == API_SCOPE_TO_DB[scope],
-                )
-            ).all()
-            current_rows = db.scalars(
-                select(DemonstracaoFinanceira).where(
-                    DemonstracaoFinanceira.cnpj_companhia == companhia.cnpj_companhia,
-                    DemonstracaoFinanceira.tipo_formulario == form,
-                    DemonstracaoFinanceira.data_referencia == data_referencia,
-                    DemonstracaoFinanceira.versao == current_doc.versao,
-                    DemonstracaoFinanceira.escopo_demonstracao == API_SCOPE_TO_DB[scope],
-                )
-            ).all()
+            previous_rows = rows_by_version[(form, data_referencia, previous_doc.versao)]
+            current_rows = rows_by_version[(form, data_referencia, current_doc.versao)]
 
             def key_fn(row: DemonstracaoFinanceira) -> tuple[str | None, str | None, str | None, date | None, date | None, str | None, str]:
                 return (
@@ -6997,6 +7116,31 @@ def materializar_analise_companhia(
         }
         db.commit()
         db.refresh(execucao)
+        snapshot_status = "disabled"
+        snapshot_source: str | None = None
+        if _settings.analise_fundamentalista_prewarm_enabled:
+            try:
+                snapshot_result = prewarm_fundamentalista_snapshot(db, companhia, execucao)
+                snapshot_status = "success" if snapshot_result is not None else "disabled"
+                snapshot_source = snapshot_result.source if snapshot_result is not None else None
+            except Exception as exc:
+                snapshot_status = "failed"
+                logger.exception(
+                    "Falha no prewarm fundamentalista codigo_cvm=%s execution_id=%s",
+                    companhia.codigo_cvm,
+                    execucao.id,
+                )
+                execucao.summary = {
+                    **(execucao.summary or {}),
+                    "fundamentalista_snapshot_error": type(exc).__name__,
+                }
+        execucao.summary = {
+            **(execucao.summary or {}),
+            "fundamentalista_snapshot_status": snapshot_status,
+            "fundamentalista_snapshot_source": snapshot_source,
+        }
+        db.commit()
+        db.refresh(execucao)
         return execucao
     except Exception:
         execucao.status = "failed"
@@ -7011,7 +7155,7 @@ def materializar_analise_companhia(
         raise
 
 
-def obter_fundamentalista(
+def _compile_fundamentalista(
     db: Session,
     companhia: Companhia,
     *,
@@ -7074,13 +7218,15 @@ def obter_fundamentalista(
         scope=scope,
         as_of=as_of,
         horizonte_anos=horizonte_anos + 2,
+        series=series_res,
     )
     qualidade_res = obter_qualidade(db, companhia, periodicidade=periodicidade, scope=scope, as_of=as_of)
-    sinais_res = obter_sinais(db, companhia, scope=scope, as_of=as_of)
     eventos_res = obter_eventos(db, companhia, as_of=as_of)
     restatements_res = obter_restatements(db, companhia, scope=scope, as_of=as_of)
 
     obs_lookup = {(obs.metric_id, obs.period_id): obs.value for obs in series_res.observacoes if obs.value is not None}
+    annual_series_res = series_res if periodicidade == "annual" else None
+    quarterly_signal_series = series_res if periodicidade == "quarterly" and base_periodo == "quarter" else None
     if periodicidade == "quarterly":
         try:
             annual_series_res = obter_series(
@@ -7098,6 +7244,16 @@ def obter_fundamentalista(
                     obs_lookup[(obs.metric_id, obs.period_id)] = obs.value
         except Exception:
             pass
+
+    sinais_res = obter_sinais(
+        db,
+        companhia,
+        scope=scope,
+        as_of=as_of,
+        annual_series=annual_series_res,
+        quarterly_series=quarterly_signal_series,
+        restatements_res=restatements_res,
+    )
 
     # Recalculate observations
     for obs in series_res.observacoes:
@@ -7585,7 +7741,7 @@ def obter_fundamentalista(
 
     return AnaliseFundamentalistaResposta(
         report_id=report_id,
-        report_version="1.1.0",
+        report_version=FUNDAMENTALISTA_REPORT_VERSION,
         companhia=manifest_res.companhia,
         contexto=manifest_res.contexto_padrao,
         qualidade=qualidade_res.qualidade,
@@ -7619,6 +7775,285 @@ def obter_fundamentalista(
         neutral_conclusion=neutral_conclusion,
         next_filing_watchlist=next_filing_watchlist,
     )
+
+
+def _fundamentalista_snapshot_context(
+    *,
+    scope: AnaliseEscopo,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    horizonte_anos: int,
+    as_of: date | None,
+    include: str | None,
+) -> dict[str, Any]:
+    return {
+        "escopo": scope,
+        "periodicidade": periodicidade,
+        "base_periodo": base_periodo,
+        "horizonte_anos": horizonte_anos,
+        "as_of_key": as_of.isoformat() if as_of is not None else "latest",
+        "include_key": "evidence_graph" if include == "evidence_graph" else "none",
+        "calculation_version": CALCULATION_VERSION,
+        "report_version": FUNDAMENTALISTA_REPORT_VERSION,
+    }
+
+
+def obter_fundamentalista_generation(
+    db: Session,
+    companhia: Companhia,
+    *,
+    scope: AnaliseEscopo,
+) -> str:
+    execution = _latest_successful_materialization(db, companhia, scope)
+    return str(execution.id) if execution is not None else "runtime"
+
+
+def _load_fundamentalista_snapshot(
+    db: Session,
+    companhia: Companhia,
+    *,
+    execution: AnaliseMaterializacaoExecucao,
+    scope: AnaliseEscopo,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    horizonte_anos: int,
+    as_of: date | None,
+    include: str | None,
+) -> AnaliseFundamentalistaSnapshot | None:
+    context = _fundamentalista_snapshot_context(
+        scope=scope,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+        as_of=as_of,
+        include=include,
+    )
+    return db.scalar(
+        select(AnaliseFundamentalistaSnapshot)
+        .where(
+            AnaliseFundamentalistaSnapshot.codigo_cvm == companhia.codigo_cvm,
+            AnaliseFundamentalistaSnapshot.escopo == context["escopo"],
+            AnaliseFundamentalistaSnapshot.periodicidade == context["periodicidade"],
+            AnaliseFundamentalistaSnapshot.base_periodo == context["base_periodo"],
+            AnaliseFundamentalistaSnapshot.horizonte_anos == context["horizonte_anos"],
+            AnaliseFundamentalistaSnapshot.as_of_key == context["as_of_key"],
+            AnaliseFundamentalistaSnapshot.include_key == context["include_key"],
+            AnaliseFundamentalistaSnapshot.calculation_version == context["calculation_version"],
+            AnaliseFundamentalistaSnapshot.report_version == context["report_version"],
+            AnaliseFundamentalistaSnapshot.source_execution_id == execution.id,
+        )
+        .limit(1)
+    )
+
+
+def _save_fundamentalista_snapshot(
+    db: Session,
+    companhia: Companhia,
+    *,
+    execution: AnaliseMaterializacaoExecucao,
+    response: AnaliseFundamentalistaResposta,
+    fingerprint: str,
+    scope: AnaliseEscopo,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    horizonte_anos: int,
+    as_of: date | None,
+    include: str | None,
+) -> None:
+    context = _fundamentalista_snapshot_context(
+        scope=scope,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+        as_of=as_of,
+        include=include,
+    )
+    now = datetime.now(UTC)
+    values = {
+        "id": uuid.uuid4(),
+        "companhia_id": companhia.id,
+        "codigo_cvm": companhia.codigo_cvm,
+        **context,
+        "source_execution_id": execution.id,
+        "payload": _jsonable_payload(response),
+        "fingerprint": fingerprint,
+        "materialized_at": response.resolution.materialized_at or now,
+        "created_at": now,
+        "updated_at": now,
+    }
+    key_columns = [
+        AnaliseFundamentalistaSnapshot.codigo_cvm,
+        AnaliseFundamentalistaSnapshot.escopo,
+        AnaliseFundamentalistaSnapshot.periodicidade,
+        AnaliseFundamentalistaSnapshot.base_periodo,
+        AnaliseFundamentalistaSnapshot.horizonte_anos,
+        AnaliseFundamentalistaSnapshot.as_of_key,
+        AnaliseFundamentalistaSnapshot.include_key,
+        AnaliseFundamentalistaSnapshot.calculation_version,
+        AnaliseFundamentalistaSnapshot.report_version,
+    ]
+    update_values = {
+        "companhia_id": companhia.id,
+        "source_execution_id": execution.id,
+        "payload": values["payload"],
+        "fingerprint": fingerprint,
+        "materialized_at": values["materialized_at"],
+        "updated_at": now,
+    }
+    dialect_name = db.get_bind().dialect.name
+    if dialect_name == "postgresql":
+        postgresql_statement = postgresql_insert(AnaliseFundamentalistaSnapshot).values(**values)
+        db.execute(postgresql_statement.on_conflict_do_update(index_elements=key_columns, set_=update_values))
+    elif dialect_name == "sqlite":
+        sqlite_statement = sqlite_insert(AnaliseFundamentalistaSnapshot).values(**values)
+        db.execute(sqlite_statement.on_conflict_do_update(index_elements=key_columns, set_=update_values))
+    else:  # pragma: no cover - dialetos de produção e teste possuem upsert nativo
+        existing = _load_fundamentalista_snapshot(
+            db,
+            companhia,
+            execution=execution,
+            scope=scope,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of,
+            include=include,
+        )
+        if existing is None:
+            db.add(AnaliseFundamentalistaSnapshot(**values))
+        else:
+            for field, value in update_values.items():
+                setattr(existing, field, value)
+    db.commit()
+
+
+def obter_fundamentalista_com_metadata(
+    db: Session,
+    companhia: Companhia,
+    *,
+    scope: AnaliseEscopo = "consolidated",
+    periodicidade: AnalisePeriodicidade = "annual",
+    base_periodo: AnaliseBasePeriodo = "fy",
+    horizonte_anos: int = 5,
+    as_of: date | None = None,
+    include: str | None = None,
+) -> FundamentalistaServiceResult:
+    execution = _latest_successful_materialization(db, companhia, scope)
+    generation = str(execution.id) if execution is not None else "runtime"
+    if _settings.analise_fundamentalista_snapshot_enabled and execution is not None:
+        snapshot = _load_fundamentalista_snapshot(
+            db,
+            companhia,
+            execution=execution,
+            scope=scope,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of,
+            include=include,
+        )
+        if snapshot is not None:
+            try:
+                response = AnaliseFundamentalistaResposta.model_validate(snapshot.payload)
+            except Exception:
+                logger.warning(
+                    "Snapshot fundamentalista invalido; recompilando codigo_cvm=%s execution_id=%s",
+                    companhia.codigo_cvm,
+                    execution.id,
+                )
+            else:
+                return FundamentalistaServiceResult(
+                    response=response,
+                    source="db_snapshot",
+                    generation=generation,
+                    fingerprint=snapshot.fingerprint,
+                )
+
+    response = _compile_fundamentalista(
+        db,
+        companhia,
+        scope=scope,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+        as_of=as_of,
+        include=include,
+    )
+    fingerprint = _payload_fingerprint(response)
+    source: Literal["compiled_canonical", "compiled_runtime"] = (
+        "compiled_canonical" if response.resolution.mode == "canonical" else "compiled_runtime"
+    )
+    if (
+        _settings.analise_fundamentalista_snapshot_enabled
+        and execution is not None
+        and response.resolution.mode == "canonical"
+        and response.resolution.materialization_execution_id == str(execution.id)
+    ):
+        _save_fundamentalista_snapshot(
+            db,
+            companhia,
+            execution=execution,
+            response=response,
+            fingerprint=fingerprint,
+            scope=scope,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of,
+            include=include,
+        )
+    return FundamentalistaServiceResult(
+        response=response,
+        source=source,
+        generation=generation,
+        fingerprint=fingerprint,
+    )
+
+
+def obter_fundamentalista(
+    db: Session,
+    companhia: Companhia,
+    *,
+    scope: AnaliseEscopo = "consolidated",
+    periodicidade: AnalisePeriodicidade = "annual",
+    base_periodo: AnaliseBasePeriodo = "fy",
+    horizonte_anos: int = 5,
+    as_of: date | None = None,
+    include: str | None = None,
+) -> AnaliseFundamentalistaResposta:
+    return obter_fundamentalista_com_metadata(
+        db,
+        companhia,
+        scope=scope,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+        as_of=as_of,
+        include=include,
+    ).response
+
+
+def prewarm_fundamentalista_snapshot(
+    db: Session,
+    companhia: Companhia,
+    execution: AnaliseMaterializacaoExecucao,
+) -> FundamentalistaServiceResult | None:
+    if not _settings.analise_fundamentalista_prewarm_enabled:
+        return None
+    clear_analysis_session_cache(db)
+    result = obter_fundamentalista_com_metadata(
+        db,
+        companhia,
+        scope=cast(AnaliseEscopo, execution.escopo),
+        periodicidade="annual",
+        base_periodo="fy",
+        horizonte_anos=5,
+        as_of=None,
+        include=None,
+    )
+    if result.response.resolution.materialization_execution_id != str(execution.id):
+        raise RuntimeError("Snapshot fundamentalista nao foi produzido pela execucao canonica atual.")
+    return result
 
 
 def obter_fundamentalista_eventos(

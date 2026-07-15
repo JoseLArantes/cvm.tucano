@@ -2,7 +2,19 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    Uuid,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -36,6 +48,25 @@ class PendingUpdate(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
 
+    @property
+    def content_changed(self) -> bool | None:
+        total_changes = (self.change_summary or {}).get("total_changes")
+        if isinstance(total_changes, int):
+            return total_changes > 0
+        return None
+
+    @property
+    def recommended_action(self) -> str:
+        if self.status in {"change_detected", "analysis_failed"}:
+            return "analyze"
+        if self.status in {"analysis_queued", "analyzing"}:
+            return "wait"
+        if self.status == "ready_for_ingestion":
+            return "ingest"
+        if self.status == "content_unchanged":
+            return "update_reference"
+        return "none"
+
 
 class UpdateScanRun(Base):
     __tablename__ = "update_scan_runs"
@@ -49,6 +80,50 @@ class UpdateScanRun(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+
+
+class AcknowledgedArtifactReference(Base):
+    __tablename__ = "acknowledged_artifact_references"
+    __table_args__ = (
+        UniqueConstraint(
+            "pending_update_id",
+            "resource_key",
+            name="uq_acknowledged_artifact_reference_pending_resource",
+        ),
+        Index(
+            "ix_acknowledged_artifact_reference_scope_confirmed",
+            "fonte",
+            "ano",
+            "confirmed_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    pending_update_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("pending_updates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    baseline_ingestion_run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("ingestion_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    fonte: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    ano: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    resource_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    resource_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    remote_etag: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_last_modified: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    remote_content_length: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    artifact_content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    member_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    confirmation_method: Mapped[str] = mapped_column(String(32), nullable=False, default="member_sha256")
+    confirmed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confirmed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class PendingUpdateMember(Base):

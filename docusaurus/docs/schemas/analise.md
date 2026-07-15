@@ -738,6 +738,8 @@ Cada conta alterada inclui:
 
 `AnaliseFundamentalistaResposta` descreve a resposta completa e unificada para o relatório fundamentalista da companhia.
 
+O schema do payload é independente da origem de entrega. Em `resolution.mode=canonical`, o backend pode responder pelo read model persistido ou por sua cópia descartável no Redis. Em `resolution.mode=runtime_fallback`, o mesmo contrato é compilado sob demanda. A origem operacional aparece em `X-Analise-Source`, não em um campo novo do payload.
+
 Campos principais:
 
 | Campo | Tipo | Descrição |

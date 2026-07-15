@@ -31,6 +31,13 @@ class DocumentoFinanceiro(Base):
             "data_referencia",
             name="uq_documentos_financeiros_chave_natural",
         ),
+        Index(
+            "ix_documentos_financeiros_analise_lookup",
+            "cnpj_companhia",
+            "tipo_formulario",
+            "data_referencia",
+            "versao",
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -90,6 +97,14 @@ class DemonstracaoFinanceira(Base):
             "arquivo_origem",
             "ano_origem",
             "hash_origem",
+        ),
+        Index(
+            "ix_demonstracoes_financeiras_analise_lookup",
+            "cnpj_companhia",
+            "escopo_demonstracao",
+            "tipo_formulario",
+            "data_referencia",
+            "versao",
         ),
     )
 

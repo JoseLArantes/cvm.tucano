@@ -2,13 +2,15 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api
-from app.api.deps import DbSession
-from app.services.normalizacao import datetime_para_string_br
+from app.api.deps import DbSession, PaginacaoQuery
+from app.core.config import get_settings
+from app.schemas.comum import Paginacao
 from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateScanRun, UpdateSession, UpdateSessionItem
 from app.updates.schemas import (
+    AcknowledgeArtifactReferenceResponseSchema,
     DiscardResponseSchema,
     PendingUpdateMemberSchema,
     PendingUpdateSchema,
@@ -16,17 +18,21 @@ from app.updates.schemas import (
     UpdateScannerStatusSchema,
     UpdateScanRunQueuedSchema,
     UpdateScanRunSchema,
+    UpdateScanRunsListSchema,
     UpdateSessionDetailSchema,
     UpdateSessionItemSchema,
     UpdateSessionSchema,
     UpdateSummarySchema,
 )
 from app.updates.service import (
+    acknowledge_artifact_reference,
     add_session_item,
     create_scan_run,
     create_session,
     discard_update,
     get_latest_scan_run,
+    get_scanner_status_snapshot,
+    list_scan_runs,
     remove_session_item,
     trigger_session,
     trigger_update,
@@ -44,9 +50,11 @@ router = APIRouter()
     dependencies=[Depends(autenticar_requisicao)],
     summary="Obter status do Scanner",
     description=(
-        "Retorna o estado operacional resumido do scanner e aponta para a última execução persistida. "
-        "Use `last_scan_run_id` para navegar até o resumo detalhado da execução mais recente, que informa quais artefatos ficaram inalterados, "
-        "quais avançaram para análise por arquivo interno e quais members mudaram."
+        "Retorna a saúde da vigilância diária e aponta para a última execução persistida. "
+        "`health_status=healthy` exige cobertura completa e conclusiva dentro da janela esperada; `degraded` indica "
+        "checagens inconclusivas, erros ou fontes sem baseline; `stale` indica ausência de conclusão recente. "
+        "`schedule_status` considera somente execuções agendadas e não é renovado por checagens manuais. "
+        "Use `last_scan_run_id` para consultar o log por fonte/ano."
     ),
     response_description="Estado resumido do scanner com referência para a última execução persistida.",
 )
@@ -55,18 +63,13 @@ def get_scanner_status(db: DbSession) -> dict[str, Any]:
     Retorna metadados do estado operacional do scanner. 
     Ideal para painéis de monitoramento exibirem quando ocorreu a última checagem remota automatizada.
     """
-    stmt = select(func.max(PendingUpdate.last_probe_timestamp))
-    last_run = db.scalar(stmt)
-    latest_scan = get_latest_scan_run(db)
-    return {
-        "status": "idle",
-        "last_run": datetime_para_string_br(last_run) if last_run else None,
-        "last_scan_run_id": str(latest_scan.id) if latest_scan is not None else None,
-        "last_scan_status": latest_scan.status if latest_scan is not None else None,
-        "last_scan_finished_at": (
-            datetime_para_string_br(latest_scan.finished_at) if latest_scan and latest_scan.finished_at else None
-        ),
-    }
+    settings = get_settings()
+    return get_scanner_status_snapshot(
+        db,
+        stale_after_hours=settings.updates_scanner_stale_after_hours,
+        scanner_enabled=settings.updates_service_enabled,
+        schedule_enabled=settings.updates_service_enabled and not settings.auto_trigger_updates,
+    )
 
 
 @router.post(
@@ -76,6 +79,7 @@ def get_scanner_status(db: DbSession) -> dict[str, Any]:
     summary="Executar Scanner de Atualizações",
     description=(
         "Dispara de forma assíncrona o job do scanner diário de todas as fontes CVM mapeadas e cria uma execução persistida de scanner. "
+        "Os escopos anuais são derivados dos anos que possuem ingestão bem-sucedida; `ANOS_INICIAIS_*` não controla a cobertura do scanner. "
         "A execução consolidará um resumo completo por fonte/ano, incluindo artefatos sem alteração, artefatos alterados e, quando houver mudança confirmada, "
         "o detalhamento dos arquivos internos alterados e inalterados."
     ),
@@ -105,6 +109,7 @@ def trigger_scanner(db: DbSession) -> dict[str, Any]:
     summary="Obter Última Execução de Scanner",
     description=(
         "Retorna a execução mais recente do scanner com o resumo consolidado do que foi efetivamente analisado. "
+        "Execuções automáticas e manuais são persistidas mesmo quando nenhuma mudança é encontrada. "
         "Use esta rota para mostrar ao operador quais artefatos pararam no check de ZIP/CSV e quais avançaram para análise por arquivo interno."
     ),
     response_description="Execução mais recente do scanner, incluindo resumo detalhado.",
@@ -114,6 +119,45 @@ def get_latest_scanner_run(db: DbSession) -> UpdateScanRun:
     if scan_run is None:
         raise HTTPException(status_code=404, detail="No scanner run found")
     return scan_run
+
+
+@router.get(
+    "/scanner/runs",
+    response_model=UpdateScanRunsListSchema,
+    dependencies=[Depends(autenticar_requisicao)],
+    summary="Listar Execuções do Scanner",
+    description=(
+        "Lista as execuções automáticas e manuais do scanner, inclusive quando nenhuma atualização foi detectada. "
+        "Cada execução informa cobertura, origem do disparo, contadores conclusivos/inconclusivos e uma checagem por fonte/ano."
+    ),
+    response_description="Histórico paginado das varreduras remotas do Updates Service.",
+)
+def list_scanner_runs(
+    db: DbSession,
+    paginacao: Annotated[PaginacaoQuery, Depends()],
+    status_filter: Annotated[
+        str | None,
+        Query(
+            alias="status",
+            description="Filtra por `queued`, `running`, `completed` ou `failed`.",
+            pattern="^(queued|running|completed|failed)$",
+        ),
+    ] = None,
+) -> UpdateScanRunsListSchema:
+    runs, total = list_scan_runs(
+        db,
+        status=status_filter,
+        offset=paginacao.offset,
+        limit=paginacao.tamanho_pagina,
+    )
+    return UpdateScanRunsListSchema(
+        dados=[UpdateScanRunSchema.model_validate(run) for run in runs],
+        paginacao=Paginacao(
+            pagina=paginacao.pagina,
+            tamanho_pagina=paginacao.tamanho_pagina,
+            total=total,
+        ),
+    )
 
 
 @router.get(
@@ -236,7 +280,10 @@ def list_pending_update_members(
     response_model=dict[str, Any],
     dependencies=[Depends(autenticar_requisicao)],
     summary="Forçar Análise Profunda",
-    description="Dispara manualmente a tarefa de análise profunda (Deep Analysis) de membros para uma atualização pendente no status change_detected.",
+    description=(
+        "Dispara a análise SHA-256 dos members para uma atualização em `change_detected` ou repete a análise de "
+        "um item `content_unchanged` quando for necessário reconstruir sua referência remota."
+    ),
     response_description="Confirmação e ID da tarefa Celery enfileirada.",
 )
 def trigger_update_analysis(
@@ -251,7 +298,7 @@ def trigger_update_analysis(
     if pending is None:
         raise HTTPException(status_code=404, detail="PendingUpdate not found")
     
-    if pending.status not in ("change_detected", "analysis_queued"):
+    if pending.status not in ("change_detected", "analysis_queued", "content_unchanged"):
         return {
             "status": pending.status,
             "message": f"Update is in status '{pending.status}', analysis not required or already running."
@@ -269,10 +316,43 @@ def trigger_update_analysis(
 
 
 @router.post(
+    "/pending/{id}/acknowledge-reference",
+    response_model=AcknowledgeArtifactReferenceResponseSchema,
+    summary="Atualizar Referência Remota Sem Ingestão",
+    description=(
+        "Finaliza uma atualização cuja análise comprovou `total_changes=0` e equivalência SHA-256 de todos os members. "
+        "Registra os headers remotos como referência reconhecida vinculada à ingestão canônica atual, sem enfileirar "
+        "Celery e sem alterar a proveniência do `IngestionFile`. A referência deixa de ser aplicável quando uma nova "
+        "ingestão bem-sucedida substitui o baseline canônico."
+    ),
+    response_description="Referências reconhecidas e confirmação explícita de que nenhuma ingestão foi disparada.",
+)
+def acknowledge_pending_update_reference(
+    id: Annotated[uuid.UUID, Path(description="UUID da atualização com status `content_unchanged`")],
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    db: DbSession,
+) -> dict[str, Any]:
+    try:
+        username = auth.usuario.username if auth.usuario else "system"
+        pending, references = acknowledge_artifact_reference(db, id, user=username)
+        return {
+            "status": pending.status,
+            "pending_update_id": pending.id,
+            "ingestion_triggered": False,
+            "acknowledged_references": references,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
     "/pending/{id}/trigger",
     response_model=TriggerResponseSchema,
     summary="Disparar Ingestão Manual",
-    description="Aprova a atualização pendente especificada e agenda sua ingestão física no banco de dados. Bypassa sondagens adicionais e atualiza o status para triggered.",
+    description=(
+        "Agenda ingestão somente para atualizações com conteúdo modificado e status `ready_for_ingestion`. "
+        "Itens `content_unchanged` devem usar `/acknowledge-reference` e não geram tarefas Celery."
+    ),
     response_description="Dados de identificação do trigger e Celery Task ID da execução física.",
 )
 def trigger_pending_update(
@@ -301,7 +381,10 @@ def trigger_pending_update(
     response_model=DiscardResponseSchema,
     dependencies=[Depends(autenticar_requisicao)],
     summary="Descartar Atualização",
-    description="Marca a atualização pendente selecionada como descartada (discarded), invalidando-a para ingestões futuras e liberando a trava operacional da fonte.",
+    description=(
+        "Marca a pendência como `discarded` sem reconhecer os metadados remotos como baseline. Se o artefato continuar "
+        "diferente da referência canônica ou reconhecida, uma checagem futura pode detectá-lo novamente."
+    ),
     response_description="Confirmação de descarte contendo o UUID correspondente.",
 )
 def discard_pending_update(
@@ -509,7 +592,10 @@ def delete_update_session(
     response_model=UpdateSummarySchema,
     dependencies=[Depends(autenticar_requisicao)],
     summary="Obter Sumário de Atualizações",
-    description="Retorna estatísticas operacionais de atualizações pendentes (contagem por tipo de fonte, status e total de itens prontos para ingestão).",
+    description=(
+        "Retorna contagens por fonte e status, itens prontos para ingestão e artefatos sem mudança de conteúdo "
+        "aguardando atualização de referência."
+    ),
     response_description="Sumário estatístico estruturado do serviço.",
 )
 def get_update_summary(db: DbSession) -> dict[str, Any]:
@@ -520,8 +606,19 @@ def get_update_summary(db: DbSession) -> dict[str, Any]:
     stmt_all = select(PendingUpdate)
     all_updates = db.scalars(stmt_all).all()
     
-    total_pending = sum(1 for item in all_updates if item.status in ("change_detected", "analysis_queued", "analyzing", "ready_for_ingestion"))
+    total_pending = sum(
+        1
+        for item in all_updates
+        if item.status in (
+            "change_detected",
+            "analysis_queued",
+            "analyzing",
+            "ready_for_ingestion",
+            "content_unchanged",
+        )
+    )
     ready_count = sum(1 for item in all_updates if item.status == "ready_for_ingestion")
+    reference_update_count = sum(1 for item in all_updates if item.status == "content_unchanged")
     
     by_source: dict[str, int] = {}
     by_status: dict[str, int] = {}
@@ -533,7 +630,8 @@ def get_update_summary(db: DbSession) -> dict[str, Any]:
         "total_pending": total_pending,
         "by_source": by_source,
         "by_status": by_status,
-        "ready_count": ready_count
+        "ready_count": ready_count,
+        "reference_update_count": reference_update_count,
     }
 
 

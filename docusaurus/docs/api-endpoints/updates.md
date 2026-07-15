@@ -5,25 +5,47 @@ sidebar_position: 14
 
 # Endpoints de Atualizações (Updates Service API)
 
-Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token** e são montados sob o prefixo `/api/updates`. Operações críticas como forçar varreduras exigem **permissão de administrador**.
+Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token** e são montados sob o prefixo `/updates`. Operações críticas como forçar varreduras exigem **permissão de administrador**.
 
 ---
 
 ## 1. Scanner & Detecção
 
 ### Obter Status do Scanner
-* **Rota:** `GET /api/updates/scanner/status`
-* **Descrição:** Retorna o status de processamento do scanner e a data/hora da última execução de sondagem remota.
+* **Rota:** `GET /updates/scanner/status`
+* **Descrição:** Retorna o estado operacional, saúde, cobertura e contadores da última execução persistida.
 * **Exemplo de Resposta:**
   ```json
   {
     "status": "idle",
-    "last_run": "2026-06-19T00:30:00+00:00"
+    "health_status": "healthy",
+    "scanner_enabled": true,
+    "schedule_enabled": true,
+    "schedule_status": "healthy",
+    "last_run": "15/07/2026 00:30:03",
+    "last_scan_run_id": "180bfa1e-61d5-4554-ba5f-b52f6b866c1f",
+    "last_scan_status": "completed",
+    "last_scheduled_scan_run_id": "180bfa1e-61d5-4554-ba5f-b52f6b866c1f",
+    "last_scheduled_scan_status": "completed",
+    "trigger": "scheduled",
+    "coverage_status": "complete",
+    "expected_scopes": 50,
+    "scanned_scopes": 50,
+    "changed_count": 0,
+    "unchanged_count": 50,
+    "inconclusive_count": 0,
+    "error_count": 0,
+    "skipped_count": 0,
+    "sources_without_scope": [],
+    "expected_interval_hours": 24,
+    "stale_after_hours": 36
   }
   ```
 
+`health_status` combina a qualidade da última varredura com a saúde do agendamento. `schedule_status` considera somente execuções com `trigger=scheduled`: uma execução manual não mascara um Beat parado ou obsoleto.
+
 ### Rodar Scanner Manualmente
-* **Rota:** `POST /api/updates/scanner/run`
+* **Rota:** `POST /updates/scanner/run`
 * **Permissão:** Requer administrador (`is_admin=true` ou token de sistema).
 * **Descrição:** Enfileira o job diário de varredura das fontes (`run_daily_scanner_task`) no worker Celery de forma assíncrona.
 * **Exemplo de Resposta:**
@@ -31,13 +53,29 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
   {
     "status": "queued",
     "task_id": "469fa781-b258-45e3-a6b1-4f3dfa3bf004",
+    "scan_run_id": "180bfa1e-61d5-4554-ba5f-b52f6b866c1f",
     "message": "Scanner task has been queued in the background."
   }
   ```
 
-### Histórico do Scanner
-* **Rota:** `GET /api/updates/scanner/history`
-* **Descrição:** Retorna a lista das últimas 50 detecções salvas.
+### Histórico das Execuções do Scanner
+* **Rota:** `GET /updates/scanner/runs`
+* **Parâmetros:** `pagina`, `tamanho_pagina` e `status` opcional.
+* **Descrição:** Retorna todas as varreduras agendadas e manuais, inclusive as que terminaram sem detectar atualizações. Cada item contém `summary.items`, o log por fonte/ano.
+
+Cada item de `summary.items` informa `fonte`, `ano`, `artifact_decision`, `decision_reason`, os metadados consultados em `probe_details` e o resultado em `member_scan`. Assim, uma tela pode distinguir ausência real de mudança, erro remoto, baseline ausente e comparação inconclusiva.
+
+### Última Execução
+* **Rota:** `GET /updates/scanner/runs/latest`
+* **Descrição:** Retorna o log consolidado mais recente.
+
+### Detalhe de uma Execução
+* **Rota:** `GET /updates/scanner/runs/{scan_run_id}`
+* **Descrição:** Retorna uma execução específica para polling ou auditoria.
+
+### Histórico de Alterações Detectadas
+* **Rota:** `GET /updates/scanner/history`
+* **Descrição:** Retorna somente as últimas 50 mudanças detectadas. Não use esta rota para verificar se o scanner diário executou; use `/scanner/runs`.
 * **Exemplo de Resposta:**
   ```json
   [
@@ -58,18 +96,25 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
 ## 2. Gerenciamento de Pendências
 
 ### Listar Atualizações Pendentes
-* **Rota:** `GET /api/updates/pending`
+* **Rota:** `GET /updates/pending`
 * **Parâmetros de Query:**
   * `fonte` (Opcional): Filtra por fonte (ex: `cadastro`, `itr`).
   * `status` (Opcional): Filtra por status (ex: `change_detected`, `ready_for_ingestion`).
 * **Descrição:** Retorna a lista de atualizações pendentes filtradas.
 
+Cada item também informa:
+
+- `content_changed`: `true`, `false` ou `null` enquanto não houver conclusão;
+- `recommended_action`: `analyze`, `wait`, `ingest`, `update_reference` ou `none`;
+- `status=content_unchanged` quando todos os members mantêm o mesmo SHA-256;
+- `status=reference_updated` após reconhecimento da referência sem ingestão.
+
 ### Detalhar Atualização
-* **Rota:** `GET /api/updates/pending/{id}`
+* **Rota:** `GET /updates/pending/{id}`
 * **Descrição:** Retorna os metadados consolidados e o `change_summary` de uma atualização específica.
 
 ### Listar Membros da Atualização
-* **Rota:** `GET /api/updates/pending/{id}/members`
+* **Rota:** `GET /updates/pending/{id}/members`
 * **Descrição:** Detalha a lista de arquivos membros (ex: tabelas CSV internas do ZIP) com o status individual de cada um.
 * **Exemplo de Resposta:**
   ```json
@@ -88,8 +133,9 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
   ```
 
 ### Disparar Ingestão (Trigger)
-* **Rota:** `POST /api/updates/pending/{id}/trigger`
+* **Rota:** `POST /updates/pending/{id}/trigger`
 * **Descrição:** Dispara a execução física da importação e atualiza o status para `triggered`. Retorna o ID da tarefa Celery que rodará a ingestão em background.
+* **Pré-condição:** Somente `ready_for_ingestion`. Para `content_unchanged`, use a atualização de referência.
 * **Exemplo de Resposta:**
   ```json
   {
@@ -99,8 +145,38 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
   }
   ```
 
+### Atualizar Referência Sem Ingestão
+
+* **Rota:** `POST /updates/pending/{id}/acknowledge-reference`
+* **Pré-condições:** `total_changes=0`, todos os members com SHA-256 anterior e atual idênticos, e baseline canônico identificado.
+* **Descrição:** Registra os headers do artefato remoto como referência reconhecida e finaliza a pendência em `reference_updated`. Não cria task Celery, não promove dados e não altera o `IngestionFile` original.
+* **Exemplo de resposta:**
+
+  ```json
+  {
+    "status": "reference_updated",
+    "pending_update_id": "180bfa1e-61d5-4554-ba5f-b52f6b866c1f",
+    "ingestion_triggered": false,
+    "acknowledged_references": [
+      {
+        "id": "9d713c0d-d1c8-41db-a6f8-90b71b46b747",
+        "resource_url": "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/CGVN/DADOS/cgvn_cia_aberta_2026.zip",
+        "remote_etag": "\"6a537c26-19b01\"",
+        "remote_last_modified": "15/07/2026 18:00:00",
+        "remote_content_length": 105217,
+        "member_fingerprint": "d12d7d7b37fd97b14f09bffdd0e34339a36661583fe672844e31bc5a28c7c514",
+        "confirmation_method": "member_sha256",
+        "confirmed_by": "admin",
+        "confirmed_at": "15/07/2026 18:40:00"
+      }
+    ]
+  }
+  ```
+
+Descartar um item `content_unchanged` não reconhece seus headers. Se o remoto continuar diferente do baseline, o scanner poderá detectá-lo novamente.
+
 ### Descartar Atualização
-* **Rota:** `POST /api/updates/pending/{id}/discard`
+* **Rota:** `POST /updates/pending/{id}/discard`
 * **Descrição:** Cancela a atualização pendente.
 * **Exemplo de Resposta:**
   ```json
@@ -115,7 +191,7 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
 ## 3. Lotes (Sessions)
 
 ### Criar Sessão
-* **Rota:** `POST /api/updates/session`
+* **Rota:** `POST /updates/session`
 * **Descrição:** Inicia uma nova sessão de seleção para processamento em lote.
 * **Exemplo de Resposta:**
   ```json
@@ -128,9 +204,9 @@ Todos os endpoints listados abaixo exigem autenticação do tipo **Bearer Token*
   ```
 
 ### Adicionar Item na Sessão
-* **Rota:** `POST /api/updates/session/{session_key}/items?pending_update_id={id}`
+* **Rota:** `POST /updates/session/{session_key}/items?pending_update_id={id}`
 * **Descrição:** Insere um item na lista de aprovação da sessão.
 
 ### Disparar Sessão (Trigger Lote)
-* **Rota:** `POST /api/updates/session/{session_key}/trigger`
+* **Rota:** `POST /updates/session/{session_key}/trigger`
 * **Descrição:** Dispara a execução simultânea de todas as atualizações selecionadas e confirmadas na sessão. Retorna os IDs das tarefas Celery geradas.

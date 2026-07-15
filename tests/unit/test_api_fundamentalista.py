@@ -2,13 +2,22 @@ import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
+from app.api.routers import analise as analise_router
+from app.core.cache import cache as delivery_cache
+from app.models.analise import AnaliseFundamentalistaSnapshot
 from app.models.companhia import Companhia
 from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro
 from app.models.ipe import IpeDocumento
-from app.services.analise import materializar_analise_companhia
+from app.services.analise import (
+    clear_analysis_session_cache,
+    materializar_analise_companhia,
+    obter_fundamentalista_com_metadata,
+)
 
 
 def _ops_headers(client: TestClient) -> dict[str, str]:
@@ -830,3 +839,174 @@ def test_fundamentalista_openapi_includes_new_block_schemas(client: TestClient) 
     assert "NeutralConclusion" in schemas
     assert "NextFilingWatchlist" in schemas
 
+    operation = openapi["paths"]["/analise/companhias/{codigo_cvm}/fundamentalista"]["get"]
+    assert "304" in operation["responses"]
+    headers = operation["responses"]["200"]["headers"]
+    assert {"ETag", "Cache-Control", "X-Analise-Source", "X-Analise-Generation"} <= set(headers)
+
+
+def test_materializacao_prewarm_persiste_e_reutiliza_snapshot(
+    db_session: Session,
+    client: TestClient,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    execution = materializar_analise_companhia(db_session, cia, scope="consolidated")
+
+    snapshot = db_session.scalar(
+        select(AnaliseFundamentalistaSnapshot).where(
+            AnaliseFundamentalistaSnapshot.codigo_cvm == cia.codigo_cvm,
+            AnaliseFundamentalistaSnapshot.source_execution_id == execution.id,
+            AnaliseFundamentalistaSnapshot.periodicidade == "annual",
+            AnaliseFundamentalistaSnapshot.base_periodo == "fy",
+            AnaliseFundamentalistaSnapshot.horizonte_anos == 5,
+            AnaliseFundamentalistaSnapshot.as_of_key == "latest",
+            AnaliseFundamentalistaSnapshot.include_key == "none",
+        )
+    )
+    assert snapshot is not None
+    assert execution.summary is not None
+    assert execution.summary["fundamentalista_snapshot_status"] == "success"
+
+    clear_analysis_session_cache(db_session)
+    result = obter_fundamentalista_com_metadata(
+        db_session,
+        cia,
+        scope="consolidated",
+        periodicidade="annual",
+        base_periodo="fy",
+        horizonte_anos=5,
+    )
+    assert result.source == "db_snapshot"
+    assert result.generation == str(execution.id)
+    assert result.response.resolution.materialization_execution_id == str(execution.id)
+
+    headers = _ops_headers(client)
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        headers=headers,
+    )
+    assert response.status_code == 200
+    assert response.headers["x-analise-source"] == "db_snapshot"
+    assert response.headers["x-analise-generation"] == str(execution.id)
+    assert response.headers["etag"].startswith('"')
+    assert response.headers["cache-control"].startswith("private")
+
+
+def test_snapshot_canonico_reduz_leitura_para_duas_consultas(
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    materializar_analise_companhia(db_session, cia, scope="consolidated")
+    clear_analysis_session_cache(db_session)
+    statements: list[str] = []
+    bind = db_session.get_bind()
+
+    def capture_selects(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            statements.append(statement)
+
+    event.listen(bind, "before_cursor_execute", capture_selects)
+    try:
+        result = obter_fundamentalista_com_metadata(
+            db_session,
+            cia,
+            scope="consolidated",
+            periodicidade="annual",
+            base_periodo="fy",
+            horizonte_anos=5,
+        )
+    finally:
+        event.remove(bind, "before_cursor_execute", capture_selects)
+
+    assert result.source == "db_snapshot"
+    assert len(statements) <= 2
+
+
+def test_runtime_fallback_nao_persiste_snapshot_sem_execucao_canonica(
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    result = obter_fundamentalista_com_metadata(
+        db_session,
+        cia,
+        scope="consolidated",
+        periodicidade="annual",
+        base_periodo="fy",
+        horizonte_anos=5,
+    )
+
+    assert result.source == "compiled_runtime"
+    assert db_session.scalar(select(func.count(AnaliseFundamentalistaSnapshot.id))) == 0
+
+
+def test_nova_materializacao_substitui_a_geracao_do_snapshot(
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    first_execution = materializar_analise_companhia(db_session, cia, scope="consolidated")
+    second_execution = materializar_analise_companhia(db_session, cia, scope="consolidated")
+
+    snapshots = db_session.scalars(
+        select(AnaliseFundamentalistaSnapshot).where(
+            AnaliseFundamentalistaSnapshot.codigo_cvm == cia.codigo_cvm,
+            AnaliseFundamentalistaSnapshot.escopo == "consolidated",
+            AnaliseFundamentalistaSnapshot.periodicidade == "annual",
+            AnaliseFundamentalistaSnapshot.base_periodo == "fy",
+            AnaliseFundamentalistaSnapshot.horizonte_anos == 5,
+            AnaliseFundamentalistaSnapshot.as_of_key == "latest",
+            AnaliseFundamentalistaSnapshot.include_key == "none",
+        )
+    ).all()
+
+    assert first_execution.id != second_execution.id
+    assert len(snapshots) == 1
+    assert snapshots[0].source_execution_id == second_execution.id
+
+
+def _cache_set(values: dict[str, str], key: str, value: str, _ttl: int) -> bool:
+    values[key] = value
+    return True
+
+
+def test_fundamentalista_redis_cache_e_etag_304(
+    db_session: Session,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+    values: dict[str, str] = {}
+
+    monkeypatch.setattr(analise_router._settings, "analise_fundamentalista_cache_enabled", True)
+    monkeypatch.setattr(delivery_cache, "get", lambda key: values.get(key))
+    monkeypatch.setattr(
+        delivery_cache,
+        "set",
+        lambda key, value, ttl: _cache_set(values, key, value, ttl),
+    )
+    monkeypatch.setattr(delivery_cache, "acquire_lock", lambda _key, _ttl: "lock-token")
+    monkeypatch.setattr(delivery_cache, "release_lock", lambda _key, _token: None)
+
+    first = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        headers=headers,
+    )
+    assert first.status_code == 200
+    assert first.headers["x-analise-source"] == "compiled_runtime"
+    assert values
+
+    conditional_headers = {**headers, "If-None-Match": first.headers["etag"]}
+    second = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        headers=conditional_headers,
+    )
+    assert second.status_code == 304
+    assert second.content == b""
+    assert second.headers["x-analise-source"] == "redis_cache"

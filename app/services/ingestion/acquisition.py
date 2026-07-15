@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
@@ -56,8 +57,9 @@ def _latest_successful_reference(
     ano: int | None,
     current_run_id: Any,
 ) -> tuple[IngestionRun | None, IngestionFile | None]:
-    previous_run = db.scalar(
-        select(IngestionRun)
+    previous_reference = db.execute(
+        select(IngestionRun, IngestionFile)
+        .join(IngestionFile, IngestionFile.ingestion_run_id == IngestionRun.id)
         .where(
             IngestionRun.tipo_fonte == tipo_fonte,
             IngestionRun.ano == ano,
@@ -66,16 +68,23 @@ def _latest_successful_reference(
         )
         .order_by(IngestionRun.started_at.desc())
         .limit(1)
-    )
-    if previous_run is None:
+    ).first()
+    if previous_reference is None:
         return None, None
-    previous_file = db.scalar(
-        select(IngestionFile)
-        .where(IngestionFile.ingestion_run_id == previous_run.id)
-        .order_by(IngestionFile.downloaded_at.desc())
-        .limit(1)
-    )
+    previous_run, previous_file = previous_reference
     return previous_run, previous_file
+
+
+def _parse_http_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _fetch_ckan_package_metadata(dataset_url: str, *, timeout: float) -> dict[str, Any] | None:
@@ -165,6 +174,7 @@ def probe_remote_source(
             str(previous_file.content_length_bytes) if previous_file is not None and previous_file.content_length_bytes else None
         ),
         "package_metadata_modified": previous_probe.get("package_metadata_modified"),
+        "downloaded_at": previous_file.downloaded_at.isoformat() if previous_file is not None else None,
     }
     probe["previous_reference"] = previous_reference
 
@@ -177,6 +187,11 @@ def probe_remote_source(
         current_value = probe.get(field)
         previous_value = previous_reference.get(field)
         return current_value is not None and previous_value is not None and current_value != previous_value
+
+    remote_modified_at = _parse_http_datetime(probe.get("resource_last_modified"))
+    downloaded_at = previous_file.downloaded_at if previous_file is not None else None
+    if downloaded_at is not None and downloaded_at.tzinfo is None:
+        downloaded_at = downloaded_at.replace(tzinfo=UTC)
 
     if previous_run is None:
         probe["decision"] = "changed"
@@ -206,6 +221,21 @@ def probe_remote_source(
     elif _same("resource_last_modified") and _same("resource_content_length"):
         probe["decision"] = "unchanged"
         probe["decision_reason"] = "metadata_matched:resource_last_modified,resource_content_length"
+        probe["confidence"] = "medium"
+        probe["download_required"] = False
+    elif remote_modified_at is not None and downloaded_at is not None and remote_modified_at > downloaded_at:
+        probe["decision"] = "changed"
+        probe["decision_reason"] = "metadata_changed:resource_last_modified_after_download"
+        probe["confidence"] = "medium"
+        probe["download_required"] = True
+    elif (
+        remote_modified_at is not None
+        and downloaded_at is not None
+        and remote_modified_at <= downloaded_at
+        and _same("resource_content_length")
+    ):
+        probe["decision"] = "unchanged"
+        probe["decision_reason"] = "metadata_matched:resource_content_length,last_modified_not_newer_than_download"
         probe["confidence"] = "medium"
         probe["download_required"] = False
     elif _different("package_metadata_modified"):

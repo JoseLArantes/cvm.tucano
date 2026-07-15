@@ -170,6 +170,119 @@ def test_probe_remote_source_does_not_skip_on_content_length_only(monkeypatch: p
         session.close()
 
 
+def test_probe_remote_source_uses_artifact_run_and_download_time_as_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    try:
+        previous_run = create_run(session, tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+        previous_run.started_at = datetime(2026, 6, 16, 12, 0, tzinfo=UTC)
+        previous_file = register_file(
+            session,
+            ingestion_run=previous_run,
+            source_url="https://example.test/dfp.zip",
+            source_filename="dfp.zip",
+            content_sha256="abc",
+            content_length_bytes=1024,
+        )
+        previous_file.downloaded_at = datetime(2026, 6, 16, 12, 5, tzinfo=UTC)
+
+        newer_child_without_artifact = create_run(
+            session,
+            tipo_fonte="dfp",
+            ano=2025,
+            status="sucesso",
+            phase="complete",
+        )
+        newer_child_without_artifact.started_at = datetime(2026, 6, 16, 12, 10, tzinfo=UTC)
+        current_run = create_run(session, tipo_fonte="dfp", ano=2025, status="em_execucao", phase="acquire")
+        current_run.started_at = datetime(2026, 6, 17, 12, 0, tzinfo=UTC)
+        session.commit()
+
+        monkeypatch.setattr(
+            "app.services.ingestion.acquisition._fetch_ckan_package_metadata",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "app.services.ingestion.acquisition._head_remote_resource",
+            lambda *args, **kwargs: {
+                "source_url": "https://example.test/dfp.zip",
+                "probe_sources": ["head"],
+                "resource_etag": None,
+                "resource_last_modified": "Mon, 15 Jun 2026 12:00:00 GMT",
+                "resource_content_length": "1024",
+                "resource_http_status_code": 200,
+            },
+        )
+
+        probe = probe_remote_source(
+            session,
+            run=current_run,
+            tipo_fonte="dfp",
+            ano=2025,
+            source_url="https://example.test/dfp.zip",
+        )
+
+        assert probe["decision"] == "unchanged"
+        assert probe["download_required"] is False
+        assert probe["confidence"] == "medium"
+        assert probe["decision_reason"] == (
+            "metadata_matched:resource_content_length,last_modified_not_newer_than_download"
+        )
+        assert probe["previous_reference"]["downloaded_at"] == "2026-06-16T12:05:00+00:00"
+    finally:
+        session.close()
+
+
+def test_probe_remote_source_detects_last_modified_after_canonical_download(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _session()
+    try:
+        previous_run = create_run(session, tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+        previous_file = register_file(
+            session,
+            ingestion_run=previous_run,
+            source_url="https://example.test/dfp.zip",
+            source_filename="dfp.zip",
+            content_sha256="abc",
+            content_length_bytes=1024,
+        )
+        previous_file.downloaded_at = datetime(2026, 6, 16, 12, 5, tzinfo=UTC)
+        current_run = create_run(session, tipo_fonte="dfp", ano=2025, status="em_execucao", phase="acquire")
+        session.commit()
+
+        monkeypatch.setattr(
+            "app.services.ingestion.acquisition._fetch_ckan_package_metadata",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "app.services.ingestion.acquisition._head_remote_resource",
+            lambda *args, **kwargs: {
+                "source_url": "https://example.test/dfp.zip",
+                "probe_sources": ["head"],
+                "resource_etag": None,
+                "resource_last_modified": "Wed, 17 Jun 2026 12:00:00 GMT",
+                "resource_content_length": "1024",
+                "resource_http_status_code": 200,
+            },
+        )
+
+        probe = probe_remote_source(
+            session,
+            run=current_run,
+            tipo_fonte="dfp",
+            ano=2025,
+            source_url="https://example.test/dfp.zip",
+        )
+
+        assert probe["decision"] == "changed"
+        assert probe["download_required"] is True
+        assert probe["decision_reason"] == "metadata_changed:resource_last_modified_after_download"
+    finally:
+        session.close()
+
+
 def test_stage_csv_payload_streaming_atualiza_heartbeat_em_fronteiras_de_chunk() -> None:
     session = _session()
     try:

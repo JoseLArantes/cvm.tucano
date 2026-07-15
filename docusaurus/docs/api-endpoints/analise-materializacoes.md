@@ -436,6 +436,14 @@ Semantica importante:
 
 Retorna o detalhe de uma execucao especifica, incluindo `summary` bruto persistido pela materializacao para auditoria operacional, o modo da execucao (`full` ou `incremental`), o cutoff `invalidated_from` quando aplicavel, os contadores de revisoes inseridas/encerradas/removidas e os vinculos opcionais `campanha_id`, `campanha_item_id`, `chunk_execucao_id`, `queue_name` e `position_in_chunk`.
 
+Em uma execução bem-sucedida, `summary` também informa o prewarm do relatório agregado:
+
+| Campo | Descrição |
+| --- | --- |
+| `fundamentalista_snapshot_status` | `success`, `failed` ou `disabled`. Uma falha de prewarm não invalida os fatos canônicos já materializados. |
+| `fundamentalista_snapshot_source` | Origem usada para produzir o read model, normalmente `compiled_canonical`. |
+| `fundamentalista_snapshot_error` | Classe do erro quando o prewarm falha; presente somente nesse caso. |
+
 Quando uma companhia estiver com `situacao_registro=CANCELADA` e nao houver override explicito de inclusao, o `summary` pode trazer:
 
 - `skipped_reason=COMPANHIA_CANCELADA`

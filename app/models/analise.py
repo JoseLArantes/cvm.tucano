@@ -2,7 +2,21 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, ForeignKey, Index, Integer, String, Text, Uuid, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -169,6 +183,15 @@ class AnaliseContextoRevision(Base):
             "known_from",
             "known_to",
         ),
+        Index(
+            "ix_analise_contexto_revisions_current",
+            "codigo_cvm",
+            "escopo",
+            "calculation_version",
+            "known_from",
+            postgresql_where=text("known_to IS NULL"),
+            sqlite_where=text("known_to IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -213,6 +236,19 @@ class AnaliseFatoRevision(Base):
             "calculation_version",
             "period_id",
         ),
+        Index(
+            "ix_analise_fato_revisions_current_lookup",
+            "codigo_cvm",
+            "escopo",
+            "calculation_version",
+            "periodicidade",
+            "base_periodo",
+            "metric_id",
+            "fiscal_year",
+            "quarter",
+            postgresql_where=text("known_to IS NULL"),
+            sqlite_where=text("known_to IS NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -240,3 +276,67 @@ class AnaliseFatoRevision(Base):
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     provenance_hash: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AnaliseFundamentalistaSnapshot(Base):
+    __tablename__ = "analise_fundamentalista_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "codigo_cvm",
+            "escopo",
+            "periodicidade",
+            "base_periodo",
+            "horizonte_anos",
+            "as_of_key",
+            "include_key",
+            "calculation_version",
+            "report_version",
+            name="uq_analise_fundamentalista_snapshot_contexto",
+        ),
+        Index(
+            "ix_analise_fundamentalista_snapshots_lookup",
+            "codigo_cvm",
+            "escopo",
+            "periodicidade",
+            "base_periodo",
+            "horizonte_anos",
+            "as_of_key",
+            "include_key",
+            "calculation_version",
+        ),
+        Index(
+            "ix_analise_fundamentalista_snapshots_execucao",
+            "source_execution_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    companhia_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("companhias.id", ondelete="CASCADE"),
+        index=True,
+    )
+    codigo_cvm: Mapped[int] = mapped_column(Integer, nullable=False)
+    escopo: Mapped[str] = mapped_column(String(20), nullable=False)
+    periodicidade: Mapped[str] = mapped_column(String(20), nullable=False)
+    base_periodo: Mapped[str] = mapped_column(String(20), nullable=False)
+    horizonte_anos: Mapped[int] = mapped_column(Integer, nullable=False)
+    as_of_key: Mapped[str] = mapped_column(String(10), nullable=False, default="latest")
+    include_key: Mapped[str] = mapped_column(String(32), nullable=False, default="none")
+    calculation_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    report_version: Mapped[str] = mapped_column(String(20), nullable=False)
+    source_execution_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("analise_materializacao_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    materialized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

@@ -1,13 +1,17 @@
+import hashlib
 from datetime import UTC, date, datetime, timedelta
+from time import perf_counter
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy import case, func, select
 
 from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
 from app.api.deps import DbSession, PaginacaoQuery
+from app.core.cache import build_cache_key, cache
 from app.core.config import get_settings
+from app.core.observabilidade import registrar_entrega_fundamentalista
 from app.models.analise import (
     AnaliseContextoRevision,
     AnaliseMaterializacaoCampanha,
@@ -79,8 +83,9 @@ from app.services.analise import (
     obter_eventos,
     obter_evidencia_detalhe,
     obter_evidencia_trilha,
-    obter_fundamentalista,
+    obter_fundamentalista_com_metadata,
     obter_fundamentalista_eventos,
+    obter_fundamentalista_generation,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
@@ -106,6 +111,29 @@ _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME = "app.worker.tasks.recuperar_materia
 _STALL_THRESHOLD_SECONDS = 300
 _settings = get_settings()
 
+
+def _fundamentalista_http_response(
+    request: Request,
+    payload: str,
+    *,
+    source: str,
+    generation: str,
+    started_at: float,
+) -> Response:
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    etag = f'"{digest}"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": f"private, max-age={_settings.analise_fundamentalista_http_cache_max_age_seconds}",
+        "Vary": "Authorization",
+        "X-Analise-Source": source,
+        "X-Analise-Generation": generation,
+    }
+    registrar_entrega_fundamentalista(source, perf_counter() - started_at)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=payload, media_type="application/json", headers=headers)
+
 _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     404: {
         "description": "Recurso não encontrado para os critérios informados.",
@@ -114,6 +142,43 @@ _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     422: {
         "description": "Parâmetro inválido.",
         "content": {"application/json": {"example": {"detail": "Campo invalido."}}},
+    },
+}
+
+_RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    200: {
+        "description": "Relatório fundamentalista entregue com metadados de cache e geração canônica.",
+        "headers": {
+            "ETag": {
+                "description": "Hash do payload para revalidação condicional com `If-None-Match`.",
+                "schema": {"type": "string"},
+            },
+            "Cache-Control": {
+                "description": "Política privada de cache HTTP do relatório autenticado.",
+                "schema": {"type": "string"},
+            },
+            "X-Analise-Source": {
+                "description": (
+                    "Origem da entrega: `redis_cache`, `redis_cache_wait`, `db_snapshot`, "
+                    "`compiled_canonical` ou `compiled_runtime`."
+                ),
+                "schema": {"type": "string"},
+            },
+            "X-Analise-Generation": {
+                "description": "UUID da materialização canônica vigente ou `runtime` quando ela não existe.",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    304: {
+        "description": "O `ETag` enviado em `If-None-Match` ainda representa o relatório vigente.",
+        "headers": {
+            "ETag": {"schema": {"type": "string"}},
+            "Cache-Control": {"schema": {"type": "string"}},
+            "X-Analise-Source": {"schema": {"type": "string"}},
+            "X-Analise-Generation": {"schema": {"type": "string"}},
+        },
     },
 }
 
@@ -1571,17 +1636,26 @@ def obter_analise_restatements(
         "3. **Caixa e Solidez**: Métricas de fluxo de caixa, endividamento, liquidez e sinais automáticos de alavancagem.\n"
         "4. **Governança e Conclusão**: Histórico de governança corporativa (CGVN), remunerações (FRE), eventos oficiais (IPE) e VLMO.\n\n"
         "**Comportamento de Resolução (Resolution Mode)**:\n"
-        "- Se os dados analíticos canônicos estiverem materializados para a companhia, o endpoint retorna em modo `canonical` (alta performance, leitura direta).\n"
+        "- Se os dados analíticos canônicos estiverem materializados para a companhia, o endpoint retorna em modo `canonical`. "
+        "O recorte padrão (`annual`, `fy`, 5 anos, último conhecimento) é pré-compilado ao final da materialização. "
+        "Outros recortes canônicos são persistidos na primeira leitura.\n"
         "- Caso contrário, o motor executa o cálculo sob demanda em modo `runtime_fallback` a partir do staging promovido relacional.\n\n"
+        "**Entrega e cache**:\n"
+        "- O read model persistido no PostgreSQL é a fonte de entrega canônica do relatório agregado.\n"
+        "- O Redis mantém apenas uma cópia descartável, versionada pela execução de materialização e pelo recorte completo.\n"
+        "- A resposta inclui `ETag`, `Cache-Control`, `X-Analise-Source` e `X-Analise-Generation`. "
+        "Envie `If-None-Match` para receber `304 Not Modified` quando o payload não mudou.\n"
+        "- Falhas ou indisponibilidade do Redis não alteram a resposta funcional; o backend consulta o read model ou compila o relatório.\n\n"
         "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis e opacas no formato `ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`.\n"
         "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos."
     ),
-    responses=_RESPOSTAS_PADRAO,
+    responses=_RESPOSTAS_FUNDAMENTALISTA,
     operation_id="obterAnaliseFundamentalista",
 )
 def obter_analise_fundamentalista(
     codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM (5 ou 6 dígitos).", examples=[9512])],
     db: DbSession,
+    request: Request,
     escopo: Annotated[
         AnaliseEscopo,
         Query(
@@ -1641,23 +1715,92 @@ def obter_analise_fundamentalista(
             examples=["evidence_graph"]
         )
     ] = None,
-) -> AnaliseFundamentalistaResposta:
+) -> Response:
+    started_at = perf_counter()
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     if periodicidade == "annual" and base_periodo != "fy":
         raise HTTPException(status_code=422, detail="Para periodicidade 'annual', a base de periodo deve ser 'fy'.")
     if periodicidade == "quarterly" and base_periodo == "fy":
         raise HTTPException(status_code=422, detail="Para periodicidade 'quarterly', a base de periodo deve ser 'quarter' ou 'ytd'.")
 
-    return obter_fundamentalista(
-        db,
-        companhia,
-        scope=escopo,
-        periodicidade=periodicidade,
-        base_periodo=base_periodo,
-        horizonte_anos=horizonte_anos,
-        as_of=date.fromisoformat(as_of) if as_of else None,
-        include=include,
+    as_of_date = date.fromisoformat(as_of) if as_of else None
+    generation = obter_fundamentalista_generation(db, companhia, scope=escopo)
+    cache_key = build_cache_key(
+        "fundamentalista",
+        codigo_cvm,
+        {
+            "escopo": escopo,
+            "periodicidade": periodicidade,
+            "base_periodo": base_periodo,
+            "horizonte_anos": horizonte_anos,
+            "as_of": as_of,
+            "include": include,
+            "calculation_version": CALCULATION_VERSION,
+            "generation": generation,
+        },
+        namespace="analise:delivery",
     )
+    if _settings.analise_fundamentalista_cache_enabled:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return _fundamentalista_http_response(
+                request,
+                cached,
+                source="redis_cache",
+                generation=generation,
+                started_at=started_at,
+            )
+
+    lock_key = f"{cache_key}:lock"
+    lock_token: str | None = None
+    if _settings.analise_fundamentalista_cache_enabled:
+        lock_token = cache.acquire_lock(
+            lock_key,
+            _settings.analise_fundamentalista_cache_lock_seconds,
+        )
+        if lock_token == "":
+            cached = cache.wait_for(
+                cache_key,
+                _settings.analise_fundamentalista_cache_wait_seconds,
+            )
+            if cached is not None:
+                return _fundamentalista_http_response(
+                    request,
+                    cached,
+                    source="redis_cache_wait",
+                    generation=generation,
+                    started_at=started_at,
+                )
+
+    try:
+        result = obter_fundamentalista_com_metadata(
+            db,
+            companhia,
+            scope=escopo,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of_date,
+            include=include,
+        )
+        payload = result.response.model_dump_json()
+        if _settings.analise_fundamentalista_cache_enabled:
+            ttl_seconds = (
+                _settings.analise_fundamentalista_cache_ttl_seconds
+                if result.response.resolution.mode == "canonical"
+                else _settings.analise_fundamentalista_runtime_cache_ttl_seconds
+            )
+            cache.set(cache_key, payload, ttl_seconds)
+        return _fundamentalista_http_response(
+            request,
+            payload,
+            source=result.source,
+            generation=result.generation,
+            started_at=started_at,
+        )
+    finally:
+        if lock_token:
+            cache.release_lock(lock_key, lock_token)
 
 
 @router.get(

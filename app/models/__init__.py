@@ -1,6 +1,7 @@
 from app.models.analise import (
     AnaliseContextoRevision,
     AnaliseFatoRevision,
+    AnaliseFundamentalistaSnapshot,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -90,11 +91,18 @@ from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
 from app.models.vlmo import VlmoConsolidado, VlmoDocumento
-from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateSession, UpdateSessionItem
+from app.updates.models import (
+    AcknowledgedArtifactReference,
+    PendingUpdate,
+    PendingUpdateMember,
+    UpdateSession,
+    UpdateSessionItem,
+)
 
 __all__ = [
     "AnaliseContextoRevision",
     "AnaliseFatoRevision",
+    "AnaliseFundamentalistaSnapshot",
     "AnaliseMaterializacaoCampanha",
     "AnaliseMaterializacaoCampanhaItem",
     "AnaliseMaterializacaoChunkExecucao",
@@ -189,6 +197,7 @@ __all__ = [
     "VlmoDocumento",
     "PendingUpdate",
     "PendingUpdateMember",
+    "AcknowledgedArtifactReference",
     "UpdateSession",
     "UpdateSessionItem",
 ]

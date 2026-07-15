@@ -45,6 +45,9 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.ingerir_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.reconciliar_ingestion_stale_task": {"queue": settings.ingestion_control_queue_name},
+    "app.updates.tasks.run_daily_scanner_task": {"queue": settings.ingestion_control_queue_name},
+    "app.updates.tasks.run_deep_analysis_task": {"queue": settings.ingestion_control_queue_name},
+    "app.updates.tasks.cleanup_temp_files_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.materializar_analise_companhia_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_campanha_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.materializar_analise_chunk_task": {"queue": settings.analise_materializacao_queue_name},
@@ -107,7 +110,7 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
                     "args": (ano,),
                 }
                 deslocamento_minutos += 5
-    else:
+    elif settings.updates_service_enabled:
         beat_schedule["cvm-updates-scanner"] = {
             "task": "app.updates.tasks.run_daily_scanner_task",
             "schedule": crontab(hour=0, minute=30),

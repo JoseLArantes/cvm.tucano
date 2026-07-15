@@ -4,6 +4,8 @@
 
 Aceito
 
+O item 4 desta decisão foi substituído pelo [ADR 0006](./0006-read-model-fundamentalista-persistido.md). Os limites de neutralidade, explicabilidade e ausência de recomendação permanecem vigentes.
+
 ## Contexto
 
 A nova funcionalidade de **Análise Fundamentalista** (Análise Fundamentalista) no Tucano CVM visa fornecer uma jornada consistente e eficiente de consumo analítico para a plataforma. O principal desafio é expor métricas agregadas e dados históricos estruturados de forma rastreável sem repassar a lógica de negócios financeiros ou a modelagem complexa de dados brutos para o frontend, mantendo uma clara fronteira de responsabilidades.

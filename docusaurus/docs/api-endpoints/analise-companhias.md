@@ -358,6 +358,8 @@ Parametros:
 
 Retorna um relatório analítico fundamentalista consolidado estruturado em quatro etapas (pilares) para subsidiar a jornada do usuário. Esse endpoint unifica dados de séries temporais, comparações prontas, qualidade de dados, sinais e eventos para o recorte solicitado em uma única chamada.
 
+O relatório canônico é servido por um read model persistido no PostgreSQL. O recorte padrão `annual`, `fy`, cinco anos, último conhecimento e sem `evidence_graph` é pré-compilado ao final de cada materialização bem-sucedida. Um recorte canônico diferente é compilado e persistido na primeira leitura. Quando ainda não existe materialização canônica, a resposta mantém `resolution.mode=runtime_fallback` e não é persistida como read model.
+
 Parâmetros:
 
 | Nome | Tipo | Padrão | Descrição |
@@ -386,6 +388,19 @@ Campos adicionais em `etapas.caixa_solidez`:
 
 As contas de `changed_accounts` em reapresentações incluem metadados de exibição e linhagem factual: `account_label`, `statement_label`, `unit`, `display_rank`, `is_focus`, `reason_if_available` e `evidence_id`.
 
+### Cache HTTP e origem da resposta
+
+A resposta preserva o mesmo schema e inclui os seguintes headers:
+
+| Header | Descrição |
+| --- | --- |
+| `ETag` | Hash do payload serializado. Pode ser enviado no próximo request em `If-None-Match`. |
+| `Cache-Control` | Política privada de cache; o relatório é autenticado e não deve ser armazenado como resposta pública compartilhada. |
+| `X-Analise-Source` | `redis_cache`, `redis_cache_wait`, `db_snapshot`, `compiled_canonical` ou `compiled_runtime`. |
+| `X-Analise-Generation` | UUID da execução canônica vigente; retorna `runtime` quando não há materialização bem-sucedida. |
+
+Quando `If-None-Match` coincide com o `ETag` vigente, o endpoint responde `304 Not Modified` sem corpo. Redis mantém uma cópia descartável e versionada do payload; falha de Redis degrada para o read model persistido ou para compilação pelo service.
+
 Exemplos de uso:
 
 ```bash
@@ -394,6 +409,10 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 curl -H "Authorization: Bearer $TOKEN" \
   "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=quarterly&base_periodo=ytd&escopo=individual&as_of=2025-11-15"
+
+curl -i -H "Authorization: Bearer $TOKEN" \
+  -H 'If-None-Match: "ETAG_RECEBIDO"' \
+  "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=5"
 ```
 
 ## `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`

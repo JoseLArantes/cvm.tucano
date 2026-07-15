@@ -21,6 +21,8 @@ For ingestion internals, also read `app/services/ingestion/CONTEXT.md`.
 - **Runtime fallback** means a request-time computation used only when canonical data is unavailable. Responses must expose this through `resolution.mode`.
 - **Annual analysis** means historical annual analysis as a first-class behavior, not a one-off latest-year shortcut.
 - **Materialization** means computing and persisting the canonical analysis layer.
+- **Fundamentalist Read Model** means the persisted projection of a complete Fundamental Analysis response for one exact analysis context. It is built by the same analysis service rules used by the REST API and points to the canonical materialization execution that produced it.
+- **Delivery Cache** means a disposable Redis copy of a serialized Fundamentalist Read Model or short-lived runtime fallback. It is never canonical state and may be rebuilt without data loss.
 - **Campaign** means a grouped materialization workload by company and scope.
 - **Item** means a unit of campaign work for one company/scope target.
 - **Chunk** means the executable slice leased to a worker.
@@ -39,6 +41,9 @@ For ingestion internals, also read `app/services/ingestion/CONTEXT.md`.
 ## Operational rules
 
 - Materialization exists to avoid expensive per-request recomputation.
+- The default Fundamentalist Read Model is prewarmed after successful canonical materialization. Other exact canonical contexts may be persisted on first read.
+- Version delivery caches by the complete analysis context, calculation version, and canonical materialization generation.
+- Redis failure must degrade to the persisted read model or service compilation without changing the public response payload.
 - Use the dedicated `analise_materializacao` queue for materialization work.
 - Keep ingestion operational priority above materialization.
 - The admission gate must block new chunks during active ingestion or manual pause.

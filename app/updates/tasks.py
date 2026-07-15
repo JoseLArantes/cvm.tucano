@@ -10,7 +10,11 @@ def run_daily_scanner_task(scan_run_id: str | None = None) -> dict[str, Any]:
     import uuid
     db = SessionLocal()
     try:
-        return run_scanner(db, scan_run_id=uuid.UUID(scan_run_id) if scan_run_id else None)
+        return run_scanner(
+            db,
+            scan_run_id=uuid.UUID(scan_run_id) if scan_run_id else None,
+            trigger="manual" if scan_run_id else "scheduled",
+        )
     finally:
         db.close()
 

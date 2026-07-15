@@ -222,14 +222,20 @@ Tracks every scanner execution, including artifacts that did not change.
 
 The `summary` field is the new operator-facing control plane for scans. It includes:
 
-- artifact decision per source/year: `changed`, `unchanged`, `unknown`, `error`
+- `trigger`: `scheduled` or `manual`
+- `coverage_status`: `complete` or `degraded`
+- artifact decision per source/year: `changed`, `unchanged`, `unknown`, `error`, `skipped`
 - decision reason explaining whether the scan stopped at the artifact or advanced
 - `member_scan.analyzed=false` with `stop_reason=artifact_unchanged` when the ZIP/CSV itself did not change
 - `member_scan.analyzed=true` with `changed_members`, `unchanged_members`, counters and per-member details when the artifact changed
 
 This ensures the user can see not only what changed, but also what was checked and remained unchanged.
 
-#### 5.1.4 `update_session` (User Session Tracking)
+#### 5.1.4 `acknowledged_artifact_reference` (Equivalent Remote Reference)
+
+Records remote metadata accepted after member-level SHA-256 equivalence is proven. It links the acknowledged URL, headers, member fingerprint, operator and confirmation timestamp to the canonical `baseline_ingestion_run_id`. It is used by future scans but does not modify ingestion provenance.
+
+#### 5.1.5 `update_session` (User Session Tracking)
 
 Tracks user sessions for the "update available" view.
 
@@ -242,7 +248,7 @@ Tracks user sessions for the "update available" view.
 | `expires_at` | DateTime | NO | Session expiration |
 | `status` | String(32) | NO | 'active', 'expired' |
 
-#### 5.1.5 `update_session_item` (Session Contents)
+#### 5.1.6 `update_session_item` (Session Contents)
 
 Items in a user's update session.
 
@@ -264,7 +270,9 @@ Items in a user's update session.
 | `analysis_queued` | Deep analysis task has been queued |
 | `analyzing` | Deep analysis is in progress |
 | `analysis_failed` | Deep analysis failed (with error details in change_summary) |
-| `ready_for_ingestion` | Analysis complete; ready for manual trigger |
+| `ready_for_ingestion` | Analysis found member content changes; ready for manual ingestion |
+| `content_unchanged` | Remote artifact changed but every member remains SHA-256 equivalent |
+| `reference_updated` | Equivalent remote artifact metadata was acknowledged without ingestion |
 | `triggered` | Manual trigger executed; passed to ingestion pipeline |
 | `discarded` | Manually discarded; no action taken |
 | `stale` | Change was detected but artifact reverted to previous state |
@@ -366,7 +374,8 @@ Items in a user's update session.
 │                                                                      │
 │  5. Store analysis results:                                       │
 │     ┌─────────────────────────────────────────────────────────┐  │
-│     │  • Update pending_update.status = 'ready_for_ingestion'  │  │
+│     │  • Use 'ready_for_ingestion' when total_changes > 0       │  │
+│     │  • Use 'content_unchanged' when total_changes = 0         │  │
 │     │  • Set analysis_timestamp                                  │  │
 │     │  • Store change_summary with:                              │  │
 │     │    - artifact_changed: bool                               │  │
@@ -393,22 +402,22 @@ Items in a user's update session.
 │                    UPDATE AVAILABLE SESSION                         │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  1. User requests session (API: GET /api/updates/pending)         │
-│     └─ Returns list of all pending_update with status              │
-│        = 'ready_for_ingestion'                                    │
+│  1. User requests updates (API: GET /updates/pending)             │
+│     └─ Returns pending updates with status, content_changed and   │
+│        recommended_action                                         │
 │     └─ Each item includes: source, year, change_summary,          │
 │        detection_timestamp, member_count_changed                  │
 │                                                                      │
-│  2. User creates a session (API: POST /api/updates/session)       │
+│  2. User creates a session (API: POST /updates/session)           │
 │     └─ Creates update_session record                               │
 │     └─ Returns session_key                                        │
 │                                                                      │
-│  3. User adds items to session (API: POST /api/updates/session    │
+│  3. User adds items to session (API: POST /updates/session        │
 │     /{session_key}/items)                                        │
 │     └─ Creates update_session_item records                         │
 │     └─ Each item references a pending_update_id                    │
 │                                                                      │
-│  4. User views session (API: GET /api/updates/session             │
+│  4. User views session (API: GET /updates/session                 │
 │     /{session_key})                                               │
 │     └─ Returns all items in session with full details             │
 │                                                                      │
@@ -428,7 +437,7 @@ Items in a user's update session.
 │                                                                      │
 │  Option A: Trigger single update                                    │
 │  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ POST /api/updates/{pending_update_id}/trigger                 │ │
+│  │ POST /updates/pending/{pending_update_id}/trigger             │ │
 │  │                                                             │ │
 │  │  1. Validate pending_update exists and is ready               │ │
 │  │  2. Update status to 'triggered'                             │ │
@@ -474,7 +483,7 @@ Items in a user's update session.
 │                      DISCARD UPDATE                                 │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                      │
-│  POST /api/updates/{pending_update_id}/discard                    │
+│  POST /updates/pending/{pending_update_id}/discard                │
 │                                                                      │
 │  1. Validate pending_update exists and is not yet triggered         │
 │  2. Update status to 'discarded'                                    │
@@ -491,14 +500,15 @@ Items in a user's update session.
 
 ### 7.1 REST API (FastAPI)
 
-Base path: `/api/updates`
+Base path: `/updates`
 
 #### 7.1.1 Scanner & Detection
 
 | Method | Endpoint | Description | Auth |
 |---|---|---|---|
-| `GET` | `/scanner/status` | Get scanner status and last run info | No |
+| `GET` | `/scanner/status` | Get scanner, schedule health, coverage and latest run info | Yes |
 | `POST` | `/scanner/run` | Manually trigger scanner and create a persisted scan summary run | Yes |
+| `GET` | `/scanner/runs` | List persisted scheduled and manual scan runs | Yes |
 | `GET` | `/scanner/runs/latest` | Get the most recent persisted scanner run summary | Yes |
 | `GET` | `/scanner/runs/{id}` | Get one persisted scanner run summary by UUID | Yes |
 | `GET` | `/scanner/history` | Get scanner execution history | Yes |
@@ -511,6 +521,7 @@ Base path: `/api/updates`
 | `GET` | `/pending/{id}` | Get details of a pending update | Yes |
 | `GET` | `/pending/{id}/members` | List member-level changes | Yes |
 | `POST` | `/pending/{id}/analyze` | Trigger deep analysis | Yes |
+| `POST` | `/pending/{id}/acknowledge-reference` | Acknowledge equivalent remote metadata without ingestion | Yes |
 | `POST` | `/pending/{id}/trigger` | Manual trigger ingestion | Yes |
 | `POST` | `/pending/{id}/discard` | Discard pending update | Yes |
 | `POST` | `/pending/trigger-all` | Trigger all ready updates | Yes |
@@ -537,6 +548,7 @@ Scanner summary contract:
 
 - `POST /scanner/run` and `POST /refresh-all` return `scan_run_id`
 - frontend should poll `GET /scanner/runs/{id}`
+- frontend should use `GET /scanner/status` to distinguish scanner health from `schedule_status`; manual runs do not refresh scheduled health
 - `summary.items[]` is the canonical list of everything the scan touched
 - unchanged artifacts are first-class results and must be shown to the user
 - changed artifacts include `member_scan.changed_members` and `member_scan.unchanged_members`
@@ -549,6 +561,9 @@ Example persisted scanner summary:
   "id": "f2f8d148-5b7f-4f44-8bbf-8f0ccf37a6a0",
   "status": "completed",
   "summary": {
+    "trigger": "scheduled",
+    "coverage_status": "complete",
+    "expected_scopes": 2,
     "scanned_scopes": 2,
     "detected_count": 1,
     "unchanged_count": 1,
@@ -729,20 +744,11 @@ updates/
 | Variable | Default | Description |
 |---|---|---|
 | `UPDATES_SERVICE_ENABLED` | `true` | Enable the updates service |
-| `AUTO_TRIGGER_UPDATES` | `false` | If true, keep existing auto-trigger behavior |
-| `SCANNER_SCHEDULE` | `0 30 * * *` | Cron schedule for daily scanner |
+| `UPDATES_SCANNER_STALE_AFTER_HOURS` | `36` | Maximum age of the latest scheduled run before scanner health becomes stale |
+| `AUTO_TRIGGER_UPDATES` | `false` | If false, schedule the scanner at 00:30; if true, schedule direct ingestion jobs |
 | `AUTO_ANALYZE_ON_DETECT` | `true` | Auto-run deep analysis when change detected |
-| `ANALYSIS_MAX_CONCURRENCY` | `2` | Max concurrent deep analysis tasks |
 | `SESSION_TIMEOUT_HOURS` | `24` | Update session timeout in hours |
-| `TEMP_DIR` | `/tmp/cvm-updates` | Directory for temp files during analysis |
-| `MAX_TEMP_FILE_AGE_HOURS` | `24` | Max age of temp files before cleanup |
-
-### 9.2 Feature Flags
-
-| Flag | Description |
-|---|---|
-| `ENABLE_CKAN_PROBE` | Use CKAN metadata API for probing |
-| `ENABLE_ETAG_PROBE` | Use ETag header for probing |
+| `TEMP_DIR` | `data/temp_updates` | Directory for temp files during analysis |
 | `ENABLE_LASTMODIFIED_PROBE` | Use Last-Modified header for probing |
 | `REQUIRE_STRONG_PROBE` | Only trust strong confidence probes |
 
