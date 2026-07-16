@@ -214,11 +214,13 @@ Registra cada execução de ingestão.
 | `status` | string | Status atual |
 | `iniciada_em` | datetime | Início da execução |
 | `finalizada_em` | datetime | Fim da execução |
-| `total_linhas_lidas` | integer | Total de linhas processadas |
-| `total_inseridos` | integer | Registros inseridos |
-| `total_atualizados` | integer | Registros atualizados |
-| `total_inalterados` | integer | Registros sem alteração |
+| `total_linhas_lidas` | integer | Total de linhas de dados lidas |
+| `total_inseridos` | integer | Linhas válidas que criaram um registro ou vínculo de domínio inexistente |
+| `total_atualizados` | integer | Linhas válidas que alteraram ao menos um campo de negócio existente |
+| `total_inalterados` | integer | Linhas válidas já representadas sem mudança de negócio |
 | `total_rejeitados` | integer | Enviados para quarentena |
+
+Os resultados `total_inseridos`, `total_atualizados` e `total_inalterados` são mutuamente exclusivos. Em uma execução concluída normalmente, a soma desses resultados com `total_rejeitados` corresponde a `total_linhas_lidas`. Alterações apenas em hash, arquivo, linha de origem ou outros dados de proveniência não classificam um registro como atualizado.
 
 ### `ingestion_runs`
 

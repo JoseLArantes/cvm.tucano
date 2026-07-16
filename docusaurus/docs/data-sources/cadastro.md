@@ -77,7 +77,18 @@ O cadastro é promovido para a tabela `companhias`. Cada registro mantém os cam
 
 A ingestão do cadastro é sensível porque alterações nessa base afetam a resolução das demais fontes. O processo calcula o hash do arquivo, registra a execução, normaliza linha a linha e separa registros inválidos em quarentena.
 
-Quando uma companhia já existe, o sistema compara campos de negócio antes de atualizar o registro. `sincronizado_em` indica que a linha foi reprocessada em uma execução recente; `alterado_em` muda apenas quando algum campo material foi modificado. Alterações relevantes são registradas em histórico de campos.
+Quando uma companhia já existe, o sistema compara campos de negócio antes de atualizar o registro. `sincronizado_em` indica que a linha foi reprocessada em uma execução recente; `alterado_em` muda apenas quando algum campo material foi modificado.
+
+Os contadores operacionais da execução classificam cada linha válida do cadastro:
+
+- `total_inseridos`: a linha criou um registro CVM ou vínculo de mercado que ainda não existia;
+- `total_atualizados`: a linha encontrou o registro existente e modificou ao menos um campo de negócio;
+- `total_inalterados`: a linha já estava representada com os mesmos valores de negócio;
+- `total_rejeitados`: a linha não pôde ser promovida.
+
+`total_registros_promovidos`, quando exposto pelo processamento interno, mede volume processado e não quantidade de inserções. Metadados de proveniência, como arquivo, linha e hash de origem, podem ser renovados sem transformar uma linha inalterada em atualização.
+
+Também são independentes a mudança do artefato e o efeito no domínio. Um CSV pode ter SHA-256 diferente por ordenação, formatação ou alteração em campo não promovido e ainda produzir `total_inseridos=0` e `total_atualizados=0`. Nesse caso, os contadores demonstram que o novo artefato foi processado, mas não alterou o estado cadastral canônico.
 
 Registros duplicados dentro do mesmo arquivo, linhas sem identificadores essenciais ou dados que não passam pela normalização não são promovidos silenciosamente. Eles ficam vinculados à execução para inspeção operacional.
 

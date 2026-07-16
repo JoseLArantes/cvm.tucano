@@ -194,10 +194,48 @@ def test_promover_registros_cadastro_merge_tipo_mercado_and_multi_code() -> None
         session.commit()
 
         assert contadores["companhias"] == 1
+        assert contadores["inseridos"] == 3
+        assert contadores["atualizados"] == 0
+        assert contadores["inalterados"] == 0
         assert session.query(Companhia).count() == 1
         assert session.query(CompanhiaRegistroCvm).count() == 2
         assert session.query(CompanhiaMercado).count() == 3
         assert session.query(CompanhiaIdentificador).count() == 3
+
+        repeticao = promover_registros_cadastro(session, [mercado_bolsa, mercado_balcao, outro_codigo])
+        session.commit()
+
+        assert repeticao["inseridos"] == 0
+        assert repeticao["atualizados"] == 0
+        assert repeticao["inalterados"] == 3
+        assert session.query(CompanhiaRegistroCvm).count() == 2
+        assert session.query(CompanhiaMercado).count() == 3
+    finally:
+        session.close()
+
+
+def test_promover_registros_cadastro_classifies_business_change_as_updated() -> None:
+    session = _session()
+    try:
+        original = normalizar_linha_cadastro_aberta(_row_aberta(), linha_origem=2).data
+        alterado = normalizar_linha_cadastro_aberta(
+            _row_aberta(categoria_registro="Categoria B"),
+            linha_origem=2,
+        ).data
+        assert original is not None
+        assert alterado is not None
+
+        primeira = promover_registros_cadastro(session, [original])
+        session.commit()
+        segunda = promover_registros_cadastro(session, [alterado])
+        session.commit()
+
+        assert primeira["inseridos"] == 1
+        assert segunda["inseridos"] == 0
+        assert segunda["atualizados"] == 1
+        assert segunda["inalterados"] == 0
+        registro = session.query(CompanhiaRegistroCvm).one()
+        assert registro.categoria_registro == "Categoria B"
     finally:
         session.close()
 
@@ -219,6 +257,9 @@ def test_sincronizar_cadastro_companhias_downloads_open_and_foreign_sources() ->
 
         assert resultado["status"] == "sucesso"
         assert resultado["total_linhas_lidas"] == 2
+        assert resultado["total_inseridos"] == 2
+        assert resultado["total_atualizados"] == 0
+        assert resultado["total_inalterados"] == 0
         assert session.query(Companhia).count() == 2
         assert session.query(CompanhiaRegistroCvm).count() == 2
         assert session.query(CompanhiaIdentificador).count() == 4
@@ -242,5 +283,19 @@ def test_sincronizar_cadastro_companhias_downloads_open_and_foreign_sources() ->
         assert all(item.header_hash for item in member_snapshots)
         assert all(item.required_member is True for item in member_snapshots)
         assert all(item.row_kind == "cadastro_registro_cvm" for item in member_snapshots)
+        alterado_em_original = estrangeira.alterado_em
+
+        repeticao = sincronizar_cadastro_companhias(
+            session,
+            force_reimport=True,
+            downloader=downloader,
+        )
+
+        assert repeticao["total_linhas_lidas"] == 2
+        assert repeticao["total_inseridos"] == 0
+        assert repeticao["total_atualizados"] == 0
+        assert repeticao["total_inalterados"] == 2
+        session.refresh(estrangeira)
+        assert estrangeira.alterado_em == alterado_em_original
     finally:
         session.close()

@@ -46,10 +46,25 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     finalizada_em: BrazilianDateTime | None = Field(
         description="Data e hora de finalização da execução, em `DD/MM/AAAA HH:MM:SS`."
     )
-    total_linhas_lidas: int = Field(description="Total de linhas lidas.")
-    total_inseridos: int = Field(description="Total de registros inseridos.")
-    total_atualizados: int = Field(description="Total de registros atualizados.")
-    total_inalterados: int = Field(description="Total de registros sem alteração de negócio.")
+    total_linhas_lidas: int = Field(description="Total de linhas de dados lidas nos arquivos da execução.")
+    total_inseridos: int = Field(
+        description=(
+            "Total de linhas válidas que criaram um registro ou vínculo de domínio inexistente. "
+            "Não representa simplesmente o volume processado por um upsert."
+        )
+    )
+    total_atualizados: int = Field(
+        description=(
+            "Total de linhas válidas associadas a registros existentes que modificaram ao menos "
+            "um campo de negócio. Mudanças apenas de proveniência não entram neste total."
+        )
+    )
+    total_inalterados: int = Field(
+        description=(
+            "Total de linhas válidas já representadas no domínio e sem alteração de negócio. "
+            "O arquivo remoto pode ter mudado em bytes ou metadados mesmo quando este total é positivo."
+        )
+    )
     total_rejeitados: int = Field(description="Total de registros enviados para quarentena.")
     analise_arquivos: list[AnaliseArquivo] | None = Field(
         default=None, description="Análise dos arquivos processados nesta execução."
@@ -137,10 +152,19 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início, em `DD/MM/AAAA HH:MM:SS`.")
     finalizada_em: BrazilianDateTime | None = Field(description="Data e hora de fim, em `DD/MM/AAAA HH:MM:SS`.")
-    total_linhas_lidas: int = Field(description="Total de linhas lidas.")
-    total_inseridos: int = Field(description="Total de inserções.")
-    total_atualizados: int = Field(description="Total de atualizações.")
-    total_inalterados: int = Field(description="Total de inalterados.")
+    total_linhas_lidas: int = Field(description="Total de linhas de dados lidas nos arquivos da execução.")
+    total_inseridos: int = Field(
+        description=(
+            "Linhas válidas que criaram registro ou vínculo de domínio inexistente; "
+            "não é o total processado pelo upsert."
+        )
+    )
+    total_atualizados: int = Field(
+        description="Linhas válidas que modificaram campos de negócio de registros existentes."
+    )
+    total_inalterados: int = Field(
+        description="Linhas válidas reprocessadas sem alteração de negócio; proveniência técnica não conta como mudança."
+    )
     total_rejeitados: int = Field(description="Total rejeitado para quarentena.")
     mensagem_erro: str | None = Field(description="Mensagem de erro in caso de falha.")
     analise_arquivos: list[AnaliseArquivo] | None = Field(

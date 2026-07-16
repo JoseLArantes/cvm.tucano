@@ -40,6 +40,54 @@ ARQUIVO_CADASTRO_ESTRANGEIRA = "cad_cia_estrang.csv"
 FONTE_CADASTRO_ABERTA = "cad_cia_aberta"
 FONTE_CADASTRO_ESTRANGEIRA = "cad_cia_estrang"
 
+_CAMPOS_NEGOCIO_REGISTRO_CVM = (
+    "denominacao_social",
+    "denominacao_comercial",
+    "pais_origem",
+    "situacao_registro",
+    "data_registro",
+    "data_constituicao",
+    "data_cancelamento",
+    "motivo_cancelamento",
+    "data_inicio_situacao",
+    "setor_atividade",
+    "categoria_registro",
+    "data_inicio_categoria",
+    "situacao_emissor",
+    "data_inicio_situacao_emissor",
+    "controle_acionario",
+    "endereco",
+    "responsavel",
+    "auditor",
+    "cnpj_auditor",
+)
+
+_CAMPOS_NEGOCIO_COMPANHIA = (
+    "codigo_cvm",
+    "denominacao_social",
+    "denominacao_comercial",
+    "situacao_registro",
+    "data_registro",
+    "data_constituicao",
+    "data_cancelamento",
+    "motivo_cancelamento",
+    "data_inicio_situacao",
+    "setor_atividade",
+    "tipo_mercado",
+    "categoria_registro",
+    "data_inicio_categoria",
+    "situacao_emissor",
+    "data_inicio_situacao_emissor",
+    "controle_acionario",
+    "endereco",
+    "responsavel",
+    "auditor",
+    "cnpj_auditor",
+    "tipo_emissor",
+    "fonte_identidade_principal",
+    "qualidade_identidade",
+)
+
 
 @dataclass(frozen=True)
 class CadastroNormalizationResult:
@@ -316,41 +364,55 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
                 raise
             companhia = companhia_existente
 
-    companhia.codigo_cvm = companhia.codigo_cvm or registro_canonico.get("codigo_cvm")
-    companhia.denominacao_social = registro_canonico.get("denominacao_social")
-    companhia.denominacao_comercial = registro_canonico.get("denominacao_comercial")
-    companhia.situacao_registro = registro_canonico.get("situacao_registro")
-    companhia.data_registro = registro_canonico.get("data_registro")
-    companhia.data_constituicao = registro_canonico.get("data_constituicao")
-    companhia.data_cancelamento = registro_canonico.get("data_cancelamento")
-    companhia.motivo_cancelamento = registro_canonico.get("motivo_cancelamento")
-    companhia.data_inicio_situacao = registro_canonico.get("data_inicio_situacao")
-    companhia.setor_atividade = registro_canonico.get("setor_atividade")
-    companhia.tipo_mercado = registro_canonico.get("tipo_mercado")
-    companhia.categoria_registro = registro_canonico.get("categoria_registro")
-    companhia.data_inicio_categoria = registro_canonico.get("data_inicio_categoria")
-    companhia.situacao_emissor = registro_canonico.get("situacao_emissor")
-    companhia.data_inicio_situacao_emissor = registro_canonico.get("data_inicio_situacao_emissor")
-    companhia.controle_acionario = registro_canonico.get("controle_acionario")
-    companhia.endereco = registro_canonico.get("endereco") or {}
-    companhia.responsavel = registro_canonico.get("responsavel") or {}
-    companhia.auditor = registro_canonico.get("auditor")
-    companhia.cnpj_auditor = registro_canonico.get("cnpj_auditor")
-    companhia.tipo_emissor = (
-        "estrangeira" if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA else "aberta"
+    valores_negocio = {
+        "codigo_cvm": companhia.codigo_cvm or registro_canonico.get("codigo_cvm"),
+        "denominacao_social": registro_canonico.get("denominacao_social"),
+        "denominacao_comercial": registro_canonico.get("denominacao_comercial"),
+        "situacao_registro": registro_canonico.get("situacao_registro"),
+        "data_registro": registro_canonico.get("data_registro"),
+        "data_constituicao": registro_canonico.get("data_constituicao"),
+        "data_cancelamento": registro_canonico.get("data_cancelamento"),
+        "motivo_cancelamento": registro_canonico.get("motivo_cancelamento"),
+        "data_inicio_situacao": registro_canonico.get("data_inicio_situacao"),
+        "setor_atividade": registro_canonico.get("setor_atividade"),
+        "tipo_mercado": registro_canonico.get("tipo_mercado"),
+        "categoria_registro": registro_canonico.get("categoria_registro"),
+        "data_inicio_categoria": registro_canonico.get("data_inicio_categoria"),
+        "situacao_emissor": registro_canonico.get("situacao_emissor"),
+        "data_inicio_situacao_emissor": registro_canonico.get("data_inicio_situacao_emissor"),
+        "controle_acionario": registro_canonico.get("controle_acionario"),
+        "endereco": registro_canonico.get("endereco") or {},
+        "responsavel": registro_canonico.get("responsavel") or {},
+        "auditor": registro_canonico.get("auditor"),
+        "cnpj_auditor": registro_canonico.get("cnpj_auditor"),
+        "tipo_emissor": (
+            "estrangeira"
+            if registro_canonico["fonte_cadastro"] == FONTE_CADASTRO_ESTRANGEIRA
+            else "aberta"
+        ),
+        "fonte_identidade_principal": registro_canonico["fonte_cadastro"],
+        "qualidade_identidade": "alta",
+    }
+    houve_alteracao = any(
+        getattr(companhia, campo) != valores_negocio[campo] for campo in _CAMPOS_NEGOCIO_COMPANHIA
     )
-    companhia.fonte_identidade_principal = registro_canonico["fonte_cadastro"]
-    companhia.qualidade_identidade = "alta"
+    for campo, valor in valores_negocio.items():
+        setattr(companhia, campo, valor)
     companhia.arquivo_origem = registro_canonico["arquivo_origem"]
     companhia.ano_origem = registro_canonico.get("ano_origem")
     companhia.linha_origem = registro_canonico.get("linha_origem")
     companhia.hash_origem = registro_canonico["hash_origem"]
     companhia.sincronizado_em = agora
-    companhia.alterado_em = agora
+    if houve_alteracao:
+        companhia.alterado_em = agora
     return companhia
 
 
-def _upsert_registro_cvm(db: Session, companhia: Companhia, registro: dict[str, Any]) -> CompanhiaRegistroCvm:
+def _upsert_registro_cvm(
+    db: Session,
+    companhia: Companhia,
+    registro: dict[str, Any],
+) -> tuple[CompanhiaRegistroCvm, str]:
     cnpj_companhia = registro.get("cnpj_companhia")
     codigo_cvm = registro.get("codigo_cvm")
 
@@ -398,8 +460,12 @@ def _upsert_registro_cvm(db: Session, companhia: Companhia, registro: dict[str, 
         )
         db.add(existente)
         db.flush()
-        return existente
+        return existente, "inserted"
 
+    houve_alteracao = any(
+        getattr(existente, campo) != registro.get(campo) for campo in _CAMPOS_NEGOCIO_REGISTRO_CVM
+    )
+    existente.hash_sem_mercado = registro["hash_sem_mercado"]
     existente.hash_origem = registro["hash_origem"]
     existente.arquivo_origem = registro["arquivo_origem"]
     existente.linha_origem = registro.get("linha_origem")
@@ -422,11 +488,21 @@ def _upsert_registro_cvm(db: Session, companhia: Companhia, registro: dict[str, 
     existente.responsavel = registro.get("responsavel")
     existente.auditor = registro.get("auditor")
     existente.cnpj_auditor = registro.get("cnpj_auditor")
-    return existente
+    return existente, "updated" if houve_alteracao else "unchanged"
 
 
-def _upsert_mercado(db: Session, registro_cvm: CompanhiaRegistroCvm, registro: dict[str, Any]) -> None:
+def _upsert_mercado(db: Session, registro_cvm: CompanhiaRegistroCvm, registro: dict[str, Any]) -> bool:
     tipo_mercado = registro.get("tipo_mercado")
+    for pendente in db.new:
+        if (
+            isinstance(pendente, CompanhiaMercado)
+            and pendente.companhia_registro_cvm_id == registro_cvm.id
+            and pendente.tipo_mercado == tipo_mercado
+        ):
+            pendente.arquivo_origem = registro["arquivo_origem"]
+            pendente.linha_origem = registro.get("linha_origem")
+            pendente.hash_origem = registro["hash_origem"]
+            return False
     existente = db.scalar(
         select(CompanhiaMercado).where(
             CompanhiaMercado.companhia_registro_cvm_id == registro_cvm.id,
@@ -445,6 +521,11 @@ def _upsert_mercado(db: Session, registro_cvm: CompanhiaRegistroCvm, registro: d
                 hash_origem=registro["hash_origem"],
             )
         )
+        return True
+    existente.arquivo_origem = registro["arquivo_origem"]
+    existente.linha_origem = registro.get("linha_origem")
+    existente.hash_origem = registro["hash_origem"]
+    return False
 
 
 def _upsert_identificador(
@@ -513,17 +594,32 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
     for registro in registros:
         grupos.setdefault(_chave_grupo_companhia(registro), []).append(registro)
 
-    contadores = {"companhias": 0, "registros": 0, "mercados": 0, "identificadores": 0}
+    contadores = {
+        "companhias": 0,
+        "registros": 0,
+        "mercados": 0,
+        "identificadores": 0,
+        "inseridos": 0,
+        "atualizados": 0,
+        "inalterados": 0,
+    }
     for registros_companhia in grupos.values():
         registro_canonico = selecionar_registro_canonico(registros_companhia)
         companhia = _upsert_companhia(db, registro_canonico)
         contadores["companhias"] += 1
         for registro in registros_companhia:
-            registro_cvm = _upsert_registro_cvm(db, companhia, registro)
+            registro_cvm, resultado_registro = _upsert_registro_cvm(db, companhia, registro)
             contadores["registros"] += 1
+            mercado_inserido = False
             if registro.get("tipo_mercado") is not None:
-                _upsert_mercado(db, registro_cvm, registro)
+                mercado_inserido = _upsert_mercado(db, registro_cvm, registro)
                 contadores["mercados"] += 1
+            if resultado_registro == "inserted" or mercado_inserido:
+                contadores["inseridos"] += 1
+            elif resultado_registro == "updated":
+                contadores["atualizados"] += 1
+            else:
+                contadores["inalterados"] += 1
         gerar_identificadores_companhia(db, companhia=companhia, registros=registros_companhia)
         contadores["identificadores"] += len(
             [
@@ -865,9 +961,9 @@ def ingerir_cadastro(
         contadores = promover_registros_cadastro(db, normalizados)
 
         execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
-        execucao.total_inseridos = contadores["registros"]
-        execucao.total_atualizados = 0
-        execucao.total_inalterados = 0
+        execucao.total_inseridos = contadores["inseridos"]
+        execucao.total_atualizados = contadores["atualizados"]
+        execucao.total_inalterados = contadores["inalterados"]
         execucao.total_rejeitados = rejeitados
         execucao.status = "sucesso"
         execucao.finalizada_em = _agora()
@@ -887,6 +983,9 @@ def ingerir_cadastro(
             "execucao_id": str(execucao.id),
             "status": "sucesso",
             "total_linhas_lidas": execucao.total_linhas_lidas,
+            "total_inseridos": execucao.total_inseridos,
+            "total_atualizados": execucao.total_atualizados,
+            "total_inalterados": execucao.total_inalterados,
             "total_rejeitados": rejeitados,
             "total_companhias_promovidas": contadores["companhias"],
             "total_registros_promovidos": contadores["registros"],

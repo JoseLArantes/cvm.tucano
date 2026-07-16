@@ -9,6 +9,30 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-15 - Contadores de efeito da sincronização do Cadastro
+
+### Superfícies afetadas
+
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+- execuções criadas por `POST /ingestion/sincronizacoes/cadastro`
+
+### Comportamento entregue
+
+- URLs, query params e nomes dos campos permanecem inalterados;
+- em novas execuções de `cadastro`, `total_inseridos` deixa de repetir o volume total promovido e passa a contar apenas linhas que criaram registro CVM ou vínculo de mercado inexistente;
+- `total_atualizados` conta linhas que alteraram ao menos um campo de negócio existente;
+- `total_inalterados` conta linhas reprocessadas sem mudança de negócio;
+- alterações somente de arquivo, hash, linha de origem ou outra proveniência técnica não contam como atualização;
+- a soma `total_inseridos + total_atualizados + total_inalterados + total_rejeitados` corresponde a `total_linhas_lidas` em uma conclusão normal;
+- execuções históricas mantêm os contadores originalmente persistidos e não são recalculadas.
+
+### Orientação para clientes
+
+- não apresente `total_inseridos` como sinônimo de linhas processadas;
+- um artefato detectado como diferente pode produzir somente `total_inalterados` quando a diferença não modifica o domínio;
+- para volume de processamento, use `total_linhas_lidas`; para efeito canônico, use os três contadores de resultado.
+
 ## 2026-07-15 - Saúde, histórico e resolução das checagens de atualizações
 
 ### Superfícies afetadas
