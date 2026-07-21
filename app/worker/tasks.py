@@ -699,7 +699,7 @@ def sincronizar_cadastro_companhias_task(
                 stmt_p = select(PendingUpdate).where(
                     PendingUpdate.fonte == "cadastro",
                     PendingUpdate.ano.is_(None),
-                    PendingUpdate.status == "triggered"
+                    PendingUpdate.status.in_(("triggered", "ingestion_queued", "ingesting"))
                 ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
                 pending = db.scalar(stmt_p)
             else:
@@ -711,6 +711,10 @@ def sincronizar_cadastro_companhias_task(
                     run = db.scalar(stmt_run)
                     if run:
                         pending.last_successful_run_id = run.id
+                        pending.current_run_id = run.id
+                pending.current_execution_id = uuid.UUID(execucao_id) if execucao_id else None
+                pending.status = "ingested"
+                pending.ingestion_result = {"status": status_res}
                 db.commit()
             if dispatch_year_after_success is not None:
                 published = _publicar_fontes_anuais_agendadas(
@@ -1408,7 +1412,7 @@ def _coordenar_sincronizacao_zip(
                 stmt_p = select(PendingUpdate).where(
                     PendingUpdate.fonte == tipo_fonte,
                     PendingUpdate.ano == ano,
-                    PendingUpdate.status == "triggered"
+                    PendingUpdate.status.in_(("triggered", "ingestion_queued", "ingesting"))
                 ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
                 pending = db.scalar(stmt_p)
             else:
@@ -2028,7 +2032,7 @@ def finalizar_sincronizacao_zip_task(
                 stmt_p = select(PendingUpdate).where(
                     PendingUpdate.fonte == execucao.tipo_fonte,
                     PendingUpdate.ano == execucao.ano,
-                    PendingUpdate.status == "triggered"
+                    PendingUpdate.status.in_(("triggered", "ingestion_queued", "ingesting"))
                 ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
                 pending = db.scalar(stmt_p)
             else:
@@ -2037,6 +2041,10 @@ def finalizar_sincronizacao_zip_task(
             if pending is not None:
                 if run is not None:
                     pending.last_successful_run_id = run.id
+                    pending.current_run_id = run.id
+                pending.current_execution_id = execucao.id
+                pending.status = "ingested"
+                pending.ingestion_result = {"status": parent_status}
                 db.commit()
 
         from app.models.ingestion import IngestionFileMember

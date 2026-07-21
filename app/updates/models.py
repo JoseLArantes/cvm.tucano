@@ -43,6 +43,17 @@ class PendingUpdate(Base):
     last_successful_run_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL"), nullable=True
     )
+    current_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("execucoes_sincronizacao.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    current_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    last_failed_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("ingestion_runs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ingestion_task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    ingestion_result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -66,6 +77,16 @@ class PendingUpdate(Base):
         if self.status == "content_unchanged":
             return "update_reference"
         return "none"
+
+    @property
+    def retryable(self) -> bool:
+        return self.status == "ingestion_failed"
+
+    @property
+    def next_action(self) -> str:
+        if self.status == "ingestion_failed":
+            return "retry_ingestion"
+        return self.recommended_action
 
 
 class UpdateScanRun(Base):

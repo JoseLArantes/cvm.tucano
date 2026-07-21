@@ -557,6 +557,54 @@ class IngestionOperationsResumo(BaseModel):
     recoverable_runs: list[IngestionOperationRunPreview] = Field(
         description="Preview das runs que hoje pedem `recover` ou outra acao administrativa equivalente."
     )
+    revision: int = Field(default=0, description="Revisao monotona do snapshot observada pelo consumidor.")
+    poll_after_ms: int = Field(default=5000, description="Intervalo sugerido para polling quando SSE nao estiver disponivel.")
+    action_counts: dict[str, int] = Field(default_factory=dict, description="Contagem global por proxima acao de negocio.")
+    waiting_for_operator_count: int = Field(default=0, description="Runs aguardando decisao ou continuidade explicita.")
+    oldest_action_required_at: BrazilianDateTime | None = Field(default=None, description="Timestamp do item que espera acao ha mais tempo.")
+    queue_health: list[dict[str, Any]] = Field(default_factory=list, description="Capacidade e backlog observados por fila.")
+    active_runs_total: int = Field(default=0, description="Total real de runs ativas, antes do preview.")
+    recoverable_runs_total: int = Field(default=0, description="Total real de runs recuperaveis, antes do preview.")
+    previews_truncated: bool = Field(default=False, description="Indica que algum preview foi truncado.")
+    aggregate_progress: dict[str, int] = Field(default_factory=dict, description="Contadores agregados de progresso das runs.")
+
+
+class IngestionScopeRequest(BaseModel):
+    fonte: str = Field(description="Fonte CVM do escopo, por exemplo `dfp` ou `itr`.")
+    ano: int | None = Field(default=None, ge=2003, description="Ano da fonte anual; nulo apenas para cadastro.")
+
+
+class IngestionDispatchPlanRequest(BaseModel):
+    scopes: list[IngestionScopeRequest] = Field(min_length=1, max_length=50)
+    strategy: str = Field(default="direct", pattern="^(direct|two_step)$")
+    force_reimport: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class IngestionDispatchPlanResponse(BaseModel):
+    plan_token: str
+    expires_at: BrazilianDateTime
+    valid_scopes: list[dict[str, Any]]
+    invalid_scopes: list[dict[str, Any]]
+    dependencies: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    materialization_gate_impact: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestionDispatchRequest(IngestionDispatchPlanRequest):
+    plan_token: str = Field(min_length=16)
+
+
+class IngestionDispatchResponse(BaseModel):
+    status: str
+    work_items: list[dict[str, Any]]
+    idempotent_replay: bool = False
+
+
+class IngestionWorkItemList(BaseModel):
+    dados: list[dict[str, Any]]
+    paginacao: Paginacao
 
 
 class IngestionRunResumo(BaseModel):

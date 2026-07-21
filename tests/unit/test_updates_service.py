@@ -796,7 +796,7 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     task_id = trigger_update(db_session, pending.id, user="tester")
     
     assert task_id == "task-uuid-123"
-    assert pending.status == "triggered"
+    assert pending.status == "ingestion_queued"
     assert pending.resolved_by == "tester"
     assert pending.resolved_timestamp is not None
 
@@ -1162,7 +1162,7 @@ def test_api_pending_endpoints(client: TestClient, auth_headers: dict[str, str],
         mock_trig.return_value = "celery-task-id-abc"
         res_trig = client.post(f"/updates/pending/{pending.id}/trigger", headers=auth_headers)
         assert res_trig.status_code == 200
-        assert res_trig.json()["status"] == "triggered"
+        assert res_trig.json()["status"] == "ingestion_queued"
         assert res_trig.json()["task_id"] == "celery-task-id-abc"
 
 

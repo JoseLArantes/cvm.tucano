@@ -1225,12 +1225,6 @@ def trigger_update(db: Session, pending_update_id: uuid.UUID, user: str | None =
             )
         raise ValueError(f"PendingUpdate is in state '{pending.status}', not 'ready_for_ingestion'.")
 
-    # Mark triggered
-    pending.status = "triggered"
-    pending.resolved_timestamp = _agora()
-    pending.resolved_by = user or "api"
-    db.commit()
-
     # Call the ingestion workflow
     # Import tasks here to avoid circular imports
     from app.worker.tasks import (
@@ -1273,8 +1267,12 @@ def trigger_update(db: Session, pending_update_id: uuid.UUID, user: str | None =
             pending_update_id=str(pending.id)
         )
 
-    # Return the run when it gets created, or we can fetch it once the task starts
-    # Since the task is async, we return the Celery task ID
+    # A task accepted by Celery is only queued; it is not evidence of completed ingestion.
+    pending.status = "ingestion_queued"
+    pending.ingestion_task_id = str(task_res.id)
+    pending.resolved_timestamp = _agora()
+    pending.resolved_by = user or "api"
+    db.commit()
     return str(task_res.id)
 
 

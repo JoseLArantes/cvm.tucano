@@ -9,6 +9,32 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-20 - Contratos de controle operacional de ingestão
+
+### Superfícies afetadas
+
+- `GET /ingestion/work-items`, `GET /ingestion/work-items/{id}` e `GET /ingestion/work-items/{id}/events`
+- `POST /ingestion/dispatch/plan` e `POST /ingestion/dispatch`
+- `GET /ingestion/scopes`, `GET /ingestion/runs/{run_id}/completion-evidence` e `GET /ingestion/quarentena/grupos`
+- `GET /ingestion/operations`, `GET /ingestion/runs`, `GET /ingestion/sincronizacoes` e `GET /updates/pending`
+- `POST /updates/pending/{id}/retry-ingestion`
+
+### Comportamento entregue
+
+- o backend correlaciona atualização, execução administrativa, run e resultado por work item estável (`fonte:ano`), eliminando correlação manual pelo cliente;
+- despacho passa pelo fluxo plano → confirmação, exige `Idempotency-Key` e retorna `409` estruturado para plano incompatível, expirado ou trabalho equivalente ativo;
+- `force_reimport` exige motivo no novo fluxo de despacho e fica auditado;
+- `operations` informa revisão, intervalo de polling, totais não truncados, ações pendentes, progresso e saúde por fila;
+- runs, sincronizações e atualizações aceitam filtros e paginação no servidor; em `updates/pending`, os metadados de paginação ficam nos headers `X-Total-Count`, `X-Page` e `X-Page-Size` para preservar o corpo em lista;
+- atualizações usam `ingestion_queued`, `ingesting`, `ingestion_failed` e `ingested`; `triggered` não é mais evidência de ingestão concluída;
+- `content_unchanged` permanece elegível somente para atualização de referência baseada em SHA-256.
+
+### Orientação para clientes
+
+- use `allowed_actions` e `next_action` retornados pelo backend, sem inferir autorização de status ou fase;
+- trate `ingestion_queued` como aceite assíncrono e consulte work item/run para conclusão;
+- migre listagens extensas para filtros server-side; não carregue histórico completo para filtrar localmente.
+
 ## 2026-07-15 - Contadores de efeito da sincronização do Cadastro
 
 ### Superfícies afetadas

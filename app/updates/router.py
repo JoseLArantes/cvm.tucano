@@ -1,7 +1,8 @@
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy import select
 
 from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api
@@ -214,8 +215,16 @@ def get_scanner_history(db: DbSession) -> list[PendingUpdate]:
 )
 def list_pending_updates(
     db: DbSession,
+    response: Response,
     fonte: Annotated[str | None, Query(description="Filtrar pelo tipo da fonte (ex: 'dfp', 'itr', 'cadastro')")] = None,
     status: Annotated[str | None, Query(description="Filtrar pelo estado do ciclo de vida da atualização (ex: 'change_detected', 'ready_for_ingestion')")] = None,
+    ano: int | None = None,
+    recommended_action: str | None = None,
+    detected_from: datetime | None = None,
+    detected_to: datetime | None = None,
+    pagina: int = Query(default=1, ge=1),
+    tamanho_pagina: int = Query(default=100, ge=1, le=500),
+    ordenar: str = "detection_timestamp:desc",
 ) -> list[PendingUpdate]:
     """
     Retorna o catálogo de pendências de dados descobertas.
@@ -226,8 +235,21 @@ def list_pending_updates(
         stmt = stmt.where(PendingUpdate.fonte == fonte)
     if status:
         stmt = stmt.where(PendingUpdate.status == status)
-    stmt = stmt.order_by(PendingUpdate.detection_timestamp.desc())
-    return list(db.scalars(stmt).all())
+    if ano is not None:
+        stmt = stmt.where(PendingUpdate.ano == ano)
+    if detected_from is not None:
+        stmt = stmt.where(PendingUpdate.detection_timestamp >= detected_from)
+    if detected_to is not None:
+        stmt = stmt.where(PendingUpdate.detection_timestamp <= detected_to)
+    candidates = list(db.scalars(stmt).all())
+    if recommended_action:
+        candidates = [pending for pending in candidates if pending.recommended_action == recommended_action or pending.next_action == recommended_action]
+    candidates.sort(key=lambda pending: pending.detection_timestamp, reverse=not ordenar.endswith(":asc"))
+    response.headers["X-Total-Count"] = str(len(candidates))
+    response.headers["X-Page"] = str(pagina)
+    response.headers["X-Page-Size"] = str(tamanho_pagina)
+    offset = (pagina - 1) * tamanho_pagina
+    return candidates[offset : offset + tamanho_pagina]
 
 
 @router.get(
@@ -368,12 +390,34 @@ def trigger_pending_update(
         username = auth.usuario.username if auth.usuario else "system"
         task_id = trigger_update(db, id, user=username)
         return {
-            "status": "triggered",
+            "status": "ingestion_queued",
             "task_id": task_id,
             "pending_update_id": id
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post(
+    "/pending/{id}/retry-ingestion",
+    response_model=TriggerResponseSchema,
+    summary="Reenfileirar ingestao de atualizacao com falha",
+    description="Aceita apenas atualizacoes em `ingestion_failed`; a resposta confirma enfileiramento, nao conclusao da ingestao.",
+)
+def retry_pending_update_ingestion(
+    id: Annotated[uuid.UUID, Path(description="UUID da atualizacao com falha de ingestao")],
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    db: DbSession,
+) -> dict[str, Any]:
+    pending = db.get(PendingUpdate, id)
+    if pending is None:
+        raise HTTPException(status_code=404, detail="PendingUpdate not found")
+    if pending.status != "ingestion_failed":
+        raise HTTPException(status_code=409, detail={"reason_code": "UPDATE_NOT_RETRYABLE"})
+    pending.status = "ready_for_ingestion"
+    db.commit()
+    task_id = trigger_update(db, id, user=auth.usuario.username if auth.usuario else "system")
+    return {"status": "ingestion_queued", "task_id": task_id, "pending_update_id": id}
 
 
 @router.post(

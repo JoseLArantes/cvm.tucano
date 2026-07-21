@@ -236,6 +236,12 @@ Campos:
 - `active_runs`
 - `recoverable_runs`
 
+## Controle de despacho e trabalho
+
+`IngestionDispatchPlanRequest` recebe `scopes[]`, `strategy` (`direct` ou `two_step`), `force_reimport` e motivo opcional. A resposta inclui `plan_token`, expiração, escopos válidos/inválidos, conflitos e impacto no gate. `IngestionDispatchRequest` deve repetir o plano e usar `Idempotency-Key`.
+
+O work item contém `id`, `fonte`, `ano`, correlação de atualização, execução e run, `state`, `next_action` e `allowed_actions[]`. Cada ação é orientada a máquina: `code`, `operation`, `resource`, `requires_confirmation`, `reason_code` e `constraints`.
+
 ## `QuarantineItemResposta`
 
 Contrato da fila de reparo.

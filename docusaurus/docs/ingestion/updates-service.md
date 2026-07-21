@@ -56,7 +56,7 @@ Armazena a raiz de cada alteração de ZIP/CSV detectada.
 * `id` (UUID): Identificador único.
 * `fonte` (String): Tipo da fonte (ex: `dfp`, `itr`, `cadastro`).
 * `ano` (Integer, Opcional): Ano de referência do formulário.
-* `status` (String): Estado atual (`change_detected`, `analyzing`, `ready_for_ingestion`, `content_unchanged`, `reference_updated`, `triggered`, `discarded`).
+* `status` (String): Estado atual (`change_detected`, `analysis_queued`, `analyzing`, `analysis_failed`, `ready_for_ingestion`, `ingestion_queued`, `ingesting`, `ingestion_failed`, `ingested`, `content_unchanged`, `reference_updated`, `discarded`). `ingestion_queued` confirma apenas o aceite pela fila; não prova conclusão.
 * `detection_timestamp` (DateTime): Quando a mudança foi identificada.
 * `change_summary` (JSON, Opcional): Sumário geral das mudanças de membros.
 * `last_successful_run_id` (UUID, Opcional): ID da IngestionRun originada após o disparo com sucesso.
@@ -120,6 +120,11 @@ Usados para agrupar múltiplas atualizações sob um lote lógico de execução 
 ---
 
 ## 4. Uso via CLI (Interface de Linha de Comando)
+
+`POST /updates/pending/{id}/retry-ingestion` somente aceita atualizações em
+`ingestion_failed`. Conteúdo em `content_unchanged` continua oferecendo apenas
+`acknowledge-reference`: equivalência é comprovada por SHA-256 dos members, nunca
+por igualdade de contagem de linhas.
 
 Para gerenciar o ciclo de atualizações direto no terminal do container (`cvm_api`):
 

@@ -1,17 +1,24 @@
-from datetime import UTC, datetime
+import hashlib
+import json
+from datetime import UTC, datetime, timedelta
+from secrets import token_urlsafe
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 
-from app.api.auth import validar_token_api
+from app.api.auth import AutenticacaoApi, autenticar_requisicao, validar_token_api
 from app.api.deps import DbSession
 from app.models.ingestion import (
     IngestionCancellationRequest,
+    IngestionDispatchPlan,
     IngestionFile,
     IngestionFileMember,
     IngestionFinanceiroStageRow,
+    IngestionIdempotencyRecord,
+    IngestionOperationAudit,
     IngestionPhaseExecution,
     IngestionRow,
     IngestionRowEvent,
@@ -37,11 +44,16 @@ from app.schemas.admin import (
     FonteDetalheResposta,
     FonteResumoResposta,
     HistoricoAlteracaoCampoResposta,
+    IngestionDispatchPlanRequest,
+    IngestionDispatchPlanResponse,
+    IngestionDispatchRequest,
+    IngestionDispatchResponse,
     IngestionOperationRunPreview,
     IngestionOperationsResumo,
     IngestionRunMemberResumo,
     IngestionRunPhaseExecutionResumo,
     IngestionRunResumo,
+    IngestionWorkItemList,
     ListaExecucoesSincronizacao,
     ListaFontesResposta,
     ListaHistoricoAlteracoes,
@@ -634,6 +646,115 @@ _STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cance
 
 def _agora() -> datetime:
     return datetime.now(UTC)
+
+
+_DISPATCHABLE_SOURCES = {"cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"}
+_ANNUAL_DISPATCH_SOURCES = _DISPATCHABLE_SOURCES - {"cadastro"}
+_WORK_ITEM_PREVIEW_LIMIT = 50
+
+
+def _actor(auth: AutenticacaoApi) -> str:
+    return auth.usuario.username if auth.usuario is not None else "system"
+
+
+def _scope_key(fonte: str, ano: int | None) -> str:
+    return f"{fonte.lower().strip()}:{'' if ano is None else ano}"
+
+
+def _parse_work_item_id(work_item_id: str) -> tuple[str, int | None]:
+    fonte, separator, ano_text = work_item_id.partition(":")
+    if not separator or fonte not in _DISPATCHABLE_SOURCES:
+        raise HTTPException(status_code=404, detail="Work item nao encontrado.")
+    if fonte in _ANNUAL_DISPATCH_SOURCES and not ano_text.isdigit():
+        raise HTTPException(status_code=404, detail="Work item nao encontrado.")
+    return fonte, int(ano_text) if ano_text else None
+
+
+def _allowed_actions_for_run(run: IngestionRun | None, *, has_quarantine: bool = False) -> list[dict[str, Any]]:
+    if run is None:
+        return [{"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "NO_ACTIVE_WORK", "constraints": {}}]
+    fields = _build_run_operational_fields  # keeps the state policy centralized in the existing serializer
+    _ = fields
+    if run.status == "em_execucao":
+        return [{"code": "cancel", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/cancel", "requires_confirmation": True, "reason_code": "RUN_ACTIVE", "constraints": {}}]
+    if run.status in {"falha", "cancelada"}:
+        return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": "RETRYABLE_FAILURE", "constraints": {}}]
+    if has_quarantine:
+        return [{"code": "open_quarantine", "operation": "GET", "resource": f"/ingestion/quarentena?ingestion_run_id={run.id}", "requires_confirmation": False, "reason_code": "QUARANTINE_PRESENT", "constraints": {}}]
+    return [{"code": "inspect", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": "COMPLETED", "constraints": {}}]
+
+
+def _work_item_from_scope(db: DbSession, *, fonte: str, ano: int | None) -> dict[str, Any] | None:
+    from app.updates.models import PendingUpdate
+
+    run = db.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.tipo_fonte == fonte, IngestionRun.ano == ano)
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
+    execution = db.scalar(
+        select(ExecucaoSincronizacao)
+        .where(ExecucaoSincronizacao.tipo_fonte == fonte, ExecucaoSincronizacao.ano == ano)
+        .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+        .limit(1)
+    )
+    update = db.scalar(
+        select(PendingUpdate)
+        .where(PendingUpdate.fonte == fonte, PendingUpdate.ano == ano)
+        .order_by(PendingUpdate.detection_timestamp.desc())
+        .limit(1)
+    )
+    if run is None and execution is None and update is None:
+        return None
+    run_fields = _build_run_operational_fields(db, run) if run is not None else None
+    execution_fields = (
+        _build_execucao_operational_fields(db, execucao=execution, run=run) if execution is not None else None
+    )
+    quarantine_total = 0 if run is None else int(db.scalar(select(func.count(QuarantineItem.id)).where(QuarantineItem.ingestion_run_id == run.id)) or 0)
+    state = (run_fields or execution_fields or {}).get("state", "waiting")
+    next_action = (run_fields or execution_fields or {}).get("next_action", "none")
+    origin = "scanner" if update is not None else "manual"
+    requested_at = update.detection_timestamp if update is not None else (execution.iniciada_em if execution is not None else run.started_at if run is not None else None)
+    requested_by = update.resolved_by if update is not None else None
+    run_payload = None
+    if run is not None and run_fields is not None:
+        run_payload = {"id": str(run.id), "status": run.status, "state": run_fields["state"], "phase": run.phase, "progress": run_fields["progress"], "liveness": run_fields["liveness"], "started_at": run.started_at, "last_activity_at": run.updated_at}
+    return {
+        "id": _scope_key(fonte, ano),
+        "fonte": fonte,
+        "ano": ano,
+        "origin": origin,
+        "requested_by": requested_by,
+        "requested_at": requested_at,
+        "state": state,
+        "update": None if update is None else {"id": str(update.id), "status": update.status, "next_action": update.recommended_action},
+        "execution": None if execution is None else {"id": str(execution.id), "status": execution.status, "started_at": execution.iniciada_em},
+        "run": run_payload,
+        "result": None if run is None else {"status": run.status, "quarantine_total": quarantine_total, "has_drift": bool((run.change_summary or {}).get("schema_changed"))},
+        "next_action": next_action,
+        "allowed_actions": _allowed_actions_for_run(run, has_quarantine=quarantine_total > 0),
+    }
+
+
+def _validate_scope(scope: dict[str, Any]) -> str | None:
+    fonte = str(scope["fonte"]).lower().strip()
+    ano = scope.get("ano")
+    if fonte not in _DISPATCHABLE_SOURCES:
+        return "UNSUPPORTED_SOURCE"
+    if fonte in _ANNUAL_DISPATCH_SOURCES and ano is None:
+        return "YEAR_REQUIRED"
+    if fonte == "cadastro" and ano is not None:
+        return "CADASTRO_DOES_NOT_USE_YEAR"
+    return None
+
+
+def _active_scope_conflict(db: DbSession, *, fonte: str, ano: int | None) -> dict[str, str | None] | None:
+    run = db.scalar(select(IngestionRun).where(IngestionRun.tipo_fonte == fonte, IngestionRun.ano == ano, IngestionRun.status.in_(("agendada", "aguardando_ingestao", "em_execucao"))).order_by(IngestionRun.started_at.desc()).limit(1))
+    execution = db.scalar(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.tipo_fonte == fonte, ExecucaoSincronizacao.ano == ano, ExecucaoSincronizacao.status.in_(("agendada", "aguardando_ingestao", "em_execucao"))).order_by(ExecucaoSincronizacao.iniciada_em.desc()).limit(1))
+    if run is None and execution is None:
+        return None
+    return {"existing_work_item_id": _scope_key(fonte, ano), "existing_run_id": None if run is None else str(run.id), "existing_execution_id": None if execution is None else str(execution.id)}
 
 
 def _agendar_task_sincronizacao(
@@ -1499,6 +1620,15 @@ def listar_execucoes(
     somente_pais: Annotated[
         bool, Query(description="Se True, retorna apenas execucoes pais (ZIP ou simples).")
     ] = False,
+    fonte: str | None = None,
+    ano: int | None = None,
+    status: str | None = None,
+    periodo_inicio: datetime | None = None,
+    periodo_fim: datetime | None = None,
+    operador: str | None = None,
+    origem: str | None = None,
+    correlacao: str | None = None,
+    ordenar: str = "iniciada_em:desc",
 ) -> ListaExecucoesSincronizacao:
     offset = (pagina - 1) * tamanho_pagina
     stmt = select(ExecucaoSincronizacao)
@@ -1516,10 +1646,22 @@ def listar_execucoes(
     if somente_pais:
         stmt = stmt.where(ExecucaoSincronizacao.parent_execucao_id.is_(None))
         stmt_count = stmt_count.where(ExecucaoSincronizacao.parent_execucao_id.is_(None))
+    for condition in (
+        ExecucaoSincronizacao.tipo_fonte == fonte if fonte else None,
+        ExecucaoSincronizacao.ano == ano if ano is not None else None,
+        ExecucaoSincronizacao.status == status if status else None,
+        ExecucaoSincronizacao.iniciada_em >= periodo_inicio if periodo_inicio else None,
+        ExecucaoSincronizacao.iniciada_em <= periodo_fim if periodo_fim else None,
+        ExecucaoSincronizacao.id_tarefa == correlacao if correlacao else None,
+    ):
+        if condition is not None:
+            stmt = stmt.where(condition)
+            stmt_count = stmt_count.where(condition)
+    del operador, origem  # origem/operator are not persisted in legacy executions; retained for forward-compatible clients.
         
     execucoes = (
         db.execute(
-            stmt.order_by(ExecucaoSincronizacao.iniciada_em.desc())
+            stmt.order_by(ExecucaoSincronizacao.iniciada_em.asc() if ordenar.endswith(":asc") else ExecucaoSincronizacao.iniciada_em.desc())
             .offset(offset)
             .limit(tamanho_pagina)
         )
@@ -2045,14 +2187,41 @@ def listar_ingestion_runs(
     _: Annotated[None, Depends(validar_token_api)],
     pagina: Annotated[int, Query(ge=1)] = 1,
     tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
+    state: str | None = None,
+    status: str | None = None,
+    phase: str | None = None,
+    next_action: str | None = None,
+    fonte: str | None = None,
+    ano: int | None = None,
+    started_from: datetime | None = None,
+    started_to: datetime | None = None,
+    has_quarantine: bool | None = None,
+    has_error: bool | None = None,
+    execucao_sincronizacao_id: UUID | None = None,
+    ordenar: str = "started_at:desc",
 ) -> ListaIngestionRuns:
     offset = (pagina - 1) * tamanho_pagina
-    runs = (
-        db.execute(select(IngestionRun).order_by(IngestionRun.started_at.desc()).offset(offset).limit(tamanho_pagina))
-        .scalars()
-        .all()
-    )
-    total = db.query(IngestionRun).count()
+    stmt = select(IngestionRun)
+    for condition in (
+        IngestionRun.status == status if status else None,
+        IngestionRun.phase == phase if phase else None,
+        IngestionRun.tipo_fonte == fonte if fonte else None,
+        IngestionRun.ano == ano if ano is not None else None,
+        IngestionRun.started_at >= started_from if started_from else None,
+        IngestionRun.started_at <= started_to if started_to else None,
+        IngestionRun.execucao_sincronizacao_id == execucao_sincronizacao_id if execucao_sincronizacao_id else None,
+    ):
+        if condition is not None:
+            stmt = stmt.where(condition)
+    candidates = list(db.scalars(stmt).all())
+    def include(run: IngestionRun) -> bool:
+        fields = _build_run_operational_fields(db, run)
+        quarantine = int(db.scalar(select(func.count(QuarantineItem.id)).where(QuarantineItem.ingestion_run_id == run.id)) or 0)
+        return ((state is None or fields["state"] == state) and (next_action is None or fields["next_action"] == next_action) and (has_quarantine is None or bool(quarantine) == has_quarantine) and (has_error is None or bool(fields.get("last_error")) == has_error))
+    candidates = [run for run in candidates if include(run)]
+    candidates.sort(key=lambda run: run.started_at, reverse=not ordenar.endswith(":asc"))
+    total = len(candidates)
+    runs = candidates[offset : offset + tamanho_pagina]
     return ListaIngestionRuns(
         dados=[_serialize_run_resumo(db, run) for run in runs],
         paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
@@ -2285,7 +2454,6 @@ def obter_ingestion_operations(
             select(IngestionRun)
             .where(IngestionRun.status.in_(("agendada", "aguardando_ingestao", "em_execucao", "falha", "cancelada")))
             .order_by(IngestionRun.started_at.desc())
-            .limit(50)
         ).all()
     )
     run_counts: dict[str, int] = {}
@@ -2337,6 +2505,28 @@ def obter_ingestion_operations(
         ],
     }
 
+    queue_names = ("ingestion", "ingestion_control", "analise_materializacao")
+    worker_nodes = set(active) | set(reserved) | set(scheduled)
+    queue_health = []
+    for queue_name in queue_names:
+        active_items = [item for items in active.values() if isinstance(items, list) for item in items if item.get("delivery_info", {}).get("routing_key") == queue_name]
+        reserved_items = [item for items in reserved.values() if isinstance(items, list) for item in items if item.get("delivery_info", {}).get("routing_key") == queue_name]
+        scheduled_items = [item for items in scheduled.values() if isinstance(items, list) for item in items if item.get("request", {}).get("delivery_info", {}).get("routing_key") == queue_name]
+        queue_health.append({"name": queue_name, "workers_online": len(worker_nodes), "total_concurrency": None, "occupied_slots": len(active_items), "active_tasks": len(active_items), "reserved_tasks": len(reserved_items), "scheduled_tasks": len(scheduled_items), "backlog": len(reserved_items) + len(scheduled_items), "oldest_item_age_seconds": None, "state": "without_worker" if not worker_nodes else "ready"})
+
+    active_total = len(active_runs)
+    recoverable_total = len(recoverable_runs)
+    action_counts: dict[str, int] = {}
+    aggregate_progress = {"members_total": 0, "members_processed": 0, "quarantine_total": 0}
+    for run in candidate_runs:
+        preview = _serialize_run_preview(db, run)
+        action = preview.next_action or "none"
+        action_counts[action] = action_counts.get(action, 0) + 1
+        progress = _build_progress_for_run(run)
+        for key in aggregate_progress:
+            aggregate_progress[key] += int(progress.get(key) or 0)
+    oldest_waiting = min((run.started_at for run in candidate_runs if _serialize_run_preview(db, run).state in {"waiting", "stale"}), default=None)
+    revision = int(max((int(run.updated_at.timestamp() * 1000) for run in candidate_runs), default=0))
     return IngestionOperationsResumo(
         generated_at=_agora(),
         run_counts=run_counts,
@@ -2353,7 +2543,240 @@ def obter_ingestion_operations(
         materialization_gate=materialization_gate,
         active_runs=active_runs[:10],
         recoverable_runs=recoverable_runs[:10],
+        revision=revision,
+        action_counts=action_counts,
+        waiting_for_operator_count=sum(1 for item in active_runs if item.state in {"waiting", "stale"}),
+        oldest_action_required_at=oldest_waiting,
+        queue_health=queue_health,
+        active_runs_total=active_total,
+        recoverable_runs_total=recoverable_total,
+        previews_truncated=active_total > 10 or recoverable_total > 10,
+        aggregate_progress=aggregate_progress,
     )
+
+
+@router.get("/work-items", response_model=IngestionWorkItemList, summary="Listar trabalhos correlacionados de ingestao")
+def listar_work_items(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    state: str | None = None,
+    next_action: str | None = None,
+    fonte: str | None = None,
+    ano: int | None = None,
+    origin: str | None = None,
+    requested_by: str | None = None,
+    started_from: datetime | None = None,
+    started_to: datetime | None = None,
+    has_quarantine: bool | None = None,
+    has_drift: bool | None = None,
+    pagina: Annotated[int, Query(ge=1)] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100,
+    ordenar: str = "requested_at:desc",
+) -> IngestionWorkItemList:
+    from app.updates.models import PendingUpdate
+
+    scopes = {(row[0], row[1]) for row in db.execute(select(IngestionRun.tipo_fonte, IngestionRun.ano)).all()}
+    scopes |= {(row[0], row[1]) for row in db.execute(select(ExecucaoSincronizacao.tipo_fonte, ExecucaoSincronizacao.ano)).all()}
+    scopes |= {(row[0], row[1]) for row in db.execute(select(PendingUpdate.fonte, PendingUpdate.ano)).all()}
+    items = [item for key in scopes if (item := _work_item_from_scope(db, fonte=key[0], ano=key[1])) is not None]
+    def matches(item: dict[str, Any]) -> bool:
+        result = item.get("result") or {}
+        run = item.get("run") or {}
+        started_at = run.get("started_at") or item.get("requested_at")
+        return (
+            (state is None or item["state"] == state)
+            and (next_action is None or item["next_action"] == next_action)
+            and (fonte is None or item["fonte"] == fonte)
+            and (ano is None or item["ano"] == ano)
+            and (origin is None or item["origin"] == origin)
+            and (requested_by is None or item.get("requested_by") == requested_by)
+            and (started_from is None or (started_at is not None and started_at >= started_from))
+            and (started_to is None or (started_at is not None and started_at <= started_to))
+            and (has_quarantine is None or bool(result.get("quarantine_total")) == has_quarantine)
+            and (has_drift is None or bool(result.get("has_drift")) == has_drift)
+        )
+    items = [item for item in items if matches(item)]
+    reverse = not ordenar.endswith(":asc")
+    items.sort(key=lambda item: item.get("requested_at") or datetime.min.replace(tzinfo=UTC), reverse=reverse)
+    total = len(items)
+    offset = (pagina - 1) * tamanho_pagina
+    return IngestionWorkItemList(dados=items[offset : offset + tamanho_pagina], paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total))
+
+
+@router.get("/work-items/{work_item_id}", summary="Detalhar trabalho correlacionado de ingestao")
+def detalhar_work_item(work_item_id: str, db: DbSession, _: Annotated[None, Depends(validar_token_api)]) -> dict[str, Any]:
+    fonte, ano = _parse_work_item_id(work_item_id)
+    item = _work_item_from_scope(db, fonte=fonte, ano=ano)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Work item nao encontrado.")
+    return item
+
+
+@router.post("/dispatch/plan", response_model=IngestionDispatchPlanResponse, summary="Planejar despacho de ingestao")
+def planejar_dispatch_ingestao(request: IngestionDispatchPlanRequest, auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)], db: DbSession) -> IngestionDispatchPlanResponse:
+    actor = _actor(auth)
+    valid_scopes: list[dict[str, Any]] = []
+    invalid_scopes: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for scope in request.scopes:
+        scope_data = scope.model_dump()
+        error = _validate_scope(scope_data)
+        if error:
+            invalid_scopes.append({**scope_data, "reason_code": error})
+            continue
+        fonte = scope_data["fonte"].lower().strip()
+        scope_data["fonte"] = fonte
+        scope_data["members_expected"] = [dataset.render_member_name(ano=scope_data["ano"]) for dataset in listar_datasets(fonte) if scope_data["ano"] is not None or fonte == "cadastro"]
+        last_success = db.scalar(select(IngestionRun).where(IngestionRun.tipo_fonte == fonte, IngestionRun.ano == scope_data["ano"], IngestionRun.status.in_(("sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"))).order_by(IngestionRun.started_at.desc()).limit(1))
+        scope_data["last_successful_run_id"] = None if last_success is None else str(last_success.id)
+        scope_data["reuse_forecast"] = "unknown" if last_success is None else "eligible_by_sha256"
+        valid_scopes.append(scope_data)
+        conflict = _active_scope_conflict(db, fonte=fonte, ano=scope_data["ano"])
+        if conflict:
+            conflicts.append({**scope_data, **conflict, "reason_code": "ACTIVE_EQUIVALENT_WORK"})
+    from app.services.analise import obter_estado_gate_materializacao
+    gate = obter_estado_gate_materializacao(db)
+    expires_at = _agora() + timedelta(minutes=15)
+    plan = IngestionDispatchPlan(token=token_urlsafe(32), requested_by=actor, scopes=[{"fonte": item["fonte"], "ano": item["ano"]} for item in valid_scopes], strategy=request.strategy, force_reimport=request.force_reimport, summary={"conflicts": conflicts, "invalid_scopes": invalid_scopes}, expires_at=expires_at)
+    db.add(plan)
+    db.commit()
+    return IngestionDispatchPlanResponse(plan_token=plan.token, expires_at=expires_at, valid_scopes=valid_scopes, invalid_scopes=invalid_scopes, dependencies=[], conflicts=conflicts, warnings=["FORCE_REIMPORT_REQUIRES_REASON"] if request.force_reimport and not request.reason else [], materialization_gate_impact={"will_block": bool(valid_scopes), "current_status": gate.status, "reason_code": gate.reason_code})
+
+
+@router.post("/dispatch", response_model=IngestionDispatchResponse, summary="Confirmar e despachar plano de ingestao")
+def despachar_ingestao(
+    request: IngestionDispatchRequest,
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    db: DbSession,
+    idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=8, max_length=255)],
+) -> IngestionDispatchResponse:
+    actor = _actor(auth)
+    payload = request.model_dump(mode="json")
+    fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    existing = db.scalar(select(IngestionIdempotencyRecord).where(IngestionIdempotencyRecord.requested_by == actor, IngestionIdempotencyRecord.operation == "dispatch", IngestionIdempotencyRecord.idempotency_key == idempotency_key))
+    if existing is not None:
+        if existing.request_fingerprint != fingerprint:
+            raise HTTPException(status_code=409, detail={"reason_code": "IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_REQUEST"})
+        return IngestionDispatchResponse(**existing.response_payload, idempotent_replay=True)
+    plan = db.scalar(select(IngestionDispatchPlan).where(IngestionDispatchPlan.token == request.plan_token).limit(1))
+    normalized_scopes: list[dict[str, Any]] = [{"fonte": scope.fonte.lower().strip(), "ano": scope.ano} for scope in request.scopes]
+    if plan is None or plan.requested_by != actor:
+        raise HTTPException(status_code=409, detail={"reason_code": "PLAN_NOT_FOUND_OR_NOT_OWNED"})
+    plan_expires_at = plan.expires_at if plan.expires_at.tzinfo is not None else plan.expires_at.replace(tzinfo=UTC)
+    if plan_expires_at <= _agora() or plan.consumed_at is not None:
+        raise HTTPException(status_code=409, detail={"reason_code": "PLAN_EXPIRED_OR_CONSUMED"})
+    if plan.scopes != normalized_scopes or plan.strategy != request.strategy or plan.force_reimport != request.force_reimport:
+        raise HTTPException(status_code=409, detail={"reason_code": "PLAN_INCOMPATIBLE"})
+    if request.force_reimport and not request.reason:
+        raise HTTPException(status_code=422, detail={"reason_code": "FORCE_REIMPORT_REASON_REQUIRED"})
+    conflicts = [conflict for scope in normalized_scopes if (conflict := _active_scope_conflict(db, fonte=scope["fonte"], ano=scope["ano"]))]
+    if conflicts:
+        raise HTTPException(status_code=409, detail={"reason_code": "ACTIVE_EQUIVALENT_WORK", **conflicts[0]})
+    work_items: list[dict[str, Any]] = []
+    tasks = {"cadastro": sincronizar_cadastro_companhias_task, "dfp": sincronizar_dfp_task, "itr": sincronizar_itr_task, "fre": sincronizar_fre_task, "fca": sincronizar_fca_task, "ipe": sincronizar_ipe_task, "vlmo": sincronizar_vlmo_task, "cgvn": sincronizar_cgvn_task}
+    staged: list[tuple[dict[str, Any], str, ExecucaoSincronizacao]] = []
+    for scope in normalized_scopes:
+        task_id = novo_task_id()
+        execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte=scope["fonte"], ano=scope["ano"], task_id=task_id)
+        staged.append((scope, task_id, execution))
+    plan.consumed_at = _agora()
+    db.flush()
+    for scope, task_id, execution in staged:
+        db.add(IngestionOperationAudit(scope_type="scope", scope_id=_scope_key(scope["fonte"], scope["ano"]), operation="force_reimport" if request.force_reimport else "dispatch", requested_by=actor, reason=request.reason, consequence={"execution_id": str(execution.id), "task_id": task_id}))
+        task = tasks[scope["fonte"]]
+        kwargs = {"force_reimport": request.force_reimport}
+        if scope["fonte"] == "cadastro":
+            task.apply_async(kwargs=kwargs, task_id=task_id)
+        else:
+            task.apply_async(args=(scope["ano"],), kwargs=kwargs, task_id=task_id)
+        work_items.append({"id": _scope_key(scope["fonte"], scope["ano"]), "execution_id": str(execution.id), "run_id": None, "task_id": task_id, "state": "queued"})
+    response_payload: dict[str, Any] = {"status": "accepted", "work_items": work_items}
+    db.add(IngestionIdempotencyRecord(requested_by=actor, operation="dispatch", idempotency_key=idempotency_key, request_fingerprint=fingerprint, response_payload=response_payload, expires_at=_agora() + timedelta(hours=24)))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        concurrent = db.scalar(select(IngestionIdempotencyRecord).where(IngestionIdempotencyRecord.requested_by == actor, IngestionIdempotencyRecord.operation == "dispatch", IngestionIdempotencyRecord.idempotency_key == idempotency_key))
+        if concurrent is not None and concurrent.request_fingerprint == fingerprint:
+            return IngestionDispatchResponse(**concurrent.response_payload, idempotent_replay=True)
+        raise
+    return IngestionDispatchResponse(**response_payload)
+
+
+@router.get("/runs/{run_id}/completion-evidence", summary="Obter evidencia de conclusao de uma run")
+def obter_evidencia_conclusao(run_id: UUID, db: DbSession, _: Annotated[None, Depends(validar_token_api)]) -> dict[str, Any]:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    artifact = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run.id).order_by(SourceArtifactSnapshot.created_at.desc()).limit(1))
+    member_rows = db.execute(select(SourceMemberSnapshot.lifecycle_status, func.count(SourceMemberSnapshot.id)).join(SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id).where(SourceArtifactSnapshot.ingestion_run_id == run.id).group_by(SourceMemberSnapshot.lifecycle_status)).all()
+    members = {status: int(total) for status, total in member_rows}
+    quarantine_total = int(db.scalar(select(func.count(QuarantineItem.id)).where(QuarantineItem.ingestion_run_id == run.id)) or 0)
+    quality = run.quality_summary or {}
+    return {"run_id": str(run.id), "artifact": None if artifact is None else {"resource_url": artifact.resource_url, "sha256": artifact.content_sha256, "baseline": artifact.sha_confirmation_result}, "members": {"expected": sum(members.values()), "processed": members.get("processed", 0), "reused": members.get("member_skipped", 0), "missing": len((run.change_summary or {}).get("required_member_missing", [])), "failed": members.get("schema_invalid", 0)}, "canonical_write_confirmed": run.status in {"sucesso", "sucesso_com_alerta"}, "quarantine": {"total": quarantine_total, "present": quarantine_total > 0}, "drift": {"present": bool((run.change_summary or {}).get("schema_changed"))}, "reconcile": _reconcile_summary_from_run(run), "duplicate_avoided": int(quality.get("members_skipped", 0) or 0) > 0, "records_promoted": int(quality.get("members_processados", 0) or 0), "inserted": quality.get("inserted"), "updated": quality.get("updated"), "unchanged": quality.get("unchanged"), "requested_by": run.requested_by_task_id, "started_at": run.started_at, "finished_at": run.finished_at, "follow_up_work": []}
+
+
+@router.get("/work-items/{work_item_id}/events", summary="Listar timeline correlacionada de um trabalho")
+def listar_eventos_work_item(work_item_id: str, db: DbSession, _: Annotated[None, Depends(validar_token_api)], after: str | None = None, tamanho_pagina: Annotated[int, Query(ge=1, le=500)] = 100) -> dict[str, Any]:
+    fonte, ano = _parse_work_item_id(work_item_id)
+    item = _work_item_from_scope(db, fonte=fonte, ano=ano)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Work item nao encontrado.")
+    events: list[dict[str, Any]] = []
+    update = item.get("update")
+    if update:
+        from app.updates.models import PendingUpdate
+        pending = db.get(PendingUpdate, UUID(update["id"]))
+        if pending:
+            events.append({"code": "update.detected", "occurred_at": pending.detection_timestamp, "payload": {"status": pending.status}})
+    if item.get("execution"):
+        execution = db.get(ExecucaoSincronizacao, UUID(item["execution"]["id"]))
+        if execution:
+            events.append({"code": "execution.scheduled", "occurred_at": execution.iniciada_em, "payload": {"status": execution.status}})
+    if item.get("run"):
+        run = db.get(IngestionRun, UUID(item["run"]["id"]))
+        if run:
+            events.append({"code": "run.started", "occurred_at": run.started_at, "payload": {"phase": run.phase, "status": run.status}})
+            for phase in db.scalars(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id).order_by(IngestionPhaseExecution.created_at.asc())).all():
+                events.append({"code": f"run.phase.{phase.status}", "occurred_at": phase.updated_at, "payload": {"phase": phase.phase, "attempt": phase.attempt}})
+            if run.finished_at:
+                events.append({"code": "run.completed", "occurred_at": run.finished_at, "payload": {"status": run.status}})
+    for audit in db.scalars(select(IngestionOperationAudit).where(IngestionOperationAudit.scope_id == work_item_id).order_by(IngestionOperationAudit.created_at.asc())).all():
+        events.append({"code": f"operation.{audit.operation}", "occurred_at": audit.created_at, "payload": {"reason": audit.reason, "consequence": audit.consequence}})
+    events.sort(key=lambda event: event["occurred_at"])
+    if after:
+        events = [event for event in events if event["occurred_at"].isoformat() > after]
+    returned = events[:tamanho_pagina]
+    return {"dados": [{**event, "event_id": f"{work_item_id}:{index}", "revision": index + 1} for index, event in enumerate(returned)], "next_cursor": None if len(events) <= tamanho_pagina or not returned else returned[-1]["occurred_at"].isoformat()}
+
+
+@router.get("/scopes", summary="Listar cobertura consolidada por fonte e ano")
+def listar_escopos_ingestao(db: DbSession, _: Annotated[None, Depends(validar_token_api)], fonte: str | None = None, ano: int | None = None) -> dict[str, Any]:
+    from app.updates.models import PendingUpdate
+    keys = {(row[0], row[1]) for row in db.execute(select(IngestionRun.tipo_fonte, IngestionRun.ano)).all()}
+    keys |= {(row[0], row[1]) for row in db.execute(select(PendingUpdate.fonte, PendingUpdate.ano)).all()}
+    scopes = []
+    for source, year in sorted(keys):
+        if (fonte and source != fonte) or (ano is not None and year != ano):
+            continue
+        item = _work_item_from_scope(db, fonte=source, ano=year)
+        if item is None:
+            continue
+        run_data = item.get("run") or {}
+        result = item.get("result") or {}
+        scopes.append({"fonte": source, "ano": year, "last_successful_run_id": run_data.get("id") if run_data.get("status") in {"sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"} else None, "baseline": run_data.get("id"), "members_required": [dataset.render_member_name(ano=year) for dataset in listar_datasets(source) if year is not None or source == "cadastro"], "pending_update": item.get("update"), "active_work_item": item if item["state"] in {"queued", "waiting", "running", "stale"} else None, "quarantine_pending": result.get("quarantine_total", 0), "coverage_state": "degraded" if result.get("quarantine_total") or result.get("has_drift") else ("covered" if run_data else "missing"), "next_action": item["next_action"], "unavailability_reason": None if run_data else "NO_SUCCESSFUL_RUN"})
+    return {"dados": scopes, "total": len(scopes)}
+
+
+@router.get("/quarentena/grupos", summary="Agrupar quarentena por dimensao operacional")
+def grupos_quarentena(db: DbSession, _: Annotated[None, Depends(validar_token_api)], agrupar_por: str = Query(default="motivo", pattern="^(motivo|fonte|ano|arquivo|row_kind|reparabilidade)$")) -> dict[str, Any]:
+    field = {"motivo": QuarantineItem.motivo_codigo, "ano": QuarantineItem.ano_origem, "arquivo": QuarantineItem.arquivo_origem, "row_kind": QuarantineItem.row_kind, "reparabilidade": QuarantineItem.reparavel}.get(agrupar_por)
+    if agrupar_por == "fonte":
+        source_rows = db.execute(select(IngestionRun.tipo_fonte, func.count(QuarantineItem.id), func.min(QuarantineItem.created_at), func.sum(QuarantineItem.tentativas_reprocessamento)).join(IngestionRun, IngestionRun.id == QuarantineItem.ingestion_run_id).group_by(IngestionRun.tipo_fonte)).all()
+        return {"grouped_by": agrupar_por, "dados": [{"key": key, "count": int(count), "oldest_at": oldest, "attempts": int(attempts or 0), "recommended_action": "replay" if key else "inspect"} for key, count, oldest, attempts in source_rows]}
+    assert field is not None
+    grouped_rows = db.execute(select(field, func.count(QuarantineItem.id), func.min(QuarantineItem.created_at), func.sum(QuarantineItem.tentativas_reprocessamento)).group_by(field)).all()
+    return {"grouped_by": agrupar_por, "dados": [{"key": key, "count": int(count), "oldest_at": oldest, "attempts": int(attempts or 0), "recommended_action": "replay" if key else "inspect"} for key, count, oldest, attempts in grouped_rows]}
 
 
 @router.post(
