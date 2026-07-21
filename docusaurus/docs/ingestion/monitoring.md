@@ -239,6 +239,20 @@ Uso recomendado:
 
 ## Contratos de controle de ingestao
 
+### Stream de eventos SSE
+
+`GET /ingestion/events/stream` entrega eventos `text/event-stream` autenticados com
+o mesmo bearer usado pela superfície de ingestão. O endpoint aceita
+`Last-Event-ID`, `cursor` ou `since_revision` (apenas um por conexão) e
+`scope=fonte:ano` para limitar um escopo operacional real.
+
+Os tipos estáveis são `ingestion.operations.updated`, `ingestion.run.updated`,
+`ingestion.work_item.updated`, `ingestion.member.updated`,
+`ingestion.queue.updated`, `ingestion.materialization.updated` e `heartbeat`.
+Cada payload inclui `event_id`, `revision`, `occurred_at`, `entity_type`,
+`entity_id`, `reason_code` e `data`. O SSE é uma notificação compacta de
+invalidação; detalhes autoritativos permanecem nos endpoints REST.
+
 `GET /ingestion/work-items` entrega uma linha por escopo fonte/ano, correlacionando atualização, execução administrativa, run técnica, resultado, próxima transição e `allowed_actions`. A lista aceita filtros por estado, ação, fonte, ano, origem, datas, quarentena e drift, além de paginação e ordenação no servidor. Use `GET /ingestion/work-items/{id}` para detalhe e `GET /ingestion/work-items/{id}/events` para a timeline cursorizada.
 
 `GET /ingestion/scopes` consolida cobertura por fonte e ano sem N+1: baseline, última run, members esperados, atualização pendente, trabalho ativo, quarentena, estado de cobertura e próxima ação. `GET /ingestion/runs/{run_id}/completion-evidence` separa members processados e reutilizados, escrita canônica, reconcile, quarentena, drift e contadores de promoção. `GET /ingestion/quarentena/grupos` agrega a fila por motivo, fonte, ano, arquivo, row kind ou reparabilidade.

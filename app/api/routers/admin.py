@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -6,11 +7,14 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
-from app.api.auth import AutenticacaoApi, autenticar_requisicao, validar_token_api
+from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api, validar_token_api
 from app.api.deps import DbSession
+from app.core.config import get_settings
+from app.db.session import SessionLocal
 from app.models.ingestion import (
     IngestionCancellationRequest,
     IngestionDispatchPlan,
@@ -74,6 +78,7 @@ from app.schemas.admin import (
 from app.schemas.comum import Paginacao
 from app.services.ingestion.audit import build_dataset_discovery_audit
 from app.services.ingestion.cadastro import sincronizar_cadastro_companhias
+from app.services.ingestion.events import list_operational_events
 from app.services.ingestion.lifecycle import (
     build_artifact_snapshot_response,
     build_delivery_snapshot_summary,
@@ -116,6 +121,70 @@ from app.worker.tasks import (
 )
 
 router = APIRouter(prefix="/ingestion")
+
+
+def _format_sse(*, event_id: str, event_type: str, payload: dict[str, Any]) -> str:
+    return f"id: {event_id}\nevent: {event_type}\ndata: {json.dumps(payload, ensure_ascii=True, separators=(',', ':'))}\n\n"
+
+
+@router.get(
+    "/events/stream",
+    summary="Stream SSE de eventos operacionais de ingestao",
+    description=(
+        "Stream autenticado de invalidacoes compactas do ledger operacional. Cada evento usa `id`, `event` e "
+        "`data` JSON; detalhes continuam nos recursos REST. Aceita `Last-Event-ID`, `cursor` ou "
+        "`since_revision` para retomada. `scope=fonte:ano` restringe um escopo real de ingestao."
+    ),
+    responses={401: {"description": "Token bearer ausente ou invalido."}, 403: {"description": "Permissao administrativa requerida."}},
+)
+async def stream_eventos_ingestao(
+    _: Annotated[None, Depends(exigir_admin_api)],
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+    cursor: str | None = None,
+    since_revision: str | None = None,
+    scope: str | None = None,
+) -> StreamingResponse:
+    if sum(value is not None for value in (last_event_id, cursor, since_revision)) > 1:
+        raise HTTPException(status_code=422, detail="Informe apenas um cursor de retomada.")
+    after_revision = cursor or since_revision or last_event_id
+    settings = get_settings()
+
+    async def event_generator() -> Any:
+        nonlocal after_revision
+        seconds_since_heartbeat = 0.0
+        while True:
+            db = SessionLocal()
+            try:
+                events = list_operational_events(db, after_revision=after_revision, scope=scope)
+            except ValueError as exc:
+                yield _format_sse(
+                    event_id=after_revision or "invalid-cursor",
+                    event_type="ingestion.operations.updated",
+                    payload={"event_id": after_revision or "invalid-cursor", "revision": after_revision or "0", "occurred_at": datetime.now(UTC).isoformat(), "entity_type": "operations", "entity_id": None, "reason_code": str(exc), "data": {}},
+                )
+                return
+            finally:
+                db.close()
+            if events:
+                for event in events:
+                    after_revision = event["revision"]
+                    event_type = str(event.pop("event_type"))
+                    yield _format_sse(event_id=str(event["event_id"]), event_type=event_type, payload=event)
+                seconds_since_heartbeat = 0.0
+            else:
+                seconds_since_heartbeat += settings.ingestion_events_stream_poll_seconds
+                if seconds_since_heartbeat >= settings.ingestion_events_stream_heartbeat_seconds:
+                    now = datetime.now(UTC)
+                    revision = f"heartbeat:{int(now.timestamp() * 1_000_000)}"
+                    yield _format_sse(event_id=revision, event_type="heartbeat", payload={"event_id": revision, "revision": revision, "occurred_at": now.isoformat(), "entity_type": "operations", "entity_id": None, "reason_code": "HEARTBEAT", "data": {}})
+                    seconds_since_heartbeat = 0.0
+            await asyncio.sleep(settings.ingestion_events_stream_poll_seconds)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 def _reconcile_summary_from_run(run: IngestionRun) -> dict[str, Any] | None:

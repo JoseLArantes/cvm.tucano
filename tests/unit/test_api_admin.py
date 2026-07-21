@@ -681,6 +681,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_replay_run = payload["paths"]["/ingestion/runs/{run_id}/replay"]["post"]
     rota_identity = payload["paths"]["/ingestion/identity/rebuild"]["post"]
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
+    rota_stream = payload["paths"]["/ingestion/events/stream"]["get"]
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
@@ -708,6 +709,8 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert rota_identity["operationId"] == "rebuildIngestionIdentityAdmin"
     assert rota_quarantine["operationId"] == "listarIngestionQuarentenaAdmin"
     assert rota_replay_quarantine["operationId"] == "replayIngestionQuarentenaAdmin"
+    assert rota_stream["summary"] == "Stream SSE de eventos operacionais de ingestao"
+    assert "Last-Event-ID" in {item["name"] for item in rota_stream["parameters"]}
     assert rota_quarentena_resumo["operationId"] == "resumoIngestionQuarentenaAdmin"
 
     esquema_run = payload["components"]["schemas"]["IngestionRunResumo"]

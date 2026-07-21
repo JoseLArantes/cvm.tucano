@@ -194,6 +194,12 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_PHASE_STALE_AFTER_SECONDS",
     )
+    ingestion_events_stream_poll_seconds: float = Field(
+        default=2.0, gt=0, alias="INGESTION_EVENTS_STREAM_POLL_SECONDS"
+    )
+    ingestion_events_stream_heartbeat_seconds: int = Field(
+        default=15, ge=1, alias="INGESTION_EVENTS_STREAM_HEARTBEAT_SECONDS"
+    )
     ingestion_recovery_sweep_seconds: int = Field(
         default=60,
         ge=1,

@@ -35,6 +35,25 @@ Convencoes deste changelog:
 - trate `ingestion_queued` como aceite assíncrono e consulte work item/run para conclusão;
 - migre listagens extensas para filtros server-side; não carregue histórico completo para filtrar localmente.
 
+## 2026-07-21 - Stream SSE operacional de ingestão
+
+### Superfície afetada
+
+- `GET /ingestion/events/stream`
+
+### Comportamento entregue
+
+- stream SSE autenticado por bearer, sem dependência de frontend específico;
+- suporte a retomada por `Last-Event-ID`, `cursor` ou `since_revision`;
+- eventos compactos para operações, runs, work items, members, filas e materialização, além de heartbeat;
+- o envelope inclui `event_id`, `revision`, `occurred_at`, `entity_type`, `entity_id`, `reason_code` e `data`.
+
+### Orientação para clientes
+
+- use SSE para invalidar ou atualizar pontualmente recursos e consulte REST para detalhes completos;
+- persista o último `id` recebido e envie-o na reconexão;
+- não trate `heartbeat` como alteração operacional.
+
 ## 2026-07-15 - Contadores de efeito da sincronização do Cadastro
 
 ### Superfícies afetadas
