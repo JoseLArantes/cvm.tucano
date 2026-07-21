@@ -29,6 +29,20 @@ Convencoes deste changelog:
 - habilite recovery somente se `recovery.eligible=true`;
 - trate `NO_RECOVERY_SOURCE` como erro de inspeção operacional, não como conclusão de recovery.
 
+## 2026-07-21 - Continuidade explícita para runs aguardando ingestão
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items/{id}`
+
+### Comportamento entregue
+
+- uma run com `state=waiting` e execução correlata em `aguardando_ingestao` passa a expor `next_action=start_ingestion`;
+- o work item expõe `allowed_actions[]` com a rota autoritativa `POST /ingestion/sincronizacoes/{execucao_id}/ingerir` e `reason_code=AWAITING_INGESTION`;
+- clientes não devem iniciar um novo dispatch para esse escopo: ele ainda é trabalho ativo e pode retornar `409 ACTIVE_EQUIVALENT_WORK`.
+
 ## 2026-07-20 - Contratos de controle operacional de ingestão
 
 ### Superfícies afetadas

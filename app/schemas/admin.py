@@ -894,7 +894,7 @@ class IngestionRunResumo(BaseModel):
     next_action: str | None = Field(
         default=None,
         description=(
-            "Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
+            "Proxima acao recomendada para consumidor desacoplado: `wait`, `start_ingestion`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
             "`recover` so aparece quando `recovery.eligible=true`; em falhas sem fonte reaplicavel a acao e `inspect_error`."
         ),
     )

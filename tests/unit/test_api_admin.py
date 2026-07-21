@@ -1419,3 +1419,52 @@ def test_admin_ingerir_fonte_pre_processada_route(
     resposta_ok = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir?force_reimport=true")
     assert resposta_ok.status_code == 200
     assert resposta_ok.json() == {"id_tarefa": f"task-ingest-{exec_uuid}-True", "status": "agendada"}
+
+
+def test_admin_run_waiting_expoe_start_ingestion_com_execucao_correlata(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=execucao_id,
+            tipo_fonte="itr",
+            ano=2022,
+            arquivo="itr_cia_aberta_2022.zip",
+            url="http://exemplo/itr-2022",
+            status="aguardando_ingestao",
+            tipo_execucao="arquivo_zip",
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            tipo_fonte="itr",
+            ano=2022,
+            status="aguardando_ingestao",
+            phase="stage",
+        )
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["state"] == "waiting"
+    assert detalhe.json()["next_action"] == "start_ingestion"
+
+    work_item = client.get("/ingestion/work-items/itr:2022")
+    assert work_item.status_code == 200
+    assert work_item.json()["next_action"] == "start_ingestion"
+    assert work_item.json()["allowed_actions"] == [
+        {
+            "code": "start_ingestion",
+            "operation": "POST",
+            "resource": f"/ingestion/sincronizacoes/{execucao_id}/ingerir",
+            "requires_confirmation": True,
+            "reason_code": "AWAITING_INGESTION",
+            "constraints": {"force_reimport": False},
+        }
+    ]

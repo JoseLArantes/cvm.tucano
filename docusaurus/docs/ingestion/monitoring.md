@@ -266,6 +266,7 @@ invalidação; detalhes autoritativos permanecem nos endpoints REST.
 | Valor | Significado |
 | --- | --- |
 | `wait` | run em andamento ou aguardando continuidade normal |
+| `start_ingestion` | pre-processamento concluido; use a execucao correlata para iniciar a fase 2 |
 | `recover` | run stale ou falha recuperavel que possui fonte de reaplicacao executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |

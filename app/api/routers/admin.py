@@ -435,8 +435,10 @@ def _next_action(
     recovery: dict[str, Any] | None = None,
     rejected_total: int | None = None,
 ) -> str:
-    if state in {"queued", "waiting", "running"}:
+    if state in {"queued", "running"}:
         return "wait"
+    if state == "waiting":
+        return "start_ingestion"
     if state == "stale":
         return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
     if state == "failed":
@@ -752,11 +754,41 @@ def _parse_work_item_id(work_item_id: str) -> tuple[str, int | None]:
     return fonte, int(ano_text) if ano_text else None
 
 
-def _allowed_actions_for_run(run: IngestionRun | None, *, has_quarantine: bool = False) -> list[dict[str, Any]]:
+def _allowed_actions_for_run(
+    db: DbSession,
+    run: IngestionRun | None,
+    *,
+    has_quarantine: bool = False,
+) -> list[dict[str, Any]]:
     if run is None:
         return [{"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "NO_ACTIVE_WORK", "constraints": {}}]
-    fields = _build_run_operational_fields  # keeps the state policy centralized in the existing serializer
-    _ = fields
+    if run.status == "aguardando_ingestao":
+        execucao = (
+            db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+            if run.execucao_sincronizacao_id is not None
+            else None
+        )
+        if execucao is not None and execucao.status == "aguardando_ingestao":
+            return [
+                {
+                    "code": "start_ingestion",
+                    "operation": "POST",
+                    "resource": f"/ingestion/sincronizacoes/{execucao.id}/ingerir",
+                    "requires_confirmation": True,
+                    "reason_code": "AWAITING_INGESTION",
+                    "constraints": {"force_reimport": False},
+                }
+            ]
+        return [
+            {
+                "code": "inspect_error",
+                "operation": "GET",
+                "resource": f"/ingestion/runs/{run.id}",
+                "requires_confirmation": False,
+                "reason_code": "MISSING_AWAITING_EXECUTION",
+                "constraints": {},
+            }
+        ]
     if run.status == "em_execucao":
         return [{"code": "cancel", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/cancel", "requires_confirmation": True, "reason_code": "RUN_ACTIVE", "constraints": {}}]
     if run.status in {"falha", "cancelada"}:
@@ -815,7 +847,7 @@ def _work_item_from_scope(db: DbSession, *, fonte: str, ano: int | None) -> dict
         "run": run_payload,
         "result": None if run is None else {"status": run.status, "quarantine_total": quarantine_total, "has_drift": bool((run.change_summary or {}).get("schema_changed"))},
         "next_action": next_action,
-        "allowed_actions": _allowed_actions_for_run(run, has_quarantine=quarantine_total > 0),
+        "allowed_actions": _allowed_actions_for_run(db, run, has_quarantine=quarantine_total > 0),
     }
 
 
