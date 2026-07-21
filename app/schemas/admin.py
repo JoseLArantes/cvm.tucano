@@ -526,6 +526,17 @@ class ListaIngestionRunMembers(BaseModel):
     paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
 
 
+class IngestionRecovery(BaseModel):
+    eligible: bool = Field(description="Indica se existe uma fonte que o comando de recovery consegue reaplicar.")
+    strategy: str | None = Field(
+        default=None,
+        description="Estrategia executavel atual: `replay_staged_rows` ou `rerun_member_execution`.",
+    )
+    reason_code: str = Field(
+        description="Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE` ou `NO_RECOVERY_SOURCE`."
+    )
+
+
 class IngestionOperationRunPreview(BaseModel):
     id: str = Field(description="ID da run.")
     execucao_sincronizacao_id: str | None = Field(default=None, description="Execucao correlata, quando houver.")
@@ -535,6 +546,7 @@ class IngestionOperationRunPreview(BaseModel):
     phase: str = Field(description="Fase persistida da run.")
     state: str = Field(description="Estado operacional agregado desta run.")
     next_action: str | None = Field(default=None, description="Acao recomendada para consumidor desacoplado.")
+    recovery: IngestionRecovery = Field(description="Elegibilidade e estrategia executavel de recuperacao da run.")
     liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
     blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
 
@@ -883,8 +895,11 @@ class IngestionRunResumo(BaseModel):
         default=None,
         description=(
             "Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
-            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+            "`recover` so aparece quando `recovery.eligible=true`; em falhas sem fonte reaplicavel a acao e `inspect_error`."
         ),
+    )
+    recovery: IngestionRecovery = Field(
+        description="Elegibilidade, estrategia e motivo da avaliacao de recovery. Clientes devem usar este campo antes de oferecer o comando de recovery."
     )
     links: dict[str, str] | None = Field(
         default=None,

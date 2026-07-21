@@ -266,7 +266,7 @@ invalidação; detalhes autoritativos permanecem nos endpoints REST.
 | Valor | Significado |
 | --- | --- |
 | `wait` | run em andamento ou aguardando continuidade normal |
-| `recover` | run stale ou falha recuperavel |
+| `recover` | run stale ou falha recuperavel que possui fonte de reaplicacao executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |
 | `none` | sem acao sugerida |
@@ -277,6 +277,9 @@ O sistema executa recovery sweep sobre fases stale.
 
 Efeitos esperados:
 
-- uma run stale pode continuar em `state=stale` e `next_action=recover`;
-- uma run pode sair de stale para `state=failed`, mas manter `last_error.retryable=true` e `next_action=recover`;
+- uma run stale so usa `next_action=recover` quando `recovery.eligible=true`;
+- uma run pode sair de stale para `state=failed` e manter `last_error.retryable=true` apenas quando houver staging reaplicavel ou execucao de member correlata;
+- sem uma estrategia executavel, `recovery` retorna `{ "eligible": false, "strategy": null, "reason_code": "NO_RECOVERY_SOURCE" }`, `next_action=inspect_error` e a run nao entra em `recoverable_runs`;
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
+
+`POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.

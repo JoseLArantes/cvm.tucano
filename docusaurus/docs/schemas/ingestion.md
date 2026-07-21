@@ -30,6 +30,7 @@ Campos principais:
 | `cancellation` | `object \| null` | ultimo cancelamento |
 | `last_error` | `object \| null` | erro mais recente |
 | `next_action` | `string \| null` | acao recomendada |
+| `recovery` | `object` | elegibilidade e estrategia executavel de recovery |
 | `remote_probe` | `object \| null` | decisao de preflight remoto |
 | `change_summary` | `object \| null` | mudanca estrutural detectada |
 | `quality_summary` | `object \| null` | resumo principal de progresso |
@@ -235,6 +236,14 @@ Campos:
 - `materialization_gate`
 - `active_runs`
 - `recoverable_runs`
+
+Os previews em `active_runs` e `recoverable_runs` incluem `recovery` com:
+
+- `eligible`: se o comando de recovery pode ser executado;
+- `strategy`: `replay_staged_rows` ou `rerun_member_execution`, quando elegivel;
+- `reason_code`: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE` ou `NO_RECOVERY_SOURCE`.
+
+`recoverable_runs` inclui somente runs com `next_action=recover` e `recovery.eligible=true`.
 
 ## Controle de despacho e trabalho
 

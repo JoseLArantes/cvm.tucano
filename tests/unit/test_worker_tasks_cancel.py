@@ -118,13 +118,13 @@ def test_reconciliar_ingestion_stale_task_marca_falha_recuperavel(db_session: Se
     db_session.refresh(run)
     phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
     assert resultado["stale_candidates"] >= 1
-    assert str(run.id) in resultado["failed_retryable_runs"]
+    assert str(run.id) in resultado["failed_non_recoverable_runs"]
     assert execucao.status == "falha"
     assert run.status == "falha"
     assert phase is not None
     assert phase.status == "failed_final"
     assert phase.error_type == "stale_phase"
-    assert phase.error_retryable is True
+    assert phase.error_retryable is False
 
 
 def test_reconciliar_ingestion_stale_task_conclui_cancelamento_propagado(db_session: Session) -> None:

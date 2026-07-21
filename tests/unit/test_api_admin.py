@@ -891,7 +891,7 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert run_payload["liveness"]["is_stale"] is True
     assert run_payload["blocking"]["reason_code"] == "stale"
     assert run_payload["cancellation"]["status"] == "propagated"
-    assert run_payload["next_action"] == "recover"
+    assert run_payload["next_action"] == "inspect_error"
     assert run_payload["links"]["run_phases"] == f"/ingestion/runs/{run_id}/phases"
 
     resposta_run = client.get(f"/ingestion/runs/{run_id}")
@@ -1087,6 +1087,7 @@ def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient
     db_session.add(
         ExecucaoSincronizacao(
             id=execucao_id,
+            parent_execucao_id=uuid.uuid4(),
             tipo_fonte="itr",
             ano=2026,
             arquivo="itr_cia_aberta_2026.zip",
@@ -1133,6 +1134,69 @@ def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient
     assert resposta_run.status_code == 200
     assert resposta_run.json()["state"] == "failed"
     assert resposta_run.json()["next_action"] == "recover"
+    assert resposta_run.json()["recovery"] == {
+        "eligible": True,
+        "strategy": "rerun_member_execution",
+        "reason_code": "MEMBER_EXECUTION_AVAILABLE",
+    }
+
+
+def test_admin_run_without_recovery_source_inspects_error_and_rejects_recover(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    run_id = uuid.uuid4()
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            tipo_fonte="itr",
+            ano=2022,
+            status="falha",
+            phase="promote",
+            message="Recovery sweep marcou a run como falha recuperavel apos heartbeat stale.",
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            phase="promote",
+            status="failed_final",
+            attempt=1,
+            started_at=agora - timedelta(hours=1),
+            heartbeat_at=agora - timedelta(minutes=30),
+            finished_at=agora,
+            error_type="stale_phase",
+            error_message="falha recuperavel",
+            error_retryable=True,
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.api.routers.admin.replay_ingestion_run_service",
+        lambda *args, **kwargs: pytest.fail("replay nao deve ser chamado sem fonte executavel"),
+    )
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "NO_RECOVERY_SOURCE",
+    }
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "NO_RECOVERY_SOURCE"
+    assert recover.json()["detail"]["recovery"]["eligible"] is False
 
 
 def test_admin_run_cancel_member_cancel_e_recover(
@@ -1210,6 +1274,19 @@ def test_admin_run_cancel_member_cancel_e_recover(
             row_count=10,
             schema_status="ok",
             schema_message=None,
+        )
+    )
+    db_session.add(
+        IngestionRow(
+            ingestion_run_id=run_id,
+            ingestion_file_member_id=member_id,
+            arquivo_origem="dfp_cia_aberta_BPA_con_2026.csv",
+            ano_origem=2026,
+            linha_origem=1,
+            raw_data={"CNPJ_CIA": "00000000000191"},
+            raw_hash="row-sha",
+            row_kind="dfp_bpa_con",
+            validation_status="valid",
         )
     )
     db_session.add(

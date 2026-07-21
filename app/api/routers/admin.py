@@ -54,6 +54,7 @@ from app.schemas.admin import (
     IngestionDispatchResponse,
     IngestionOperationRunPreview,
     IngestionOperationsResumo,
+    IngestionRecovery,
     IngestionRunMemberResumo,
     IngestionRunPhaseExecutionResumo,
     IngestionRunResumo,
@@ -91,6 +92,7 @@ from app.services.ingestion.operational import (
     latest_cancellation_request_for_run,
     list_phase_executions,
 )
+from app.services.ingestion.recovery import NoRecoverySourceError, assess_ingestion_run_recovery
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.scheduling import (
@@ -426,14 +428,20 @@ def _serialize_last_error(*, message: str | None, phase_execution: Any, status: 
     return None
 
 
-def _next_action(*, state: str, last_error: dict[str, Any] | None, rejected_total: int | None = None) -> str:
+def _next_action(
+    *,
+    state: str,
+    last_error: dict[str, Any] | None,
+    recovery: dict[str, Any] | None = None,
+    rejected_total: int | None = None,
+) -> str:
     if state in {"queued", "waiting", "running"}:
         return "wait"
     if state == "stale":
-        return "recover"
+        return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
     if state == "failed":
         if last_error is not None and last_error.get("retryable") is True:
-            return "recover"
+            return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
         return "inspect_error"
     if rejected_total and rejected_total > 0:
         return "inspect_quarantine"
@@ -447,6 +455,7 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
     cancellation = _serialize_cancellation(latest_cancellation_request_for_run(db, run_id=run.id))
     last_error = _serialize_last_error(message=run.message, phase_execution=latest_phase, status=run.status)
     quality_summary = run.quality_summary or {}
+    recovery = assess_ingestion_run_recovery(db, run=run).as_dict()
     return {
         "state": state,
         "progress": _build_progress_for_run(run),
@@ -454,9 +463,11 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
         "blocking": _build_blocking_from_state(state=state, status=run.status),
         "cancellation": cancellation,
         "last_error": last_error,
+        "recovery": recovery,
         "next_action": _next_action(
             state=state,
             last_error=last_error,
+            recovery=recovery,
             rejected_total=quality_summary.get("quarantine_total"),
         ),
         "links": {
@@ -495,6 +506,7 @@ def _build_execucao_operational_fields(
         "next_action": _next_action(
             state=state,
             last_error=last_error,
+            recovery={"eligible": True},
             rejected_total=execucao.total_rejeitados,
         ),
         "links": links,
@@ -535,6 +547,7 @@ def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperati
         phase=run.phase,
         state=operational["state"],
         next_action=operational["next_action"],
+        recovery=IngestionRecovery(**operational["recovery"]),
         liveness=operational["liveness"],
         blocking=operational["blocking"],
     )
@@ -2309,7 +2322,10 @@ def listar_ingestion_runs(
         "promocao e reconcile. "
         "Para explicar por que uma run anual reaproveitou ou reprocessou members, use `quality_summary`, `member_snapshot_summary` e `lifecycle_decision`."
     ),
-    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run nao encontrado."},
+    },
     operation_id="detalharIngestionRunAdmin",
 )
 def detalhar_ingestion_run(
@@ -2948,12 +2964,13 @@ def cancelar_ingestion_run_member(
     summary="Recuperar administrativamente uma run de ingestion",
     description=(
         "Executa recuperacao administrativa controlada de uma run marcada como stale ou falhada com erro recuperavel. "
-        "Na implementacao atual, a recuperacao reaplica o replay completo da run a partir dos artefatos retidos."
+        "A operacao so e aceita quando a run possui staging reaplicavel ou uma execucao de member correlata. "
+        "Quando nao houver fonte executavel, responde `409` com `reason_code=NO_RECOVERY_SOURCE`."
     ),
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Run nao encontrado."},
-        409: {"description": "Run nao esta em estado recuperavel."},
+        409: {"description": "Run nao esta em estado recuperavel ou nao possui fonte executavel (`NO_RECOVERY_SOURCE`)."},
     },
     operation_id="recoverIngestionRunAdmin",
 )
@@ -2966,11 +2983,17 @@ def recover_ingestion_run(
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
     operational = _build_run_operational_fields(db, run)
+    recovery = operational["recovery"]
     last_error = operational["last_error"]
     is_retryable_failure = bool(last_error and last_error.get("retryable"))
     if operational["state"] != "stale" and not is_retryable_failure:
         raise HTTPException(status_code=409, detail="Run nao esta em estado recuperavel.")
-    resultado = replay_ingestion_run_service(db, run_id=run_id)
+    if not recovery["eligible"]:
+        raise HTTPException(status_code=409, detail={"reason_code": recovery["reason_code"], "recovery": recovery})
+    try:
+        resultado = replay_ingestion_run_service(db, run_id=run_id)
+    except NoRecoverySourceError:
+        raise HTTPException(status_code=409, detail={"reason_code": "NO_RECOVERY_SOURCE", "recovery": recovery}) from None
     return ReplayResposta(status="sucesso", detalhe=resultado)
 
 
@@ -3252,7 +3275,11 @@ def replay_ingestion_quarentena(
         "A operacao reaplica o fluxo operacional da run, incluindo reavaliacao de members, promote, quarentena e reconcile. "
         "Use este endpoint quando uma correcao de regra, parser ou identidade precisar ser aplicada novamente ao escopo inteiro da run."
     ),
-    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Run nao encontrado."}},
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run nao encontrado."},
+        409: {"description": "Nao existe fonte de recovery executavel para esta run (`NO_RECOVERY_SOURCE`)."},
+    },
     operation_id="replayIngestionRunAdmin",
 )
 def replay_ingestion_run(
@@ -3260,9 +3287,17 @@ def replay_ingestion_run(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
 ) -> ReplayResposta:
-    if db.get(IngestionRun, run_id) is None:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
-    resultado = replay_ingestion_run_service(db, run_id=run_id)
+    try:
+        resultado = replay_ingestion_run_service(db, run_id=run_id)
+    except NoRecoverySourceError:
+        recovery = assess_ingestion_run_recovery(db, run=run)
+        raise HTTPException(
+            status_code=409,
+            detail={"reason_code": recovery.reason_code, "recovery": recovery.as_dict()},
+        ) from None
     return ReplayResposta(status="sucesso", detalhe=resultado)
 
 

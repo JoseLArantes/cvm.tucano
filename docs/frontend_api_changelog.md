@@ -9,6 +9,26 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-21 - Elegibilidade explicita de recovery de ingestion
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Comportamento entregue
+
+- os resumos de run e os previews operacionais passam a expor `recovery: { eligible, strategy, reason_code }`;
+- `next_action=recover` e `recoverable_runs` so aparecem quando existe uma estrategia que o backend consegue executar: `replay_staged_rows` ou `rerun_member_execution`;
+- runs sem fonte executavel retornam `recovery.reason_code=NO_RECOVERY_SOURCE`, usam `next_action=inspect_error` e nao sao anunciadas como recuperaveis;
+- `POST /ingestion/runs/{run_id}/recover` passa a retornar `409` estruturado com `reason_code=NO_RECOVERY_SOURCE` e o objeto `recovery`, em vez de sucesso com `rows: []`.
+
+### Orientação para clientes
+
+- habilite recovery somente se `recovery.eligible=true`;
+- trate `NO_RECOVERY_SOURCE` como erro de inspeção operacional, não como conclusão de recovery.
+
 ## 2026-07-20 - Contratos de controle operacional de ingestão
 
 ### Superfícies afetadas
