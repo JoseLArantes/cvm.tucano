@@ -537,6 +537,23 @@ class IngestionRecovery(BaseModel):
     )
 
 
+class IngestionFailureAcknowledgementRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    reason: str = Field(
+        min_length=3,
+        max_length=2000,
+        description="Conclusao operacional da investigacao que permite retirar a falha da fila de acao.",
+    )
+
+
+class IngestionFailureAcknowledgement(BaseModel):
+    acknowledged_at: BrazilianDateTime = Field(description="Momento em que a falha foi reconhecida.")
+    acknowledged_by: str = Field(description="Ator autenticado que reconheceu a falha.")
+    reason: str = Field(description="Conclusao operacional informada pelo ator.")
+    failure_key: str = Field(description="Identificador da ocorrencia de falha reconhecida.")
+
+
 class IngestionOperationRunPreview(BaseModel):
     id: str = Field(description="ID da run.")
     execucao_sincronizacao_id: str | None = Field(default=None, description="Execucao correlata, quando houver.")
@@ -547,6 +564,10 @@ class IngestionOperationRunPreview(BaseModel):
     state: str = Field(description="Estado operacional agregado desta run.")
     next_action: str | None = Field(default=None, description="Acao recomendada para consumidor desacoplado.")
     recovery: IngestionRecovery = Field(description="Elegibilidade e estrategia executavel de recuperacao da run.")
+    failure_acknowledgement: IngestionFailureAcknowledgement | None = Field(
+        default=None,
+        description="Reconhecimento da falha atual, quando a investigacao ja foi encerrada.",
+    )
     liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
     blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
 
@@ -900,6 +921,10 @@ class IngestionRunResumo(BaseModel):
     )
     recovery: IngestionRecovery = Field(
         description="Elegibilidade, estrategia e motivo da avaliacao de recovery. Clientes devem usar este campo antes de oferecer o comando de recovery."
+    )
+    failure_acknowledgement: IngestionFailureAcknowledgement | None = Field(
+        default=None,
+        description="Reconhecimento auditavel da falha atual. Quando presente, `next_action` deixa de ser `inspect_error`.",
     )
     links: dict[str, str] | None = Field(
         default=None,

@@ -53,6 +53,8 @@ from app.schemas.admin import (
     IngestionDispatchPlanResponse,
     IngestionDispatchRequest,
     IngestionDispatchResponse,
+    IngestionFailureAcknowledgement,
+    IngestionFailureAcknowledgementRequest,
     IngestionOperationRunPreview,
     IngestionOperationsResumo,
     IngestionRecovery,
@@ -441,6 +443,13 @@ def _cleanup_transient_state_for_run(db: DbSession, *, run: IngestionRun) -> dic
 
 
 def _serialize_last_error(*, message: str | None, phase_execution: Any, status: str) -> dict[str, Any] | None:
+    if status == "falha" and message and message.startswith(_RECOVERY_DISPATCH_FAILURE_PREFIX):
+        return {
+            "error_type": "recovery_dispatch_failed",
+            "error_message": message,
+            "retryable": False,
+            "phase": "complete",
+        }
     if phase_execution is not None and (
         phase_execution.error_message is not None or phase_execution.error_type is not None
     ):
@@ -460,6 +469,7 @@ def _next_action(
     state: str,
     last_error: dict[str, Any] | None,
     recovery: dict[str, Any] | None = None,
+    failure_acknowledged: bool = False,
     rejected_total: int | None = None,
 ) -> str:
     if state in {"queued", "running"}:
@@ -471,12 +481,49 @@ def _next_action(
     if state == "stale":
         return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
     if state == "failed":
+        if failure_acknowledged:
+            return "none"
         if last_error is not None and last_error.get("retryable") is True:
             return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
         return "inspect_error"
     if rejected_total and rejected_total > 0:
         return "inspect_quarantine"
     return "none"
+
+
+def _failure_key(run: IngestionRun, latest_phase: IngestionPhaseExecution | None) -> str:
+    if latest_phase is not None and latest_phase.status == "failed_final":
+        return f"phase:{latest_phase.id}"
+    return f"run:{run.status}:{run.updated_at.isoformat()}:{run.message or ''}"
+
+
+def _failure_acknowledgement(
+    db: DbSession,
+    *,
+    run: IngestionRun,
+    latest_phase: IngestionPhaseExecution | None,
+) -> dict[str, Any] | None:
+    if run.status != "falha":
+        return None
+    failure_key = _failure_key(run, latest_phase)
+    audit = db.scalar(
+        select(IngestionOperationAudit)
+        .where(
+            IngestionOperationAudit.scope_type == "run",
+            IngestionOperationAudit.scope_id == str(run.id),
+            IngestionOperationAudit.operation == "acknowledge_failure",
+        )
+        .order_by(IngestionOperationAudit.created_at.desc())
+        .limit(1)
+    )
+    if audit is None or (audit.consequence or {}).get("failure_key") != failure_key:
+        return None
+    return {
+        "acknowledged_at": audit.created_at,
+        "acknowledged_by": audit.requested_by,
+        "reason": audit.reason or "",
+        "failure_key": failure_key,
+    }
 
 
 def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str, Any]:
@@ -492,6 +539,7 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
         state=state,
         error_retryable=bool(last_error and last_error.get("retryable")),
     ).as_dict()
+    failure_acknowledgement = _failure_acknowledgement(db, run=run, latest_phase=latest_phase)
     return {
         "state": state,
         "progress": _build_progress_for_run(run),
@@ -500,10 +548,12 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
         "cancellation": cancellation,
         "last_error": last_error,
         "recovery": recovery,
+        "failure_acknowledgement": failure_acknowledgement,
         "next_action": _next_action(
             state=state,
             last_error=last_error,
             recovery=recovery,
+            failure_acknowledged=failure_acknowledgement is not None,
             rejected_total=quality_summary.get("quarantine_total"),
         ),
         "links": {
@@ -584,6 +634,7 @@ def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperati
         state=operational["state"],
         next_action=operational["next_action"],
         recovery=IngestionRecovery(**operational["recovery"]),
+        failure_acknowledgement=operational["failure_acknowledgement"],
         liveness=operational["liveness"],
         blocking=operational["blocking"],
     )
@@ -774,6 +825,7 @@ _RESPOSTA_TOKEN_INVALIDO: dict[int | str, dict[str, Any]] = {
 }
 
 _STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cancelada"}
+_RECOVERY_DISPATCH_FAILURE_PREFIX = "Falha ao agendar recovery de member:"
 
 
 def _agora() -> datetime:
@@ -852,11 +904,24 @@ def _allowed_actions_for_run(
         ]
     if run.status == "em_execucao":
         return [{"code": "cancel", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/cancel", "requires_confirmation": True, "reason_code": "RUN_ACTIVE", "constraints": {}}]
-    if run.status in {"falha", "cancelada"}:
+    if run.status == "falha":
         if operational["next_action"] == "recover":
             return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": recovery["reason_code"], "constraints": {"strategy": recovery["strategy"]}}]
+        actions = []
+        if operational["failure_acknowledgement"] is None:
+            actions.extend(
+                [
+                    {"code": "inspect_error", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": recovery["reason_code"], "constraints": {}},
+                    {"code": "acknowledge_failure", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/acknowledge-failure", "requires_confirmation": True, "reason_code": "INVESTIGATION_REQUIRED", "constraints": {"reason_required": True}},
+                ]
+            )
+        else:
+            actions.append({"code": "inspect", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": "FAILURE_ACKNOWLEDGED", "constraints": {}})
+        actions.append({"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "TERMINAL_RUN_REDISPATCH_ALLOWED", "constraints": {"fonte": run.tipo_fonte, "ano": run.ano}})
+        return actions
+    if run.status == "cancelada":
         return [
-            {"code": "inspect_error", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": recovery["reason_code"], "constraints": {}},
+            {"code": "inspect", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": "RUN_CANCELLED", "constraints": {}},
             {"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "TERMINAL_RUN_REDISPATCH_ALLOWED", "constraints": {"fonte": run.tipo_fonte, "ano": run.ano}},
         ]
     if has_quarantine:
@@ -2906,6 +2971,7 @@ def listar_eventos_work_item(work_item_id: str, db: DbSession, _: Annotated[None
     if item is None:
         raise HTTPException(status_code=404, detail="Work item nao encontrado.")
     events: list[dict[str, Any]] = []
+    audit_scope_ids = [work_item_id]
     update = item.get("update")
     if update:
         from app.updates.models import PendingUpdate
@@ -2919,12 +2985,13 @@ def listar_eventos_work_item(work_item_id: str, db: DbSession, _: Annotated[None
     if item.get("run"):
         run = db.get(IngestionRun, UUID(item["run"]["id"]))
         if run:
+            audit_scope_ids.append(str(run.id))
             events.append({"code": "run.started", "occurred_at": run.started_at, "payload": {"phase": run.phase, "status": run.status}})
             for phase in db.scalars(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id).order_by(IngestionPhaseExecution.created_at.asc())).all():
                 events.append({"code": f"run.phase.{phase.status}", "occurred_at": phase.updated_at, "payload": {"phase": phase.phase, "attempt": phase.attempt}})
             if run.finished_at:
                 events.append({"code": "run.completed", "occurred_at": run.finished_at, "payload": {"status": run.status}})
-    for audit in db.scalars(select(IngestionOperationAudit).where(IngestionOperationAudit.scope_id == work_item_id).order_by(IngestionOperationAudit.created_at.asc())).all():
+    for audit in db.scalars(select(IngestionOperationAudit).where(IngestionOperationAudit.scope_id.in_(audit_scope_ids)).order_by(IngestionOperationAudit.created_at.asc())).all():
         events.append({"code": f"operation.{audit.operation}", "occurred_at": audit.created_at, "payload": {"reason": audit.reason, "consequence": audit.consequence}})
     events.sort(key=lambda event: event["occurred_at"])
     if after:
@@ -3071,6 +3138,27 @@ def cancelar_ingestion_run_member(
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Run nao encontrado."},
         409: {"description": "Run nao esta em estado recuperavel (`RUN_ALREADY_COMPLETED`, `NON_RETRYABLE_FAILURE` ou `RUN_NOT_RECOVERABLE`) ou nao possui fonte executavel (`NO_RECOVERY_SOURCE`)."},
+        503: {
+            "description": "Falha temporaria de banco ou falha terminal ao publicar a task de recovery no Celery.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "database_pool_exhausted": {
+                            "value": {"detail": {"reason_code": "DATABASE_POOL_EXHAUSTED", "retryable": True}}
+                        },
+                        "recovery_dispatch_failed": {
+                            "value": {
+                                "detail": {
+                                    "reason_code": "RECOVERY_DISPATCH_FAILED",
+                                    "retryable": False,
+                                    "run_id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
+                                }
+                            }
+                        },
+                    }
+                }
+            },
+        },
     },
     operation_id="recoverIngestionRunAdmin",
 )
@@ -3099,6 +3187,7 @@ def recover_ingestion_run(
         execucao.finalizada_em = None
         execucao.mensagem_erro = None
         run.status = "agendada"
+        run.requested_by_task_id = task_id
         run.message = "Recovery de member agendado."
         run.finished_at = None
         db.commit()
@@ -3116,10 +3205,22 @@ def recover_ingestion_run(
             )
         except Exception as exc:
             marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-            run.status = "falha"
-            run.message = f"Falha ao agendar recovery de member: {exc}"
+            update_run_state(
+                run,
+                status="falha",
+                phase="complete",
+                message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
+                finished_at=_agora(),
+            )
             db.commit()
-            raise HTTPException(status_code=503, detail={"reason_code": "RECOVERY_DISPATCH_FAILED"}) from exc
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "reason_code": "RECOVERY_DISPATCH_FAILED",
+                    "retryable": False,
+                    "run_id": str(run.id),
+                },
+            ) from exc
         return ReplayResposta(status="agendada", detalhe={"task_id": task_id, "strategy": recovery["strategy"]})
     try:
         resultado = replay_ingestion_run_service(db, run_id=run_id)
@@ -3128,6 +3229,68 @@ def recover_ingestion_run(
     except SQLAlchemyTimeoutError:
         raise HTTPException(status_code=503, detail={"reason_code": "DATABASE_POOL_EXHAUSTED"}) from None
     return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/runs/{run_id}/acknowledge-failure",
+    response_model=IngestionFailureAcknowledgement,
+    summary="Reconhecer falha investigada de uma run",
+    description=(
+        "Encerra a pendencia operacional `inspect_error` depois da investigacao, sem apagar a run, fases, "
+        "staging, filas ou dados promovidos. Registra ator, motivo e a ocorrencia exata da falha em auditoria "
+        "imutavel. Depois do reconhecimento, a run preserva `state=failed`, passa a `next_action=none` e deixa "
+        "de aparecer em consultas de work items com `next_action=inspect_error`. Uma falha posterior na mesma "
+        "run cria uma nova ocorrencia e exige novo reconhecimento."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Run nao encontrada."},
+        409: {"description": "A run nao possui uma falha terminal aguardando investigacao."},
+    },
+    operation_id="acknowledgeIngestionRunFailureAdmin",
+)
+def acknowledge_ingestion_run_failure(
+    run_id: Annotated[UUID, Path()],
+    payload: IngestionFailureAcknowledgementRequest,
+    db: DbSession,
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+) -> IngestionFailureAcknowledgement:
+    run = db.get(IngestionRun, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run nao encontrada.")
+    operational = _build_run_operational_fields(db, run)
+    existing = operational["failure_acknowledgement"]
+    if existing is not None:
+        return IngestionFailureAcknowledgement(**existing)
+    if operational["state"] != "failed" or operational["next_action"] != "inspect_error":
+        raise HTTPException(
+            status_code=409,
+            detail={"reason_code": "FAILURE_NOT_ACKNOWLEDGEABLE"},
+        )
+
+    latest_phase = get_latest_phase_execution(db, run_id=run.id)
+    failure_key = _failure_key(run, latest_phase)
+    audit = IngestionOperationAudit(
+        scope_type="run",
+        scope_id=str(run.id),
+        operation="acknowledge_failure",
+        requested_by=_actor(auth),
+        reason=payload.reason,
+        consequence={
+            "failure_key": failure_key,
+            "error_type": (operational["last_error"] or {}).get("error_type"),
+            "error_message": (operational["last_error"] or {}).get("error_message"),
+        },
+    )
+    db.add(audit)
+    db.commit()
+    db.refresh(audit)
+    return IngestionFailureAcknowledgement(
+        acknowledged_at=audit.created_at,
+        acknowledged_by=audit.requested_by,
+        reason=audit.reason or "",
+        failure_key=failure_key,
+    )
 
 
 @router.post(

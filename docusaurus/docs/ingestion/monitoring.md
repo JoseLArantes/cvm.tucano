@@ -299,3 +299,28 @@ Efeitos esperados:
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
 
 Quando a estrategia for `rerun_member_execution`, o comando agenda uma task na fila de ingestao e responde `status=agendada`; ele nao executa o processamento pesado dentro da requisicao HTTP.
+
+Se a publicacao dessa task falhar, inclusive por indisponibilidade do result backend Celery, a run e a execucao filha terminam em `falha`. A run recebe uma fase `failed_final` com `error_retryable=false`, passa a expor `recovery.reason_code=NON_RETRYABLE_FAILURE` e deixa imediatamente de `recoverable_runs`. A resposta do comando e `503` com `reason_code=RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`. O backend nao limpa filas nem tenta anunciar um recovery que nao foi publicado. Runs antigas cuja mensagem persistida começa com `Falha ao agendar recovery de member:` recebem a mesma classificação terminal durante a leitura, mesmo que uma fase anterior ainda esteja marcada como retentável.
+
+## Encerramento de falhas investigadas
+
+`POST /ingestion/runs/{run_id}/acknowledge-failure` encerra uma pendencia `inspect_error` depois da investigacao. O payload exige:
+
+```json
+{
+  "reason": "Falha de infraestrutura confirmada; novo dispatch sera criado."
+}
+```
+
+A operacao nao apaga run, fases, staging, quarentena, filas ou dados promovidos. Ela grava uma auditoria imutavel com ator, motivo e uma chave da ocorrencia da falha. A resposta e `failure_acknowledgement` com `acknowledged_at`, `acknowledged_by`, `reason` e `failure_key`.
+
+Depois do reconhecimento:
+
+- a run preserva `state=failed` e `last_error` para historico;
+- `next_action` passa de `inspect_error` para `none`;
+- o work item deixa de aparecer em `GET /ingestion/work-items?next_action=inspect_error`;
+- `allowed_actions[]` troca `inspect_error` e `acknowledge_failure` por `inspect`, mantendo `start_ingestion` para um novo dispatch equivalente;
+- repeticao do comando e idempotente para a mesma ocorrencia;
+- uma falha posterior na mesma run possui outra `failure_key` e exige novo reconhecimento.
+
+Use `acknowledge-failure` para limpar a fila de atencao sem perda de evidencia. `cleanup-transient-state` tem outra finalidade: remove estado transitorio quando uma reconstrução administrativa exigir essa limpeza.

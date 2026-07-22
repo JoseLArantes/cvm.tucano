@@ -9,6 +9,26 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-22 - Encerramento auditável de falhas de ingestão
+
+### Superfícies afetadas
+
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/runs/{run_id}/acknowledge-failure`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items` e `GET /ingestion/work-items/{id}`
+
+### Comportamento entregue
+
+- falha ao publicar recovery no Celery termina a run como falha não retentável e cria fase `failed_final`; a resposta usa `RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`;
+- runs já existentes com a mensagem `Falha ao agendar recovery de member:` também são classificadas como não retentáveis, sem exigir backfill;
+- essa run deixa imediatamente de `recoverable_runs` e passa a `next_action=inspect_error`;
+- falhas aguardando investigação oferecem `allowed_actions[].code=acknowledge_failure`;
+- o novo endpoint recebe `{ "reason": "..." }` e retorna `{ acknowledged_at, acknowledged_by, reason, failure_key }`;
+- depois do reconhecimento, `next_action=none`, a run sai do filtro `next_action=inspect_error` e continua disponível como histórico `state=failed`;
+- nenhum dado, staging ou fila é removido pelo reconhecimento; `start_ingestion` permanece disponível para novo dispatch equivalente.
+
 ## 2026-07-22 - Saturação do pool PostgreSQL
 
 ### Superfícies afetadas

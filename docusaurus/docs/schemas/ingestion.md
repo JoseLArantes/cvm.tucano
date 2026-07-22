@@ -246,6 +246,15 @@ Os previews em `active_runs` e `recoverable_runs` incluem `recovery` com:
 `recoverable_runs` inclui somente runs com `next_action=recover` e `recovery.eligible=true`.
 Runs concluidas ou com falha nao retentavel permanecem terminais, nao entram nessa lista e nao bloqueiam um novo dispatch equivalente. Para falhas terminais, `allowed_actions[]` inclui `start_ingestion` com `reason_code=TERMINAL_RUN_REDISPATCH_ALLOWED`.
 
+Runs falhadas podem incluir `failure_acknowledgement`:
+
+- `acknowledged_at`: momento do reconhecimento;
+- `acknowledged_by`: ator autenticado;
+- `reason`: conclusao da investigacao;
+- `failure_key`: identificador da ocorrencia exata reconhecida.
+
+Antes do reconhecimento, uma falha não retentável expõe as ações `inspect_error`, `acknowledge_failure` e `start_ingestion`. Depois de `POST /ingestion/runs/{run_id}/acknowledge-failure`, `next_action=none` e as ações passam a ser `inspect` e `start_ingestion`. O reconhecimento remove a pendência operacional, mas preserva `state=failed`, `last_error` e toda a trilha histórica.
+
 ## Controle de despacho e trabalho
 
 `IngestionDispatchPlanRequest` recebe `scopes[]`, `strategy` (`direct` ou `two_step`), `force_reimport` e motivo opcional. A resposta inclui `plan_token`, expiração, escopos válidos/inválidos, conflitos e impacto no gate. `IngestionDispatchRequest` deve repetir o plano e usar `Idempotency-Key`.
