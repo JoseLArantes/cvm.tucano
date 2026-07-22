@@ -895,7 +895,7 @@ class IngestionRunResumo(BaseModel):
         default=None,
         description=(
             "Proxima acao recomendada para consumidor desacoplado: `wait`, `start_ingestion`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
-            "`recover` so aparece quando `recovery.eligible=true`; em falhas sem fonte reaplicavel a acao e `inspect_error`."
+            "`recover` aparece quando `recovery.eligible=true`, inclusive para um member aguardando retomada apos falha do ZIP pai; em falhas sem fonte reaplicavel a acao e `inspect_error`."
         ),
     )
     recovery: IngestionRecovery = Field(

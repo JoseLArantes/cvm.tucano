@@ -1468,3 +1468,58 @@ def test_admin_run_waiting_expoe_start_ingestion_com_execucao_correlata(
             "constraints": {"force_reimport": False},
         }
     ]
+
+
+def test_admin_run_waiting_member_of_failed_parent_allows_recover(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_2022.zip",
+                url="http://exemplo/itr-2022",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_DVA_con_2022.csv",
+                url="http://exemplo/itr-2022",
+                status="aguardando_ingestao",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="aguardando_ingestao",
+                phase="stage",
+            ),
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.worker.tasks.sincronizar_member_task.apply_async",
+        lambda **kwargs: SimpleNamespace(id=kwargs["task_id"]),
+    )
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "recover"
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 200
+    assert recover.json()["status"] == "agendada"
+    assert recover.json()["detalhe"]["strategy"] == "rerun_member_execution"

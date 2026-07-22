@@ -33,6 +33,8 @@ class IngestionRun(Base):
             "status",
             "started_at",
         ),
+        Index("ix_ingestion_runs_updated_at", "updated_at"),
+        Index("ix_ingestion_runs_tipo_fonte_ano_updated_at", "tipo_fonte", "ano", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -273,6 +275,7 @@ class IngestionFileMember(Base):
             "member_sha256",
             "ingestion_file_id",
         ),
+        Index("ix_ingestion_file_members_updated_at", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

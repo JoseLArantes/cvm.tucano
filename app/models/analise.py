@@ -24,6 +24,7 @@ from app.db.base import Base
 
 class AnaliseMaterializacaoCampanha(Base):
     __tablename__ = "analise_materializacao_campanhas"
+    __table_args__ = (Index("ix_analise_materializacao_campanhas_updated_at", "updated_at"),)
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="post_ingestion")

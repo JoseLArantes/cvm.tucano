@@ -43,6 +43,24 @@ Convencoes deste changelog:
 - o work item expõe `allowed_actions[]` com a rota autoritativa `POST /ingestion/sincronizacoes/{execucao_id}/ingerir` e `reason_code=AWAITING_INGESTION`;
 - clientes não devem iniciar um novo dispatch para esse escopo: ele ainda é trabalho ativo e pode retornar `409 ACTIVE_EQUIVALENT_WORK`.
 
+### Ajuste de members pendentes de um ZIP pai falho
+
+- quando uma run `waiting` representa um member com execução pai em falha, o backend passa a expor `next_action=recover` e permite `POST /ingestion/runs/{run_id}/recover` para retomar somente esse member;
+- runs `waiting` normais continuam usando `next_action=start_ingestion`.
+- recovery de member agora responde `status=agendada` e executa pela fila Celery, evitando que a requisição HTTP retenha conexões do pool durante o processamento.
+
+## 2026-07-21 - Resiliência do stream SSE sob saturação temporária do banco
+
+### Superfície afetada
+
+- `GET /ingestion/events/stream`
+
+### Comportamento entregue
+
+- quando não houver conexão PostgreSQL disponível no pool, o SSE não encerra a resposta com erro ASGI;
+- o stream envia `heartbeat` com `reason_code=DATABASE_POOL_EXHAUSTED` e `data.retry_after_seconds`, liberando o cliente para manter a conexão até a próxima tentativa;
+- índices incrementais foram adicionados para as leituras por `updated_at` de runs, members e campanhas usadas pelo stream.
+
 ## 2026-07-20 - Contratos de controle operacional de ingestão
 
 ### Superfícies afetadas

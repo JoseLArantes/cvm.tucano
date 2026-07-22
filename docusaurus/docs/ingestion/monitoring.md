@@ -253,6 +253,11 @@ Cada payload inclui `event_id`, `revision`, `occurred_at`, `entity_type`,
 `entity_id`, `reason_code` e `data`. O SSE é uma notificação compacta de
 invalidação; detalhes autoritativos permanecem nos endpoints REST.
 
+Se o pool de banco estiver temporariamente saturado, a conexão não é encerrada:
+o stream envia `heartbeat` com `reason_code=DATABASE_POOL_EXHAUSTED` e
+`data.retry_after_seconds`, depois tenta novamente. Clientes devem manter a
+conexão e usar o polling REST apenas como contingência.
+
 `GET /ingestion/work-items` entrega uma linha por escopo fonte/ano, correlacionando atualização, execução administrativa, run técnica, resultado, próxima transição e `allowed_actions`. A lista aceita filtros por estado, ação, fonte, ano, origem, datas, quarentena e drift, além de paginação e ordenação no servidor. Use `GET /ingestion/work-items/{id}` para detalhe e `GET /ingestion/work-items/{id}/events` para a timeline cursorizada.
 
 `GET /ingestion/scopes` consolida cobertura por fonte e ano sem N+1: baseline, última run, members esperados, atualização pendente, trabalho ativo, quarentena, estado de cobertura e próxima ação. `GET /ingestion/runs/{run_id}/completion-evidence` separa members processados e reutilizados, escrita canônica, reconcile, quarentena, drift e contadores de promoção. `GET /ingestion/quarentena/grupos` agrega a fila por motivo, fonte, ano, arquivo, row kind ou reparabilidade.
@@ -267,7 +272,7 @@ invalidação; detalhes autoritativos permanecem nos endpoints REST.
 | --- | --- |
 | `wait` | run em andamento ou aguardando continuidade normal |
 | `start_ingestion` | pre-processamento concluido; use a execucao correlata para iniciar a fase 2 |
-| `recover` | run stale ou falha recuperavel que possui fonte de reaplicacao executavel |
+| `recover` | run stale, falha recuperavel ou member aguardando retomada apos falha do ZIP pai, desde que possua fonte executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |
 | `none` | sem acao sugerida |
@@ -284,3 +289,5 @@ Efeitos esperados:
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
 
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
+
+Quando a estrategia for `rerun_member_execution`, o comando agenda uma task na fila de ingestao e responde `status=agendada`; ele nao executa o processamento pesado dentro da requisicao HTTP.

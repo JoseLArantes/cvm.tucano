@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api, validar_token_api
 from app.api.deps import DbSession
@@ -156,8 +157,27 @@ async def stream_eventos_ingestao(
         seconds_since_heartbeat = 0.0
         while True:
             db = SessionLocal()
+            pool_exhausted = False
             try:
                 events = list_operational_events(db, after_revision=after_revision, scope=scope)
+            except SQLAlchemyTimeoutError:
+                pool_exhausted = True
+                now = datetime.now(UTC)
+                revision = f"heartbeat:{int(now.timestamp() * 1_000_000)}"
+                yield _format_sse(
+                    event_id=revision,
+                    event_type="heartbeat",
+                    payload={
+                        "event_id": revision,
+                        "revision": revision,
+                        "occurred_at": now.isoformat(),
+                        "entity_type": "operations",
+                        "entity_id": None,
+                        "reason_code": "DATABASE_POOL_EXHAUSTED",
+                        "data": {"retry_after_seconds": settings.ingestion_events_stream_poll_seconds},
+                    },
+                )
+                seconds_since_heartbeat = 0.0
             except ValueError as exc:
                 yield _format_sse(
                     event_id=after_revision or "invalid-cursor",
@@ -167,6 +187,9 @@ async def stream_eventos_ingestao(
                 return
             finally:
                 db.close()
+            if pool_exhausted:
+                await asyncio.sleep(settings.ingestion_events_stream_poll_seconds)
+                continue
             if events:
                 for event in events:
                     after_revision = event["revision"]
@@ -438,6 +461,8 @@ def _next_action(
     if state in {"queued", "running"}:
         return "wait"
     if state == "waiting":
+        if recovery is not None and recovery.get("strategy") == "rerun_member_execution":
+            return "recover"
         return "start_ingestion"
     if state == "stale":
         return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
@@ -763,6 +788,18 @@ def _allowed_actions_for_run(
     if run is None:
         return [{"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "NO_ACTIVE_WORK", "constraints": {}}]
     if run.status == "aguardando_ingestao":
+        recovery = assess_ingestion_run_recovery(db, run=run)
+        if recovery.eligible and recovery.strategy == "rerun_member_execution":
+            return [
+                {
+                    "code": "recover",
+                    "operation": "POST",
+                    "resource": f"/ingestion/runs/{run.id}/recover",
+                    "requires_confirmation": True,
+                    "reason_code": recovery.reason_code,
+                    "constraints": {"strategy": recovery.strategy},
+                }
+            ]
         execucao = (
             db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
             if run.execucao_sincronizacao_id is not None
@@ -3018,14 +3055,56 @@ def recover_ingestion_run(
     recovery = operational["recovery"]
     last_error = operational["last_error"]
     is_retryable_failure = bool(last_error and last_error.get("retryable"))
-    if operational["state"] != "stale" and not is_retryable_failure:
+    is_waiting_member_recovery = (
+        operational["state"] == "waiting"
+        and recovery["eligible"]
+        and recovery["strategy"] == "rerun_member_execution"
+    )
+    if operational["state"] != "stale" and not is_retryable_failure and not is_waiting_member_recovery:
         raise HTTPException(status_code=409, detail="Run nao esta em estado recuperavel.")
     if not recovery["eligible"]:
         raise HTTPException(status_code=409, detail={"reason_code": recovery["reason_code"], "recovery": recovery})
+    if recovery["strategy"] == "rerun_member_execution":
+        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+        parent_id = None if execucao is None else execucao.parent_execucao_id
+        if execucao is None or parent_id is None:
+            raise HTTPException(status_code=409, detail={"reason_code": "NO_RECOVERY_SOURCE", "recovery": recovery})
+        from app.worker.tasks import sincronizar_member_task
+
+        task_id = novo_task_id()
+        execucao.id_tarefa = task_id
+        execucao.status = "agendada"
+        execucao.finalizada_em = None
+        execucao.mensagem_erro = None
+        run.status = "agendada"
+        run.message = "Recovery de member agendado."
+        run.finished_at = None
+        db.commit()
+        try:
+            sincronizar_member_task.apply_async(
+                kwargs={
+                    "tipo_fonte": execucao.tipo_fonte,
+                    "ano": execucao.ano or 0,
+                    "member_name": execucao.arquivo,
+                    "parent_execucao_id": str(parent_id),
+                    "child_execucao_id": str(execucao.id),
+                    "force_reimport": True,
+                },
+                task_id=task_id,
+            )
+        except Exception as exc:
+            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
+            run.status = "falha"
+            run.message = f"Falha ao agendar recovery de member: {exc}"
+            db.commit()
+            raise HTTPException(status_code=503, detail={"reason_code": "RECOVERY_DISPATCH_FAILED"}) from exc
+        return ReplayResposta(status="agendada", detalhe={"task_id": task_id, "strategy": recovery["strategy"]})
     try:
         resultado = replay_ingestion_run_service(db, run_id=run_id)
     except NoRecoverySourceError:
         raise HTTPException(status_code=409, detail={"reason_code": "NO_RECOVERY_SOURCE", "recovery": recovery}) from None
+    except SQLAlchemyTimeoutError:
+        raise HTTPException(status_code=503, detail={"reason_code": "DATABASE_POOL_EXHAUSTED"}) from None
     return ReplayResposta(status="sucesso", detalhe=resultado)
 
 
