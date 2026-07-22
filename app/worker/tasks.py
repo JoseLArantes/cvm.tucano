@@ -1740,7 +1740,10 @@ def sincronizar_member_internal(
         from app.services.ingestion.summary import build_contadores_quality_summary
 
         quality_summary = build_contadores_quality_summary(contadores)
-        status_execucao, mensagem_status = enforce_quality_gate(quality_summary=quality_summary)
+        status_execucao, mensagem_status = enforce_quality_gate(
+            quality_summary=quality_summary,
+            require_rows=True,
+        )
 
         execucao = db.get(ExecucaoSincronizacao, execucao.id)
         run = db.get(IngestionRun, run.id)

@@ -245,6 +245,7 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
         captured["reconcile_required"] = kwargs["reconcile_required"]
         contadores = kwargs["contadores"]
         contadores["lidas"] = 1
+        contadores["inalterados"] = 1
 
     monkeypatch.setattr(
         "app.services.ingestion.financeiro._process_financeiro_member",
@@ -355,6 +356,7 @@ def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
         captured["header_map"] = kwargs["header_map"]
         contadores = kwargs["contadores"]
         contadores["lidas"] = 1
+        contadores["inalterados"] = 1
 
     monkeypatch.setattr(
         "app.services.ingestion.financeiro._process_financeiro_member",

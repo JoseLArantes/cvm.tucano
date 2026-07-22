@@ -93,7 +93,11 @@ from app.services.ingestion.operational import (
     latest_cancellation_request_for_run,
     list_phase_executions,
 )
-from app.services.ingestion.recovery import NoRecoverySourceError, assess_ingestion_run_recovery
+from app.services.ingestion.recovery import (
+    NoRecoverySourceError,
+    assess_ingestion_run_recovery,
+    assess_ingestion_run_recovery_eligibility,
+)
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.scheduling import (
@@ -482,7 +486,12 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
     cancellation = _serialize_cancellation(latest_cancellation_request_for_run(db, run_id=run.id))
     last_error = _serialize_last_error(message=run.message, phase_execution=latest_phase, status=run.status)
     quality_summary = run.quality_summary or {}
-    recovery = assess_ingestion_run_recovery(db, run=run).as_dict()
+    recovery = assess_ingestion_run_recovery_eligibility(
+        db,
+        run=run,
+        state=state,
+        error_retryable=bool(last_error and last_error.get("retryable")),
+    ).as_dict()
     return {
         "state": state,
         "progress": _build_progress_for_run(run),
@@ -787,17 +796,18 @@ def _allowed_actions_for_run(
 ) -> list[dict[str, Any]]:
     if run is None:
         return [{"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "NO_ACTIVE_WORK", "constraints": {}}]
+    operational = _build_run_operational_fields(db, run)
+    recovery = operational["recovery"]
     if run.status == "aguardando_ingestao":
-        recovery = assess_ingestion_run_recovery(db, run=run)
-        if recovery.eligible and recovery.strategy == "rerun_member_execution":
+        if recovery["eligible"] and recovery["strategy"] == "rerun_member_execution":
             return [
                 {
                     "code": "recover",
                     "operation": "POST",
                     "resource": f"/ingestion/runs/{run.id}/recover",
                     "requires_confirmation": True,
-                    "reason_code": recovery.reason_code,
-                    "constraints": {"strategy": recovery.strategy},
+                    "reason_code": recovery["reason_code"],
+                    "constraints": {"strategy": recovery["strategy"]},
                 }
             ]
         execucao = (
@@ -829,7 +839,12 @@ def _allowed_actions_for_run(
     if run.status == "em_execucao":
         return [{"code": "cancel", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/cancel", "requires_confirmation": True, "reason_code": "RUN_ACTIVE", "constraints": {}}]
     if run.status in {"falha", "cancelada"}:
-        return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": "RETRYABLE_FAILURE", "constraints": {}}]
+        if operational["next_action"] == "recover":
+            return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": recovery["reason_code"], "constraints": {"strategy": recovery["strategy"]}}]
+        return [
+            {"code": "inspect_error", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": recovery["reason_code"], "constraints": {}},
+            {"code": "start_ingestion", "operation": "POST", "resource": "/ingestion/dispatch", "requires_confirmation": True, "reason_code": "TERMINAL_RUN_REDISPATCH_ALLOWED", "constraints": {"fonte": run.tipo_fonte, "ano": run.ano}},
+        ]
     if has_quarantine:
         return [{"code": "open_quarantine", "operation": "GET", "resource": f"/ingestion/quarentena?ingestion_run_id={run.id}", "requires_confirmation": False, "reason_code": "QUARANTINE_PRESENT", "constraints": {}}]
     return [{"code": "inspect", "operation": "GET", "resource": f"/ingestion/runs/{run.id}", "requires_confirmation": False, "reason_code": "COMPLETED", "constraints": {}}]
@@ -3034,12 +3049,14 @@ def cancelar_ingestion_run_member(
     description=(
         "Executa recuperacao administrativa controlada de uma run marcada como stale ou falhada com erro recuperavel. "
         "A operacao so e aceita quando a run possui staging reaplicavel ou uma execucao de member correlata. "
-        "Quando nao houver fonte executavel, responde `409` com `reason_code=NO_RECOVERY_SOURCE`."
+        "Quando nao houver fonte executavel, responde `409` com `reason_code=NO_RECOVERY_SOURCE`. "
+        "Runs concluidas ou com falha nao retentavel tambem respondem `409`, respectivamente com "
+        "`RUN_ALREADY_COMPLETED` ou `NON_RETRYABLE_FAILURE`, e podem ser sucedidas por novo dispatch equivalente."
     ),
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Run nao encontrado."},
-        409: {"description": "Run nao esta em estado recuperavel ou nao possui fonte executavel (`NO_RECOVERY_SOURCE`)."},
+        409: {"description": "Run nao esta em estado recuperavel (`RUN_ALREADY_COMPLETED`, `NON_RETRYABLE_FAILURE` ou `RUN_NOT_RECOVERABLE`) ou nao possui fonte executavel (`NO_RECOVERY_SOURCE`)."},
     },
     operation_id="recoverIngestionRunAdmin",
 )
@@ -3053,16 +3070,7 @@ def recover_ingestion_run(
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
     operational = _build_run_operational_fields(db, run)
     recovery = operational["recovery"]
-    last_error = operational["last_error"]
-    is_retryable_failure = bool(last_error and last_error.get("retryable"))
-    is_waiting_member_recovery = (
-        operational["state"] == "waiting"
-        and recovery["eligible"]
-        and recovery["strategy"] == "rerun_member_execution"
-    )
-    if operational["state"] != "stale" and not is_retryable_failure and not is_waiting_member_recovery:
-        raise HTTPException(status_code=409, detail="Run nao esta em estado recuperavel.")
-    if not recovery["eligible"]:
+    if operational["next_action"] != "recover" or not recovery["eligible"]:
         raise HTTPException(status_code=409, detail={"reason_code": recovery["reason_code"], "recovery": recovery})
     if recovery["strategy"] == "rerun_member_execution":
         execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)

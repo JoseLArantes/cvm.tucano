@@ -1523,3 +1523,154 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
     assert recover.status_code == 200
     assert recover.json()["status"] == "agendada"
     assert recover.json()["detalhe"]["strategy"] == "rerun_member_execution"
+
+
+def test_admin_run_terminal_com_execucao_filha_nao_permanece_recuperavel(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    agora = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_2023.zip",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_DVA_con_2023.csv",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                mensagem_erro="NO_ROWS_PROCESSED",
+                finalizada_em=agora,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2023,
+                status="falha",
+                phase="complete",
+                message="NO_ROWS_PROCESSED",
+                finished_at=agora,
+            ),
+            IngestionPhaseExecution(
+                ingestion_run_id=run_id,
+                execucao_sincronizacao_id=child_id,
+                phase="promote",
+                status="failed_final",
+                attempt=1,
+                started_at=agora,
+                heartbeat_at=agora,
+                finished_at=agora,
+                error_type="empty_member",
+                error_message="NO_ROWS_PROCESSED",
+                error_retryable=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["state"] == "failed"
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "NON_RETRYABLE_FAILURE",
+    }
+
+    work_item = client.get("/ingestion/work-items/itr:2023")
+    assert work_item.status_code == 200
+    assert work_item.json()["allowed_actions"][0]["code"] == "inspect_error"
+    assert work_item.json()["allowed_actions"][0]["reason_code"] == "NON_RETRYABLE_FAILURE"
+    assert work_item.json()["allowed_actions"][1] == {
+        "code": "start_ingestion",
+        "operation": "POST",
+        "resource": "/ingestion/dispatch",
+        "requires_confirmation": True,
+        "reason_code": "TERMINAL_RUN_REDISPATCH_ALLOWED",
+        "constraints": {"fonte": "itr", "ano": 2023},
+    }
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "NON_RETRYABLE_FAILURE"
+
+    plan = client.post(
+        "/ingestion/dispatch/plan",
+        json={"scopes": [{"fonte": "itr", "ano": 2023}], "strategy": "direct", "force_reimport": False},
+    )
+    assert plan.status_code == 200
+    assert plan.json()["conflicts"] == []
+
+
+def test_admin_run_concluida_com_execucao_filha_nao_expoe_recovery(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_2024.zip",
+                url="http://exemplo/itr-2024",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DVA_con_2024.csv",
+                url="http://exemplo/itr-2024",
+                status="sucesso",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="sucesso",
+                phase="complete",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "none"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "RUN_ALREADY_COMPLETED",
+    }
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "RUN_ALREADY_COMPLETED"

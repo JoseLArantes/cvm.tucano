@@ -286,6 +286,9 @@ Efeitos esperados:
 - uma run stale so usa `next_action=recover` quando `recovery.eligible=true`;
 - uma run pode sair de stale para `state=failed` e manter `last_error.retryable=true` apenas quando houver staging reaplicavel ou execucao de member correlata;
 - sem uma estrategia executavel, `recovery` retorna `{ "eligible": false, "strategy": null, "reason_code": "NO_RECOVERY_SOURCE" }`, `next_action=inspect_error` e a run nao entra em `recoverable_runs`;
+- `recovery.eligible` representa autorizacao no estado atual, nao apenas existencia historica de uma fonte: runs concluidas usam `RUN_ALREADY_COMPLETED` e falhas nao retentaveis usam `NON_RETRYABLE_FAILURE`;
+- processamento de member que nao le nenhuma linha termina como `falha` com mensagem `NO_ROWS_PROCESSED`, em vez de sucesso vazio;
+- runs terminais nao bloqueiam novo dispatch do mesmo escopo, e o work item oferece `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, sem exigir limpeza de filas ou staging para liberar a nova execucao;
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
 
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.

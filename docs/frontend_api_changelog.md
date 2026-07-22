@@ -49,6 +49,24 @@ Convencoes deste changelog:
 - runs `waiting` normais continuam usando `next_action=start_ingestion`.
 - recovery de member agora responde `status=agendada` e executa pela fila Celery, evitando que a requisição HTTP retenha conexões do pool durante o processamento.
 
+## 2026-07-22 - Recovery terminal e novo dispatch equivalente
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items/{id}`
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/dispatch/plan` e `POST /ingestion/dispatch`
+
+### Comportamento entregue
+
+- a existência histórica de uma execução filha ou de staging não mantém uma run terminal recuperável;
+- runs concluídas expõem `recovery.eligible=false` com `reason_code=RUN_ALREADY_COMPLETED`;
+- falhas não retentáveis expõem `recovery.eligible=false`, `reason_code=NON_RETRYABLE_FAILURE` e `next_action=inspect_error`;
+- um member que termina sem processar linhas passa a finalizar com `status=falha` e mensagem `NO_ROWS_PROCESSED`, em vez de sucesso vazio;
+- runs terminais deixam `recoverable_runs`; work items com falha terminal expõem `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, permitindo novo dispatch equivalente sem limpeza de filas.
+
 ## 2026-07-21 - Resiliência do stream SSE sob saturação temporária do banco
 
 ### Superfície afetada

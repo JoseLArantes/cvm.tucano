@@ -239,11 +239,12 @@ Campos:
 
 Os previews em `active_runs` e `recoverable_runs` incluem `recovery` com:
 
-- `eligible`: se o comando de recovery pode ser executado;
+- `eligible`: se o estado atual autoriza recovery e existe uma fonte executavel;
 - `strategy`: `replay_staged_rows` ou `rerun_member_execution`, quando elegivel;
-- `reason_code`: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE` ou `NO_RECOVERY_SOURCE`.
+- `reason_code`: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, `RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`.
 
 `recoverable_runs` inclui somente runs com `next_action=recover` e `recovery.eligible=true`.
+Runs concluidas ou com falha nao retentavel permanecem terminais, nao entram nessa lista e nao bloqueiam um novo dispatch equivalente. Para falhas terminais, `allowed_actions[]` inclui `start_ingestion` com `reason_code=TERMINAL_RUN_REDISPATCH_ALLOWED`.
 
 ## Controle de despacho e trabalho
 

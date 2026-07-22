@@ -527,13 +527,13 @@ class ListaIngestionRunMembers(BaseModel):
 
 
 class IngestionRecovery(BaseModel):
-    eligible: bool = Field(description="Indica se existe uma fonte que o comando de recovery consegue reaplicar.")
+    eligible: bool = Field(description="Indica se o estado atual da run autoriza recovery e existe uma fonte executavel.")
     strategy: str | None = Field(
         default=None,
         description="Estrategia executavel atual: `replay_staged_rows` ou `rerun_member_execution`.",
     )
     reason_code: str = Field(
-        description="Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE` ou `NO_RECOVERY_SOURCE`."
+        description="Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, `RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`."
     )
 
 
@@ -574,7 +574,7 @@ class IngestionOperationsResumo(BaseModel):
     action_counts: dict[str, int] = Field(default_factory=dict, description="Contagem global por proxima acao de negocio.")
     waiting_for_operator_count: int = Field(default=0, description="Runs aguardando decisao ou continuidade explicita.")
     oldest_action_required_at: BrazilianDateTime | None = Field(default=None, description="Timestamp do item que espera acao ha mais tempo.")
-    queue_health: list[dict[str, Any]] = Field(default_factory=list, description="Capacidade e backlog observados por fila.")
+    queue_health: list[dict[str, Any]] = Field(default_factory=list, description="Capacidade e backlog observados por fila Celery.")
     active_runs_total: int = Field(default=0, description="Total real de runs ativas, antes do preview.")
     recoverable_runs_total: int = Field(default=0, description="Total real de runs recuperaveis, antes do preview.")
     previews_truncated: bool = Field(default=False, description="Indica que algum preview foi truncado.")

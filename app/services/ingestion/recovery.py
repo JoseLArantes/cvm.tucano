@@ -57,3 +57,49 @@ def assess_ingestion_run_recovery(db: Session, *, run: IngestionRun) -> Ingestio
         strategy=None,
         reason_code="NO_RECOVERY_SOURCE",
     )
+
+
+def assess_ingestion_run_recovery_eligibility(
+    db: Session,
+    *,
+    run: IngestionRun,
+    state: str,
+    error_retryable: bool,
+) -> IngestionRecoveryAssessment:
+    """Combina a fonte disponivel com o estado operacional atual da run."""
+
+    source = assess_ingestion_run_recovery(db, run=run)
+    if state == "waiting" and source.strategy == "rerun_member_execution":
+        execucao = (
+            db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+            if run.execucao_sincronizacao_id is not None
+            else None
+        )
+        parent = (
+            db.get(ExecucaoSincronizacao, execucao.parent_execucao_id)
+            if execucao is not None and execucao.parent_execucao_id is not None
+            else None
+        )
+        if parent is not None and parent.status == "falha":
+            return source
+    if state == "stale":
+        return source
+    if state == "failed" and error_retryable:
+        return source
+    if state == "failed":
+        return IngestionRecoveryAssessment(
+            eligible=False,
+            strategy=None,
+            reason_code="NON_RETRYABLE_FAILURE",
+        )
+    if state in {"succeeded", "skipped"}:
+        return IngestionRecoveryAssessment(
+            eligible=False,
+            strategy=None,
+            reason_code="RUN_ALREADY_COMPLETED",
+        )
+    return IngestionRecoveryAssessment(
+        eligible=False,
+        strategy=None,
+        reason_code="RUN_NOT_RECOVERABLE",
+    )
