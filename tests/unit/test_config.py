@@ -1,6 +1,12 @@
 from app.core.config import Settings
 
 
+def test_pool_padrao_suporta_concorrencia_http_operacional() -> None:
+    assert Settings.model_fields["database_pool_size"].default == 5
+    assert Settings.model_fields["database_max_overflow"].default == 3
+    assert Settings.model_fields["database_pool_timeout_seconds"].default == 10
+
+
 def test_normaliza_database_url_postgresql_para_psycopg() -> None:
     settings = Settings(DATABASE_URL="postgresql://usuario:senha@db:5432/cvm")
     assert settings.database_url == "postgresql+psycopg://usuario:senha@db:5432/cvm"

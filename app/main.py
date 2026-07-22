@@ -5,6 +5,7 @@ from typing import Any, cast
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.api.auth import validar_token_api
 from app.api.routers import protected_router, public_router
@@ -178,6 +179,20 @@ def configurar_cors(api_app: FastAPI, app_settings: Settings) -> None:
 
 configurar_cors(app, settings)
 app.add_middleware(ObservabilidadeMiddleware, habilitar_metricas=settings.enable_prometheus_metrics)
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def responder_pool_banco_saturado(_: Request, __: SQLAlchemyTimeoutError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "reason_code": "DATABASE_POOL_EXHAUSTED",
+                "retryable": True,
+            }
+        },
+        headers={"Retry-After": "1"},
+    )
 
 
 @app.middleware("http")

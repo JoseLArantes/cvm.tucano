@@ -706,6 +706,10 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert rota_replay_run["summary"] == "Reprocessar Run de Ingestion"
     assert rota_identity["summary"] == "Reconstruir Identidade de Ingestion"
     assert rota_runs["operationId"] == "listarIngestionRunsAdmin"
+    assert rota_runs["responses"]["503"]["content"]["application/json"]["example"]["detail"] == {
+        "reason_code": "DATABASE_POOL_EXHAUSTED",
+        "retryable": True,
+    }
     assert rota_identity["operationId"] == "rebuildIngestionIdentityAdmin"
     assert rota_quarantine["operationId"] == "listarIngestionQuarentenaAdmin"
     assert rota_replay_quarantine["operationId"] == "replayIngestionQuarentenaAdmin"

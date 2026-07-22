@@ -1,4 +1,6 @@
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from app.api.auth import gerar_hash_senha
@@ -93,6 +95,32 @@ def test_me_retorna_usuario_logado(client: TestClient, db_session: Session) -> N
 
     assert resposta.status_code == 200
     assert resposta.json()["id"] == str(usuario.id)
+    assert db_session.in_transaction() is False
+
+
+def test_saturacao_do_pool_retorna_503_retryable(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _criar_usuario(db_session)
+    login = client.post("/auth/login", json={"username": "frontend-teste", "password": "senha-teste"})
+    client.headers["Authorization"] = f"Bearer {login.json()['access_token']}"
+
+    def _pool_saturado(*args: object, **kwargs: object) -> object:
+        raise SQLAlchemyTimeoutError("pool exhausted")
+
+    monkeypatch.setattr(Session, "get", _pool_saturado)
+    resposta = client.get("/auth/me")
+
+    assert resposta.status_code == 503
+    assert resposta.headers["Retry-After"] == "1"
+    assert resposta.json() == {
+        "detail": {
+            "reason_code": "DATABASE_POOL_EXHAUSTED",
+            "retryable": True,
+        }
+    }
 
 
 def test_me_retorna_permissao_operacional_materializacao(client: TestClient, db_session: Session) -> None:

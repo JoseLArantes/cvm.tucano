@@ -94,9 +94,9 @@ Resposta esperada:
 |----------|-----------|---------|
 | `DATABASE_URL` | URL de conexão PostgreSQL | `postgresql://user:pass@host:5432/db` |
 | `REDIS_URL` | URL de conexão Redis | `redis://host:6379/0` |
-| `DB_POOL_SIZE` | Conexões persistentes por processo da aplicação | `2` |
-| `DB_MAX_OVERFLOW` | Conexões adicionais temporárias por processo | `1` |
-| `DB_POOL_TIMEOUT_SECONDS` | Espera máxima por uma conexão livre | `5` |
+| `DB_POOL_SIZE` | Conexões persistentes por processo da aplicação | `5` |
+| `DB_MAX_OVERFLOW` | Conexões adicionais temporárias por processo | `3` |
+| `DB_POOL_TIMEOUT_SECONDS` | Espera máxima por uma conexão livre | `10` |
 | `DB_POOL_RECYCLE_SECONDS` | Idade máxima antes de reciclar uma conexão | `1800` |
 | `LOG_LEVEL` | Nível de log | `INFO`, `DEBUG`, `WARNING` |
 | `AMBIENTE` | Ambiente de execução | `development`, `production` |
@@ -105,6 +105,8 @@ Resposta esperada:
 `BACKEND_CORS_ORIGINS` deve conter apenas origins completas no formato `scheme://host[:port]`, sem path. Quando vazio, o middleware CORS não é habilitado.
 
 O pool é criado por processo. Dimensione o total como a soma de `(DB_POOL_SIZE + DB_MAX_OVERFLOW)` para cada processo da API, ingestão, materialização e demais consumidores SQLAlchemy. Em bancos pequenos, mantenha esse orçamento abaixo de `max_connections` com margem para Alembic e operação administrativa.
+
+A autenticação por token de usuário libera sua transação imediatamente após validar o usuário. Assim, streams SSE e esperas por inspeção Celery não retêm uma conexão PostgreSQL apenas por permanecerem abertos. Se o orçamento ainda for excedido, a API responde `503` com `reason_code=DATABASE_POOL_EXHAUSTED`, `retryable=true` e `Retry-After: 1`, em vez de `500`.
 
 ### Entrega da Análise Fundamentalista
 

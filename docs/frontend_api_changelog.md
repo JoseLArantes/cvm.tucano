@@ -9,6 +9,19 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-22 - Saturação do pool PostgreSQL
+
+### Superfícies afetadas
+
+- endpoints REST autenticados;
+- `GET /ingestion/events/stream`.
+
+### Comportamento entregue
+
+- autenticação por token de usuário libera a conexão PostgreSQL imediatamente após validar o usuário, inclusive para conexões SSE longas;
+- o orçamento padrão por processo passa a ser `DB_POOL_SIZE=5`, `DB_MAX_OVERFLOW=3` e `DB_POOL_TIMEOUT_SECONDS=10`;
+- saturação residual retorna `503`, `detail.reason_code=DATABASE_POOL_EXHAUSTED`, `detail.retryable=true` e `Retry-After: 1`, em vez de `500` com stack trace.
+
 ## 2026-07-21 - Elegibilidade explicita de recovery de ingestion
 
 ### Superfícies afetadas

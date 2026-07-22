@@ -25,9 +25,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     database_url: str = Field(default="postgresql+psycopg://cvm:cvm@localhost:5432/cvm", alias="DATABASE_URL")
-    database_pool_size: int = Field(default=2, ge=1, alias="DB_POOL_SIZE")
-    database_max_overflow: int = Field(default=1, ge=0, alias="DB_MAX_OVERFLOW")
-    database_pool_timeout_seconds: float = Field(default=5.0, gt=0, alias="DB_POOL_TIMEOUT_SECONDS")
+    database_pool_size: int = Field(default=5, ge=1, alias="DB_POOL_SIZE")
+    database_max_overflow: int = Field(default=3, ge=0, alias="DB_MAX_OVERFLOW")
+    database_pool_timeout_seconds: float = Field(default=10.0, gt=0, alias="DB_POOL_TIMEOUT_SECONDS")
     database_pool_recycle_seconds: int = Field(default=1800, ge=0, alias="DB_POOL_RECYCLE_SECONDS")
     redis_url: str = Field(default="redis://localhost:6389/0", alias="REDIS_URL")
     cvm_base_url: str = Field(default="https://dados.cvm.gov.br/dados", alias="CVM_BASE_URL")

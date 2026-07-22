@@ -258,6 +258,11 @@ o stream envia `heartbeat` com `reason_code=DATABASE_POOL_EXHAUSTED` e
 `data.retry_after_seconds`, depois tenta novamente. Clientes devem manter a
 conexão e usar o polling REST apenas como contingência.
 
+Nas chamadas REST, saturação residual do pool retorna `503` com
+`detail.reason_code=DATABASE_POOL_EXHAUSTED`, `detail.retryable=true` e
+`Retry-After: 1`. A autenticação não mantém uma conexão reservada durante a
+vida do SSE nem durante operações externas como a inspeção Celery.
+
 `GET /ingestion/work-items` entrega uma linha por escopo fonte/ano, correlacionando atualização, execução administrativa, run técnica, resultado, próxima transição e `allowed_actions`. A lista aceita filtros por estado, ação, fonte, ano, origem, datas, quarentena e drift, além de paginação e ordenação no servidor. Use `GET /ingestion/work-items/{id}` para detalhe e `GET /ingestion/work-items/{id}/events` para a timeline cursorizada.
 
 `GET /ingestion/scopes` consolida cobertura por fonte e ano sem N+1: baseline, última run, members esperados, atualização pendente, trabalho ativo, quarentena, estado de cobertura e próxima ação. `GET /ingestion/runs/{run_id}/completion-evidence` separa members processados e reutilizados, escrita canônica, reconcile, quarentena, drift e contadores de promoção. `GET /ingestion/quarentena/grupos` agrega a fila por motivo, fonte, ano, arquivo, row kind ou reparabilidade.

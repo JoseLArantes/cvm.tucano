@@ -756,7 +756,21 @@ _RESPOSTA_TOKEN_INVALIDO: dict[int | str, dict[str, Any]] = {
     401: {
         "description": "Token de acesso ausente ou invalido.",
         "content": {"application/json": {"example": {"detail": "Token de acesso invalido."}}},
-    }
+    },
+    503: {
+        "description": "Pool PostgreSQL temporariamente saturado; a requisicao pode ser repetida.",
+        "headers": {"Retry-After": {"schema": {"type": "integer"}}},
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": {
+                        "reason_code": "DATABASE_POOL_EXHAUSTED",
+                        "retryable": True,
+                    }
+                }
+            }
+        },
+    },
 }
 
 _STATUS_FINAL_EXECUCAO = {"sucesso", "sem_alteracao", "skipped", "falha", "cancelada"}
