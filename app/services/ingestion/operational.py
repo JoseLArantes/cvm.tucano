@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.ingestion import IngestionCancellationRequest, IngestionPhaseExecution, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.recovery import assess_ingestion_run_recovery
 
 _settings = get_settings()
 
@@ -334,7 +335,8 @@ def reconcile_stale_ingestion_phase_executions(
     )
     recovered_run_ids: list[str] = []
     cancelled_run_ids: list[str] = []
-    failed_run_ids: list[str] = []
+    failed_retryable_run_ids: list[str] = []
+    failed_non_recoverable_run_ids: list[str] = []
     for phase_execution in stale_phases:
         run = db.get(IngestionRun, phase_execution.ingestion_run_id)
         if run is None:
@@ -366,24 +368,34 @@ def reconcile_stale_ingestion_phase_executions(
             update_cancellation_request(cancellation_request, status="completed")
             cancelled_run_ids.append(str(run.id))
         else:
+            recovery = assess_ingestion_run_recovery(db, run=run)
+            message = (
+                "Recovery sweep marcou a run como falha recuperavel apos heartbeat stale."
+                if recovery.eligible
+                else "Recovery sweep marcou a run como falha sem fonte de recuperacao executavel apos heartbeat stale."
+            )
             run.status = "falha"
             run.message = message
             run.finished_at = _agora()
             phase_execution.status = "failed_final"
             phase_execution.error_type = "stale_phase"
             phase_execution.error_message = message
-            phase_execution.error_retryable = True
+            phase_execution.error_retryable = recovery.eligible
             phase_execution.finished_at = _agora()
             if execucao is not None and execucao.status not in {"cancelada", "sucesso", "sem_alteracao", "skipped", "falha"}:
                 execucao.status = "falha"
                 execucao.mensagem_erro = message
                 execucao.finalizada_em = _agora()
-            failed_run_ids.append(str(run.id))
+            if recovery.eligible:
+                failed_retryable_run_ids.append(str(run.id))
+            else:
+                failed_non_recoverable_run_ids.append(str(run.id))
         recovered_run_ids.append(str(run.id))
     db.flush()
     return {
         "stale_candidates": len(stale_phases),
         "recovered_runs": recovered_run_ids,
         "cancelled_runs": cancelled_run_ids,
-        "failed_retryable_runs": failed_run_ids,
+        "failed_retryable_runs": failed_retryable_run_ids,
+        "failed_non_recoverable_runs": failed_non_recoverable_run_ids,
     }

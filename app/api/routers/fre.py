@@ -93,6 +93,7 @@ from app.schemas.fre import (
     ListaFreCapitalSocialClassesAcoesResposta,
     ListaFreCapitalSocialResposta,
     ListaFreCapitalSocialTitulosConversiveisResposta,
+    ListaFreDatasetsDisponibilidadeResposta,
     ListaFreDistribuicaoCapitalClassesAcoesResposta,
     ListaFreDistribuicaoCapitalResposta,
     ListaFreDocumentosResposta,
@@ -122,6 +123,12 @@ from app.schemas.fre import (
     ListaFreValoresMobiliariosTesourariaMovimentacoesResposta,
     ListaFreValoresMobiliariosTesourariaUltimosExerciciosResposta,
     ListaFreVolumeValoresMobiliariosResposta,
+)
+from app.services.fre_diagnostics import (
+    FreDisponibilidadeValidationError,
+)
+from app.services.fre_diagnostics import (
+    diagnosticar_disponibilidade_datasets_fre as diagnosticar_disponibilidade_datasets_fre_service,
 )
 from app.services.normalizacao import normalizar_cnpj
 
@@ -163,7 +170,6 @@ ParametroLocal = Annotated[str | None, Query(description="Filtrar pelo local dec
 ParametroTipoParentesco = Annotated[
     str | None, Query(description="Filtrar pelo tipo de parentesco declarado no FRE.", examples=["Conjuge"])
 ]
-
 
 def _col(modelo: type[Any], campo: str) -> Any:
     return getattr(modelo, campo)
@@ -230,6 +236,45 @@ def _aplicar_ordenacao(
         raise HTTPException(status_code=422, detail=f"Campo invalido para ordenacao: {campo}")
     coluna = _col(modelo, campo)
     return query.order_by(coluna.desc() if desc else coluna.asc())
+
+
+@router.get(
+    "/fre/datasets/disponibilidade",
+    response_model=ListaFreDatasetsDisponibilidadeResposta,
+    summary="Diagnosticar Disponibilidade de Datasets FRE",
+    description=(
+        "Cruza catalogo de fontes, snapshots de ingestao e tabelas promovidas para explicar por que um "
+        "endpoint FRE esta vazio em um ano. O diagnostico distingue pacote anual ausente, CSV membro ausente, "
+        "CSV membro vazio, falha/lacuna de promocao e endpoint/tabela nao promovidos."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="diagnosticarDisponibilidadeDatasetsFre",
+)
+def diagnosticar_disponibilidade_datasets_fre(
+    db: DbSession,
+    ano: Annotated[int | None, Query(description="Ano unico do ZIP FRE a avaliar.", examples=[2025])] = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
+    dataset: Annotated[
+        list[str] | None,
+        Query(
+            description=(
+                "Filtra datasets especificos pelo identificador do catalogo. Pode ser repetido na query string."
+            ),
+            examples=["outro_valor_mobiliario"],
+        ),
+    ] = None,
+) -> ListaFreDatasetsDisponibilidadeResposta:
+    try:
+        return diagnosticar_disponibilidade_datasets_fre_service(
+            db,
+            ano=ano,
+            ano_inicio=ano_inicio,
+            ano_fim=ano_fim,
+            dataset=dataset,
+        )
+    except FreDisponibilidadeValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get(

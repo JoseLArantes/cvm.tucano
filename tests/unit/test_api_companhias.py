@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
 from app.models.fca import FcaValorMobiliario
+from app.services.companhias import listar_companhias as listar_companhias_service
 
 
 def _nova_companhia(cnpj: str, codigo_cvm: int, nome: str) -> Companhia:
@@ -102,6 +103,32 @@ def test_get_companhias_paginado(client: TestClient, db_session: Session) -> Non
     assert payload["paginacao"]["total"] == 2
     assert len(payload["dados"]) == 1
     assert payload["dados"][0]["logo_url"] == "https://pub-04fd7aefad4846c98bccc4719b2eaed1.r2.dev/png/P/PETR4.png"
+
+
+def test_service_companhias_preserva_payload_do_router(client: TestClient, db_session: Session) -> None:
+    db_session.add(_nova_companhia("08773135000100", 25224, "Empresa A"))
+    db_session.add(_nova_companhia("11396633000187", 21954, "Empresa B"))
+    db_session.add(
+        _novo_valor_mobiliario(
+            "08773135000100",
+            codigo_negociacao="PETR4",
+            data_referencia=date(2026, 6, 1),
+            data_inicio_listagem=date(2020, 1, 1),
+        )
+    )
+    db_session.commit()
+
+    service_payload = listar_companhias_service(
+        db_session,
+        pagina=1,
+        tamanho_pagina=10,
+        nome="Empresa",
+        ordenar="ativa_nome",
+    ).model_dump(mode="json")
+    response = client.get("/companhias", params={"pagina": 1, "tamanho_pagina": 10, "nome": "Empresa"})
+
+    assert response.status_code == 200
+    assert response.json() == service_payload
 
 
 def test_get_companhia_por_cnpj(client: TestClient, db_session: Session) -> None:

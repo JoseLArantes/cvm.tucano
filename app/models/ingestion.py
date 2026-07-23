@@ -14,6 +14,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
 )
@@ -32,6 +33,8 @@ class IngestionRun(Base):
             "status",
             "started_at",
         ),
+        Index("ix_ingestion_runs_updated_at", "updated_at"),
+        Index("ix_ingestion_runs_tipo_fonte_ano_updated_at", "tipo_fonte", "ano", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -134,6 +137,59 @@ class IngestionCancellationRequest(Base):
     )
 
 
+class IngestionDispatchPlan(Base):
+    """Plano persistido para confirmar um despacho sem recalcular o escopo no cliente."""
+
+    __tablename__ = "ingestion_dispatch_plans"
+    __table_args__ = (Index("ix_ingestion_dispatch_plans_owner_expires", "requested_by", "expires_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    token: Mapped[str] = mapped_column(String(96), nullable=False, unique=True, index=True)
+    requested_by: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    scopes: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    strategy: Mapped[str] = mapped_column(String(32), nullable=False)
+    force_reimport: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    summary: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class IngestionIdempotencyRecord(Base):
+    """Resposta durável de um comando de despacho, inclusive em retry de rede."""
+
+    __tablename__ = "ingestion_idempotency_records"
+    __table_args__ = (
+        UniqueConstraint("requested_by", "operation", "idempotency_key", name="uq_ingestion_idempotency_actor_operation_key"),
+        Index("ix_ingestion_idempotency_expires", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    operation: Mapped[str] = mapped_column(String(80), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class IngestionOperationAudit(Base):
+    """Trilha imutável para comandos administrativos forçados e seus efeitos."""
+
+    __tablename__ = "ingestion_operation_audits"
+    __table_args__ = (Index("ix_ingestion_operation_audits_scope_created", "scope_type", "scope_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    scope_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    consequence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class SourceArtifactSnapshot(Base):
     __tablename__ = "source_artifact_snapshots"
     __table_args__ = (
@@ -219,6 +275,7 @@ class IngestionFileMember(Base):
             "member_sha256",
             "ingestion_file_id",
         ),
+        Index("ix_ingestion_file_members_updated_at", "updated_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)

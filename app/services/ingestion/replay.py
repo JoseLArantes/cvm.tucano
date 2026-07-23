@@ -17,6 +17,7 @@ from app.services.ingestion.quarantine import (
     mark_quarantine_resolved,
     register_quarantine_replay_attempt,
 )
+from app.services.ingestion.recovery import NoRecoverySourceError, assess_ingestion_run_recovery
 from app.services.ingestion.repair_rules import find_matching_repair_rule
 from app.services.ingestion.resolver import (
     STATUS_PROVISIONAL_CREATED,
@@ -351,6 +352,9 @@ def replay_ingestion_run(db: Session, *, run_id: Any) -> dict[str, Any]:
     run = db.get(IngestionRun, run_id)
     if run is None:
         raise ValueError("ingestion_run_nao_encontrado")
+
+    if not assess_ingestion_run_recovery(db, run=run).eligible:
+        raise NoRecoverySourceError(NoRecoverySourceError.reason_code)
 
     execucao = None
     if run.execucao_sincronizacao_id is not None:

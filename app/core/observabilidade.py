@@ -71,6 +71,31 @@ _LATENCIA_REQUISICOES = (
     if histogram_factory is not None
     else None
 )
+_CONTADOR_ENTREGA_FUNDAMENTALISTA = (
+    counter_factory(
+        "cvm_api_fundamentalista_entregas_total",
+        "Total de respostas fundamentalistas por origem efetiva da entrega.",
+        ["origem"],
+    )
+    if counter_factory is not None
+    else None
+)
+_LATENCIA_ENTREGA_FUNDAMENTALISTA = (
+    histogram_factory(
+        "cvm_api_fundamentalista_entrega_duracao_segundos",
+        "Duracao da entrega fundamentalista por origem efetiva.",
+        ["origem"],
+    )
+    if histogram_factory is not None
+    else None
+)
+
+
+def registrar_entrega_fundamentalista(origem: str, duracao_segundos: float) -> None:
+    if _CONTADOR_ENTREGA_FUNDAMENTALISTA is not None:
+        _CONTADOR_ENTREGA_FUNDAMENTALISTA.labels(origem).inc()
+    if _LATENCIA_ENTREGA_FUNDAMENTALISTA is not None:
+        _LATENCIA_ENTREGA_FUNDAMENTALISTA.labels(origem).observe(duracao_segundos)
 
 
 class ObservabilidadeMiddleware(BaseHTTPMiddleware):

@@ -5,11 +5,17 @@ from typing import Any
 from app.core.config import get_settings
 
 
-def enforce_quality_gate(*, quality_summary: dict[str, Any]) -> tuple[str, str | None]:
+def enforce_quality_gate(
+    *,
+    quality_summary: dict[str, Any],
+    require_rows: bool = False,
+) -> tuple[str, str | None]:
     settings = get_settings()
     row_status_counts = quality_summary.get("row_status_counts", {})
     total_rows = sum(value for value in row_status_counts.values() if isinstance(value, int))
     if total_rows <= 0:
+        if require_rows:
+            return "falha", "NO_ROWS_PROCESSED"
         return "sucesso", None
 
     reason_counts = quality_summary.get("reason_counts", {})

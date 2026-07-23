@@ -1,14 +1,24 @@
+import hashlib
 from datetime import UTC, date, datetime, timedelta
+from time import perf_counter
 from typing import Annotated, Any, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy import case, func, select
 
-from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
+from app.api.auth import (
+    AutenticacaoApi,
+    autenticar_requisicao,
+    exigir_admin_api,
+    exigir_operador_materializacao_api,
+)
 from app.api.deps import DbSession, PaginacaoQuery
+from app.core.cache import build_cache_key, cache
 from app.core.config import get_settings
+from app.core.observabilidade import registrar_entrega_fundamentalista
 from app.models.analise import (
+    AnaliseContextoRevision,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
@@ -20,14 +30,23 @@ from app.schemas.analise import (
     AnaliseBasePeriodo,
     AnaliseBriefResposta,
     AnaliseComparacoesResposta,
+    AnaliseCoverageResposta,
     AnaliseEscopo,
     AnaliseEventosResposta,
+    AnaliseEvidenceTrailResponse,
+    AnaliseFundamentalistaEventosResposta,
+    AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
+    AnaliseMaterializacaoAllowedAction,
+    AnaliseMaterializacaoAnoStatus,
     AnaliseMaterializacaoCampanhaItemPreview,
     AnaliseMaterializacaoCampanhaResumo,
     AnaliseMaterializacaoChunkExecucaoPreview,
     AnaliseMaterializacaoChunkExecucaoResumo,
+    AnaliseMaterializacaoCompanhiaStatusResposta,
+    AnaliseMaterializacaoCompletion,
     AnaliseMaterializacaoControleResposta,
     AnaliseMaterializacaoExecucaoDetalhe,
     AnaliseMaterializacaoExecucaoResumo,
@@ -36,23 +55,34 @@ from app.schemas.analise import (
     AnaliseMaterializacaoFilaSnapshot,
     AnaliseMaterializacaoGateSnapshot,
     AnaliseMaterializacaoIngestionBlocker,
+    AnaliseMaterializacaoLiveness,
     AnaliseMaterializacaoMonitoramentoResposta,
+    AnaliseMaterializacaoPeriodoStatus,
     AnaliseMaterializacaoProgress,
     AnaliseMaterializacaoReativacaoResposta,
     AnaliseMaterializacaoReativacaoSweepResposta,
+    AnaliseMaterializacaoReconcileRequest,
+    AnaliseMaterializacaoReconcileResponse,
+    AnaliseMaterializacaoRecovery,
     AnaliseMaterializacaoRecuperacaoResposta,
+    AnaliseMaterializacaoRepairRequest,
+    AnaliseMaterializacaoRepairResposta,
     AnaliseMetricasCatalogoResposta,
     AnalisePeriodicidade,
     AnalisePessoasResposta,
     AnaliseQualidadeResposta,
     AnaliseRestatementsResposta,
+    AnaliseSeriesDiagnosticoResposta,
     AnaliseSeriesResposta,
     AnaliseSinaisResposta,
 )
 from app.schemas.comum import Paginacao
 from app.services.analise import (
+    CALCULATION_VERSION,
     campanha_tem_requeue_em_transito,
+    contar_chunks_ativos_campanha,
     contar_chunks_stale_campanha,
+    criar_repair_materializacao_companhia,
     listar_chunks_ativos_campanha,
     listar_metricas,
     obter_brief,
@@ -60,20 +90,32 @@ from app.services.analise import (
     obter_chunks_stale_ativos,
     obter_comparacoes,
     obter_controle_materializacao,
+    obter_coverage,
     obter_estado_gate_materializacao,
     obter_eventos,
+    obter_evidencia_detalhe,
+    obter_evidencia_trilha,
+    obter_fundamentalista_com_metadata,
+    obter_fundamentalista_eventos,
+    obter_fundamentalista_generation,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
     obter_qualidade,
     obter_restatements,
     obter_series,
+    obter_series_diagnostico,
     obter_sinais,
     pausar_controle_materializacao,
     reativar_materializacao_campanha,
     recuperar_chunks_materializacao_stale,
     recuperar_materializacao_pendente,
     retomar_controle_materializacao,
+)
+from app.services.analise_materializacao_operacional import (
+    MaterializationReconcileConflict,
+    build_materialization_operational_snapshot,
+    reconcile_materialization_execution,
 )
 from app.worker.celery_app import celery_app
 
@@ -83,8 +125,32 @@ _MATERIALIZACAO_CAMPANHA_TASK_NAME = "app.worker.tasks.materializar_analise_camp
 _MATERIALIZACAO_CHUNK_TASK_NAME = "app.worker.tasks.materializar_analise_chunk_task"
 _MATERIALIZACAO_RECOVERY_TASK_NAME = "app.worker.tasks.reconciliar_materializacao_stale_task"
 _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME = "app.worker.tasks.recuperar_materializacao_pendente_task"
+_MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME = "app.worker.tasks.reconciliar_materializacoes_terminais_task"
 _STALL_THRESHOLD_SECONDS = 300
 _settings = get_settings()
+
+
+def _fundamentalista_http_response(
+    request: Request,
+    payload: str,
+    *,
+    source: str,
+    generation: str,
+    started_at: float,
+) -> Response:
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    etag = f'"{digest}"'
+    headers = {
+        "ETag": etag,
+        "Cache-Control": f"private, max-age={_settings.analise_fundamentalista_http_cache_max_age_seconds}",
+        "Vary": "Authorization",
+        "X-Analise-Source": source,
+        "X-Analise-Generation": generation,
+    }
+    registrar_entrega_fundamentalista(source, perf_counter() - started_at)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(content=payload, media_type="application/json", headers=headers)
 
 _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     404: {
@@ -94,6 +160,43 @@ _RESPOSTAS_PADRAO: dict[int | str, dict[str, Any]] = {
     422: {
         "description": "Parâmetro inválido.",
         "content": {"application/json": {"example": {"detail": "Campo invalido."}}},
+    },
+}
+
+_RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    200: {
+        "description": "Relatório fundamentalista entregue com metadados de cache e geração canônica.",
+        "headers": {
+            "ETag": {
+                "description": "Hash do payload para revalidação condicional com `If-None-Match`.",
+                "schema": {"type": "string"},
+            },
+            "Cache-Control": {
+                "description": "Política privada de cache HTTP do relatório autenticado.",
+                "schema": {"type": "string"},
+            },
+            "X-Analise-Source": {
+                "description": (
+                    "Origem da entrega: `redis_cache`, `redis_cache_wait`, `db_snapshot`, "
+                    "`compiled_canonical` ou `compiled_runtime`."
+                ),
+                "schema": {"type": "string"},
+            },
+            "X-Analise-Generation": {
+                "description": "UUID da materialização canônica vigente ou `runtime` quando ela não existe.",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    304: {
+        "description": "O `ETag` enviado em `If-None-Match` ainda representa o relatório vigente.",
+        "headers": {
+            "ETag": {"schema": {"type": "string"}},
+            "Cache-Control": {"schema": {"type": "string"}},
+            "X-Analise-Source": {"schema": {"type": "string"}},
+            "X-Analise-Generation": {"schema": {"type": "string"}},
+        },
     },
 }
 
@@ -107,6 +210,34 @@ _RESPOSTAS_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
         "description": "Permissao operacional de materializacao requerida.",
         "content": {
             "application/json": {"example": {"detail": "Permissao de operacao de materializacao requerida."}}
+        },
+    },
+    409: {
+        "description": "Estado incompatível com a ação solicitada.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": {
+                        "reason_code": "ACTIVE_WORK_PRESENT",
+                        "evidence": {"has_active_task": True, "has_active_chunk": False},
+                        "allowed_actions": [],
+                    }
+                }
+            }
+        },
+    },
+    503: {
+        "description": "Capacidade operacional temporariamente indisponível.",
+        "headers": {"Retry-After": {"schema": {"type": "integer"}, "description": "Segundos até nova tentativa."}},
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": {
+                        "reason_code": "TASK_INSPECTION_UNAVAILABLE",
+                        "retryable": True,
+                    }
+                }
+            }
         },
     },
 }
@@ -128,7 +259,7 @@ _DESCRICAO_RECUPERAR_STALE_GERAL = (
     "Use este endpoint quando o operador administrativo precisar forcar a limpeza tecnica de chunks com lease "
     "expirado sem depender da classificacao por campanha. A operacao devolve itens inacabados para `pending`, "
     "marca as execucoes de chunk recuperadas como `stale` e reenfileira as campanhas afetadas. "
-    "Este endpoint e de baixo nivel e existe para operacao administrativa; para usuarios delegados e fluxos de UI, "
+    "Este endpoint e de baixo nivel e existe para operacao administrativa; para consumidores delegados, "
     "prefira `POST /analise/materializacoes/recuperacao/trigger` ou "
     "`POST /analise/materializacoes/campanhas/{campanha_id}/reativar`."
 )
@@ -142,7 +273,7 @@ _DESCRICAO_RECUPERAR_STALE_CAMPANHA = (
 
 _DESCRICAO_REATIVAR_CAMPANHA = (
     "Classifica uma campanha pendente da materializacao analitica e executa a reativacao operacional suportada "
-    "para API users. Use este endpoint quando a UI ja conhece a `campanha_id` e quer tentar destravar apenas uma "
+    "para consumidores da API. Use este endpoint quando o consumidor ja conhece a `campanha_id` e quer destravar apenas uma "
     "campanha especifica. O endpoint e idempotente do ponto de vista operacional: ele pode recuperar chunks stale "
     "ativos, reenfileirar uma campanha `PENDING_UNDISPATCHED` ou devolver `noop` com motivo objetivo quando a "
     "campanha estiver bloqueada por gate, slot, chunk vivo ou ausencia real de trabalho pendente. "
@@ -152,7 +283,7 @@ _DESCRICAO_REATIVAR_CAMPANHA = (
 
 _DESCRICAO_TRIGGER_RECUPERACAO = (
     "Executa um sweep operacional limitado sobre campanhas pendentes para self-healing delegado. Use este "
-    "endpoint quando a UI nao sabe qual campanha esta presa, ou quando o operador quer pedir ao backend para "
+    "endpoint quando o consumidor nao sabe qual campanha esta presa, ou quando o operador quer pedir ao backend para "
     "varrer um lote limitado de campanhas `pending` e recuperar apenas as elegiveis naquele instante. "
     "O sweep respeita gate, concorrencia e limites configurados de batch; ele nao faz bypass de protecoes nem "
     "requeue irrestrito. O resultado traz contadores agregados e a lista das campanhas afetadas para auditoria."
@@ -215,11 +346,28 @@ def _estimate_finish(
     return remaining, datetime.now(UTC) + timedelta(seconds=remaining)
 
 
-def _serializar_materializacao_execucao(execucao: AnaliseMaterializacaoExecucao) -> AnaliseMaterializacaoExecucaoResumo:
+def _serializar_materializacao_execucao(
+    db: DbSession,
+    execucao: AnaliseMaterializacaoExecucao,
+    *,
+    active_task_ids: set[str] | None = None,
+    task_inspection_available: bool = False,
+    gate_status: str = "green",
+    gate_reason_code: str = "NO_BLOCKERS",
+) -> AnaliseMaterializacaoExecucaoResumo:
     progress = _progress_from_summary(execucao.summary)
     elapsed = _elapsed_seconds(execucao.started_at, execucao.finished_at)
     remaining, finish_at = _estimate_finish(execucao.started_at, execucao.finished_at, progress)
     summary = execucao.summary if isinstance(execucao.summary, dict) else {}
+    operational = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids or set(),
+        task_inspection_available=task_inspection_available,
+        gate_status=gate_status,
+        gate_reason_code=gate_reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
     return AnaliseMaterializacaoExecucaoResumo(
         id=str(execucao.id),
         codigo_cvm=execucao.codigo_cvm,
@@ -250,7 +398,83 @@ def _serializar_materializacao_execucao(execucao: AnaliseMaterializacaoExecucao)
         deleted_future_context_revisions=summary.get("deleted_future_context_revisions"),
         deleted_future_fact_revisions=summary.get("deleted_future_fact_revisions"),
         progress=progress,
+        operational_state=operational.operational_state,
+        reason_code=operational.reason_code,
+        liveness=AnaliseMaterializacaoLiveness.model_validate({
+            "last_activity_at": operational.last_activity_at,
+            "age_seconds": operational.age_seconds,
+            "has_active_task": operational.has_active_task,
+            "task_inspection_available": operational.task_inspection_available,
+            "has_active_chunk": operational.has_active_chunk,
+            "has_active_lease": operational.has_active_lease,
+            "is_stalled": operational.is_stalled,
+            "stalled_threshold_seconds": operational.stalled_threshold_seconds,
+        }),
+        completion=AnaliseMaterializacaoCompletion.model_validate({
+            "technical_progress_complete": operational.technical_progress_complete,
+            "total_knowledge_dates": operational.total_knowledge_dates,
+            "processed_knowledge_dates": operational.processed_knowledge_dates,
+            "finalization_pending": operational.finalization_pending,
+            "reason_code": operational.completion_reason_code,
+        }),
+        recovery=AnaliseMaterializacaoRecovery.model_validate({
+            "eligible": operational.recovery_eligible,
+            "strategy": operational.recovery_strategy,
+            "reason_code": operational.recovery_reason_code,
+        }),
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in operational.allowed_actions
+        ],
+        has_action_required=operational.has_action_required,
     )
+
+
+def _preload_materialization_relations(
+    db: DbSession,
+    executions: list[AnaliseMaterializacaoExecucao],
+) -> tuple[
+    list[AnaliseMaterializacaoChunkExecucao],
+    list[AnaliseMaterializacaoCampanhaItem],
+    list[AnaliseMaterializacaoCampanha],
+]:
+    chunk_ids = {item.chunk_execucao_id for item in executions if item.chunk_execucao_id is not None}
+    item_ids = {item.campanha_item_id for item in executions if item.campanha_item_id is not None}
+    campaign_ids = {item.campanha_id for item in executions if item.campanha_id is not None}
+    chunks = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoChunkExecucao).where(
+                    AnaliseMaterializacaoChunkExecucao.id.in_(chunk_ids)
+                )
+            ).all()
+        )
+        if chunk_ids
+        else []
+    )
+    items = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanhaItem).where(
+                    AnaliseMaterializacaoCampanhaItem.id.in_(item_ids)
+                )
+            ).all()
+        )
+        if item_ids
+        else []
+    )
+    campaigns = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanha).where(
+                    AnaliseMaterializacaoCampanha.id.in_(campaign_ids)
+                )
+            ).all()
+        )
+        if campaign_ids
+        else []
+    )
+    return chunks, items, campaigns
 
 
 def _materializacao_task_count(
@@ -275,6 +499,56 @@ def _materializacao_task_count(
             if name in names:
                 total += 1
     return total
+
+
+def _materializacao_task_ids(
+    payload: dict[str, Any] | None,
+    *,
+    scheduled: bool = False,
+) -> set[str]:
+    if not payload:
+        return set()
+    ids: set[str] = set()
+    for tasks in payload.values():
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            request = task.get("request") if scheduled else task
+            if not isinstance(request, dict):
+                continue
+            task_id = request.get("id")
+            if isinstance(task_id, str):
+                ids.add(task_id)
+    return ids
+
+
+def _inspect_materialization_tasks() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    set[str],
+    bool,
+]:
+    inspect = celery_app.control.inspect(timeout=0.5)
+    try:
+        active = inspect.active()
+        reserved = inspect.reserved()
+        scheduled = inspect.scheduled()
+    except Exception:
+        return {}, {}, {}, set(), False
+    if active is None and reserved is None and scheduled is None:
+        return {}, {}, {}, set(), False
+    active_payload = active or {}
+    reserved_payload = reserved or {}
+    scheduled_payload = scheduled or {}
+    task_ids = (
+        _materializacao_task_ids(active_payload)
+        | _materializacao_task_ids(reserved_payload)
+        | _materializacao_task_ids(scheduled_payload, scheduled=True)
+    )
+    return active_payload, reserved_payload, scheduled_payload, task_ids, True
 
 
 def _queue_depth() -> int | None:
@@ -339,12 +613,48 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
     progress_ratio = _campaign_progress_ratio(campanha)
     remaining = None
     active_chunks = listar_chunks_ativos_campanha(db, campanha.id, limit=5)
+    active_chunk_count = contar_chunks_ativos_campanha(db, campanha.id)
     active_chunk = active_chunks[0] if active_chunks else None
     stale_chunks = contar_chunks_stale_campanha(db, campanha.id)
     if progress_ratio is not None and campanha.started_at is not None and 0 < progress_ratio < 1:
         elapsed = _elapsed_seconds(campanha.started_at, None)
         if elapsed is not None and elapsed > 0:
             remaining = max(0, int((elapsed / progress_ratio) - elapsed))
+    wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
+    recovery_state = (campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None
+    recovery_eligible = stale_chunks > 0 or recovery_state == "recoverable"
+    if campanha.status == "success":
+        operational_state = "terminal_success"
+        reason_code = "CAMPAIGN_SUCCEEDED"
+    elif campanha.status in {"failed", "partial"}:
+        operational_state = "terminal_failed"
+        reason_code = "CAMPAIGN_FAILED" if campanha.status == "failed" else "CAMPAIGN_PARTIAL"
+    elif active_chunks:
+        operational_state = "active"
+        reason_code = "ACTIVE_CHUNK_PRESENT"
+    elif wait_reason in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}:
+        operational_state = "waiting_for_gate"
+        reason_code = str(wait_reason)
+    elif recovery_eligible:
+        operational_state = "stalled_recoverable"
+        reason_code = "STALE_CHUNK" if stale_chunks else "PENDING_UNDISPATCHED"
+    elif campanha.status == "running":
+        operational_state = "stalled_unrecoverable"
+        reason_code = "NO_ACTIVE_CHUNK"
+    else:
+        operational_state = "queued" if campanha.status == "pending" else "unknown"
+        reason_code = "CAMPAIGN_PENDING" if campanha.status == "pending" else "UNKNOWN_CAMPAIGN_STATE"
+    allowed_actions = []
+    if recovery_eligible:
+        allowed_actions.append(
+            {
+                "code": "reactivate_campaign",
+                "operation": "POST",
+                "path": f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+                "requires_confirmation": True,
+                "reason_code": reason_code,
+            }
+        )
     return AnaliseMaterializacaoCampanhaResumo(
         campanha_id=str(campanha.id),
         source=campanha.source,
@@ -360,16 +670,27 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
         started_at=campanha.started_at,
         updated_at=campanha.updated_at,
         estimated_remaining_seconds=remaining,
-        active_chunks=len(active_chunks),
+        active_chunks=active_chunk_count,
         active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
         active_chunk_lease_expires_at=active_chunk.lease_expires_at if active_chunk is not None else None,
         active_chunk_ids_preview=[str(chunk.id) for chunk in active_chunks],
         stale_chunks=stale_chunks,
-        wait_reason=(campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None,
-        recovery_state=(campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None,
+        wait_reason=wait_reason,
+        recovery_state=recovery_state,
         last_recovery_check_at=(campanha.summary or {}).get("last_recovery_check_at") if isinstance(campanha.summary, dict) else None,
         last_recovery_action=(campanha.summary or {}).get("last_recovery_action") if isinstance(campanha.summary, dict) else None,
         last_recovery_reason_code=(campanha.summary or {}).get("last_recovery_reason_code") if isinstance(campanha.summary, dict) else None,
+        operational_state=operational_state,
+        reason_code=reason_code,
+        recovery=AnaliseMaterializacaoRecovery.model_validate({
+            "eligible": recovery_eligible,
+            "strategy": "reactivate_campaign" if recovery_eligible else None,
+            "reason_code": reason_code if recovery_eligible else "NO_RECOVERY_SOURCE",
+        }),
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in allowed_actions
+        ],
     )
 
 
@@ -385,6 +706,76 @@ def _serializar_item_preview(item: AnaliseMaterializacaoCampanhaItem) -> Analise
         status=item.status,
         started_at=item.started_at,
     )
+
+
+def _materializacao_ano_status_from_execucao(
+    *,
+    ano: int,
+    escopo: AnaliseEscopo,
+    execucao: AnaliseMaterializacaoExecucao,
+) -> AnaliseMaterializacaoAnoStatus:
+    return AnaliseMaterializacaoAnoStatus(
+        ano=ano,
+        status=execucao.status,
+        escopo=escopo,
+        coverage_complete=execucao.coverage_complete,
+        materialized_at=execucao.finished_at if execucao.status == "success" else None,
+        started_at=execucao.started_at,
+        finished_at=execucao.finished_at,
+        updated_at=execucao.updated_at,
+        execution_id=str(execucao.id),
+        materialization_execution_id=str(execucao.id),
+        calculation_version=execucao.calculation_version,
+        source=execucao.source,
+        materialization_mode=execucao.materialization_mode,
+        message=None,
+    )
+
+
+def _materializacao_ano_status_from_item(
+    *,
+    ano: int,
+    escopo: AnaliseEscopo,
+    item: AnaliseMaterializacaoCampanhaItem,
+) -> AnaliseMaterializacaoAnoStatus:
+    status = "queued" if item.status == "pending" and item.chunk_execucao_id is not None else item.status
+    return AnaliseMaterializacaoAnoStatus(
+        ano=ano,
+        status=status,
+        escopo=escopo,
+        coverage_complete=None,
+        materialized_at=None,
+        started_at=item.started_at,
+        finished_at=item.finished_at,
+        updated_at=item.updated_at,
+        execution_id=str(item.materializacao_execucao_id) if item.materializacao_execucao_id is not None else None,
+        materialization_execution_id=str(item.materializacao_execucao_id) if item.materializacao_execucao_id is not None else None,
+        calculation_version=CALCULATION_VERSION,
+        source=None,
+        materialization_mode="incremental" if item.invalidated_from is not None else "full",
+        message=item.last_error,
+    )
+
+
+def _anos_from_context_revision(revision: AnaliseContextoRevision | None) -> list[int]:
+    if revision is None:
+        return []
+    anos: set[int] = set()
+    for periodo in revision.periodos_disponiveis or []:
+        if not isinstance(periodo, dict):
+            continue
+        if periodo.get("periodicidade") != "annual" or periodo.get("base_periodo") != "fy":
+            continue
+        fiscal_year = periodo.get("fiscal_year")
+        if isinstance(fiscal_year, int):
+            anos.add(fiscal_year)
+    return sorted(anos, reverse=True)
+
+
+def _datetime_sort_key(value: datetime) -> float:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.timestamp()
 
 
 def _serializar_gate(db: DbSession, controle: AnaliseMaterializacaoControle | None = None) -> AnaliseMaterializacaoGateSnapshot:
@@ -445,15 +836,7 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
     operation_id="monitorarMaterializacoesAnaliticas",
 )
 def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacaoMonitoramentoResposta:
-    inspect = celery_app.control.inspect(timeout=0.5)
-    try:
-        active = inspect.active() or {}
-        reserved = inspect.reserved() or {}
-        scheduled = inspect.scheduled() or {}
-    except Exception:
-        active = {}
-        reserved = {}
-        scheduled = {}
+    active, reserved, scheduled, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
 
     running = list(
         db.scalars(
@@ -484,6 +867,39 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     oldest_started_at = running[0].started_at if running else None
     longest_elapsed = _elapsed_seconds(oldest_started_at, None) if oldest_started_at else None
     controle = obter_controle_materializacao(db)
+    gate_snapshot = _serializar_gate(db, controle)
+    running_execution_summaries = [
+        _serializar_materializacao_execucao(
+            db,
+            item,
+            active_task_ids=active_task_ids,
+            task_inspection_available=task_inspection_available,
+            gate_status=gate_snapshot.status,
+            gate_reason_code=gate_snapshot.reason_code,
+        )
+        for item in running
+    ]
+    operational_counts = {
+        state: sum(1 for item in running_execution_summaries if item.operational_state == state)
+        for state in (
+            "active",
+            "queued",
+            "waiting_for_gate",
+            "completion_pending",
+            "stalled_recoverable",
+            "stalled_unrecoverable",
+            "unknown",
+        )
+    }
+    completion_pending_ids = [
+        item.id for item in running_execution_summaries if item.operational_state == "completion_pending"
+    ]
+    stalled_unrecoverable_ids = [
+        item.id for item in running_execution_summaries if item.operational_state == "stalled_unrecoverable"
+    ]
+    action_required_ids = [
+        item.id for item in running_execution_summaries if item.has_action_required
+    ]
     campanhas = list(
         db.scalars(
             select(AnaliseMaterializacaoCampanha)
@@ -627,6 +1043,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_reserved_tasks=_materializacao_task_count(
@@ -637,6 +1054,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_scheduled_tasks=_materializacao_task_count(
@@ -648,13 +1066,14 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_orchestrator_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CAMPANHA_TASK_NAME}),
             materialization_chunk_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CHUNK_TASK_NAME}),
             materialization_queue_depth=_queue_depth(),
         ),
-        gate=_serializar_gate(db, controle),
+        gate=gate_snapshot,
         running_executions=len(running),
         running_full_executions=running_full_executions,
         running_incremental_executions=running_incremental_executions,
@@ -685,11 +1104,15 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         stalled_execution_ids=stalled_ids,
         stalled_incremental_execution_ids=stalled_incremental_ids,
         pending_recovery_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME}),
-        running_execution_previews=[_serializar_materializacao_execucao(item) for item in running[:10]],
+        running_execution_previews=running_execution_summaries[:10],
         campaigns=campanhas_resumo,
         stale_chunk_preview=[AnaliseMaterializacaoChunkExecucaoPreview(**_serializar_chunk(chunk).model_dump()) for chunk in stale_chunk_preview],
         running_items_preview=[_serializar_item_preview(item) for item in running_items_preview],
         pending_items_preview=[_serializar_item_preview(item) for item in pending_items_preview],
+        operational_counts=operational_counts,
+        completion_pending_execution_ids=completion_pending_ids[:10],
+        stalled_unrecoverable_execution_ids=stalled_unrecoverable_ids[:10],
+        action_required_execution_ids=action_required_ids[:10],
     )
 
 
@@ -898,7 +1321,26 @@ def listar_materializacoes_analiticas(
     escopo: Annotated[AnaliseEscopo | None, Query(description="Filtra por escopo societário.")] = None,
     source: Annotated[str | None, Query(description="Filtra por origem do disparo da materialização.")] = None,
     campanha_id: Annotated[str | None, Query(description="Filtra por identificador da campanha de materialização.")] = None,
+    materialization_mode: Annotated[str | None, Query(description="Filtra por modo `full` ou `incremental`.")] = None,
+    operational_state: Annotated[str | None, Query(description="Filtra pelo estado operacional derivado documentado no contrato.")] = None,
+    has_action_required: Annotated[bool | None, Query(description="Filtra execuções com ou sem ação operacional autorizada.")] = None,
+    started_from: Annotated[datetime | None, Query(description="Início mínimo, inclusivo, em ISO-8601.")] = None,
+    started_to: Annotated[datetime | None, Query(description="Início máximo, inclusivo, em ISO-8601.")] = None,
+    ordenar: Annotated[str, Query(description="Ordenação estável: `started_at:desc`, `started_at:asc`, `updated_at:desc` ou `updated_at:asc`.")] = "started_at:desc",
 ) -> AnaliseMaterializacaoExecucoesListaResposta:
+    valid_operational_states = {
+        "active",
+        "queued",
+        "waiting_for_gate",
+        "completion_pending",
+        "stalled_recoverable",
+        "stalled_unrecoverable",
+        "terminal_success",
+        "terminal_failed",
+        "unknown",
+    }
+    if operational_state is not None and operational_state not in valid_operational_states:
+        raise HTTPException(status_code=422, detail="operational_state invalido.")
     filters = []
     if status is not None:
         filters.append(AnaliseMaterializacaoExecucao.status == status)
@@ -913,41 +1355,479 @@ def listar_materializacoes_analiticas(
             filters.append(AnaliseMaterializacaoExecucao.campanha_id == UUID(campanha_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="campanha_id invalido.") from exc
+    if materialization_mode is not None:
+        if materialization_mode not in {"full", "incremental"}:
+            raise HTTPException(status_code=422, detail="materialization_mode invalido.")
+        filters.append(AnaliseMaterializacaoExecucao.materialization_mode == materialization_mode)
+    if started_from is not None:
+        filters.append(AnaliseMaterializacaoExecucao.started_at >= started_from)
+    if started_to is not None:
+        filters.append(AnaliseMaterializacaoExecucao.started_at <= started_to)
+    ordering = {
+        "started_at:desc": (
+            AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        ),
+        "started_at:asc": (
+            AnaliseMaterializacaoExecucao.started_at.asc().nullsfirst(),
+            AnaliseMaterializacaoExecucao.created_at.asc(),
+        ),
+        "updated_at:desc": (
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.id.desc(),
+        ),
+        "updated_at:asc": (
+            AnaliseMaterializacaoExecucao.updated_at.asc().nullsfirst(),
+            AnaliseMaterializacaoExecucao.id.asc(),
+        ),
+    }
+    if ordenar not in ordering:
+        raise HTTPException(status_code=422, detail="ordenar invalido.")
 
-    stmt = select(AnaliseMaterializacaoExecucao)
+    base_stmt = select(AnaliseMaterializacaoExecucao)
     if filters:
-        stmt = stmt.where(*filters)
-    stmt = stmt.order_by(
-        AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
-        AnaliseMaterializacaoExecucao.created_at.desc(),
-    )
+        base_stmt = base_stmt.where(*filters)
+    (
+        _active_payload,
+        _reserved_payload,
+        _scheduled_payload,
+        active_task_ids,
+        task_inspection_available,
+    ) = _inspect_materialization_tasks()
+    gate = _serializar_gate(db)
 
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    execucoes = list(db.scalars(stmt.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).all())
+    def serialize(
+        executions: list[AnaliseMaterializacaoExecucao],
+    ) -> list[AnaliseMaterializacaoExecucaoResumo]:
+        relation_cache = _preload_materialization_relations(db, executions)
+        result = [
+            _serializar_materializacao_execucao(
+                db,
+                item,
+                active_task_ids=active_task_ids,
+                task_inspection_available=task_inspection_available,
+                gate_status=gate.status,
+                gate_reason_code=gate.reason_code,
+            )
+            for item in executions
+        ]
+        # Keep the preloaded objects strongly referenced while the identity map is used.
+        del relation_cache
+        return result
 
-    resumo_stmt = select(
-        func.count(AnaliseMaterializacaoExecucao.id),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "running", 1), else_=0)),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "success", 1), else_=0)),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "failed", 1), else_=0)),
-    )
-    if filters:
-        resumo_stmt = resumo_stmt.where(*filters)
-    total_count, running_count, success_count, failed_count = db.execute(resumo_stmt).one()
+    derived_filter_requested = operational_state is not None or has_action_required is not None
+    if derived_filter_requested:
+        executions = list(
+            db.scalars(
+                base_stmt.order_by(*cast(Any, ordering[ordenar]))
+            ).all()
+        )
+        serialized = serialize(executions)
+        if operational_state is not None:
+            serialized = [item for item in serialized if item.operational_state == operational_state]
+        if has_action_required is not None:
+            serialized = [item for item in serialized if item.has_action_required is has_action_required]
+        total = len(serialized)
+        status_counts = {
+            state: sum(1 for item in serialized if item.status == state)
+            for state in ("running", "success", "failed")
+        }
+        operational_counts = {
+            state: sum(1 for item in serialized if item.operational_state == state)
+            for state in valid_operational_states
+        }
+        page_items = serialized[
+            paginacao.offset : paginacao.offset + paginacao.tamanho_pagina
+        ]
+    else:
+        count_stmt = select(
+            AnaliseMaterializacaoExecucao.status,
+            func.count(AnaliseMaterializacaoExecucao.id),
+        )
+        if filters:
+            count_stmt = count_stmt.where(*filters)
+        status_rows = db.execute(
+            count_stmt.group_by(AnaliseMaterializacaoExecucao.status)
+        ).all()
+        status_counts = {"running": 0, "success": 0, "failed": 0}
+        for execution_status, count in status_rows:
+            if execution_status in status_counts:
+                status_counts[execution_status] = int(count)
+        total = sum(int(count) for _, count in status_rows)
+
+        page_executions = list(
+            db.scalars(
+                base_stmt.order_by(*cast(Any, ordering[ordenar]))
+                .offset(paginacao.offset)
+                .limit(paginacao.tamanho_pagina)
+            ).all()
+        )
+        page_items = serialize(page_executions)
+
+        running_stmt = base_stmt.where(AnaliseMaterializacaoExecucao.status == "running")
+        running_executions = list(db.scalars(running_stmt).all())
+        running_serialized = serialize(running_executions)
+        operational_counts = {state: 0 for state in valid_operational_states}
+        operational_counts["terminal_success"] = status_counts["success"]
+        operational_counts["terminal_failed"] = status_counts["failed"]
+        for item in running_serialized:
+            operational_counts[item.operational_state] += 1
 
     return AnaliseMaterializacaoExecucoesListaResposta(
-        dados=[_serializar_materializacao_execucao(item) for item in execucoes],
+        dados=page_items,
         paginacao=Paginacao(
             pagina=paginacao.pagina,
             tamanho_pagina=paginacao.tamanho_pagina,
             total=total,
         ),
         resumo=AnaliseMaterializacaoExecucoesResumo(
-            total=int(total_count or 0),
-            running=int(running_count or 0),
-            success=int(success_count or 0),
-            failed=int(failed_count or 0),
+            total=total,
+            running=status_counts["running"],
+            success=status_counts["success"],
+            failed=status_counts["failed"],
+            status_counts=status_counts,
+            operational_counts=operational_counts,
         ),
+    )
+
+
+@router.get(
+    "/materializacoes/companhias/{codigo_cvm}/status",
+    response_model=AnaliseMaterializacaoCompanhiaStatusResposta,
+    summary="Consultar Status de Materializacao por Companhia",
+    description=(
+        "Retorna um snapshot de leitura rapida para a materializacao analitica de uma companhia em um escopo. "
+        "O endpoint combina a revisao canonica atual, a ultima execucao de materializacao e eventual item ativo "
+        "ou pendente de campanha. A lista `anos` representa os anos fiscais anuais FY presentes na revisao canonica "
+        "corrente; quando ainda nao existe revisao canonica, o backend retorna o ano inferido da janela ativa ou "
+        "da ultima execucao, se disponivel. Os aliases `dados`, `periodos`, `materializacoes` e `status_por_ano` "
+        "existem para consumidores desacoplados que renderizam status por ano sem depender da listagem operacional."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="consultarStatusMaterializacaoCompanhia",
+)
+def consultar_status_materializacao_companhia(
+    codigo_cvm: int,
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societario consultado.")] = "consolidated",
+) -> AnaliseMaterializacaoCompanhiaStatusResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    latest_execucao = db.scalar(
+        select(AnaliseMaterializacaoExecucao)
+        .where(
+            AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoExecucao.escopo == escopo,
+            AnaliseMaterializacaoExecucao.calculation_version == CALCULATION_VERSION,
+        )
+        .order_by(
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        )
+        .limit(1)
+    )
+    latest_success = db.scalar(
+        select(AnaliseMaterializacaoExecucao)
+        .where(
+            AnaliseMaterializacaoExecucao.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoExecucao.escopo == escopo,
+            AnaliseMaterializacaoExecucao.calculation_version == CALCULATION_VERSION,
+            AnaliseMaterializacaoExecucao.status == "success",
+        )
+        .order_by(
+            AnaliseMaterializacaoExecucao.finished_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        )
+        .limit(1)
+    )
+    active_item = db.scalar(
+        select(AnaliseMaterializacaoCampanhaItem)
+        .join(
+            AnaliseMaterializacaoCampanha,
+            AnaliseMaterializacaoCampanha.id == AnaliseMaterializacaoCampanhaItem.campanha_id,
+        )
+        .where(
+            AnaliseMaterializacaoCampanhaItem.codigo_cvm == companhia.codigo_cvm,
+            AnaliseMaterializacaoCampanhaItem.escopo == escopo,
+            AnaliseMaterializacaoCampanhaItem.status.in_(("pending", "running")),
+            AnaliseMaterializacaoCampanha.status.in_(("pending", "running")),
+        )
+        .order_by(
+            case((AnaliseMaterializacaoCampanhaItem.status == "running", 0), else_=1),
+            AnaliseMaterializacaoCampanhaItem.updated_at.desc(),
+            AnaliseMaterializacaoCampanhaItem.created_at.desc(),
+        )
+        .limit(1)
+    )
+    revision = db.scalar(
+        select(AnaliseContextoRevision)
+        .where(
+            AnaliseContextoRevision.codigo_cvm == companhia.codigo_cvm,
+            AnaliseContextoRevision.escopo == escopo,
+            AnaliseContextoRevision.calculation_version == CALCULATION_VERSION,
+            AnaliseContextoRevision.known_to.is_(None),
+        )
+        .order_by(AnaliseContextoRevision.known_from.desc(), AnaliseContextoRevision.created_at.desc())
+        .limit(1)
+    )
+    coverage = obter_coverage(db, companhia, scope=escopo)
+    coverage_by_period = {item.period_id: item for item in coverage.periodos}
+    periodos_detalhe = [
+        AnaliseMaterializacaoPeriodoStatus(
+            period_id=item.period_id,
+            ano=item.ano,
+            periodicidade=item.periodicidade,
+            base_periodo=item.base_periodo,
+            escopo=item.escopo,
+            has_context_revision=item.has_canonical_context,
+            has_fact_revision=item.has_canonical_facts,
+            metrics_count=item.metrics_count,
+            unavailable_count=item.unavailable_count,
+            coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
+        )
+        for item in coverage.periodos
+    ]
+
+    anos = _anos_from_context_revision(revision)
+    execucao_base = latest_success or latest_execucao
+    anos_set = set(anos)
+    if active_item is not None and active_item.invalidated_from is not None:
+        anos_set.add(active_item.invalidated_from.year)
+    if execucao_base is not None and execucao_base.invalidated_from is not None:
+        anos_set.add(execucao_base.invalidated_from.year)
+    anos = sorted(anos_set, reverse=True)
+
+    statuses: list[AnaliseMaterializacaoAnoStatus] = []
+    for ano in anos:
+        if active_item is not None and active_item.invalidated_from is not None and ano >= active_item.invalidated_from.year:
+            status_item = _materializacao_ano_status_from_item(ano=ano, escopo=escopo, item=active_item)
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            if coverage_item is not None:
+                status_item.period_id = coverage_item.period_id
+                status_item.has_context_revision = coverage_item.has_canonical_context
+                status_item.has_fact_revision = coverage_item.has_canonical_facts
+                status_item.metrics_count = coverage_item.metrics_count
+                status_item.unavailable_count = coverage_item.unavailable_count
+            statuses.append(status_item)
+        elif execucao_base is not None:
+            status_item = _materializacao_ano_status_from_execucao(ano=ano, escopo=escopo, execucao=execucao_base)
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            if coverage_item is not None:
+                status_item.period_id = coverage_item.period_id
+                status_item.has_context_revision = coverage_item.has_canonical_context
+                status_item.has_fact_revision = coverage_item.has_canonical_facts
+                status_item.metrics_count = coverage_item.metrics_count
+                status_item.unavailable_count = coverage_item.unavailable_count
+            statuses.append(status_item)
+        else:
+            coverage_item = coverage_by_period.get(f"FY{ano}")
+            statuses.append(
+                AnaliseMaterializacaoAnoStatus(
+                    ano=ano,
+                    period_id=coverage_item.period_id if coverage_item is not None else f"FY{ano}",
+                    status="missing",
+                    escopo=escopo,
+                    has_context_revision=coverage_item.has_canonical_context if coverage_item is not None else False,
+                    has_fact_revision=coverage_item.has_canonical_facts if coverage_item is not None else False,
+                    metrics_count=coverage_item.metrics_count if coverage_item is not None else 0,
+                    unavailable_count=coverage_item.unavailable_count if coverage_item is not None else 0,
+                    coverage_complete=None,
+                    calculation_version=CALCULATION_VERSION,
+                )
+            )
+
+    if active_item is not None:
+        status = "queued" if active_item.status == "pending" and active_item.chunk_execucao_id is not None else active_item.status
+    elif latest_execucao is not None:
+        status = latest_execucao.status
+    elif revision is not None:
+        status = "success"
+    else:
+        status = "missing"
+
+    updated_candidates = [
+        latest_execucao.updated_at if latest_execucao is not None else None,
+        active_item.updated_at if active_item is not None else None,
+        revision.created_at if revision is not None else None,
+    ]
+    updated_at = max((item for item in updated_candidates if item is not None), key=_datetime_sort_key, default=None)
+    status_por_ano = {str(item.ano): item for item in statuses}
+    latest_execution_summary = None
+    if latest_execucao is not None:
+        _, _, _, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
+        gate = _serializar_gate(db)
+        latest_execution_summary = _serializar_materializacao_execucao(
+            db,
+            latest_execucao,
+            active_task_ids=active_task_ids,
+            task_inspection_available=task_inspection_available,
+            gate_status=gate.status,
+            gate_reason_code=gate.reason_code,
+        )
+    return AnaliseMaterializacaoCompanhiaStatusResposta(
+        codigo_cvm=companhia.codigo_cvm or codigo_cvm,
+        escopo=escopo,
+        status=status,
+        coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
+        latest_execution=latest_execution_summary,
+        active_item=_serializar_item_preview(active_item) if active_item is not None else None,
+        anos=statuses,
+        periodos_detalhe=periodos_detalhe,
+        dados=statuses,
+        periodos=statuses,
+        materializacoes=statuses,
+        status_por_ano=status_por_ano,
+        generated_at=datetime.now(UTC),
+        updated_at=updated_at,
+    )
+
+
+@router.post(
+    "/materializacoes/companhias/{codigo_cvm}/repair",
+    response_model=AnaliseMaterializacaoRepairResposta,
+    summary="Criar Repair Focado de Materializacao Analitica",
+    description=(
+        "Cria uma campanha pequena de materialização para recompor a camada canônica de uma companhia e escopo "
+        "a partir dos períodos solicitados. O payload pode informar métricas para validação e diagnóstico, mas "
+        "a recomposição operacional continua sendo por companhia, escopo e janela de conhecimento derivada do "
+        "primeiro período aceito. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
+        "resposta retorna `gate_status=red` e `reason_code=WAIT_MATERIALIZATION`."
+    ),
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
+    operation_id="criarRepairMaterializacaoCompanhia",
+)
+def criar_repair_materializacao_companhia_analitica(
+    codigo_cvm: int,
+    payload: AnaliseMaterializacaoRepairRequest,
+    db: DbSession,
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoRepairResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    resultado = criar_repair_materializacao_companhia(db, companhia, payload)
+    if resultado.campanha_id is not None and resultado.gate_status == "green":
+        from app.worker.tasks import materializar_analise_campanha_task
+
+        materializar_analise_campanha_task.delay(resultado.campanha_id)
+        resultado.dispatcher_enqueued = True
+    return resultado
+
+
+@router.post(
+    "/materializacoes/{execucao_id}/reconcile",
+    response_model=AnaliseMaterializacaoReconcileResponse,
+    summary="Reconciliar Estado Terminal de Materialização",
+    description=(
+        "Reconcilia de forma individual, idempotente e auditável uma execução terminalmente inconsistente. "
+        "`mark_success` exige progresso técnico integral, ausência comprovada de task, lease e chunk ativos, "
+        "ausência de erro terminal e gate liberado. `mark_failed` encerra a inconsistência sem remover revisões, "
+        "artefatos, staging ou logs. Estados incompatíveis retornam `409` com evidências e ações autorizadas."
+    ),
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
+    operation_id="reconciliarMaterializacaoAnalitica",
+)
+def reconciliar_materializacao_analitica(
+    execucao_id: str,
+    payload: AnaliseMaterializacaoReconcileRequest,
+    db: DbSession,
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoReconcileResponse:
+    try:
+        execucao_uuid = UUID(execucao_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.") from exc
+    execucao = db.get(AnaliseMaterializacaoExecucao, execucao_uuid)
+    if execucao is None:
+        raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.")
+
+    (
+        _active_payload,
+        _reserved_payload,
+        _scheduled_payload,
+        active_task_ids,
+        task_inspection_available,
+    ) = _inspect_materialization_tasks()
+    if not task_inspection_available and execucao.status not in {"success", "failed"}:
+        raise HTTPException(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            detail={
+                "reason_code": "TASK_INSPECTION_UNAVAILABLE",
+                "retryable": True,
+            },
+        )
+    gate = _serializar_gate(db)
+    snapshot = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
+    actor = auth.usuario.username if auth.usuario is not None else "system-token"
+    try:
+        audit = reconcile_materialization_execution(
+            db,
+            execucao,
+            decision=payload.decision,
+            reason=payload.reason,
+            actor=actor,
+            snapshot=snapshot,
+        )
+    except MaterializationReconcileConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": exc.reason_code,
+                "evidence": exc.snapshot.evidence(),
+                "allowed_actions": list(exc.snapshot.allowed_actions),
+            },
+        ) from exc
+
+    db.refresh(execucao)
+    final_snapshot = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
+    if audit is None:
+        reconciled_at = execucao.finished_at or execucao.updated_at or datetime.now(UTC)
+        return AnaliseMaterializacaoReconcileResponse(
+            execution_id=str(execucao.id),
+            previous_status=execucao.status,
+            status=execucao.status,
+            operational_state=final_snapshot.operational_state,
+            reconciled_at=reconciled_at,
+            reconciled_by=actor,
+            reason_code="ALREADY_TERMINAL",
+            reason=payload.reason,
+            evidence=final_snapshot.evidence(),
+            allowed_actions=[
+                AnaliseMaterializacaoAllowedAction.model_validate(item)
+                for item in final_snapshot.allowed_actions
+            ],
+        )
+    return AnaliseMaterializacaoReconcileResponse(
+        execution_id=str(execucao.id),
+        previous_status=audit.previous_status,
+        status=audit.status,
+        operational_state=final_snapshot.operational_state,
+        reconciled_at=audit.created_at,
+        reconciled_by=audit.reconciled_by,
+        reason_code=audit.reason_code,
+        reason=audit.reason,
+        evidence=audit.evidence,
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in final_snapshot.allowed_actions
+        ],
     )
 
 
@@ -971,7 +1851,16 @@ def detalhar_materializacao_analitica(execucao_id: str, db: DbSession) -> Analis
     execucao = db.get(AnaliseMaterializacaoExecucao, execucao_uuid)
     if execucao is None:
         raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.")
-    resumo = _serializar_materializacao_execucao(execucao)
+    _, _, _, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
+    gate = _serializar_gate(db)
+    resumo = _serializar_materializacao_execucao(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+    )
     return AnaliseMaterializacaoExecucaoDetalhe(**resumo.model_dump(), summary=execucao.summary or {})
 
 
@@ -994,6 +1883,39 @@ def obter_analise_manifesto(
 
 
 @router.get(
+    "/companhias/{codigo_cvm}/coverage",
+    response_model=AnaliseCoverageResposta,
+    summary="Matriz de Cobertura Analitica da Companhia",
+    description=(
+        "Retorna uma matriz autoritativa por período que cruza dado bruto promovido, contexto canônico, fatos "
+        "canônicos e última execução de materialização. Use para explicar lacunas como períodos que existem no "
+        "DFP/ITR bruto, mas ainda não geraram série canônica para as métricas do gráfico."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseCoverage",
+)
+def obter_analise_coverage(
+    codigo_cvm: int,
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    periodicidade: Annotated[AnalisePeriodicidade | None, Query(description="Periodicidade opcional para alinhar com `/series`: `annual` ou `quarterly`.")] = None,
+    base_periodo: Annotated[AnaliseBasePeriodo | None, Query(description="Base temporal opcional para alinhar com `/series`: `fy`, `quarter` ou `ytd`.")] = None,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    horizonte_anos: Annotated[int | None, Query(description="Horizonte anual máximo quando `periodicidade=annual&base_periodo=fy`.", ge=1, le=20)] = None,
+) -> AnaliseCoverageResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    return obter_coverage(
+        db,
+        companhia,
+        scope=escopo,
+        as_of=date.fromisoformat(as_of) if as_of else None,
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        horizonte_anos=horizonte_anos,
+    )
+
+
+@router.get(
     "/companhias/{codigo_cvm}/series",
     response_model=AnaliseSeriesResposta,
     summary="Series Analiticas Normalizadas",
@@ -1013,6 +1935,41 @@ def obter_analise_series(
 ) -> AnaliseSeriesResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     return obter_series(
+        db,
+        companhia,
+        metricas=_parse_metricas(metricas),
+        periodicidade=periodicidade,
+        base_periodo=base_periodo,
+        scope=escopo,
+        as_of=date.fromisoformat(as_of) if as_of else None,
+        horizonte_anos=horizonte_anos,
+    )
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/series/diagnostico",
+    response_model=AnaliseSeriesDiagnosticoResposta,
+    summary="Diagnostico de Lacunas das Series Analiticas",
+    description=(
+        "Usa os mesmos filtros de `/analise/companhias/{codigo_cvm}/series`, mas retorna candidatos, períodos "
+        "retornados, períodos rejeitados, contas ausentes, formulários ausentes, mismatch de escopo e mismatch "
+        "de materialização. O objetivo é explicar por que um gráfico não possui pontos suficientes."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseSeriesDiagnostico",
+)
+def obter_analise_series_diagnostico(
+    codigo_cvm: int,
+    db: DbSession,
+    metricas: Annotated[str | None, Query(description="Lista CSV de métricas estáveis.")] = None,
+    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade: `annual` ou `quarterly`.")] = "annual",
+    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal: `fy`, `quarter` ou `ytd`.")] = "fy",
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo a diagnosticar quando `periodicidade=annual&base_periodo=fy`.", ge=1, le=20)] = 5,
+) -> AnaliseSeriesDiagnosticoResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    return obter_series_diagnostico(
         db,
         companhia,
         metricas=_parse_metricas(metricas),
@@ -1100,9 +2057,13 @@ def obter_analise_sinais(
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseEventos",
 )
-def obter_analise_eventos(codigo_cvm: int, db: DbSession) -> AnaliseEventosResposta:
+def obter_analise_eventos(
+    codigo_cvm: int,
+    db: DbSession,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+) -> AnaliseEventosResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
-    return obter_eventos(db, companhia)
+    return obter_eventos(db, companhia, as_of=date.fromisoformat(as_of) if as_of else None)
 
 
 @router.get(
@@ -1186,3 +2147,311 @@ def obter_analise_restatements(
 ) -> AnaliseRestatementsResposta:
     companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
     return obter_restatements(db, companhia, scope=escopo, as_of=date.fromisoformat(as_of) if as_of else None)
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista",
+    response_model=AnaliseFundamentalistaResposta,
+    summary="Relatório de Análise Fundamentalista da Companhia",
+    description=(
+        "Gera um relatório financeiro e cadastral consolidado estruturado em quatro etapas lógicas:\n\n"
+        "1. **Ponto de Partida**: Informações básicas do emissor, qualidade cadastral e física da base de dados.\n"
+        "2. **Resultado e Eficiência**: Séries e comparações de desempenho operacional (receitas, margens, lucros).\n"
+        "3. **Caixa e Solidez**: Métricas de fluxo de caixa, endividamento, liquidez e sinais automáticos de alavancagem.\n"
+        "4. **Governança e Conclusão**: Histórico de governança corporativa (CGVN), remunerações (FRE), eventos oficiais (IPE) e VLMO.\n\n"
+        "**Comportamento de Resolução (Resolution Mode)**:\n"
+        "- Se os dados analíticos canônicos estiverem materializados para a companhia, o endpoint retorna em modo `canonical`. "
+        "O recorte padrão (`annual`, `fy`, 5 anos, último conhecimento) é pré-compilado ao final da materialização. "
+        "Outros recortes canônicos são persistidos na primeira leitura.\n"
+        "- Caso contrário, o motor executa o cálculo sob demanda em modo `runtime_fallback` a partir do staging promovido relacional.\n\n"
+        "**Entrega e cache**:\n"
+        "- O read model persistido no PostgreSQL é a fonte de entrega canônica do relatório agregado.\n"
+        "- O Redis mantém apenas uma cópia descartável, versionada pela execução de materialização e pelo recorte completo.\n"
+        "- A resposta inclui `ETag`, `Cache-Control`, `X-Analise-Source` e `X-Analise-Generation`. "
+        "Envie `If-None-Match` para receber `304 Not Modified` quando o payload não mudou.\n"
+        "- Falhas ou indisponibilidade do Redis não alteram a resposta funcional; o backend consulta o read model ou compila o relatório.\n\n"
+        "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis e opacas no formato `ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`.\n"
+        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos."
+    ),
+    responses=_RESPOSTAS_FUNDAMENTALISTA,
+    operation_id="obterAnaliseFundamentalista",
+)
+def obter_analise_fundamentalista(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM (5 ou 6 dígitos).", examples=[9512])],
+    db: DbSession,
+    request: Request,
+    escopo: Annotated[
+        AnaliseEscopo,
+        Query(
+            description=(
+                "Escopo societário considerado para a consolidação dos dados: "
+                "`consolidated` (demonstrações consolidadas do grupo econômico) ou "
+                "`individual` (demonstrações individuais da controladora)."
+            )
+        )
+    ] = "consolidated",
+    periodicidade: Annotated[
+        AnalisePeriodicidade,
+        Query(
+            description=(
+                "Periodicidade dos pontos de dados históricos a retornar: "
+                "`annual` (dados anuais acumulados) ou `quarterly` (dados trimestrais)."
+            )
+        )
+    ] = "annual",
+    base_periodo: Annotated[
+        AnaliseBasePeriodo,
+        Query(
+            description=(
+                "Base temporal de referência para a seleção de períodos: "
+                "`fy` (ano fiscal completo - obrigatório se periodicidade=annual), "
+                "`quarter` (trimestre isolado de três meses) ou "
+                "`ytd` (acumulado do início do ano até o trimestre)."
+            )
+        )
+    ] = "fy",
+    horizonte_anos: Annotated[
+        int,
+        Query(
+            description="Horizonte anual máximo de dados históricos a retornar para séries e comparações.",
+            ge=1,
+            le=20,
+            examples=[5]
+        )
+    ] = 5,
+    as_of: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Data de corte informacional em formato ISO 8601 (`AAAA-MM-DD`). "
+                "Se omitido, considera a data e hora do momento da requisição (último dado disponível)."
+            ),
+            examples=["2025-12-31"]
+        )
+    ] = None,
+    include: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Parâmetro opcional de inclusão de blocos adicionais de resposta. "
+                "Informe `evidence_graph` para obter o grafo estruturado de proveniência lógica e documental."
+            ),
+            examples=["evidence_graph"]
+        )
+    ] = None,
+) -> Response:
+    started_at = perf_counter()
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    if periodicidade == "annual" and base_periodo != "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'annual', a base de periodo deve ser 'fy'.")
+    if periodicidade == "quarterly" and base_periodo == "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'quarterly', a base de periodo deve ser 'quarter' ou 'ytd'.")
+
+    as_of_date = date.fromisoformat(as_of) if as_of else None
+    generation = obter_fundamentalista_generation(db, companhia, scope=escopo)
+    cache_key = build_cache_key(
+        "fundamentalista",
+        codigo_cvm,
+        {
+            "escopo": escopo,
+            "periodicidade": periodicidade,
+            "base_periodo": base_periodo,
+            "horizonte_anos": horizonte_anos,
+            "as_of": as_of,
+            "include": include,
+            "calculation_version": CALCULATION_VERSION,
+            "generation": generation,
+        },
+        namespace="analise:delivery",
+    )
+    if _settings.analise_fundamentalista_cache_enabled:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return _fundamentalista_http_response(
+                request,
+                cached,
+                source="redis_cache",
+                generation=generation,
+                started_at=started_at,
+            )
+
+    lock_key = f"{cache_key}:lock"
+    lock_token: str | None = None
+    if _settings.analise_fundamentalista_cache_enabled:
+        lock_token = cache.acquire_lock(
+            lock_key,
+            _settings.analise_fundamentalista_cache_lock_seconds,
+        )
+        if lock_token == "":
+            cached = cache.wait_for(
+                cache_key,
+                _settings.analise_fundamentalista_cache_wait_seconds,
+            )
+            if cached is not None:
+                return _fundamentalista_http_response(
+                    request,
+                    cached,
+                    source="redis_cache_wait",
+                    generation=generation,
+                    started_at=started_at,
+                )
+
+    try:
+        result = obter_fundamentalista_com_metadata(
+            db,
+            companhia,
+            scope=escopo,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=as_of_date,
+            include=include,
+        )
+        payload = result.response.model_dump_json()
+        if _settings.analise_fundamentalista_cache_enabled:
+            ttl_seconds = (
+                _settings.analise_fundamentalista_cache_ttl_seconds
+                if result.response.resolution.mode == "canonical"
+                else _settings.analise_fundamentalista_runtime_cache_ttl_seconds
+            )
+            cache.set(cache_key, payload, ttl_seconds)
+        return _fundamentalista_http_response(
+            request,
+            payload,
+            source=result.source,
+            generation=result.generation,
+            started_at=started_at,
+        )
+    finally:
+        if lock_token:
+            cache.release_lock(lock_key, lock_token)
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/eventos",
+    response_model=AnaliseFundamentalistaEventosResposta,
+    summary="Eventos do Relatório Fundamentalista",
+    description=(
+        "Retorna eventos oficiais relacionados ao relatório fundamentalista em ordem do mais recente para o mais antigo. "
+        "A resposta respeita `escopo`, `periodicidade`, `base_periodo`, `horizonte_anos` e `as_of`, e usa cursor opaco para paginação. "
+        "Use este endpoint para detalhar buckets agregados retornados no relatório principal."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEventos",
+)
+def obter_analise_fundamentalista_eventos(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM.", examples=[9512])],
+    db: DbSession,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`.")] = "consolidated",
+    periodicidade: Annotated[AnalisePeriodicidade, Query(description="Periodicidade dos pontos históricos do contexto.")] = "annual",
+    base_periodo: Annotated[AnaliseBasePeriodo, Query(description="Base temporal do contexto.")] = "fy",
+    horizonte_anos: Annotated[int, Query(description="Horizonte anual máximo para seleção de eventos.", ge=1, le=20)] = 5,
+    as_of: Annotated[str | None, Query(description="Data de corte informacional em ISO 8601 (`AAAA-MM-DD`).")] = None,
+    bucket: Annotated[str | None, Query(description="Bucket temporal específico no formato `YYYY` ou `YYYY-MM`.")] = None,
+    familias: Annotated[list[str] | None, Query(description="Famílias de evento a filtrar, por exemplo `IPE` ou `FRE`.")] = None,
+    severidades: Annotated[list[str] | None, Query(description="Severidades a filtrar, por exemplo `info`, `warning` ou `critical`.")] = None,
+    cursor: Annotated[str | None, Query(description="Cursor opaco retornado pela página anterior.")] = None,
+    limit: Annotated[int, Query(description="Quantidade máxima de eventos por página.", ge=1, le=100)] = 25,
+) -> AnaliseFundamentalistaEventosResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    if periodicidade == "annual" and base_periodo != "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'annual', a base de periodo deve ser 'fy'.")
+    if periodicidade == "quarterly" and base_periodo == "fy":
+        raise HTTPException(status_code=422, detail="Para periodicidade 'quarterly', a base de periodo deve ser 'quarter' ou 'ytd'.")
+    try:
+        return obter_fundamentalista_eventos(
+            db,
+            companhia,
+            scope=escopo,
+            periodicidade=periodicidade,
+            base_periodo=base_periodo,
+            horizonte_anos=horizonte_anos,
+            as_of=date.fromisoformat(as_of) if as_of else None,
+            bucket=bucket,
+            familias=familias,
+            severidades=severidades,
+            cursor=cursor,
+            limit=limit,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha",
+    response_model=AnaliseEvidenceTrailResponse,
+    summary="Trilha Focal de Evidência",
+    description=(
+        "Retorna uma trilha factual curta ao redor de uma evidência do relatório fundamentalista. "
+        "O `evidence_id` é opaco, a profundidade é limitada a 1 e a resposta nunca passa de 12 nós."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEvidenciaTrilha",
+)
+def obter_analise_fundamentalista_evidencia_trilha(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM.", examples=[9512])],
+    evidence_id: Annotated[str, Path(description="Identificador opaco da evidência raiz.")],
+    db: DbSession,
+    depth: Annotated[int, Query(description="Profundidade da trilha focal. Neste contrato, apenas `1` é aceito.", ge=1, le=1)] = 1,
+    limit: Annotated[int, Query(description="Limite máximo de nós na trilha.", ge=1, le=12)] = 12,
+    types: Annotated[list[str] | None, Query(description="Tipos de nós permitidos: observation, signal, event, document ou restatement.")] = None,
+) -> AnaliseEvidenceTrailResponse:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    allowed = {"observation", "signal", "event", "document", "restatement"}
+    if types and any(item not in allowed for item in types):
+        raise HTTPException(status_code=422, detail="Tipo de nó de evidência invalido.")
+    try:
+        return obter_evidencia_trilha(
+            db,
+            companhia,
+            evidence_id,
+            depth=depth,
+            limit=limit,
+            types=cast(list[Any], types) if types else None,
+        )
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}",
+    response_model=AnaliseFundamentalistaEvidenciaDetalhe,
+    summary="Detalhar Evidência sob Demanda",
+    description=(
+        "Resolve e detalha as informações lógicas, documentais e a proveniência factual de uma "
+        "determinada evidência acionada no relatório fundamentalista.\n\n"
+        "Esse endpoint funciona como o motor do *Audit Trail* da plataforma, permitindo ao usuário "
+        "conectar qualquer número ou sinal apresentado na tela ao documento oficial assinado "
+        "e protocolado na CVM (como DFP, ITR ou FRE).\n\n"
+        "**Segurança e Validação**:\n"
+        "- Valida se o `evidence_id` está no formato correto de dois pontos (`ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`).\n"
+        "- Garante que a evidência pertence de fato à companhia identificada na rota. Se houver divergência, retorna **403 Forbidden**.\n"
+        "- Se a evidência não existir ou o período for inconsistente, retorna **404 Not Found**."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="obterAnaliseFundamentalistaEvidencia",
+)
+def obter_analise_fundamentalista_evidencia(
+    codigo_cvm: Annotated[int, Path(description="Código oficial de registro da companhia na CVM (5 ou 6 dígitos).", examples=[9512])],
+    evidence_id: Annotated[
+        str,
+        Path(
+            description="Identificador único e estável da evidência. Deve ser tratado de forma opaca pelo cliente (ex: 'ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025').",
+            examples=["ev::9512::metric::consolidated::none::fy::receita_liquida::FY2025"]
+        )
+    ],
+    db: DbSession,
+) -> AnaliseFundamentalistaEvidenciaDetalhe:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    try:
+        return obter_evidencia_detalhe(db, companhia, evidence_id)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e

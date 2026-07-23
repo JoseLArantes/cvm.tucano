@@ -679,8 +679,11 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_replay_quarantine = payload["paths"]["/ingestion/replay/quarentena"]["post"]
     rota_quarentena_resumo = payload["paths"]["/ingestion/quarentena/resumo"]["get"]
     rota_replay_run = payload["paths"]["/ingestion/runs/{run_id}/replay"]["post"]
+    rota_recover_run = payload["paths"]["/ingestion/runs/{run_id}/recover"]["post"]
     rota_identity = payload["paths"]["/ingestion/identity/rebuild"]["post"]
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
+    rota_stream = payload["paths"]["/ingestion/events/stream"]["get"]
+    rota_acknowledge_failure = payload["paths"]["/ingestion/runs/{run_id}/acknowledge-failure"]["post"]
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
@@ -703,11 +706,20 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert rota_quarentena_resumo["summary"] == "Resumo Analítico da Quarentena"
     assert "status" in rota_quarentena_resumo["description"]
     assert rota_replay_run["summary"] == "Reprocessar Run de Ingestion"
+    assert "recovery_dispatch_failed" in rota_recover_run["responses"]["503"]["content"]["application/json"]["examples"]
     assert rota_identity["summary"] == "Reconstruir Identidade de Ingestion"
     assert rota_runs["operationId"] == "listarIngestionRunsAdmin"
+    assert rota_runs["responses"]["503"]["content"]["application/json"]["example"]["detail"] == {
+        "reason_code": "DATABASE_POOL_EXHAUSTED",
+        "retryable": True,
+    }
     assert rota_identity["operationId"] == "rebuildIngestionIdentityAdmin"
     assert rota_quarantine["operationId"] == "listarIngestionQuarentenaAdmin"
     assert rota_replay_quarantine["operationId"] == "replayIngestionQuarentenaAdmin"
+    assert rota_stream["summary"] == "Stream SSE de eventos operacionais de ingestao"
+    assert rota_acknowledge_failure["operationId"] == "acknowledgeIngestionRunFailureAdmin"
+    assert "sem apagar" in rota_acknowledge_failure["description"]
+    assert "Last-Event-ID" in {item["name"] for item in rota_stream["parameters"]}
     assert rota_quarentena_resumo["operationId"] == "resumoIngestionQuarentenaAdmin"
 
     esquema_run = payload["components"]["schemas"]["IngestionRunResumo"]
@@ -726,6 +738,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert "blocking" in esquema_run["properties"]
     assert "cancellation" in esquema_run["properties"]
     assert "next_action" in esquema_run["properties"]
+    assert "failure_acknowledgement" in esquema_run["properties"]
     assert "members_reused_from_failed_parent" in esquema_run["properties"]["quality_summary"]["description"]
     assert "reaproveitados a partir de resultados anteriores" in esquema_run["properties"]["lifecycle_decision"]["description"]
     esquema_phase = payload["components"]["schemas"]["IngestionRunPhaseExecutionResumo"]
@@ -888,7 +901,7 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert run_payload["liveness"]["is_stale"] is True
     assert run_payload["blocking"]["reason_code"] == "stale"
     assert run_payload["cancellation"]["status"] == "propagated"
-    assert run_payload["next_action"] == "recover"
+    assert run_payload["next_action"] == "inspect_error"
     assert run_payload["links"]["run_phases"] == f"/ingestion/runs/{run_id}/phases"
 
     resposta_run = client.get(f"/ingestion/runs/{run_id}")
@@ -1084,6 +1097,7 @@ def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient
     db_session.add(
         ExecucaoSincronizacao(
             id=execucao_id,
+            parent_execucao_id=uuid.uuid4(),
             tipo_fonte="itr",
             ano=2026,
             arquivo="itr_cia_aberta_2026.zip",
@@ -1130,6 +1144,69 @@ def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient
     assert resposta_run.status_code == 200
     assert resposta_run.json()["state"] == "failed"
     assert resposta_run.json()["next_action"] == "recover"
+    assert resposta_run.json()["recovery"] == {
+        "eligible": True,
+        "strategy": "rerun_member_execution",
+        "reason_code": "MEMBER_EXECUTION_AVAILABLE",
+    }
+
+
+def test_admin_run_without_recovery_source_inspects_error_and_rejects_recover(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agora = datetime.now(UTC)
+    run_id = uuid.uuid4()
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            tipo_fonte="itr",
+            ano=2022,
+            status="falha",
+            phase="promote",
+            message="Recovery sweep marcou a run como falha recuperavel apos heartbeat stale.",
+        )
+    )
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run_id,
+            phase="promote",
+            status="failed_final",
+            attempt=1,
+            started_at=agora - timedelta(hours=1),
+            heartbeat_at=agora - timedelta(minutes=30),
+            finished_at=agora,
+            error_type="stale_phase",
+            error_message="falha recuperavel",
+            error_retryable=True,
+        )
+    )
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.api.routers.admin.replay_ingestion_run_service",
+        lambda *args, **kwargs: pytest.fail("replay nao deve ser chamado sem fonte executavel"),
+    )
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "NO_RECOVERY_SOURCE",
+    }
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "NO_RECOVERY_SOURCE"
+    assert recover.json()["detail"]["recovery"]["eligible"] is False
 
 
 def test_admin_run_cancel_member_cancel_e_recover(
@@ -1207,6 +1284,19 @@ def test_admin_run_cancel_member_cancel_e_recover(
             row_count=10,
             schema_status="ok",
             schema_message=None,
+        )
+    )
+    db_session.add(
+        IngestionRow(
+            ingestion_run_id=run_id,
+            ingestion_file_member_id=member_id,
+            arquivo_origem="dfp_cia_aberta_BPA_con_2026.csv",
+            ano_origem=2026,
+            linha_origem=1,
+            raw_data={"CNPJ_CIA": "00000000000191"},
+            raw_hash="row-sha",
+            row_kind="dfp_bpa_con",
+            validation_status="valid",
         )
     )
     db_session.add(
@@ -1339,3 +1429,452 @@ def test_admin_ingerir_fonte_pre_processada_route(
     resposta_ok = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir?force_reimport=true")
     assert resposta_ok.status_code == 200
     assert resposta_ok.json() == {"id_tarefa": f"task-ingest-{exec_uuid}-True", "status": "agendada"}
+
+
+def test_admin_run_waiting_expoe_start_ingestion_com_execucao_correlata(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=execucao_id,
+            tipo_fonte="itr",
+            ano=2022,
+            arquivo="itr_cia_aberta_2022.zip",
+            url="http://exemplo/itr-2022",
+            status="aguardando_ingestao",
+            tipo_execucao="arquivo_zip",
+        )
+    )
+    db_session.add(
+        IngestionRun(
+            id=run_id,
+            execucao_sincronizacao_id=execucao_id,
+            tipo_fonte="itr",
+            ano=2022,
+            status="aguardando_ingestao",
+            phase="stage",
+        )
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["state"] == "waiting"
+    assert detalhe.json()["next_action"] == "start_ingestion"
+
+    work_item = client.get("/ingestion/work-items/itr:2022")
+    assert work_item.status_code == 200
+    assert work_item.json()["next_action"] == "start_ingestion"
+    assert work_item.json()["allowed_actions"] == [
+        {
+            "code": "start_ingestion",
+            "operation": "POST",
+            "resource": f"/ingestion/sincronizacoes/{execucao_id}/ingerir",
+            "requires_confirmation": True,
+            "reason_code": "AWAITING_INGESTION",
+            "constraints": {"force_reimport": False},
+        }
+    ]
+
+
+def test_admin_run_waiting_member_of_failed_parent_allows_recover(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_2022.zip",
+                url="http://exemplo/itr-2022",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_DVA_con_2022.csv",
+                url="http://exemplo/itr-2022",
+                status="aguardando_ingestao",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="aguardando_ingestao",
+                phase="stage",
+            ),
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.worker.tasks.sincronizar_member_task.apply_async",
+        lambda **kwargs: SimpleNamespace(id=kwargs["task_id"]),
+    )
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "recover"
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 200
+    assert recover.json()["status"] == "agendada"
+    assert recover.json()["detalhe"]["strategy"] == "rerun_member_execution"
+
+
+def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_2021.zip",
+                url="http://exemplo/itr-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_DVA_con_2021.csv",
+                url="http://exemplo/itr-2021",
+                status="aguardando_ingestao",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="aguardando_ingestao",
+                phase="stage",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    def _dispatch_indisponivel(**kwargs: object) -> object:
+        raise RuntimeError(
+            "Retry limit exceeded while trying to reconnect to the Celery result store backend. "
+            "The Celery application must be restarted."
+        )
+
+    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", _dispatch_indisponivel)
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 503
+    assert recover.json()["detail"] == {
+        "reason_code": "RECOVERY_DISPATCH_FAILED",
+        "retryable": False,
+        "run_id": str(run_id),
+    }
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["state"] == "failed"
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "NON_RETRYABLE_FAILURE",
+    }
+    assert detalhe.json()["last_error"]["retryable"] is False
+    assert "Celery result store backend" in detalhe.json()["last_error"]["error_message"]
+
+    phases = client.get(f"/ingestion/runs/{run_id}/phases")
+    assert phases.status_code == 200
+    assert phases.json()["dados"][-1]["status"] == "failed_final"
+    assert phases.json()["dados"][-1]["error_retryable"] is False
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+
+def test_admin_legacy_recovery_dispatch_failure_ignores_old_retryable_phase(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    agora = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2020,
+                arquivo="itr_cia_aberta_2020.zip",
+                url="http://exemplo/itr-2020",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2020,
+                arquivo="itr_cia_aberta_DVA_con_2020.csv",
+                url="http://exemplo/itr-2020",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2020,
+                status="falha",
+                phase="complete",
+                message=(
+                    "Falha ao agendar recovery de member: Retry limit exceeded while trying to reconnect "
+                    "to the Celery result store backend."
+                ),
+                finished_at=agora,
+            ),
+            IngestionPhaseExecution(
+                ingestion_run_id=run_id,
+                execucao_sincronizacao_id=child_id,
+                phase="promote",
+                status="failed_final",
+                attempt=1,
+                started_at=agora,
+                heartbeat_at=agora,
+                finished_at=agora,
+                error_type="stale_phase",
+                error_message="falha recuperavel anterior",
+                error_retryable=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["last_error"]["error_type"] == "recovery_dispatch_failed"
+    assert detalhe.json()["last_error"]["retryable"] is False
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"]["eligible"] is False
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+
+def test_admin_run_terminal_com_execucao_filha_nao_permanece_recuperavel(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    agora = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_2023.zip",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_DVA_con_2023.csv",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                mensagem_erro="NO_ROWS_PROCESSED",
+                finalizada_em=agora,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2023,
+                status="falha",
+                phase="complete",
+                message="NO_ROWS_PROCESSED",
+                finished_at=agora,
+            ),
+            IngestionPhaseExecution(
+                ingestion_run_id=run_id,
+                execucao_sincronizacao_id=child_id,
+                phase="promote",
+                status="failed_final",
+                attempt=1,
+                started_at=agora,
+                heartbeat_at=agora,
+                finished_at=agora,
+                error_type="empty_member",
+                error_message="NO_ROWS_PROCESSED",
+                error_retryable=False,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["state"] == "failed"
+    assert detalhe.json()["next_action"] == "inspect_error"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "NON_RETRYABLE_FAILURE",
+    }
+
+    work_item = client.get("/ingestion/work-items/itr:2023")
+    assert work_item.status_code == 200
+    assert work_item.json()["allowed_actions"][0]["code"] == "inspect_error"
+    assert work_item.json()["allowed_actions"][0]["reason_code"] == "NON_RETRYABLE_FAILURE"
+    assert work_item.json()["allowed_actions"][1] == {
+        "code": "acknowledge_failure",
+        "operation": "POST",
+        "resource": f"/ingestion/runs/{run_id}/acknowledge-failure",
+        "requires_confirmation": True,
+        "reason_code": "INVESTIGATION_REQUIRED",
+        "constraints": {"reason_required": True},
+    }
+    assert work_item.json()["allowed_actions"][2] == {
+        "code": "start_ingestion",
+        "operation": "POST",
+        "resource": "/ingestion/dispatch",
+        "requires_confirmation": True,
+        "reason_code": "TERMINAL_RUN_REDISPATCH_ALLOWED",
+        "constraints": {"fonte": "itr", "ano": 2023},
+    }
+
+    operations = client.get("/ingestion/operations")
+    assert operations.status_code == 200
+    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "NON_RETRYABLE_FAILURE"
+
+    acknowledgement = client.post(
+        f"/ingestion/runs/{run_id}/acknowledge-failure",
+        json={"reason": "Falha investigada; nao existe trabalho reaplicavel."},
+    )
+    assert acknowledgement.status_code == 200
+    assert acknowledgement.json()["acknowledged_by"] == "system"
+    assert acknowledgement.json()["reason"] == "Falha investigada; nao existe trabalho reaplicavel."
+
+    detalhe_reconhecido = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe_reconhecido.status_code == 200
+    assert detalhe_reconhecido.json()["state"] == "failed"
+    assert detalhe_reconhecido.json()["next_action"] == "none"
+    assert detalhe_reconhecido.json()["failure_acknowledgement"]["failure_key"].startswith("phase:")
+
+    work_item_reconhecido = client.get("/ingestion/work-items/itr:2023")
+    assert work_item_reconhecido.status_code == 200
+    assert [action["code"] for action in work_item_reconhecido.json()["allowed_actions"]] == [
+        "inspect",
+        "start_ingestion",
+    ]
+
+    pendencias = client.get("/ingestion/work-items?next_action=inspect_error")
+    assert pendencias.status_code == 200
+    assert all(item["id"] != "itr:2023" for item in pendencias.json()["dados"])
+
+    timeline = client.get("/ingestion/work-items/itr:2023/events")
+    assert timeline.status_code == 200
+    assert any(event["code"] == "operation.acknowledge_failure" for event in timeline.json()["dados"])
+
+    acknowledgement_retry = client.post(
+        f"/ingestion/runs/{run_id}/acknowledge-failure",
+        json={"reason": "Tentativa repetida."},
+    )
+    assert acknowledgement_retry.status_code == 200
+    assert acknowledgement_retry.json() == acknowledgement.json()
+
+    plan = client.post(
+        "/ingestion/dispatch/plan",
+        json={"scopes": [{"fonte": "itr", "ano": 2023}], "strategy": "direct", "force_reimport": False},
+    )
+    assert plan.status_code == 200
+    assert plan.json()["conflicts"] == []
+
+
+def test_admin_run_concluida_com_execucao_filha_nao_expoe_recovery(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_2024.zip",
+                url="http://exemplo/itr-2024",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DVA_con_2024.csv",
+                url="http://exemplo/itr-2024",
+                status="sucesso",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="sucesso",
+                phase="complete",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    detalhe = client.get(f"/ingestion/runs/{run_id}")
+    assert detalhe.status_code == 200
+    assert detalhe.json()["next_action"] == "none"
+    assert detalhe.json()["recovery"] == {
+        "eligible": False,
+        "strategy": None,
+        "reason_code": "RUN_ALREADY_COMPLETED",
+    }
+
+    recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert recover.status_code == 409
+    assert recover.json()["detail"]["reason_code"] == "RUN_ALREADY_COMPLETED"

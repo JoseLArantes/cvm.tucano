@@ -17,7 +17,7 @@ services:
 
   cvm_analise_materializacao_worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Ofair -Q analise_materializacao
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=3 -Ofair -Q analise_materializacao
     env_file:
       - .env
     mem_limit: ${ANALISE_MATERIALIZACAO_WORKER_MEM_LIMIT:-2g}
@@ -26,7 +26,7 @@ services:
     volumes:
       - .:/app
     deploy:
-      replicas: ${ANALISE_MATERIALIZACAO_WORKER_REPLICAS:-2}
+      replicas: ${ANALISE_MATERIALIZACAO_WORKER_REPLICAS:-3}
     depends_on:
       cvm_redis:
         condition: service_healthy

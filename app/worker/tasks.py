@@ -190,6 +190,7 @@ def materializar_analise_companhia_task(
             campanha_item_id=uuid.UUID(campanha_item_id) if campanha_item_id else None,
             chunk_execucao_id=uuid.UUID(chunk_execucao_id) if chunk_execucao_id else None,
             queue_name=_settings.analise_materializacao_queue_name,
+            task_id=str(self.request.id),
             position_in_chunk=position_in_chunk,
         )
         return {
@@ -567,6 +568,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                     campanha_item_id=item.id,
                     chunk_execucao_id=chunk_uuid,
                     queue_name=_settings.analise_materializacao_queue_name,
+                    task_id=str(self.request.id),
                     position_in_chunk=position,
                 )
                 registrar_resultado_materializacao_campanha_item(
@@ -672,6 +674,54 @@ def recuperar_materializacao_pendente_task(self: Any) -> dict[str, Any]:
         db.close()
 
 
+@celery_app.task(bind=True, name="app.worker.tasks.reconciliar_materializacoes_terminais_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def reconciliar_materializacoes_terminais_task(self: Any) -> dict[str, Any]:
+    from app.services.analise import obter_estado_gate_materializacao
+    from app.services.analise_materializacao_operacional import (
+        reconcile_completion_pending_executions,
+    )
+
+    inspect = celery_app.control.inspect(timeout=0.5)
+    try:
+        active = inspect.active()
+        reserved = inspect.reserved()
+        scheduled = inspect.scheduled()
+    except Exception:
+        active = reserved = scheduled = None
+    inspection_available = not (
+        active is None and reserved is None and scheduled is None
+    )
+    task_ids: set[str] = set()
+    for payload, is_scheduled in (
+        (active or {}, False),
+        (reserved or {}, False),
+        (scheduled or {}, True),
+    ):
+        for tasks in payload.values():
+            if not isinstance(tasks, list):
+                continue
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                request = task.get("request") if is_scheduled else task
+                if isinstance(request, dict) and isinstance(request.get("id"), str):
+                    task_ids.add(request["id"])
+
+    db = SessionLocal()
+    try:
+        gate = obter_estado_gate_materializacao(db)
+        return reconcile_completion_pending_executions(
+            db,
+            active_task_ids=task_ids,
+            task_inspection_available=inspection_available,
+            gate_status=gate.status,
+            gate_reason_code=gate.reason_code,
+            stalled_threshold_seconds=300,
+        )
+    finally:
+        db.close()
+
+
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cadastro_companhias_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def sincronizar_cadastro_companhias_task(
     self: Any,
@@ -685,33 +735,31 @@ def sincronizar_cadastro_companhias_task(
     from sqlalchemy import select
 
     from app.models.ingestion import IngestionRun
-    from app.updates.models import PendingUpdate
+    from app.updates.lifecycle import finalize_pending_update_by_run_id
 
     db = SessionLocal()
     try:
-        resultado = sincronizar_cadastro_companhias(db, task_id=str(self.request.id), force_reimport=force_reimport)
+        resultado = sincronizar_cadastro_companhias(
+            db,
+            task_id=str(self.request.id),
+            force_reimport=force_reimport,
+            pending_update_id=pending_update_id,
+        )
         status_res = resultado.get("status")
         execucao_id = resultado.get("execucao_id")
 
-        if status_res in ("sucesso", "sem_alteracao", "skipped"):
-            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
-            if not p_id:
-                stmt_p = select(PendingUpdate).where(
-                    PendingUpdate.fonte == "cadastro",
-                    PendingUpdate.ano.is_(None),
-                    PendingUpdate.status == "triggered"
-                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
-                pending = db.scalar(stmt_p)
-            else:
-                pending = db.get(PendingUpdate, p_id)
-
-            if pending is not None:
-                if execucao_id:
-                    stmt_run = select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == uuid.UUID(execucao_id))
-                    run = db.scalar(stmt_run)
-                    if run:
-                        pending.last_successful_run_id = run.id
+        if execucao_id and pending_update_id:
+            stmt_run = select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id == uuid.UUID(execucao_id)
+            )
+            run = db.scalar(stmt_run)
+            if finalize_pending_update_by_run_id(
+                db,
+                pending_update_id=pending_update_id,
+                run=run,
+            ):
                 db.commit()
+        if status_res in ("sucesso", "sem_alteracao", "skipped"):
             if dispatch_year_after_success is not None:
                 published = _publicar_fontes_anuais_agendadas(
                     db,
@@ -727,6 +775,21 @@ def sincronizar_cadastro_companhias_task(
                 )
 
         return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    except Exception:
+        db.rollback()
+        run = db.scalar(
+            select(IngestionRun)
+            .where(IngestionRun.requested_by_task_id == str(self.request.id))
+            .order_by(IngestionRun.created_at.desc())
+            .limit(1)
+        )
+        if finalize_pending_update_by_run_id(
+            db,
+            pending_update_id=pending_update_id,
+            run=run,
+        ):
+            db.commit()
+        raise
     finally:
         db.close()
 
@@ -953,6 +1016,15 @@ def pre_processar_sincronizacao_zip(
     )
     db.commit()
     db.refresh(run)
+    if pending_update_id is not None:
+        from app.updates.lifecycle import link_pending_update_to_run
+
+        link_pending_update_to_run(
+            db,
+            pending_update_id=pending_update_id,
+            run=run,
+        )
+        db.commit()
 
     zip_dir = Path(settings.storage_dir) / str(execucao.id)
     zip_path = zip_dir / arquivo_zip
@@ -1239,6 +1311,14 @@ def pre_processar_sincronizacao_zip(
                 message=str(exc),
                 finished_at=datetime.now(UTC)
             )
+            if pending_update_id is not None:
+                from app.updates.lifecycle import finalize_pending_update_by_run_id
+
+                finalize_pending_update_by_run_id(
+                    db,
+                    pending_update_id=pending_update_id,
+                    run=run_erro,
+                )
         db.commit()
 
         # Clean up files
@@ -1369,6 +1449,14 @@ def ingerir_sincronizacao_zip(
                 message=str(exc),
                 finished_at=datetime.now(UTC)
             )
+            if pending_update_id is not None:
+                from app.updates.lifecycle import finalize_pending_update_by_run_id
+
+                finalize_pending_update_by_run_id(
+                    db,
+                    pending_update_id=pending_update_id,
+                    run=run_erro,
+                )
         db.commit()
         raise
     finally:
@@ -1402,26 +1490,19 @@ def _coordenar_sincronizacao_zip(
         db = SessionLocal()
         try:
             from app.models.ingestion import IngestionRun
-            from app.updates.models import PendingUpdate
-            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
-            if not p_id:
-                stmt_p = select(PendingUpdate).where(
-                    PendingUpdate.fonte == tipo_fonte,
-                    PendingUpdate.ano == ano,
-                    PendingUpdate.status == "triggered"
-                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
-                pending = db.scalar(stmt_p)
-            else:
-                pending = db.get(PendingUpdate, p_id)
+            from app.updates.lifecycle import finalize_pending_update_by_run_id
 
-            if pending is not None:
-                stmt_run = select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == uuid.UUID(phase1_res["execucao_id"]))
-                run = db.scalar(stmt_run)
-                if run:
-                    pending.last_successful_run_id = run.id
+            stmt_run = select(IngestionRun).where(
+                IngestionRun.execucao_sincronizacao_id
+                == uuid.UUID(phase1_res["execucao_id"])
+            )
+            run = db.scalar(stmt_run)
+            if finalize_pending_update_by_run_id(
+                db,
+                pending_update_id=pending_update_id,
+                run=run,
+            ):
                 db.commit()
-        except Exception:
-            pass
         finally:
             db.close()
         return phase1_res
@@ -1736,7 +1817,10 @@ def sincronizar_member_internal(
         from app.services.ingestion.summary import build_contadores_quality_summary
 
         quality_summary = build_contadores_quality_summary(contadores)
-        status_execucao, mensagem_status = enforce_quality_gate(quality_summary=quality_summary)
+        status_execucao, mensagem_status = enforce_quality_gate(
+            quality_summary=quality_summary,
+            require_rows=True,
+        )
 
         execucao = db.get(ExecucaoSincronizacao, execucao.id)
         run = db.get(IngestionRun, run.id)
@@ -2020,24 +2104,13 @@ def finalizar_sincronizacao_zip_task(
                 finished_at=datetime.now(UTC),
             )
 
-        if parent_status == "sucesso":
-            from app.updates.models import PendingUpdate
+        from app.updates.lifecycle import finalize_pending_update_by_run_id
 
-            p_id = uuid.UUID(pending_update_id) if pending_update_id else None
-            if not p_id:
-                stmt_p = select(PendingUpdate).where(
-                    PendingUpdate.fonte == execucao.tipo_fonte,
-                    PendingUpdate.ano == execucao.ano,
-                    PendingUpdate.status == "triggered"
-                ).order_by(PendingUpdate.resolved_timestamp.desc()).limit(1)
-                pending = db.scalar(stmt_p)
-            else:
-                pending = db.get(PendingUpdate, p_id)
-
-            if pending is not None:
-                if run is not None:
-                    pending.last_successful_run_id = run.id
-                db.commit()
+        finalize_pending_update_by_run_id(
+            db,
+            pending_update_id=pending_update_id,
+            run=run,
+        )
 
         from app.models.ingestion import IngestionFileMember
 

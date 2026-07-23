@@ -1,11 +1,18 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app.api.auth import validar_token_api
 from app.api.routers import protected_router, public_router
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.observabilidade import ObservabilidadeMiddleware, configurar_logging, criar_app_metricas
+from app.mcp.security import McpAuthError, validate_http_bearer
+from app.mcp.settings import McpSettings, get_mcp_settings
 
 DESCRICAO_API = """
 API para normalização e consulta de dados públicos da CVM de companhias abertas.
@@ -132,6 +139,20 @@ OPENAPI_TAGS = [
     },
 ]
 
+settings = get_settings()
+mcp_settings = get_mcp_settings()
+mcp_http_app: Any | None = None
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    if mcp_http_app is None:
+        yield
+        return
+    async with mcp_http_app.router.lifespan_context(mcp_http_app):
+        yield
+
+
 app = FastAPI(
     title="API CVM Companhias Abertas",
     version="0.1.0",
@@ -139,11 +160,69 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_tags=OPENAPI_TAGS,
+    lifespan=lifespan,
 )
-settings = get_settings()
 configurar_logging(settings.log_level)
 
+
+def configurar_cors(api_app: FastAPI, app_settings: Settings) -> None:
+    if not app_settings.cors_origins:
+        return
+    api_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=app_settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+
+configurar_cors(app, settings)
 app.add_middleware(ObservabilidadeMiddleware, habilitar_metricas=settings.enable_prometheus_metrics)
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def responder_pool_banco_saturado(_: Request, __: SQLAlchemyTimeoutError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "reason_code": "DATABASE_POOL_EXHAUSTED",
+                "retryable": True,
+            }
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+@app.middleware("http")
+async def proteger_mcp_http(request: Request, call_next: Any) -> Any:
+    if not mcp_settings.http_enabled or not request.url.path.startswith("/mcp"):
+        return await call_next(request)
+    try:
+        validate_http_bearer(mcp_settings, request.headers.get("authorization"))
+    except McpAuthError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=401)
+    if request.scope.get("path") == "/mcp":
+        request.scope["path"] = "/mcp/"
+        request.scope["raw_path"] = b"/mcp/"
+    return await call_next(request)
+
+
+def configurar_mcp_http(api_app: FastAPI, app_settings: McpSettings) -> None:
+    global mcp_http_app
+    if not app_settings.http_enabled:
+        return
+    if app_settings.http_require_bearer and not app_settings.token.strip():
+        raise RuntimeError("MCP_HTTP_ENABLED=true com MCP_HTTP_REQUIRE_BEARER=true exige MCP_TOKEN configurado.")
+    from app.mcp.server import create_server
+
+    mcp_server = create_server(app_settings, http=True)
+    mcp_http_app = mcp_server.streamable_http_app()
+    api_app.mount("/mcp", cast(Any, mcp_http_app))
+
+
+configurar_mcp_http(app, mcp_settings)
 if settings.enable_prometheus_metrics:
     app_metricas = criar_app_metricas()
     if app_metricas is not None:

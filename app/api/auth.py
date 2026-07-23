@@ -128,6 +128,9 @@ def autenticar_requisicao(
     usuario = db.get(Usuario, usuario_id)
     if usuario is None or not usuario.ativo:
         raise HTTPException(status_code=401, detail="Token de acesso invalido.")
+    # A autenticacao nao deve reter uma conexao durante todo o processamento da
+    # rota (ou por toda a vida de um StreamingResponse/SSE).
+    db.commit()
     return AutenticacaoApi(usuario=usuario, token_sistema=False)
 
 

@@ -26,6 +26,10 @@ This context covers the priority pipeline that acquires, normalizes, stores, and
 - **Typed Staging** means rebuildable PostgreSQL staging tables loaded from normalized artifacts via streaming `COPY`.
 - **Financial Direct Path** means the DFP/ITR member pipeline that reads the raw CSV artifact, normalizes valid rows into a typed normalized artifact, loads typed staging, promotes canonical rows, reconciles scope, and purges typed staging without persisting valid rows in `ingestion_rows`.
 - **Promotion** means writing normalized rows into domain tables.
+- **Inserted Record** means a valid source row that created a domain record or relationship that did not exist before the synchronization.
+- **Updated Record** means a valid source row that changed at least one business field on an existing domain representation; lineage-only changes do not qualify.
+- **Unchanged Record** means a valid source row whose domain representation already existed with equivalent business values, even when artifact metadata or lineage was refreshed.
+- **Promoted Record** means a valid normalized row processed by promotion; it describes throughput and is not synonymous with an inserted record.
 - **Phase Checkpoint** means the operational record that marks which ingestion phase has started, advanced, failed, or completed for a run or member.
 - **Operational Signal** means the API-facing aggregate state that tells a decoupled consumer the current state, phase, progress, liveness, blocking reason, cancellation state, last error, and next recommended action for an ingestion scope.
 - **Cancellation Request** means a durable operator request to stop a run, ZIP execution, member execution, quarantine replay, or task without relying only on transient Celery revoke state.

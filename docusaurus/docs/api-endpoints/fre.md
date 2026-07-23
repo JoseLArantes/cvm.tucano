@@ -11,6 +11,12 @@ O **Formulário de Referência (FRE)** é o documento mais rico em informações
 
 ## Endpoints Disponíveis
 
+### Diagnóstico Operacional
+
+| Método | Rota | Descrição |
+|--------|------|-----------|
+| `GET` | `/fre/datasets/disponibilidade` | Diagnosticar se cada dataset FRE está disponível na fonte, foi ingerido e possui linhas promovidas para o endpoint |
+
 ### Documentos e Cabeçalhos
 
 | Método | Rota | Descrição |
@@ -87,7 +93,7 @@ Para exercícios a partir de 2024, use principalmente:
 
 | Método | Rota | Descrição |
 |--------|------|-----------|
-| `GET` | `/fre/volume-valor-mobiliario` | Volume de negociação |
+| `GET` | `/fre/volume-valor-mobiliario` | Volume de negociação, quando publicado pela CVM para o ano consultado |
 | `GET` | `/fre/outro-valor-mobiliario` | Outros valores mobiliários |
 | `GET` | `/fre/titular-valor-mobiliario` | Titulares de valores mobiliários |
 | `GET` | `/fre/mercado-estrangeiro` | Mercados estrangeiros |
@@ -97,9 +103,9 @@ Para exercícios a partir de 2024, use principalmente:
 
 | Método | Rota | Descrição |
 |--------|------|-----------|
-| `GET` | `/fre/valor-mobiliario-tesouraria-movimentacao` | Movimentações em tesouraria |
-| `GET` | `/fre/valor-mobiliario-tesouraria-ultimo-exercicio` | Saldos em tesouraria |
-| `GET` | `/fre/plano-recompra` | Planos de recompra |
+| `GET` | `/fre/valor-mobiliario-tesouraria-movimentacao` | Movimentações em tesouraria, quando publicadas pela CVM para o ano consultado |
+| `GET` | `/fre/valor-mobiliario-tesouraria-ultimo-exercicio` | Saldos em tesouraria, quando publicados pela CVM para o ano consultado |
+| `GET` | `/fre/plano-recompra` | Planos de recompra, incluindo anos históricos em que o arquivo foi publicado |
 | `GET` | `/fre/plano-recompra-classes-acoes` | Classes em planos de recompra |
 
 ### Observação de layout para `/fre/plano-recompra-classes-acoes`
@@ -116,6 +122,102 @@ Na prática, o backend não rejeita mais a linha apenas porque `tipo_classe_acao
 | Método | Rota | Descrição |
 |--------|------|-----------|
 | `GET` | `/fre/participacoes-sociedades` | Participações em sociedades |
+
+---
+
+## `GET /fre/datasets/disponibilidade`
+
+Retorna um diagnóstico por ano e dataset FRE cruzando quatro camadas:
+
+- catálogo de fonte esperado pelo backend;
+- snapshot do pacote anual FRE;
+- snapshot ou indexação do CSV membro dentro do ZIP;
+- linhas promovidas na tabela de domínio que alimenta o endpoint público.
+
+Use este endpoint quando um endpoint específico de FRE retornar vazio. Ele diferencia casos como:
+
+- o pacote anual FRE ainda não foi ingerido;
+- o ZIP foi conhecido, mas o CSV membro não existe no pacote publicado pela CVM;
+- o CSV membro existe e tem linhas, mas não houve promoção para a tabela do endpoint;
+- o endpoint público já possui linhas promovidas;
+- o dataset existe no catálogo, mas não possui endpoint público ativo.
+
+### Parâmetros
+
+| Parâmetro | Tipo | Descrição |
+|-----------|------|-----------|
+| `ano` | integer | Ano único do ZIP FRE a diagnosticar. Não deve ser usado junto com `ano_inicio` ou `ano_fim`. |
+| `ano_inicio` | integer | Ano inicial para diagnóstico em intervalo. |
+| `ano_fim` | integer | Ano final para diagnóstico em intervalo. |
+| `dataset` | string[] | Identificador do dataset no catálogo. Pode ser repetido na query string. Quando ausente, todos os datasets FRE catalogados são avaliados. |
+
+Quando nenhum ano é informado, a API usa o ano FRE mais recente conhecido por `fre_documentos` ou por snapshot de ingestão.
+
+### Exemplo
+
+```bash
+curl -X GET "http://localhost:8007/fre/datasets/disponibilidade?ano=2025&dataset=outro_valor_mobiliario&dataset=titular_valor_mobiliario" \
+  -H "Authorization: Bearer <token>"
+```
+
+### Response 200
+
+**Schema:** `ListaFreDatasetsDisponibilidadeResposta`
+
+```json
+{
+  "resumo": {
+    "total": 2,
+    "available": 1,
+    "package_not_ingested": 0,
+    "source_member_missing": 0,
+    "source_member_empty": 0,
+    "promotion_missing": 1,
+    "not_promoted": 0,
+    "unsupported_dataset": 0
+  },
+  "dados": [
+    {
+      "ano": 2025,
+      "dataset": "outro_valor_mobiliario",
+      "descricao": "Outros valores mobiliarios no FRE",
+      "endpoint": "/fre/outro-valor-mobiliario",
+      "member_name": "fre_cia_aberta_outro_valor_mobiliario_2025.csv",
+      "row_kind": "fre_outro_valor_mobiliario",
+      "destino_promovido": "fre_outros_valores_mobiliarios",
+      "status_suporte": "suportado",
+      "obrigatorio": false,
+      "source_package_seen": true,
+      "source_package_status": "success",
+      "source_package_run_id": "00000000-0000-0000-0000-000000000000",
+      "source_member_exists": true,
+      "source_member_row_count": 2726,
+      "source_member_schema_status": "valid",
+      "source_member_lifecycle_status": "present",
+      "member_ingested": true,
+      "promoted_rows": 2726,
+      "endpoint_available": true,
+      "diagnosis_code": "AVAILABLE",
+      "diagnosis_message": "Endpoint publico possui linhas promovidas para o ano.",
+      "latest_ingestion_run_id": "00000000-0000-0000-0000-000000000000",
+      "latest_execucao_id": "00000000-0000-0000-0000-000000000000",
+      "atualizado_em": "02/07/2026 10:00:00"
+    }
+  ]
+}
+```
+
+### Códigos de diagnóstico
+
+| Código | Significado | Ação esperada |
+|--------|-------------|---------------|
+| `AVAILABLE` | A tabela promovida possui linhas e o endpoint público deve retornar dados para o ano. | Consultar o endpoint do dataset com os mesmos filtros de ano. |
+| `PACKAGE_NOT_INGESTED` | Não há pacote anual FRE conhecido para o ano. | Rodar a ingestão FRE do ano ou verificar a execução correspondente. |
+| `SOURCE_MEMBER_MISSING` | O pacote anual é conhecido, mas o CSV membro não foi encontrado/indexado. | Confirmar se a CVM publicou esse membro no ZIP do ano; se publicou, investigar a indexação do pacote. |
+| `SOURCE_MEMBER_EMPTY` | O CSV membro foi encontrado, mas não tem linhas. | Tratar como ausência legítima de dados para o ano. |
+| `PROMOTION_MISSING` | O CSV membro tem linhas, mas a tabela que alimenta o endpoint está vazia. | Reprocessar o membro FRE ou investigar erro de promoção. |
+| `NOT_PROMOTED` | O dataset não possui endpoint público ativo ou não possui tabela promovida. | Não usar como endpoint público de análise. |
+| `UNSUPPORTED_DATASET` | O dataset está no catálogo, mas ainda não é suportado para ingestão/promoção. | Não usar até haver suporte explícito. |
 
 ---
 
@@ -398,7 +500,7 @@ def exportar_posicao_acionaria(codigo_cvm, ano, token):
 
 ### Regras de Negócio
 
-1. **Promoção Seletiva**: O FRE possui ~48 datasets, mas apenas 9 são promovidos para tabelas de domínio por relevância regulatória
+1. **Promoção por dataset suportado**: os datasets FRE com `destino_promovido` são carregados em tabelas de domínio específicas. Use `/fre/datasets/disponibilidade` para confirmar se um ano/dataset possui fonte, membro CSV e linhas promovidas.
 2. **Resolução de Acionistas**: CNPJs/CPFs são normalizados e vinculados a entidades quando possível
 3. **Moeda**: Valores monetários são convertidos para escala base (R$) automaticamente
 4. **Histórico**: Cada ano gera novo documento; não há sobrescrita

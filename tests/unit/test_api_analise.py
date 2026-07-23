@@ -4,14 +4,18 @@ from decimal import Decimal
 
 from _pytest.monkeypatch import MonkeyPatch
 from fastapi.testclient import TestClient
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.analise import (
+    AnaliseContextoRevision,
+    AnaliseFatoRevision,
     AnaliseMaterializacaoCampanha,
     AnaliseMaterializacaoCampanhaItem,
     AnaliseMaterializacaoChunkExecucao,
     AnaliseMaterializacaoControle,
     AnaliseMaterializacaoExecucao,
+    AnaliseMaterializacaoReconciliacao,
 )
 from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
@@ -21,6 +25,9 @@ from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.vlmo import VlmoConsolidado
 from app.services.analise import materializar_analise_companhia
+from app.services.analise_materializacao_operacional import (
+    reconcile_completion_pending_executions,
+)
 from app.worker.celery_app import celery_app
 
 
@@ -503,6 +510,7 @@ def _materializacao_execucao(
     campanha_item_id: uuid.UUID | None = None,
     chunk_execucao_id: uuid.UUID | None = None,
     queue_name: str | None = None,
+    task_id: str | None = None,
     position_in_chunk: int | None = None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
@@ -526,6 +534,7 @@ def _materializacao_execucao(
         campanha_item_id=campanha_item_id,
         chunk_execucao_id=chunk_execucao_id,
         queue_name=queue_name,
+        task_id=task_id,
         position_in_chunk=position_in_chunk,
         summary=summary or {},
         started_at=started_at or agora,
@@ -648,6 +657,110 @@ def test_analise_manifesto(client: TestClient, db_session: Session) -> None:
     assert payload["resolution"]["mode"] == "runtime_fallback"
     assert payload["links"]["series"] == "/analise/companhias/9512/series"
     assert any(periodo["period_id"] == "2025-Q3" for periodo in payload["periodos_disponiveis"])
+    availability = {item["metric_id"]: item["period_ids"] for item in payload["periodos_disponiveis_por_metrica"]}
+    assert "FY2025" in availability["receita_liquida"]
+
+
+def test_analise_coverage_explica_raw_vs_canonico(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+
+    resp_runtime = client.get("/analise/companhias/9512/coverage?escopo=consolidated")
+    assert resp_runtime.status_code == 200
+    runtime_payload = resp_runtime.json()
+    fy2025_runtime = next(item for item in runtime_payload["periodos"] if item["period_id"] == "FY2025")
+    assert runtime_payload["resolution"]["mode"] == "runtime_fallback"
+    assert fy2025_runtime["has_raw_data"] is True
+    assert fy2025_runtime["has_canonical_context"] is False
+    assert fy2025_runtime["has_series"] is False
+
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+
+    resp_canonical = client.get("/analise/companhias/9512/coverage?escopo=consolidated")
+    assert resp_canonical.status_code == 200
+    canonical_payload = resp_canonical.json()
+    fy2025 = next(item for item in canonical_payload["periodos"] if item["period_id"] == "FY2025")
+    assert canonical_payload["resolution"]["mode"] == "canonical"
+    assert fy2025["has_raw_data"] is True
+    assert fy2025["has_canonical_context"] is True
+    assert fy2025["has_series"] is True
+    assert "receita_liquida" in fy2025["metrics_available"]
+    assert fy2025["latest_execution_id"] == str(execucao.id)
+
+
+def test_analise_series_diagnostico_retorna_lacunas_por_periodo(client: TestClient, db_session: Session) -> None:
+    _seed_analise_v2(db_session)
+
+    resp = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida,liquidez_corrente&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["requested_metrics"] == ["receita_liquida", "liquidez_corrente"]
+    assert "FY2025" in payload["candidate_periods"]
+    assert "FY2025" in payload["returned_periods"]
+    assert "unavailable_reasons" in payload
+    assert all("materialization_mismatch" in item for item in payload["rejected_periods"])
+
+
+def test_analise_series_diagnostico_explica_fatos_canonicos_ausentes(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+    db_session.execute(
+        delete(AnaliseFatoRevision).where(
+            AnaliseFatoRevision.codigo_cvm == cia.codigo_cvm,
+            AnaliseFatoRevision.escopo == "consolidated",
+            AnaliseFatoRevision.fiscal_year.in_([2021, 2022, 2023]),
+        )
+    )
+    db_session.commit()
+
+    series = client.get(
+        "/analise/companhias/9512/series?metricas=receita_liquida,ebitda,lucro_liquido&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+    assert series.status_code == 200
+    series_periods = {item["period_id"] for item in series.json()["observacoes"]}
+    assert series_periods == {"FY2024", "FY2025"}
+
+    diagnostico = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida,ebitda,lucro_liquido&periodicidade=annual&base_periodo=fy&horizonte_anos=5"
+    )
+    assert diagnostico.status_code == 200
+    payload = diagnostico.json()
+    rejected = {item["period_id"]: item for item in payload["rejected_periods"]}
+    assert {"FY2021", "FY2022", "FY2023"}.issubset(rejected)
+    fy2023 = rejected["FY2023"]
+    assert fy2023["has_raw_data"] is True
+    assert fy2023["has_canonical_context"] is True
+    assert fy2023["has_canonical_facts"] is False
+    assert fy2023["has_materialized_metrics"] is False
+    assert fy2023["metrics_count"] == 0
+    assert fy2023["unavailable_count"] == 0
+    reason_by_metric = {item["metric_id"]: item for item in fy2023["metric_reasons"]}
+    assert reason_by_metric["receita_liquida"]["reason_code"] == "CANONICAL_FACTS_MISSING"
+    assert reason_by_metric["receita_liquida"]["layer"] == "canonical_fact"
+    assert reason_by_metric["receita_liquida"]["remediation_code"] == "RUN_MATERIALIZATION"
+
+
+def test_analise_coverage_e_diagnostico_usam_mesma_janela(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+
+    coverage = client.get(
+        "/analise/companhias/9512/coverage?escopo=consolidated&periodicidade=annual&base_periodo=fy&horizonte_anos=3"
+    )
+    diagnostico = client.get(
+        "/analise/companhias/9512/series/diagnostico?metricas=receita_liquida&periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=3"
+    )
+
+    assert coverage.status_code == 200
+    assert diagnostico.status_code == 200
+    coverage_periods = [item["period_id"] for item in coverage.json()["periodos"]]
+    diag_periods = diagnostico.json()["candidate_periods"]
+    assert set(coverage_periods) == set(diag_periods)
+    assert all(item["periodicidade"] == "annual" and item["base_periodo"] == "fy" for item in coverage.json()["periodos"])
 
 
 def test_analise_series_annual_selects_latest_current_exercise(client: TestClient, db_session: Session) -> None:
@@ -880,6 +993,57 @@ def test_analise_series_reads_from_canonical_materialization(client: TestClient,
     assert fy2025["value"] == "497549000000"
 
 
+def test_analise_series_coverage_diagnostico_e_repair_sao_consistentes_para_periodos_materializados(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    execucao = materializar_analise_companhia(db_session, cia, scope="consolidated", source="test")
+    assert execucao.status == "success"
+
+    params = "periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=20"
+    coverage = client.get(f"/analise/companhias/9512/coverage?{params}")
+    series = client.get(f"/analise/companhias/9512/series?{params}")
+    diagnostico = client.get(f"/analise/companhias/9512/series/diagnostico?metricas=receita_liquida&{params}")
+    repair = client.post(
+        "/analise/materializacoes/companhias/9512/repair",
+        headers=_ops_headers(client),
+        json={
+            "escopo": "consolidated",
+            "period_ids": ["FY2021"],
+            "metricas": ["receita_liquida"],
+            "mode": "missing_only",
+        },
+    )
+
+    assert coverage.status_code == 200
+    assert series.status_code == 200
+    assert diagnostico.status_code == 200
+    assert repair.status_code == 200
+
+    coverage_by_period = {item["period_id"]: item for item in coverage.json()["periodos"]}
+    for period_id in ["FY2021", "FY2022", "FY2023", "FY2024", "FY2025"]:
+        assert coverage_by_period[period_id]["has_series"] is True
+        assert coverage_by_period[period_id]["metrics_count"] > 0
+
+    series_periods = {item["period_id"] for item in series.json()["observacoes"]}
+    assert {"FY2021", "FY2022", "FY2023", "FY2024", "FY2025"}.issubset(series_periods)
+    assert any(item["period_id"] == "FY2021" and item["metric_id"] == "receita_liquida" for item in series.json()["observacoes"])
+
+    repair_payload = repair.json()
+    assert repair_payload["status"] == "rejected"
+    assert repair_payload["rejected_items"][0]["period_id"] == "FY2021"
+    assert repair_payload["rejected_items"][0]["reason_code"] == "NO_MISSING_METRICS"
+
+    rejected_by_period = {item["period_id"]: item for item in diagnostico.json()["rejected_periods"]}
+    assert "FY2021" not in rejected_by_period
+    assert all(
+        reason["reason_code"] != "MATERIALIZATION_MISSING" and reason["remediation_code"] != "RUN_MATERIALIZATION"
+        for item in diagnostico.json()["rejected_periods"]
+        for reason in item["metric_reasons"]
+    )
+
+
 def test_materializar_analise_companhia_pula_cancelada_por_padrao(db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     cia.situacao_registro = "CANCELADA"
@@ -1076,6 +1240,100 @@ def test_analise_materializacoes_list_and_detail(client: TestClient, db_session:
     assert filtrado.status_code == 200
     filtrado_payload = filtrado.json()
     assert len(filtrado_payload["dados"]) == 2
+
+
+def test_analise_materializacao_companhia_status_retorna_anos_canonicos(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    finished_at = datetime.now(UTC) - timedelta(minutes=5)
+    execucao = _materializacao_execucao(
+        cia,
+        status="success",
+        escopo="consolidated",
+        source="post_ingestion",
+        materialization_mode="incremental",
+        invalidated_from=date(2025, 2, 26),
+        started_at=finished_at - timedelta(seconds=30),
+        finished_at=finished_at,
+        updated_at=finished_at,
+        coverage_complete=True,
+    )
+    db_session.add(execucao)
+    db_session.flush()
+    db_session.add(
+        AnaliseContextoRevision(
+            id=uuid.uuid4(),
+            execucao_id=execucao.id,
+            companhia_id=cia.id,
+            codigo_cvm=cia.codigo_cvm,
+            escopo="consolidated",
+            calculation_version="2026.2",
+            known_from=date(2025, 2, 26),
+            known_to=None,
+            default_period_id="FY2025",
+            periodos_disponiveis=[
+                {"period_id": "FY2024", "fiscal_year": 2024, "periodicidade": "annual", "base_periodo": "fy"},
+                {"period_id": "FY2025", "fiscal_year": 2025, "periodicidade": "annual", "base_periodo": "fy"},
+                {"period_id": "2025-Q3", "fiscal_year": 2025, "periodicidade": "quarterly", "base_periodo": "quarter"},
+            ],
+            qualidade={},
+            issues=[],
+            fingerprint="ctx-9512",
+        )
+    )
+    db_session.commit()
+
+    resp = client.get("/analise/materializacoes/companhias/9512/status?escopo=consolidated")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["codigo_cvm"] == 9512
+    assert payload["escopo"] == "consolidated"
+    assert payload["status"] == "success"
+    assert payload["coverage_complete"] is True
+    assert payload["latest_execution"]["id"] == str(execucao.id)
+    assert [item["ano"] for item in payload["anos"]] == [2025, 2024]
+    assert payload["status_por_ano"]["2025"]["status"] == "success"
+    assert payload["status_por_ano"]["2025"]["materialization_execution_id"] == str(execucao.id)
+    assert payload["dados"] == payload["anos"]
+    assert payload["periodos"] == payload["anos"]
+    assert payload["materializacoes"] == payload["anos"]
+
+
+def test_analise_materializacao_companhia_status_reflete_item_pendente(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
+    db_session.add(campanha)
+    db_session.flush()
+    item = _materializacao_campanha_item(
+        campanha,
+        cia,
+        status="pending",
+        escopo="individual",
+        ordem=1,
+        invalidated_from=date(2026, 3, 10),
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    resp = client.get("/analise/materializacoes/companhias/9512/status?escopo=individual")
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "pending"
+    assert payload["latest_execution"] is None
+    assert payload["active_item"]["item_id"] == str(item.id)
+    assert len(payload["anos"]) == 1
+    assert payload["anos"][0]["ano"] == 2026
+    assert payload["anos"][0]["status"] == "pending"
+    assert payload["anos"][0]["escopo"] == "individual"
+    assert payload["anos"][0]["updated_at"] is not None
+    assert payload["anos"][0]["materialization_mode"] == "incremental"
 
 
 def test_analise_materializacoes_monitoramento_reports_worker_snapshot(
@@ -1502,6 +1760,42 @@ def test_analise_materializacoes_reativar_campanha_endpoint(client: TestClient, 
     assert payload["dispatcher_enqueued"] is True
 
 
+def test_analise_materializacoes_repair_companhia_cria_campanha_focada(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    _seed_analise_v2(db_session)
+
+    resp = client.post(
+        "/analise/materializacoes/companhias/9512/repair",
+        headers=_ops_headers(client),
+        json={
+            "escopo": "consolidated",
+            "period_ids": ["FY2021", "FY2022", "FY2030"],
+            "metricas": ["receita_liquida", "ebitda", "lucro_liquido"],
+            "mode": "missing_only",
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "partial"
+    assert payload["campanha_id"] is not None
+    assert payload["dispatcher_enqueued"] is True
+    assert [item["period_id"] for item in payload["accepted_items"]] == ["FY2021", "FY2022"]
+    rejected = {item["period_id"]: item for item in payload["rejected_items"]}
+    assert rejected["FY2030"]["reason_code"] == "RAW_DATA_MISSING"
+    campanha = db_session.get(AnaliseMaterializacaoCampanha, uuid.UUID(payload["campanha_id"]))
+    assert campanha is not None
+    assert campanha.source == "manual_repair"
+    assert campanha.chunk_size == 1
+    assert campanha.summary is not None
+    assert campanha.summary["repair"]["period_ids"] == ["FY2021", "FY2022", "FY2030"]
+    item = db_session.query(AnaliseMaterializacaoCampanhaItem).filter_by(campanha_id=campanha.id).one()
+    assert item.escopo == "consolidated"
+    assert item.invalidated_from == date(2022, 3, 15)
+
+
 def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: TestClient, db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     campanha = _materializacao_campanha(status="pending", total_items=1, pending_items=1)
@@ -1569,6 +1863,336 @@ def test_analise_materializacoes_operador_endpoints_exigem_permissao_de_usuario_
     assert com_usuario_sem_permissao.json()["detail"] == "Permissao de operacao de materializacao requerida."
 
 
+def test_reconcile_materializacao_rejeita_execucao_com_task_ativa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        task_id="task-active",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 2,
+                "processed_knowledge_dates": 2,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {
+                "worker-a": [
+                    {
+                        "id": "task-active",
+                        "name": "app.worker.tasks.materializar_analise_companhia_task",
+                    }
+                ]
+            }
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    response = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=_ops_headers(client),
+        json={"decision": "auto", "reason": "Conferência operacional com task ainda ativa."},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason_code"] == "ACTIVE_WORK_PRESENT"
+    db_session.refresh(execucao)
+    assert execucao.status == "running"
+
+
+def test_reconcile_materializacao_conclui_e_e_idempotente_sem_apagar_evidencias(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "artifact_marker": "preservar",
+            "progress": {
+                "total_knowledge_dates": 14,
+                "processed_knowledge_dates": 14,
+                "progress_ratio": 1.0,
+            },
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    headers = _ops_headers(client)
+    payload = {
+        "decision": "auto",
+        "reason": "Execução sem trabalho ativo e com progresso técnico integral.",
+    }
+    first = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=headers,
+        json=payload,
+    )
+    second = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=headers,
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "success"
+    assert first.json()["operational_state"] == "terminal_success"
+    assert first.json()["reason_code"] == "TECHNICAL_PROGRESS_COMPLETE_NO_ACTIVE_WORK"
+    assert second.status_code == 200
+    assert second.json()["reason_code"] == "TECHNICAL_PROGRESS_COMPLETE_NO_ACTIVE_WORK"
+    db_session.refresh(execucao)
+    assert execucao.coverage_complete is True
+    assert execucao.finished_at is not None
+    assert (execucao.summary or {})["artifact_marker"] == "preservar"
+    assert (
+        db_session.scalar(
+            select(func.count(AnaliseMaterializacaoReconciliacao.id)).where(
+                AnaliseMaterializacaoReconciliacao.execucao_id == execucao.id
+            )
+        )
+        == 1
+    )
+
+
+def test_reconcile_materializacao_auto_marca_incompleta_como_failed(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 4,
+                "processed_knowledge_dates": 2,
+                "progress_ratio": 0.5,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    response = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=_ops_headers(client),
+        json={
+            "decision": "auto",
+            "reason": "Execução incompleta e parada sem qualquer fonte recuperável.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["operational_state"] == "terminal_failed"
+    db_session.refresh(execucao)
+    assert execucao.coverage_complete is False
+
+
+def test_monitoramento_classifica_estados_operacionais_e_lista_filtra_totais(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    completion_pending = _materializacao_execucao(
+        cia,
+        status="running",
+        materialization_mode="incremental",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 3,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    unrecoverable = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 1,
+                "progress_ratio": 1 / 3,
+            }
+        },
+    )
+    campanha = _materializacao_campanha(status="pending", total_items=1, running_items=1)
+    db_session.add_all([completion_pending, unrecoverable, campanha])
+    db_session.flush()
+    chunk = _materializacao_chunk_execucao(
+        campanha,
+        status="stale",
+        lease_expires_at=stale_at,
+        heartbeat_at=stale_at,
+        updated_at=stale_at,
+    )
+    db_session.add(chunk)
+    db_session.flush()
+    item = _materializacao_campanha_item(
+        campanha,
+        cia,
+        escopo="consolidated",
+        status="running",
+        ordem=1,
+        chunk_execucao_id=chunk.id,
+    )
+    db_session.add(item)
+    db_session.flush()
+    recoverable = _materializacao_execucao(
+        cia,
+        status="running",
+        campanha_id=campanha.id,
+        campanha_item_id=item.id,
+        chunk_execucao_id=chunk.id,
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 1,
+                "progress_ratio": 1 / 3,
+            }
+        },
+    )
+    db_session.add(recoverable)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    monitor = client.get("/analise/materializacoes/monitoramento")
+    filtered = client.get(
+        "/analise/materializacoes"
+        "?operational_state=completion_pending"
+        "&materialization_mode=incremental"
+        "&has_action_required=true"
+        "&ordenar=updated_at:asc"
+    )
+
+    assert monitor.status_code == 200
+    monitor_payload = monitor.json()
+    assert monitor_payload["operational_counts"]["completion_pending"] == 1
+    assert monitor_payload["operational_counts"]["stalled_recoverable"] == 1
+    assert monitor_payload["operational_counts"]["stalled_unrecoverable"] >= 1
+    assert str(completion_pending.id) in monitor_payload["completion_pending_execution_ids"]
+    assert str(unrecoverable.id) in monitor_payload["stalled_unrecoverable_execution_ids"]
+    assert filtered.status_code == 200
+    filtered_payload = filtered.json()
+    assert filtered_payload["paginacao"]["total"] == 1
+    assert filtered_payload["resumo"]["operational_counts"]["completion_pending"] == 1
+    assert filtered_payload["dados"][0]["id"] == str(completion_pending.id)
+    assert filtered_payload["dados"][0]["allowed_actions"][0]["code"] == "reconcile_terminal"
+
+
+def test_reconciliador_automatico_promove_completion_pending_uma_unica_vez(
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 5,
+                "processed_knowledge_dates": 5,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    first = reconcile_completion_pending_executions(
+        db_session,
+        active_task_ids=set(),
+        task_inspection_available=True,
+        gate_status="green",
+        gate_reason_code="NO_BLOCKERS",
+        stalled_threshold_seconds=300,
+    )
+    second = reconcile_completion_pending_executions(
+        db_session,
+        active_task_ids=set(),
+        task_inspection_available=True,
+        gate_status="green",
+        gate_reason_code="NO_BLOCKERS",
+        stalled_threshold_seconds=300,
+    )
+
+    assert first["reconciled_execution_ids"] == [str(execucao.id)]
+    assert second["reconciled_execution_ids"] == []
+    db_session.refresh(execucao)
+    assert execucao.status == "success"
+
+
 def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> None:
     resp = client.get("/openapi.json")
     assert resp.status_code == 200
@@ -1587,9 +2211,14 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         "/analise/materializacoes/campanhas/{campanha_id}/recuperar",
         "/analise/materializacoes/campanhas/{campanha_id}/reativar",
         "/analise/materializacoes/recuperacao/trigger",
+        "/analise/materializacoes/companhias/{codigo_cvm}/status",
+        "/analise/materializacoes/companhias/{codigo_cvm}/repair",
         "/analise/materializacoes/{execucao_id}",
+        "/analise/materializacoes/{execucao_id}/reconcile",
         "/analise/companhias/{codigo_cvm}",
+        "/analise/companhias/{codigo_cvm}/coverage",
         "/analise/companhias/{codigo_cvm}/series",
+        "/analise/companhias/{codigo_cvm}/series/diagnostico",
         "/analise/companhias/{codigo_cvm}/comparacoes",
         "/analise/companhias/{codigo_cvm}/qualidade",
         "/analise/companhias/{codigo_cvm}/sinais",
@@ -1620,17 +2249,62 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
 
     assert "AnaliseLegadoRemovidoResposta" not in components
     assert paths["/analise/companhias/{codigo_cvm}"]["get"]["operationId"] == "obterAnaliseManifesto"
+    assert paths["/analise/companhias/{codigo_cvm}/coverage"]["get"]["operationId"] == "obterAnaliseCoverage"
     assert paths["/analise/companhias/{codigo_cvm}/series"]["get"]["operationId"] == "obterAnaliseSeries"
+    assert paths["/analise/companhias/{codigo_cvm}/series/diagnostico"]["get"]["operationId"] == "obterAnaliseSeriesDiagnostico"
+    assert paths["/analise/materializacoes/companhias/{codigo_cvm}/repair"]["post"]["operationId"] == "criarRepairMaterializacaoCompanhia"
     assert paths["/analise/companhias/{codigo_cvm}/comparacoes"]["get"]["operationId"] == "obterAnaliseComparacoes"
+    manifesto_schema = components["AnaliseManifestoResposta"]["properties"]
+    assert "periodos_disponiveis_por_metrica" in manifesto_schema
+    coverage_schema = components["AnaliseCoveragePeriodoItem"]["properties"]
+    assert "has_raw_data" in coverage_schema
+    assert "has_canonical_context" in coverage_schema
+    assert "has_canonical_facts" in coverage_schema
+    assert "has_materialized_metrics" in coverage_schema
+    assert "metrics_count" in coverage_schema
+    assert "unavailable_count" in coverage_schema
+    assert "metrics_available" in coverage_schema
+    diagnostico_schema = components["AnaliseSeriesDiagnosticoResposta"]["properties"]
+    assert "candidate_periods" in diagnostico_schema
+    assert "rejected_periods" in diagnostico_schema
+    diagnostico_periodo_schema = components["AnaliseSeriesDiagnosticoPeriodo"]["properties"]
+    assert "has_raw_data" in diagnostico_periodo_schema
+    assert "has_canonical_facts" in diagnostico_periodo_schema
+    assert "materialization_status" in diagnostico_periodo_schema
+    assert "metric_reasons" in diagnostico_periodo_schema
+    metric_reason_schema = components["AnaliseSeriesDiagnosticoMetricReason"]["properties"]
+    assert "reason_code" in metric_reason_schema
+    assert "remediation_code" in metric_reason_schema
+    repair_schema = components["AnaliseMaterializacaoRepairResposta"]["properties"]
+    assert "accepted_items" in repair_schema
+    assert "rejected_items" in repair_schema
+    assert "gate_status" in repair_schema
     execucao_schema = components["AnaliseMaterializacaoExecucaoResumo"]["properties"]
     assert "materialization_mode" in execucao_schema
     assert "invalidated_from" in execucao_schema
     assert "window_total_knowledge_dates" in execucao_schema
+    assert "operational_state" in execucao_schema
+    assert "liveness" in execucao_schema
+    assert "completion" in execucao_schema
+    assert "recovery" in execucao_schema
+    assert "allowed_actions" in execucao_schema
     materializacoes_params = {
         item["name"]
         for item in paths["/analise/materializacoes"]["get"]["parameters"]
     }
     assert "campanha_id" in materializacoes_params
+    assert "operational_state" in materializacoes_params
+    assert "materialization_mode" in materializacoes_params
+    assert "has_action_required" in materializacoes_params
+    assert "started_from" in materializacoes_params
+    assert "started_to" in materializacoes_params
+    assert "ordenar" in materializacoes_params
+    companhia_status_schema = components["AnaliseMaterializacaoCompanhiaStatusResposta"]["properties"]
+    assert "anos" in companhia_status_schema
+    assert "periodos_detalhe" in companhia_status_schema
+    assert "status_por_ano" in companhia_status_schema
+    assert "latest_execution" in companhia_status_schema
+    assert "active_item" in companhia_status_schema
     monitor_schema = components["AnaliseMaterializacaoMonitoramentoResposta"]["properties"]
     assert "gate" in monitor_schema
     assert "running_full_executions" in monitor_schema
@@ -1645,6 +2319,10 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert "pending_recovery_active_tasks" in monitor_schema
     assert "stale_chunks" in monitor_schema
     assert "stale_chunk_preview" in monitor_schema
+    assert "operational_counts" in monitor_schema
+    assert "completion_pending_execution_ids" in monitor_schema
+    assert "stalled_unrecoverable_execution_ids" in monitor_schema
+    assert "action_required_execution_ids" in monitor_schema
     assert "running_execution_previews" in monitor_schema
     assert "campaigns" in monitor_schema
     campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]
