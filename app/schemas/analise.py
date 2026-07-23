@@ -81,6 +81,18 @@ AnaliseMaterializacaoAnoStatusCode = Literal[
     "unknown",
 ]
 AnaliseMaterializacaoRecoveryStatus = Literal["triggered", "recovered", "noop", "rejected"]
+AnaliseMaterializacaoOperationalState = Literal[
+    "active",
+    "queued",
+    "waiting_for_gate",
+    "completion_pending",
+    "stalled_recoverable",
+    "stalled_unrecoverable",
+    "terminal_success",
+    "terminal_failed",
+    "unknown",
+]
+AnaliseMaterializacaoReconcileDecision = Literal["auto", "mark_success", "mark_failed"]
 AnaliseMaterializacaoRecoveryReasonCode = Literal[
     "PENDING_UNDISPATCHED",
     "STALE_CHUNK",
@@ -197,6 +209,39 @@ class AnaliseMaterializacaoProgress(BaseModel):
     fact_revisions: int | None = Field(default=None, description="Quantidade parcial de revisões de fatos acumuladas.")
 
 
+class AnaliseMaterializacaoLiveness(BaseModel):
+    last_activity_at: datetime | None = Field(default=None, description="Última atividade persistida da execução, item ou chunk correlato.")
+    age_seconds: int | None = Field(default=None, description="Idade da última atividade em segundos.")
+    has_active_task: bool = Field(description="Indica task Celery correlata observada como ativa, reservada ou agendada.")
+    task_inspection_available: bool = Field(description="Indica se a inspeção Celery estava disponível para comprovar liveness.")
+    has_active_chunk: bool = Field(description="Indica chunk correlato em estado ativo com lease válido.")
+    has_active_lease: bool = Field(description="Indica lease de chunk ainda válido.")
+    is_stalled: bool = Field(description="Indica ausência de atividade além do threshold operacional.")
+    stalled_threshold_seconds: int = Field(description="Threshold de inatividade usado na classificação.")
+
+
+class AnaliseMaterializacaoCompletion(BaseModel):
+    technical_progress_complete: bool = Field(description="Indica progresso técnico integral comprovado.")
+    total_knowledge_dates: int | None = Field(default=None, description="Total técnico esperado.")
+    processed_knowledge_dates: int | None = Field(default=None, description="Total técnico processado.")
+    finalization_pending: bool = Field(description="Indica que falta apenas persistir a conclusão terminal.")
+    reason_code: str = Field(description="Código estável da evidência de conclusão.")
+
+
+class AnaliseMaterializacaoRecovery(BaseModel):
+    eligible: bool = Field(description="Indica existência de estratégia de recuperação executável.")
+    strategy: str | None = Field(default=None, description="Estratégia de recuperação suportada.")
+    reason_code: str = Field(description="Código estável da elegibilidade ou ausência de fonte de recuperação.")
+
+
+class AnaliseMaterializacaoAllowedAction(BaseModel):
+    code: str = Field(description="Código estável da ação autorizada.")
+    operation: Literal["POST"] = Field(description="Método HTTP da operação.")
+    path: str = Field(description="Rota autoritativa da operação.")
+    requires_confirmation: bool = Field(description="Indica necessidade de confirmação explícita.")
+    reason_code: str = Field(description="Motivo estável para disponibilizar a ação.")
+
+
 class AnaliseMaterializacaoExecucaoResumo(BaseModel):
     id: str = Field(description="Identificador da execução de materialização.")
     codigo_cvm: int = Field(description="Código CVM da companhia.")
@@ -227,6 +272,13 @@ class AnaliseMaterializacaoExecucaoResumo(BaseModel):
     deleted_future_context_revisions: int | None = Field(default=None, description="Quantidade de revisões futuras de contexto removidas por substituição.")
     deleted_future_fact_revisions: int | None = Field(default=None, description="Quantidade de revisões futuras de fatos removidas por substituição.")
     progress: AnaliseMaterializacaoProgress = Field(description="Resumo estruturado do progresso da execução.")
+    operational_state: AnaliseMaterializacaoOperationalState = Field(description="Classificação operacional derivada de estado, liveness, progresso e recuperação.")
+    reason_code: str = Field(description="Motivo estável da classificação operacional.")
+    liveness: AnaliseMaterializacaoLiveness = Field(description="Evidências de atividade da execução.")
+    completion: AnaliseMaterializacaoCompletion = Field(description="Evidências de conclusão técnica e finalização.")
+    recovery: AnaliseMaterializacaoRecovery = Field(description="Elegibilidade e estratégia de recuperação.")
+    allowed_actions: list[AnaliseMaterializacaoAllowedAction] = Field(default_factory=list, description="Operações atualmente autorizadas pelo backend.")
+    has_action_required: bool = Field(description="Indica se existe ao menos uma ação operacional autorizada.")
 
 
 class AnaliseMaterializacaoExecucaoDetalhe(AnaliseMaterializacaoExecucaoResumo):
@@ -238,6 +290,8 @@ class AnaliseMaterializacaoExecucoesResumo(BaseModel):
     running: int = Field(description="Quantidade de execuções em andamento.")
     success: int = Field(description="Quantidade de execuções concluídas com sucesso.")
     failed: int = Field(description="Quantidade de execuções com falha.")
+    status_counts: dict[str, int] = Field(default_factory=dict, description="Contagens por status persistido para os filtros aplicados.")
+    operational_counts: dict[str, int] = Field(default_factory=dict, description="Contagens por estado operacional derivado para os filtros aplicados.")
 
 
 class AnaliseMaterializacaoExecucoesListaResposta(BaseModel):
@@ -292,7 +346,7 @@ class AnaliseMaterializacaoCompanhiaStatusResposta(BaseModel):
     periodos_detalhe: list[AnaliseMaterializacaoPeriodoStatus] = Field(default_factory=list, description="Detalhe por período canônico conhecido para explicar lacunas de materialização.")
     dados: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores genéricos.")
     periodos: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores orientados a períodos.")
-    materializacoes: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores legados do frontend.")
+    materializacoes: list[AnaliseMaterializacaoAnoStatus] = Field(default_factory=list, description="Alias de `anos` para consumidores legados da API.")
     status_por_ano: dict[str, AnaliseMaterializacaoAnoStatus] = Field(default_factory=dict, description="Mapa de ano fiscal para status derivado.")
     generated_at: datetime = Field(description="Momento em que o snapshot foi produzido.")
     updated_at: datetime | None = Field(default=None, description="Última atualização conhecida entre execução, item e revisão canônica.")
@@ -436,6 +490,10 @@ class AnaliseMaterializacaoCampanhaResumo(BaseModel):
     last_recovery_check_at: datetime | None = Field(default=None, description="Último momento em que a campanha foi classificada pelo fluxo de recuperação.")
     last_recovery_action: str | None = Field(default=None, description="Última ação operacional executada pelo fluxo de recuperação para a campanha.")
     last_recovery_reason_code: str | None = Field(default=None, description="Último reason code produzido pelo fluxo de recuperação para a campanha.")
+    operational_state: str = Field(description="Classificação operacional atual da campanha.")
+    reason_code: str = Field(description="Motivo estável da classificação da campanha.")
+    recovery: AnaliseMaterializacaoRecovery = Field(description="Elegibilidade atual de recuperação da campanha.")
+    allowed_actions: list[AnaliseMaterializacaoAllowedAction] = Field(default_factory=list, description="Ações autorizadas para a campanha.")
 
 
 class AnaliseMaterializacaoCampanhaItemPreview(BaseModel):
@@ -562,6 +620,36 @@ class AnaliseMaterializacaoMonitoramentoResposta(BaseModel):
     stale_chunk_preview: list[AnaliseMaterializacaoChunkExecucaoPreview] = Field(default_factory=list, description="Preview dos chunks stale ainda acionaveis, excluindo stale historico de campanhas ja concluídas.")
     running_items_preview: list[AnaliseMaterializacaoCampanhaItemPreview] = Field(default_factory=list, description="Preview dos itens atualmente em processamento.")
     pending_items_preview: list[AnaliseMaterializacaoCampanhaItemPreview] = Field(default_factory=list, description="Preview dos próximos itens pendentes.")
+    operational_counts: dict[str, int] = Field(default_factory=dict, description="Contagens de execuções por estado operacional.")
+    completion_pending_execution_ids: list[str] = Field(default_factory=list, description="Execuções aguardando apenas finalização terminal.")
+    stalled_unrecoverable_execution_ids: list[str] = Field(default_factory=list, description="Execuções paradas sem estratégia automática de recuperação.")
+    action_required_execution_ids: list[str] = Field(default_factory=list, description="Execuções que expõem ao menos uma ação operacional autorizada.")
+
+
+class AnaliseMaterializacaoReconcileRequest(BaseModel):
+    decision: AnaliseMaterializacaoReconcileDecision = Field(
+        default="auto",
+        description="Decisão solicitada: automática, sucesso comprovado ou falha explícita.",
+    )
+    reason: str = Field(
+        min_length=10,
+        max_length=1000,
+        description="Justificativa auditável da reconciliação.",
+        examples=["Execução sem task ou chunk ativo, com progresso técnico concluído."],
+    )
+
+
+class AnaliseMaterializacaoReconcileResponse(BaseModel):
+    execution_id: str = Field(description="Execução reconciliada.")
+    previous_status: str = Field(description="Status anterior à reconciliação.")
+    status: str = Field(description="Status terminal resultante.")
+    operational_state: AnaliseMaterializacaoOperationalState = Field(description="Estado operacional após a reconciliação.")
+    reconciled_at: datetime = Field(description="Momento persistido da reconciliação.")
+    reconciled_by: str = Field(description="Ator autenticado responsável.")
+    reason_code: str = Field(description="Código estável do resultado.")
+    reason: str = Field(description="Justificativa auditada.")
+    evidence: dict[str, object] = Field(description="Evidências usadas na decisão.")
+    allowed_actions: list[AnaliseMaterializacaoAllowedAction] = Field(default_factory=list, description="Ações autorizadas após a reconciliação.")
 
 
 class AnaliseMetricaCatalogoItem(BaseModel):

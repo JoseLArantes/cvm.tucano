@@ -9,6 +9,32 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-23 - Operação genérica de materializações analíticas
+
+### Superfícies afetadas
+
+- `GET /analise/materializacoes` e `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+- `POST /analise/materializacoes/{execucao_id}/reconcile`
+- previews de campanhas em monitoramento
+
+### Comportamento entregue
+
+- execuções expõem `operational_state`, `reason_code`, `liveness`, `completion`, `recovery`, `allowed_actions` e `has_action_required`;
+- `completion_pending` identifica progresso técnico integral sem task, chunk ou lease ativo e sem finalização persistida;
+- o novo endpoint reconcilia uma execução para `success` ou `failed` somente mediante evidências suficientes, registra auditoria persistida e é idempotente;
+- `409` informa `reason_code`, evidências e ações autorizadas; indisponibilidade da inspeção Celery retorna `503`, `retryable=true` e `Retry-After`;
+- o monitoramento agrega `operational_counts` e previews de execuções pendentes de conclusão ou paradas sem recuperação;
+- a listagem aceita `operational_state`, `materialization_mode`, `has_action_required`, período e ordenação estável, com contagens por status persistido e estado operacional;
+- campanhas históricas `success`, `failed` ou `partial` não são classificadas como ativas;
+- um sweep periódico promove automaticamente apenas `completion_pending` comprovado, sem apagar revisões, artefatos, chunks ou logs.
+
+### Orientação para consumidores
+
+- autorize operações exclusivamente por `allowed_actions`;
+- não derive ação a partir de `status=running` ou de um booleano `stalled`;
+- use `reason_code` e `recovery.eligible` em consoles, CLIs, automações e integrações externas.
+
 ## 2026-07-23 - Resolução terminal do ciclo de vida de Updates
 
 ### Superfícies afetadas

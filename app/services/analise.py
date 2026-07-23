@@ -6720,6 +6720,7 @@ def materializar_analise_companhia(
     campanha_item_id: uuid.UUID | None = None,
     chunk_execucao_id: uuid.UUID | None = None,
     queue_name: str | None = None,
+    task_id: str | None = None,
     position_in_chunk: int | None = None,
 ) -> AnaliseMaterializacaoExecucao:
     def atualizar_execucao_progresso(
@@ -6761,6 +6762,7 @@ def materializar_analise_companhia(
             campanha_item_id=campanha_item_id,
             chunk_execucao_id=chunk_execucao_id,
             queue_name=queue_name,
+            task_id=task_id,
             position_in_chunk=position_in_chunk,
             summary={
                 "mode": "full",
@@ -6828,6 +6830,7 @@ def materializar_analise_companhia(
         campanha_item_id=campanha_item_id,
         chunk_execucao_id=chunk_execucao_id,
         queue_name=queue_name,
+        task_id=task_id,
         position_in_chunk=position_in_chunk,
         summary={},
         started_at=started_at,

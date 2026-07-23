@@ -7,6 +7,7 @@ from app.models.analise import (
     AnaliseMaterializacaoChunkExecucao,
     AnaliseMaterializacaoControle,
     AnaliseMaterializacaoExecucao,
+    AnaliseMaterializacaoReconciliacao,
 )
 from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
@@ -108,6 +109,7 @@ __all__ = [
     "AnaliseMaterializacaoChunkExecucao",
     "AnaliseMaterializacaoControle",
     "AnaliseMaterializacaoExecucao",
+    "AnaliseMaterializacaoReconciliacao",
     "CgvnDocumento",
     "CgvnPratica",
     "Companhia",

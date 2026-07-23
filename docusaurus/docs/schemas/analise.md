@@ -324,6 +324,34 @@ Estados esperados em `status` e `anos[].status`:
 
 Cada item de `anos` inclui `ano`, `status`, `escopo`, `coverage_complete`, timestamps operacionais, identificadores de execução, `calculation_version`, `source`, `materialization_mode` e `message`.
 
+### Estado operacional de execução
+
+`AnaliseMaterializacaoExecucaoResumo` e o detalhe individual expõem:
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `operational_state` | string | Estado derivado de liveness, progresso, gate e recuperação |
+| `reason_code` | string | Motivo estável da classificação |
+| `liveness` | object | Task, chunk, lease, última atividade, idade e threshold |
+| `completion` | object | Progresso técnico e indicação de finalização pendente |
+| `recovery` | object | Elegibilidade, estratégia e motivo |
+| `allowed_actions` | array | Operações autorizadas pelo backend |
+| `has_action_required` | boolean | Atalho para existência de ação autorizada |
+
+Estados possíveis:
+
+- `active`
+- `queued`
+- `waiting_for_gate`
+- `completion_pending`
+- `stalled_recoverable`
+- `stalled_unrecoverable`
+- `terminal_success`
+- `terminal_failed`
+- `unknown`
+
+`completion_pending` exige progresso integral, inatividade acima do threshold, inspeção Celery disponível, ausência de task/chunk/lease ativo, ausência de erro terminal e gate liberado.
+
 ### Monitoramento da fila
 
 `AnaliseMaterializacaoMonitoramentoResposta` combina banco e Celery para responder:
@@ -379,6 +407,10 @@ Campos adicionais importantes:
 | `stale_chunk_preview` | array | Preview dos chunks stale ainda acionaveis no snapshot |
 | `running_items_preview` | array | Preview dos itens atualmente em execução |
 | `pending_items_preview` | array | Preview dos próximos itens pendentes |
+| `operational_counts` | object | Contagens por estado operacional |
+| `completion_pending_execution_ids` | array | Execuções aguardando finalização terminal |
+| `stalled_unrecoverable_execution_ids` | array | Execuções paradas sem recuperação automática |
+| `action_required_execution_ids` | array | Execuções com ação autorizada |
 
 ### `running_items_preview` e `pending_items_preview`
 
@@ -451,6 +483,10 @@ Além dos totais gerais de tasks, o snapshot atual expõe:
 | `last_recovery_check_at` | string | Último momento em que a campanha foi classificada pelo fluxo de recuperação |
 | `last_recovery_action` | string | Última ação executada pelo fluxo de recuperação |
 | `last_recovery_reason_code` | string | Último reason code emitido para a campanha |
+| `operational_state` | string | Estado operacional atual da campanha |
+| `reason_code` | string | Motivo estável da classificação |
+| `recovery` | object | Elegibilidade e estratégia de recuperação |
+| `allowed_actions` | array | Ações autorizadas para a campanha |
 
 ### `AnaliseMaterializacaoCampanhaItemPreview`
 

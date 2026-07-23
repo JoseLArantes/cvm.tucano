@@ -190,6 +190,7 @@ def materializar_analise_companhia_task(
             campanha_item_id=uuid.UUID(campanha_item_id) if campanha_item_id else None,
             chunk_execucao_id=uuid.UUID(chunk_execucao_id) if chunk_execucao_id else None,
             queue_name=_settings.analise_materializacao_queue_name,
+            task_id=str(self.request.id),
             position_in_chunk=position_in_chunk,
         )
         return {
@@ -567,6 +568,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                     campanha_item_id=item.id,
                     chunk_execucao_id=chunk_uuid,
                     queue_name=_settings.analise_materializacao_queue_name,
+                    task_id=str(self.request.id),
                     position_in_chunk=position,
                 )
                 registrar_resultado_materializacao_campanha_item(
@@ -668,6 +670,54 @@ def recuperar_materializacao_pendente_task(self: Any) -> dict[str, Any]:
             "recoverable_campaigns": resultado.recoverable_campaigns,
             "triggered_at": resultado.triggered_at.isoformat(),
         }
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.reconciliar_materializacoes_terminais_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def reconciliar_materializacoes_terminais_task(self: Any) -> dict[str, Any]:
+    from app.services.analise import obter_estado_gate_materializacao
+    from app.services.analise_materializacao_operacional import (
+        reconcile_completion_pending_executions,
+    )
+
+    inspect = celery_app.control.inspect(timeout=0.5)
+    try:
+        active = inspect.active()
+        reserved = inspect.reserved()
+        scheduled = inspect.scheduled()
+    except Exception:
+        active = reserved = scheduled = None
+    inspection_available = not (
+        active is None and reserved is None and scheduled is None
+    )
+    task_ids: set[str] = set()
+    for payload, is_scheduled in (
+        (active or {}, False),
+        (reserved or {}, False),
+        (scheduled or {}, True),
+    ):
+        for tasks in payload.values():
+            if not isinstance(tasks, list):
+                continue
+            for task in tasks:
+                if not isinstance(task, dict):
+                    continue
+                request = task.get("request") if is_scheduled else task
+                if isinstance(request, dict) and isinstance(request.get("id"), str):
+                    task_ids.add(request["id"])
+
+    db = SessionLocal()
+    try:
+        gate = obter_estado_gate_materializacao(db)
+        return reconcile_completion_pending_executions(
+            db,
+            active_task_ids=task_ids,
+            task_inspection_available=inspection_available,
+            gate_status=gate.status,
+            gate_reason_code=gate.reason_code,
+            stalled_threshold_seconds=300,
+        )
     finally:
         db.close()
 

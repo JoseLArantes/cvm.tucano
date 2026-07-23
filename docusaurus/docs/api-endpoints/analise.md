@@ -76,6 +76,7 @@ Endpoints cobertos:
 - `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
 - `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
 - `POST /analise/materializacoes/recuperacao/trigger`
+- `POST /analise/materializacoes/{execucao_id}/reconcile`
 - `GET /analise/materializacoes/{execucao_id}`
 
 ### 4. Análise Pública de Companhias Selecionadas

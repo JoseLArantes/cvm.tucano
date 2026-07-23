@@ -165,12 +165,40 @@ class AnaliseMaterializacaoExecucao(Base):
         nullable=True,
     )
     queue_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     position_in_chunk: Mapped[int | None] = mapped_column(Integer, nullable=True)
     summary: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class AnaliseMaterializacaoReconciliacao(Base):
+    __tablename__ = "analise_materializacao_reconciliacoes"
+    __table_args__ = (
+        Index(
+            "ix_analise_materializacao_reconciliacoes_execucao_created",
+            "execucao_id",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    execucao_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("analise_materializacao_execucoes.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    decision: Mapped[str] = mapped_column(String(32), nullable=False)
+    previous_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    reconciled_by: Mapped[str] = mapped_column(String(128), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(96), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class AnaliseContextoRevision(Base):

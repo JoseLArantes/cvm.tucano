@@ -54,6 +54,7 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.despachar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.reconciliar_materializacao_stale_task": {"queue": settings.analise_materializacao_queue_name},
     "app.worker.tasks.recuperar_materializacao_pendente_task": {"queue": settings.analise_materializacao_queue_name},
+    "app.worker.tasks.reconciliar_materializacoes_terminais_task": {"queue": settings.analise_materializacao_queue_name},
     "app.radar.tasks.run_radar_collection_task": {"queue": settings.radar_cvm_queue_name},
 }
 
@@ -67,7 +68,11 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
         "analise-materializacao-stale-recovery": {
             "task": "app.worker.tasks.reconciliar_materializacao_stale_task",
             "schedule": timedelta(seconds=settings.analise_materializacao_recovery_sweep_seconds),
-        }
+        },
+        "analise-materializacao-terminal-reconciliation": {
+            "task": "app.worker.tasks.reconciliar_materializacoes_terminais_task",
+            "schedule": timedelta(seconds=settings.analise_materializacao_recovery_sweep_seconds),
+        },
     }
     if settings.analise_materializacao_pending_recovery_enabled:
         beat_schedule["analise-materializacao-pending-recovery"] = {

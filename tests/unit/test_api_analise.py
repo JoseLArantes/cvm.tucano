@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from _pytest.monkeypatch import MonkeyPatch
 from fastapi.testclient import TestClient
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.analise import (
@@ -15,6 +15,7 @@ from app.models.analise import (
     AnaliseMaterializacaoChunkExecucao,
     AnaliseMaterializacaoControle,
     AnaliseMaterializacaoExecucao,
+    AnaliseMaterializacaoReconciliacao,
 )
 from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
@@ -24,6 +25,9 @@ from app.models.ipe import IpeDocumento
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.models.vlmo import VlmoConsolidado
 from app.services.analise import materializar_analise_companhia
+from app.services.analise_materializacao_operacional import (
+    reconcile_completion_pending_executions,
+)
 from app.worker.celery_app import celery_app
 
 
@@ -506,6 +510,7 @@ def _materializacao_execucao(
     campanha_item_id: uuid.UUID | None = None,
     chunk_execucao_id: uuid.UUID | None = None,
     queue_name: str | None = None,
+    task_id: str | None = None,
     position_in_chunk: int | None = None,
     started_at: datetime | None = None,
     finished_at: datetime | None = None,
@@ -529,6 +534,7 @@ def _materializacao_execucao(
         campanha_item_id=campanha_item_id,
         chunk_execucao_id=chunk_execucao_id,
         queue_name=queue_name,
+        task_id=task_id,
         position_in_chunk=position_in_chunk,
         summary=summary or {},
         started_at=started_at or agora,
@@ -1857,6 +1863,336 @@ def test_analise_materializacoes_operador_endpoints_exigem_permissao_de_usuario_
     assert com_usuario_sem_permissao.json()["detail"] == "Permissao de operacao de materializacao requerida."
 
 
+def test_reconcile_materializacao_rejeita_execucao_com_task_ativa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        task_id="task-active",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 2,
+                "processed_knowledge_dates": 2,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {
+                "worker-a": [
+                    {
+                        "id": "task-active",
+                        "name": "app.worker.tasks.materializar_analise_companhia_task",
+                    }
+                ]
+            }
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    response = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=_ops_headers(client),
+        json={"decision": "auto", "reason": "Conferência operacional com task ainda ativa."},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason_code"] == "ACTIVE_WORK_PRESENT"
+    db_session.refresh(execucao)
+    assert execucao.status == "running"
+
+
+def test_reconcile_materializacao_conclui_e_e_idempotente_sem_apagar_evidencias(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "artifact_marker": "preservar",
+            "progress": {
+                "total_knowledge_dates": 14,
+                "processed_knowledge_dates": 14,
+                "progress_ratio": 1.0,
+            },
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    headers = _ops_headers(client)
+    payload = {
+        "decision": "auto",
+        "reason": "Execução sem trabalho ativo e com progresso técnico integral.",
+    }
+    first = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=headers,
+        json=payload,
+    )
+    second = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=headers,
+        json=payload,
+    )
+
+    assert first.status_code == 200
+    assert first.json()["status"] == "success"
+    assert first.json()["operational_state"] == "terminal_success"
+    assert first.json()["reason_code"] == "TECHNICAL_PROGRESS_COMPLETE_NO_ACTIVE_WORK"
+    assert second.status_code == 200
+    assert second.json()["reason_code"] == "TECHNICAL_PROGRESS_COMPLETE_NO_ACTIVE_WORK"
+    db_session.refresh(execucao)
+    assert execucao.coverage_complete is True
+    assert execucao.finished_at is not None
+    assert (execucao.summary or {})["artifact_marker"] == "preservar"
+    assert (
+        db_session.scalar(
+            select(func.count(AnaliseMaterializacaoReconciliacao.id)).where(
+                AnaliseMaterializacaoReconciliacao.execucao_id == execucao.id
+            )
+        )
+        == 1
+    )
+
+
+def test_reconcile_materializacao_auto_marca_incompleta_como_failed(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 4,
+                "processed_knowledge_dates": 2,
+                "progress_ratio": 0.5,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+    response = client.post(
+        f"/analise/materializacoes/{execucao.id}/reconcile",
+        headers=_ops_headers(client),
+        json={
+            "decision": "auto",
+            "reason": "Execução incompleta e parada sem qualquer fonte recuperável.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert response.json()["operational_state"] == "terminal_failed"
+    db_session.refresh(execucao)
+    assert execucao.coverage_complete is False
+
+
+def test_monitoramento_classifica_estados_operacionais_e_lista_filtra_totais(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    completion_pending = _materializacao_execucao(
+        cia,
+        status="running",
+        materialization_mode="incremental",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 3,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    unrecoverable = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 1,
+                "progress_ratio": 1 / 3,
+            }
+        },
+    )
+    campanha = _materializacao_campanha(status="pending", total_items=1, running_items=1)
+    db_session.add_all([completion_pending, unrecoverable, campanha])
+    db_session.flush()
+    chunk = _materializacao_chunk_execucao(
+        campanha,
+        status="stale",
+        lease_expires_at=stale_at,
+        heartbeat_at=stale_at,
+        updated_at=stale_at,
+    )
+    db_session.add(chunk)
+    db_session.flush()
+    item = _materializacao_campanha_item(
+        campanha,
+        cia,
+        escopo="consolidated",
+        status="running",
+        ordem=1,
+        chunk_execucao_id=chunk.id,
+    )
+    db_session.add(item)
+    db_session.flush()
+    recoverable = _materializacao_execucao(
+        cia,
+        status="running",
+        campanha_id=campanha.id,
+        campanha_item_id=item.id,
+        chunk_execucao_id=chunk.id,
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 3,
+                "processed_knowledge_dates": 1,
+                "progress_ratio": 1 / 3,
+            }
+        },
+    )
+    db_session.add(recoverable)
+    db_session.commit()
+
+    class FakeInspect:
+        def active(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def reserved(self) -> dict[str, list[dict[str, str]]]:
+            return {}
+
+        def scheduled(self) -> dict[str, list[dict[str, object]]]:
+            return {}
+
+    monkeypatch.setattr(celery_app.control, "inspect", lambda timeout=1.0: FakeInspect())
+
+    monitor = client.get("/analise/materializacoes/monitoramento")
+    filtered = client.get(
+        "/analise/materializacoes"
+        "?operational_state=completion_pending"
+        "&materialization_mode=incremental"
+        "&has_action_required=true"
+        "&ordenar=updated_at:asc"
+    )
+
+    assert monitor.status_code == 200
+    monitor_payload = monitor.json()
+    assert monitor_payload["operational_counts"]["completion_pending"] == 1
+    assert monitor_payload["operational_counts"]["stalled_recoverable"] == 1
+    assert monitor_payload["operational_counts"]["stalled_unrecoverable"] >= 1
+    assert str(completion_pending.id) in monitor_payload["completion_pending_execution_ids"]
+    assert str(unrecoverable.id) in monitor_payload["stalled_unrecoverable_execution_ids"]
+    assert filtered.status_code == 200
+    filtered_payload = filtered.json()
+    assert filtered_payload["paginacao"]["total"] == 1
+    assert filtered_payload["resumo"]["operational_counts"]["completion_pending"] == 1
+    assert filtered_payload["dados"][0]["id"] == str(completion_pending.id)
+    assert filtered_payload["dados"][0]["allowed_actions"][0]["code"] == "reconcile_terminal"
+
+
+def test_reconciliador_automatico_promove_completion_pending_uma_unica_vez(
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    stale_at = datetime.now(UTC) - timedelta(minutes=20)
+    execucao = _materializacao_execucao(
+        cia,
+        status="running",
+        started_at=stale_at,
+        updated_at=stale_at,
+        summary={
+            "progress": {
+                "total_knowledge_dates": 5,
+                "processed_knowledge_dates": 5,
+                "progress_ratio": 1.0,
+            }
+        },
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    first = reconcile_completion_pending_executions(
+        db_session,
+        active_task_ids=set(),
+        task_inspection_available=True,
+        gate_status="green",
+        gate_reason_code="NO_BLOCKERS",
+        stalled_threshold_seconds=300,
+    )
+    second = reconcile_completion_pending_executions(
+        db_session,
+        active_task_ids=set(),
+        task_inspection_available=True,
+        gate_status="green",
+        gate_reason_code="NO_BLOCKERS",
+        stalled_threshold_seconds=300,
+    )
+
+    assert first["reconciled_execution_ids"] == [str(execucao.id)]
+    assert second["reconciled_execution_ids"] == []
+    db_session.refresh(execucao)
+    assert execucao.status == "success"
+
+
 def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> None:
     resp = client.get("/openapi.json")
     assert resp.status_code == 200
@@ -1878,6 +2214,7 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
         "/analise/materializacoes/companhias/{codigo_cvm}/status",
         "/analise/materializacoes/companhias/{codigo_cvm}/repair",
         "/analise/materializacoes/{execucao_id}",
+        "/analise/materializacoes/{execucao_id}/reconcile",
         "/analise/companhias/{codigo_cvm}",
         "/analise/companhias/{codigo_cvm}/coverage",
         "/analise/companhias/{codigo_cvm}/series",
@@ -1946,11 +2283,22 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert "materialization_mode" in execucao_schema
     assert "invalidated_from" in execucao_schema
     assert "window_total_knowledge_dates" in execucao_schema
+    assert "operational_state" in execucao_schema
+    assert "liveness" in execucao_schema
+    assert "completion" in execucao_schema
+    assert "recovery" in execucao_schema
+    assert "allowed_actions" in execucao_schema
     materializacoes_params = {
         item["name"]
         for item in paths["/analise/materializacoes"]["get"]["parameters"]
     }
     assert "campanha_id" in materializacoes_params
+    assert "operational_state" in materializacoes_params
+    assert "materialization_mode" in materializacoes_params
+    assert "has_action_required" in materializacoes_params
+    assert "started_from" in materializacoes_params
+    assert "started_to" in materializacoes_params
+    assert "ordenar" in materializacoes_params
     companhia_status_schema = components["AnaliseMaterializacaoCompanhiaStatusResposta"]["properties"]
     assert "anos" in companhia_status_schema
     assert "periodos_detalhe" in companhia_status_schema
@@ -1971,6 +2319,10 @@ def test_analise_openapi_exposes_only_versionless_paths(client: TestClient) -> N
     assert "pending_recovery_active_tasks" in monitor_schema
     assert "stale_chunks" in monitor_schema
     assert "stale_chunk_preview" in monitor_schema
+    assert "operational_counts" in monitor_schema
+    assert "completion_pending_execution_ids" in monitor_schema
+    assert "stalled_unrecoverable_execution_ids" in monitor_schema
+    assert "action_required_execution_ids" in monitor_schema
     assert "running_execution_previews" in monitor_schema
     assert "campaigns" in monitor_schema
     campanha_schema = components["AnaliseMaterializacaoCampanhaResumo"]["properties"]

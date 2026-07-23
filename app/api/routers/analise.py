@@ -7,7 +7,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy import case, func, select
 
-from app.api.auth import exigir_admin_api, exigir_operador_materializacao_api
+from app.api.auth import (
+    AutenticacaoApi,
+    autenticar_requisicao,
+    exigir_admin_api,
+    exigir_operador_materializacao_api,
+)
 from app.api.deps import DbSession, PaginacaoQuery
 from app.core.cache import build_cache_key, cache
 from app.core.config import get_settings
@@ -34,12 +39,14 @@ from app.schemas.analise import (
     AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
+    AnaliseMaterializacaoAllowedAction,
     AnaliseMaterializacaoAnoStatus,
     AnaliseMaterializacaoCampanhaItemPreview,
     AnaliseMaterializacaoCampanhaResumo,
     AnaliseMaterializacaoChunkExecucaoPreview,
     AnaliseMaterializacaoChunkExecucaoResumo,
     AnaliseMaterializacaoCompanhiaStatusResposta,
+    AnaliseMaterializacaoCompletion,
     AnaliseMaterializacaoControleResposta,
     AnaliseMaterializacaoExecucaoDetalhe,
     AnaliseMaterializacaoExecucaoResumo,
@@ -48,11 +55,15 @@ from app.schemas.analise import (
     AnaliseMaterializacaoFilaSnapshot,
     AnaliseMaterializacaoGateSnapshot,
     AnaliseMaterializacaoIngestionBlocker,
+    AnaliseMaterializacaoLiveness,
     AnaliseMaterializacaoMonitoramentoResposta,
     AnaliseMaterializacaoPeriodoStatus,
     AnaliseMaterializacaoProgress,
     AnaliseMaterializacaoReativacaoResposta,
     AnaliseMaterializacaoReativacaoSweepResposta,
+    AnaliseMaterializacaoReconcileRequest,
+    AnaliseMaterializacaoReconcileResponse,
+    AnaliseMaterializacaoRecovery,
     AnaliseMaterializacaoRecuperacaoResposta,
     AnaliseMaterializacaoRepairRequest,
     AnaliseMaterializacaoRepairResposta,
@@ -69,6 +80,7 @@ from app.schemas.comum import Paginacao
 from app.services.analise import (
     CALCULATION_VERSION,
     campanha_tem_requeue_em_transito,
+    contar_chunks_ativos_campanha,
     contar_chunks_stale_campanha,
     criar_repair_materializacao_companhia,
     listar_chunks_ativos_campanha,
@@ -100,6 +112,11 @@ from app.services.analise import (
     recuperar_materializacao_pendente,
     retomar_controle_materializacao,
 )
+from app.services.analise_materializacao_operacional import (
+    MaterializationReconcileConflict,
+    build_materialization_operational_snapshot,
+    reconcile_materialization_execution,
+)
 from app.worker.celery_app import celery_app
 
 router = APIRouter(prefix="/analise")
@@ -108,6 +125,7 @@ _MATERIALIZACAO_CAMPANHA_TASK_NAME = "app.worker.tasks.materializar_analise_camp
 _MATERIALIZACAO_CHUNK_TASK_NAME = "app.worker.tasks.materializar_analise_chunk_task"
 _MATERIALIZACAO_RECOVERY_TASK_NAME = "app.worker.tasks.reconciliar_materializacao_stale_task"
 _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME = "app.worker.tasks.recuperar_materializacao_pendente_task"
+_MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME = "app.worker.tasks.reconciliar_materializacoes_terminais_task"
 _STALL_THRESHOLD_SECONDS = 300
 _settings = get_settings()
 
@@ -194,6 +212,34 @@ _RESPOSTAS_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
             "application/json": {"example": {"detail": "Permissao de operacao de materializacao requerida."}}
         },
     },
+    409: {
+        "description": "Estado incompatível com a ação solicitada.",
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": {
+                        "reason_code": "ACTIVE_WORK_PRESENT",
+                        "evidence": {"has_active_task": True, "has_active_chunk": False},
+                        "allowed_actions": [],
+                    }
+                }
+            }
+        },
+    },
+    503: {
+        "description": "Capacidade operacional temporariamente indisponível.",
+        "headers": {"Retry-After": {"schema": {"type": "integer"}, "description": "Segundos até nova tentativa."}},
+        "content": {
+            "application/json": {
+                "example": {
+                    "detail": {
+                        "reason_code": "TASK_INSPECTION_UNAVAILABLE",
+                        "retryable": True,
+                    }
+                }
+            }
+        },
+    },
 }
 
 _RESPOSTAS_ADMIN_OPERACAO_MATERIALIZACAO: dict[int | str, dict[str, Any]] = {
@@ -213,7 +259,7 @@ _DESCRICAO_RECUPERAR_STALE_GERAL = (
     "Use este endpoint quando o operador administrativo precisar forcar a limpeza tecnica de chunks com lease "
     "expirado sem depender da classificacao por campanha. A operacao devolve itens inacabados para `pending`, "
     "marca as execucoes de chunk recuperadas como `stale` e reenfileira as campanhas afetadas. "
-    "Este endpoint e de baixo nivel e existe para operacao administrativa; para usuarios delegados e fluxos de UI, "
+    "Este endpoint e de baixo nivel e existe para operacao administrativa; para consumidores delegados, "
     "prefira `POST /analise/materializacoes/recuperacao/trigger` ou "
     "`POST /analise/materializacoes/campanhas/{campanha_id}/reativar`."
 )
@@ -227,7 +273,7 @@ _DESCRICAO_RECUPERAR_STALE_CAMPANHA = (
 
 _DESCRICAO_REATIVAR_CAMPANHA = (
     "Classifica uma campanha pendente da materializacao analitica e executa a reativacao operacional suportada "
-    "para API users. Use este endpoint quando a UI ja conhece a `campanha_id` e quer tentar destravar apenas uma "
+    "para consumidores da API. Use este endpoint quando o consumidor ja conhece a `campanha_id` e quer destravar apenas uma "
     "campanha especifica. O endpoint e idempotente do ponto de vista operacional: ele pode recuperar chunks stale "
     "ativos, reenfileirar uma campanha `PENDING_UNDISPATCHED` ou devolver `noop` com motivo objetivo quando a "
     "campanha estiver bloqueada por gate, slot, chunk vivo ou ausencia real de trabalho pendente. "
@@ -237,7 +283,7 @@ _DESCRICAO_REATIVAR_CAMPANHA = (
 
 _DESCRICAO_TRIGGER_RECUPERACAO = (
     "Executa um sweep operacional limitado sobre campanhas pendentes para self-healing delegado. Use este "
-    "endpoint quando a UI nao sabe qual campanha esta presa, ou quando o operador quer pedir ao backend para "
+    "endpoint quando o consumidor nao sabe qual campanha esta presa, ou quando o operador quer pedir ao backend para "
     "varrer um lote limitado de campanhas `pending` e recuperar apenas as elegiveis naquele instante. "
     "O sweep respeita gate, concorrencia e limites configurados de batch; ele nao faz bypass de protecoes nem "
     "requeue irrestrito. O resultado traz contadores agregados e a lista das campanhas afetadas para auditoria."
@@ -300,11 +346,28 @@ def _estimate_finish(
     return remaining, datetime.now(UTC) + timedelta(seconds=remaining)
 
 
-def _serializar_materializacao_execucao(execucao: AnaliseMaterializacaoExecucao) -> AnaliseMaterializacaoExecucaoResumo:
+def _serializar_materializacao_execucao(
+    db: DbSession,
+    execucao: AnaliseMaterializacaoExecucao,
+    *,
+    active_task_ids: set[str] | None = None,
+    task_inspection_available: bool = False,
+    gate_status: str = "green",
+    gate_reason_code: str = "NO_BLOCKERS",
+) -> AnaliseMaterializacaoExecucaoResumo:
     progress = _progress_from_summary(execucao.summary)
     elapsed = _elapsed_seconds(execucao.started_at, execucao.finished_at)
     remaining, finish_at = _estimate_finish(execucao.started_at, execucao.finished_at, progress)
     summary = execucao.summary if isinstance(execucao.summary, dict) else {}
+    operational = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids or set(),
+        task_inspection_available=task_inspection_available,
+        gate_status=gate_status,
+        gate_reason_code=gate_reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
     return AnaliseMaterializacaoExecucaoResumo(
         id=str(execucao.id),
         codigo_cvm=execucao.codigo_cvm,
@@ -335,7 +398,83 @@ def _serializar_materializacao_execucao(execucao: AnaliseMaterializacaoExecucao)
         deleted_future_context_revisions=summary.get("deleted_future_context_revisions"),
         deleted_future_fact_revisions=summary.get("deleted_future_fact_revisions"),
         progress=progress,
+        operational_state=operational.operational_state,
+        reason_code=operational.reason_code,
+        liveness=AnaliseMaterializacaoLiveness.model_validate({
+            "last_activity_at": operational.last_activity_at,
+            "age_seconds": operational.age_seconds,
+            "has_active_task": operational.has_active_task,
+            "task_inspection_available": operational.task_inspection_available,
+            "has_active_chunk": operational.has_active_chunk,
+            "has_active_lease": operational.has_active_lease,
+            "is_stalled": operational.is_stalled,
+            "stalled_threshold_seconds": operational.stalled_threshold_seconds,
+        }),
+        completion=AnaliseMaterializacaoCompletion.model_validate({
+            "technical_progress_complete": operational.technical_progress_complete,
+            "total_knowledge_dates": operational.total_knowledge_dates,
+            "processed_knowledge_dates": operational.processed_knowledge_dates,
+            "finalization_pending": operational.finalization_pending,
+            "reason_code": operational.completion_reason_code,
+        }),
+        recovery=AnaliseMaterializacaoRecovery.model_validate({
+            "eligible": operational.recovery_eligible,
+            "strategy": operational.recovery_strategy,
+            "reason_code": operational.recovery_reason_code,
+        }),
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in operational.allowed_actions
+        ],
+        has_action_required=operational.has_action_required,
     )
+
+
+def _preload_materialization_relations(
+    db: DbSession,
+    executions: list[AnaliseMaterializacaoExecucao],
+) -> tuple[
+    list[AnaliseMaterializacaoChunkExecucao],
+    list[AnaliseMaterializacaoCampanhaItem],
+    list[AnaliseMaterializacaoCampanha],
+]:
+    chunk_ids = {item.chunk_execucao_id for item in executions if item.chunk_execucao_id is not None}
+    item_ids = {item.campanha_item_id for item in executions if item.campanha_item_id is not None}
+    campaign_ids = {item.campanha_id for item in executions if item.campanha_id is not None}
+    chunks = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoChunkExecucao).where(
+                    AnaliseMaterializacaoChunkExecucao.id.in_(chunk_ids)
+                )
+            ).all()
+        )
+        if chunk_ids
+        else []
+    )
+    items = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanhaItem).where(
+                    AnaliseMaterializacaoCampanhaItem.id.in_(item_ids)
+                )
+            ).all()
+        )
+        if item_ids
+        else []
+    )
+    campaigns = (
+        list(
+            db.scalars(
+                select(AnaliseMaterializacaoCampanha).where(
+                    AnaliseMaterializacaoCampanha.id.in_(campaign_ids)
+                )
+            ).all()
+        )
+        if campaign_ids
+        else []
+    )
+    return chunks, items, campaigns
 
 
 def _materializacao_task_count(
@@ -360,6 +499,56 @@ def _materializacao_task_count(
             if name in names:
                 total += 1
     return total
+
+
+def _materializacao_task_ids(
+    payload: dict[str, Any] | None,
+    *,
+    scheduled: bool = False,
+) -> set[str]:
+    if not payload:
+        return set()
+    ids: set[str] = set()
+    for tasks in payload.values():
+        if not isinstance(tasks, list):
+            continue
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            request = task.get("request") if scheduled else task
+            if not isinstance(request, dict):
+                continue
+            task_id = request.get("id")
+            if isinstance(task_id, str):
+                ids.add(task_id)
+    return ids
+
+
+def _inspect_materialization_tasks() -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    set[str],
+    bool,
+]:
+    inspect = celery_app.control.inspect(timeout=0.5)
+    try:
+        active = inspect.active()
+        reserved = inspect.reserved()
+        scheduled = inspect.scheduled()
+    except Exception:
+        return {}, {}, {}, set(), False
+    if active is None and reserved is None and scheduled is None:
+        return {}, {}, {}, set(), False
+    active_payload = active or {}
+    reserved_payload = reserved or {}
+    scheduled_payload = scheduled or {}
+    task_ids = (
+        _materializacao_task_ids(active_payload)
+        | _materializacao_task_ids(reserved_payload)
+        | _materializacao_task_ids(scheduled_payload, scheduled=True)
+    )
+    return active_payload, reserved_payload, scheduled_payload, task_ids, True
 
 
 def _queue_depth() -> int | None:
@@ -424,12 +613,48 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
     progress_ratio = _campaign_progress_ratio(campanha)
     remaining = None
     active_chunks = listar_chunks_ativos_campanha(db, campanha.id, limit=5)
+    active_chunk_count = contar_chunks_ativos_campanha(db, campanha.id)
     active_chunk = active_chunks[0] if active_chunks else None
     stale_chunks = contar_chunks_stale_campanha(db, campanha.id)
     if progress_ratio is not None and campanha.started_at is not None and 0 < progress_ratio < 1:
         elapsed = _elapsed_seconds(campanha.started_at, None)
         if elapsed is not None and elapsed > 0:
             remaining = max(0, int((elapsed / progress_ratio) - elapsed))
+    wait_reason = (campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None
+    recovery_state = (campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None
+    recovery_eligible = stale_chunks > 0 or recovery_state == "recoverable"
+    if campanha.status == "success":
+        operational_state = "terminal_success"
+        reason_code = "CAMPAIGN_SUCCEEDED"
+    elif campanha.status in {"failed", "partial"}:
+        operational_state = "terminal_failed"
+        reason_code = "CAMPAIGN_FAILED" if campanha.status == "failed" else "CAMPAIGN_PARTIAL"
+    elif active_chunks:
+        operational_state = "active"
+        reason_code = "ACTIVE_CHUNK_PRESENT"
+    elif wait_reason in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}:
+        operational_state = "waiting_for_gate"
+        reason_code = str(wait_reason)
+    elif recovery_eligible:
+        operational_state = "stalled_recoverable"
+        reason_code = "STALE_CHUNK" if stale_chunks else "PENDING_UNDISPATCHED"
+    elif campanha.status == "running":
+        operational_state = "stalled_unrecoverable"
+        reason_code = "NO_ACTIVE_CHUNK"
+    else:
+        operational_state = "queued" if campanha.status == "pending" else "unknown"
+        reason_code = "CAMPAIGN_PENDING" if campanha.status == "pending" else "UNKNOWN_CAMPAIGN_STATE"
+    allowed_actions = []
+    if recovery_eligible:
+        allowed_actions.append(
+            {
+                "code": "reactivate_campaign",
+                "operation": "POST",
+                "path": f"/analise/materializacoes/campanhas/{campanha.id}/reativar",
+                "requires_confirmation": True,
+                "reason_code": reason_code,
+            }
+        )
     return AnaliseMaterializacaoCampanhaResumo(
         campanha_id=str(campanha.id),
         source=campanha.source,
@@ -445,16 +670,27 @@ def _serializar_campanha(db: DbSession, campanha: AnaliseMaterializacaoCampanha)
         started_at=campanha.started_at,
         updated_at=campanha.updated_at,
         estimated_remaining_seconds=remaining,
-        active_chunks=len(active_chunks),
+        active_chunks=active_chunk_count,
         active_chunk_id=str(active_chunk.id) if active_chunk is not None else None,
         active_chunk_lease_expires_at=active_chunk.lease_expires_at if active_chunk is not None else None,
         active_chunk_ids_preview=[str(chunk.id) for chunk in active_chunks],
         stale_chunks=stale_chunks,
-        wait_reason=(campanha.summary or {}).get("wait_reason") if isinstance(campanha.summary, dict) else None,
-        recovery_state=(campanha.summary or {}).get("recovery_state") if isinstance(campanha.summary, dict) else None,
+        wait_reason=wait_reason,
+        recovery_state=recovery_state,
         last_recovery_check_at=(campanha.summary or {}).get("last_recovery_check_at") if isinstance(campanha.summary, dict) else None,
         last_recovery_action=(campanha.summary or {}).get("last_recovery_action") if isinstance(campanha.summary, dict) else None,
         last_recovery_reason_code=(campanha.summary or {}).get("last_recovery_reason_code") if isinstance(campanha.summary, dict) else None,
+        operational_state=operational_state,
+        reason_code=reason_code,
+        recovery=AnaliseMaterializacaoRecovery.model_validate({
+            "eligible": recovery_eligible,
+            "strategy": "reactivate_campaign" if recovery_eligible else None,
+            "reason_code": reason_code if recovery_eligible else "NO_RECOVERY_SOURCE",
+        }),
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in allowed_actions
+        ],
     )
 
 
@@ -600,15 +836,7 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
     operation_id="monitorarMaterializacoesAnaliticas",
 )
 def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacaoMonitoramentoResposta:
-    inspect = celery_app.control.inspect(timeout=0.5)
-    try:
-        active = inspect.active() or {}
-        reserved = inspect.reserved() or {}
-        scheduled = inspect.scheduled() or {}
-    except Exception:
-        active = {}
-        reserved = {}
-        scheduled = {}
+    active, reserved, scheduled, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
 
     running = list(
         db.scalars(
@@ -639,6 +867,39 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
     oldest_started_at = running[0].started_at if running else None
     longest_elapsed = _elapsed_seconds(oldest_started_at, None) if oldest_started_at else None
     controle = obter_controle_materializacao(db)
+    gate_snapshot = _serializar_gate(db, controle)
+    running_execution_summaries = [
+        _serializar_materializacao_execucao(
+            db,
+            item,
+            active_task_ids=active_task_ids,
+            task_inspection_available=task_inspection_available,
+            gate_status=gate_snapshot.status,
+            gate_reason_code=gate_snapshot.reason_code,
+        )
+        for item in running
+    ]
+    operational_counts = {
+        state: sum(1 for item in running_execution_summaries if item.operational_state == state)
+        for state in (
+            "active",
+            "queued",
+            "waiting_for_gate",
+            "completion_pending",
+            "stalled_recoverable",
+            "stalled_unrecoverable",
+            "unknown",
+        )
+    }
+    completion_pending_ids = [
+        item.id for item in running_execution_summaries if item.operational_state == "completion_pending"
+    ]
+    stalled_unrecoverable_ids = [
+        item.id for item in running_execution_summaries if item.operational_state == "stalled_unrecoverable"
+    ]
+    action_required_ids = [
+        item.id for item in running_execution_summaries if item.has_action_required
+    ]
     campanhas = list(
         db.scalars(
             select(AnaliseMaterializacaoCampanha)
@@ -782,6 +1043,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_reserved_tasks=_materializacao_task_count(
@@ -792,6 +1054,7 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_scheduled_tasks=_materializacao_task_count(
@@ -803,13 +1066,14 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
                     _MATERIALIZACAO_CHUNK_TASK_NAME,
                     _MATERIALIZACAO_RECOVERY_TASK_NAME,
                     _MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME,
+                    _MATERIALIZACAO_TERMINAL_RECONCILIATION_TASK_NAME,
                 },
             ),
             materialization_orchestrator_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CAMPANHA_TASK_NAME}),
             materialization_chunk_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_CHUNK_TASK_NAME}),
             materialization_queue_depth=_queue_depth(),
         ),
-        gate=_serializar_gate(db, controle),
+        gate=gate_snapshot,
         running_executions=len(running),
         running_full_executions=running_full_executions,
         running_incremental_executions=running_incremental_executions,
@@ -840,11 +1104,15 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         stalled_execution_ids=stalled_ids,
         stalled_incremental_execution_ids=stalled_incremental_ids,
         pending_recovery_active_tasks=_materializacao_task_count(active, task_names={_MATERIALIZACAO_PENDING_RECOVERY_TASK_NAME}),
-        running_execution_previews=[_serializar_materializacao_execucao(item) for item in running[:10]],
+        running_execution_previews=running_execution_summaries[:10],
         campaigns=campanhas_resumo,
         stale_chunk_preview=[AnaliseMaterializacaoChunkExecucaoPreview(**_serializar_chunk(chunk).model_dump()) for chunk in stale_chunk_preview],
         running_items_preview=[_serializar_item_preview(item) for item in running_items_preview],
         pending_items_preview=[_serializar_item_preview(item) for item in pending_items_preview],
+        operational_counts=operational_counts,
+        completion_pending_execution_ids=completion_pending_ids[:10],
+        stalled_unrecoverable_execution_ids=stalled_unrecoverable_ids[:10],
+        action_required_execution_ids=action_required_ids[:10],
     )
 
 
@@ -1053,7 +1321,26 @@ def listar_materializacoes_analiticas(
     escopo: Annotated[AnaliseEscopo | None, Query(description="Filtra por escopo societário.")] = None,
     source: Annotated[str | None, Query(description="Filtra por origem do disparo da materialização.")] = None,
     campanha_id: Annotated[str | None, Query(description="Filtra por identificador da campanha de materialização.")] = None,
+    materialization_mode: Annotated[str | None, Query(description="Filtra por modo `full` ou `incremental`.")] = None,
+    operational_state: Annotated[str | None, Query(description="Filtra pelo estado operacional derivado documentado no contrato.")] = None,
+    has_action_required: Annotated[bool | None, Query(description="Filtra execuções com ou sem ação operacional autorizada.")] = None,
+    started_from: Annotated[datetime | None, Query(description="Início mínimo, inclusivo, em ISO-8601.")] = None,
+    started_to: Annotated[datetime | None, Query(description="Início máximo, inclusivo, em ISO-8601.")] = None,
+    ordenar: Annotated[str, Query(description="Ordenação estável: `started_at:desc`, `started_at:asc`, `updated_at:desc` ou `updated_at:asc`.")] = "started_at:desc",
 ) -> AnaliseMaterializacaoExecucoesListaResposta:
+    valid_operational_states = {
+        "active",
+        "queued",
+        "waiting_for_gate",
+        "completion_pending",
+        "stalled_recoverable",
+        "stalled_unrecoverable",
+        "terminal_success",
+        "terminal_failed",
+        "unknown",
+    }
+    if operational_state is not None and operational_state not in valid_operational_states:
+        raise HTTPException(status_code=422, detail="operational_state invalido.")
     filters = []
     if status is not None:
         filters.append(AnaliseMaterializacaoExecucao.status == status)
@@ -1068,40 +1355,138 @@ def listar_materializacoes_analiticas(
             filters.append(AnaliseMaterializacaoExecucao.campanha_id == UUID(campanha_id))
         except ValueError as exc:
             raise HTTPException(status_code=422, detail="campanha_id invalido.") from exc
+    if materialization_mode is not None:
+        if materialization_mode not in {"full", "incremental"}:
+            raise HTTPException(status_code=422, detail="materialization_mode invalido.")
+        filters.append(AnaliseMaterializacaoExecucao.materialization_mode == materialization_mode)
+    if started_from is not None:
+        filters.append(AnaliseMaterializacaoExecucao.started_at >= started_from)
+    if started_to is not None:
+        filters.append(AnaliseMaterializacaoExecucao.started_at <= started_to)
+    ordering = {
+        "started_at:desc": (
+            AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.created_at.desc(),
+        ),
+        "started_at:asc": (
+            AnaliseMaterializacaoExecucao.started_at.asc().nullsfirst(),
+            AnaliseMaterializacaoExecucao.created_at.asc(),
+        ),
+        "updated_at:desc": (
+            AnaliseMaterializacaoExecucao.updated_at.desc().nullslast(),
+            AnaliseMaterializacaoExecucao.id.desc(),
+        ),
+        "updated_at:asc": (
+            AnaliseMaterializacaoExecucao.updated_at.asc().nullsfirst(),
+            AnaliseMaterializacaoExecucao.id.asc(),
+        ),
+    }
+    if ordenar not in ordering:
+        raise HTTPException(status_code=422, detail="ordenar invalido.")
 
-    stmt = select(AnaliseMaterializacaoExecucao)
+    base_stmt = select(AnaliseMaterializacaoExecucao)
     if filters:
-        stmt = stmt.where(*filters)
-    stmt = stmt.order_by(
-        AnaliseMaterializacaoExecucao.started_at.desc().nullslast(),
-        AnaliseMaterializacaoExecucao.created_at.desc(),
-    )
+        base_stmt = base_stmt.where(*filters)
+    (
+        _active_payload,
+        _reserved_payload,
+        _scheduled_payload,
+        active_task_ids,
+        task_inspection_available,
+    ) = _inspect_materialization_tasks()
+    gate = _serializar_gate(db)
 
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    execucoes = list(db.scalars(stmt.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).all())
+    def serialize(
+        executions: list[AnaliseMaterializacaoExecucao],
+    ) -> list[AnaliseMaterializacaoExecucaoResumo]:
+        relation_cache = _preload_materialization_relations(db, executions)
+        result = [
+            _serializar_materializacao_execucao(
+                db,
+                item,
+                active_task_ids=active_task_ids,
+                task_inspection_available=task_inspection_available,
+                gate_status=gate.status,
+                gate_reason_code=gate.reason_code,
+            )
+            for item in executions
+        ]
+        # Keep the preloaded objects strongly referenced while the identity map is used.
+        del relation_cache
+        return result
 
-    resumo_stmt = select(
-        func.count(AnaliseMaterializacaoExecucao.id),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "running", 1), else_=0)),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "success", 1), else_=0)),
-        func.sum(case((AnaliseMaterializacaoExecucao.status == "failed", 1), else_=0)),
-    )
-    if filters:
-        resumo_stmt = resumo_stmt.where(*filters)
-    total_count, running_count, success_count, failed_count = db.execute(resumo_stmt).one()
+    derived_filter_requested = operational_state is not None or has_action_required is not None
+    if derived_filter_requested:
+        executions = list(
+            db.scalars(
+                base_stmt.order_by(*cast(Any, ordering[ordenar]))
+            ).all()
+        )
+        serialized = serialize(executions)
+        if operational_state is not None:
+            serialized = [item for item in serialized if item.operational_state == operational_state]
+        if has_action_required is not None:
+            serialized = [item for item in serialized if item.has_action_required is has_action_required]
+        total = len(serialized)
+        status_counts = {
+            state: sum(1 for item in serialized if item.status == state)
+            for state in ("running", "success", "failed")
+        }
+        operational_counts = {
+            state: sum(1 for item in serialized if item.operational_state == state)
+            for state in valid_operational_states
+        }
+        page_items = serialized[
+            paginacao.offset : paginacao.offset + paginacao.tamanho_pagina
+        ]
+    else:
+        count_stmt = select(
+            AnaliseMaterializacaoExecucao.status,
+            func.count(AnaliseMaterializacaoExecucao.id),
+        )
+        if filters:
+            count_stmt = count_stmt.where(*filters)
+        status_rows = db.execute(
+            count_stmt.group_by(AnaliseMaterializacaoExecucao.status)
+        ).all()
+        status_counts = {"running": 0, "success": 0, "failed": 0}
+        for execution_status, count in status_rows:
+            if execution_status in status_counts:
+                status_counts[execution_status] = int(count)
+        total = sum(int(count) for _, count in status_rows)
+
+        page_executions = list(
+            db.scalars(
+                base_stmt.order_by(*cast(Any, ordering[ordenar]))
+                .offset(paginacao.offset)
+                .limit(paginacao.tamanho_pagina)
+            ).all()
+        )
+        page_items = serialize(page_executions)
+
+        running_stmt = base_stmt.where(AnaliseMaterializacaoExecucao.status == "running")
+        running_executions = list(db.scalars(running_stmt).all())
+        running_serialized = serialize(running_executions)
+        operational_counts = {state: 0 for state in valid_operational_states}
+        operational_counts["terminal_success"] = status_counts["success"]
+        operational_counts["terminal_failed"] = status_counts["failed"]
+        for item in running_serialized:
+            operational_counts[item.operational_state] += 1
 
     return AnaliseMaterializacaoExecucoesListaResposta(
-        dados=[_serializar_materializacao_execucao(item) for item in execucoes],
+        dados=page_items,
         paginacao=Paginacao(
             pagina=paginacao.pagina,
             tamanho_pagina=paginacao.tamanho_pagina,
             total=total,
         ),
         resumo=AnaliseMaterializacaoExecucoesResumo(
-            total=int(total_count or 0),
-            running=int(running_count or 0),
-            success=int(success_count or 0),
-            failed=int(failed_count or 0),
+            total=total,
+            running=status_counts["running"],
+            success=status_counts["success"],
+            failed=status_counts["failed"],
+            status_counts=status_counts,
+            operational_counts=operational_counts,
         ),
     )
 
@@ -1268,12 +1653,24 @@ def consultar_status_materializacao_companhia(
     ]
     updated_at = max((item for item in updated_candidates if item is not None), key=_datetime_sort_key, default=None)
     status_por_ano = {str(item.ano): item for item in statuses}
+    latest_execution_summary = None
+    if latest_execucao is not None:
+        _, _, _, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
+        gate = _serializar_gate(db)
+        latest_execution_summary = _serializar_materializacao_execucao(
+            db,
+            latest_execucao,
+            active_task_ids=active_task_ids,
+            task_inspection_available=task_inspection_available,
+            gate_status=gate.status,
+            gate_reason_code=gate.reason_code,
+        )
     return AnaliseMaterializacaoCompanhiaStatusResposta(
         codigo_cvm=companhia.codigo_cvm or codigo_cvm,
         escopo=escopo,
         status=status,
         coverage_complete=latest_execucao.coverage_complete if latest_execucao is not None else None,
-        latest_execution=_serializar_materializacao_execucao(latest_execucao) if latest_execucao is not None else None,
+        latest_execution=latest_execution_summary,
         active_item=_serializar_item_preview(active_item) if active_item is not None else None,
         anos=statuses,
         periodos_detalhe=periodos_detalhe,
@@ -1316,6 +1713,124 @@ def criar_repair_materializacao_companhia_analitica(
     return resultado
 
 
+@router.post(
+    "/materializacoes/{execucao_id}/reconcile",
+    response_model=AnaliseMaterializacaoReconcileResponse,
+    summary="Reconciliar Estado Terminal de Materialização",
+    description=(
+        "Reconcilia de forma individual, idempotente e auditável uma execução terminalmente inconsistente. "
+        "`mark_success` exige progresso técnico integral, ausência comprovada de task, lease e chunk ativos, "
+        "ausência de erro terminal e gate liberado. `mark_failed` encerra a inconsistência sem remover revisões, "
+        "artefatos, staging ou logs. Estados incompatíveis retornam `409` com evidências e ações autorizadas."
+    ),
+    responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
+    operation_id="reconciliarMaterializacaoAnalitica",
+)
+def reconciliar_materializacao_analitica(
+    execucao_id: str,
+    payload: AnaliseMaterializacaoReconcileRequest,
+    db: DbSession,
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    _: Annotated[None, Depends(exigir_operador_materializacao_api)],
+) -> AnaliseMaterializacaoReconcileResponse:
+    try:
+        execucao_uuid = UUID(execucao_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.") from exc
+    execucao = db.get(AnaliseMaterializacaoExecucao, execucao_uuid)
+    if execucao is None:
+        raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.")
+
+    (
+        _active_payload,
+        _reserved_payload,
+        _scheduled_payload,
+        active_task_ids,
+        task_inspection_available,
+    ) = _inspect_materialization_tasks()
+    if not task_inspection_available and execucao.status not in {"success", "failed"}:
+        raise HTTPException(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            detail={
+                "reason_code": "TASK_INSPECTION_UNAVAILABLE",
+                "retryable": True,
+            },
+        )
+    gate = _serializar_gate(db)
+    snapshot = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
+    actor = auth.usuario.username if auth.usuario is not None else "system-token"
+    try:
+        audit = reconcile_materialization_execution(
+            db,
+            execucao,
+            decision=payload.decision,
+            reason=payload.reason,
+            actor=actor,
+            snapshot=snapshot,
+        )
+    except MaterializationReconcileConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": exc.reason_code,
+                "evidence": exc.snapshot.evidence(),
+                "allowed_actions": list(exc.snapshot.allowed_actions),
+            },
+        ) from exc
+
+    db.refresh(execucao)
+    final_snapshot = build_materialization_operational_snapshot(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+        stalled_threshold_seconds=_STALL_THRESHOLD_SECONDS,
+    )
+    if audit is None:
+        reconciled_at = execucao.finished_at or execucao.updated_at or datetime.now(UTC)
+        return AnaliseMaterializacaoReconcileResponse(
+            execution_id=str(execucao.id),
+            previous_status=execucao.status,
+            status=execucao.status,
+            operational_state=final_snapshot.operational_state,
+            reconciled_at=reconciled_at,
+            reconciled_by=actor,
+            reason_code="ALREADY_TERMINAL",
+            reason=payload.reason,
+            evidence=final_snapshot.evidence(),
+            allowed_actions=[
+                AnaliseMaterializacaoAllowedAction.model_validate(item)
+                for item in final_snapshot.allowed_actions
+            ],
+        )
+    return AnaliseMaterializacaoReconcileResponse(
+        execution_id=str(execucao.id),
+        previous_status=audit.previous_status,
+        status=audit.status,
+        operational_state=final_snapshot.operational_state,
+        reconciled_at=audit.created_at,
+        reconciled_by=audit.reconciled_by,
+        reason_code=audit.reason_code,
+        reason=audit.reason,
+        evidence=audit.evidence,
+        allowed_actions=[
+            AnaliseMaterializacaoAllowedAction.model_validate(item)
+            for item in final_snapshot.allowed_actions
+        ],
+    )
+
+
 @router.get(
     "/materializacoes/{execucao_id}",
     response_model=AnaliseMaterializacaoExecucaoDetalhe,
@@ -1336,7 +1851,16 @@ def detalhar_materializacao_analitica(execucao_id: str, db: DbSession) -> Analis
     execucao = db.get(AnaliseMaterializacaoExecucao, execucao_uuid)
     if execucao is None:
         raise HTTPException(status_code=404, detail="Execucao de materializacao nao encontrada.")
-    resumo = _serializar_materializacao_execucao(execucao)
+    _, _, _, active_task_ids, task_inspection_available = _inspect_materialization_tasks()
+    gate = _serializar_gate(db)
+    resumo = _serializar_materializacao_execucao(
+        db,
+        execucao,
+        active_task_ids=active_task_ids,
+        task_inspection_available=task_inspection_available,
+        gate_status=gate.status,
+        gate_reason_code=gate.reason_code,
+    )
     return AnaliseMaterializacaoExecucaoDetalhe(**resumo.model_dump(), summary=execucao.summary or {})
 
 
