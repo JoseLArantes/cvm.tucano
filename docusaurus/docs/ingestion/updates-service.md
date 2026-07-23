@@ -56,12 +56,18 @@ Armazena a raiz de cada alteração de ZIP/CSV detectada.
 * `id` (UUID): Identificador único.
 * `fonte` (String): Tipo da fonte (ex: `dfp`, `itr`, `cadastro`).
 * `ano` (Integer, Opcional): Ano de referência do formulário.
-* `status` (String): Estado atual (`change_detected`, `analysis_queued`, `analyzing`, `analysis_failed`, `ready_for_ingestion`, `ingestion_queued`, `ingesting`, `ingestion_failed`, `ingested`, `content_unchanged`, `reference_updated`, `discarded`). `ingestion_queued` confirma apenas o aceite pela fila; não prova conclusão.
+* `status` (String): Estado atual (`change_detected`, `analysis_queued`, `analyzing`, `analysis_failed`, `ready_for_ingestion`, `triggered`, `ingestion_failed`, `ingested`, `content_unchanged`, `reference_updated`, `discarded`). `triggered` é transitório: o despacho foi aceito e ainda aguarda execução ou possui ingestão ativa. `ingested` somente é gravado após a run terminal bem-sucedida confirmar a promoção canônica. `ingestion_failed` representa falha terminal.
 * `detection_timestamp` (DateTime): Quando a mudança foi identificada.
 * `change_summary` (JSON, Opcional): Sumário geral das mudanças de membros.
 * `last_successful_run_id` (UUID, Opcional): ID da IngestionRun originada após o disparo com sucesso.
+* `current_run_id` e `current_execution_id` (UUID, Opcionais): correlação com trabalho ativo ou ainda pendente de confirmação; são limpos na resolução terminal.
+* `last_failed_run_id` (UUID, Opcional): última run terminalmente falha correlacionada.
+* `ingestion_task_id` (String, Opcional): identificador transitório da tarefa Celery; é limpo ao concluir ou falhar.
+* `resolved_timestamp` (DateTime, Opcional): momento da resolução terminal; o simples aceite pelo Celery não preenche este campo.
 
 Os campos derivados `content_changed` e `recommended_action` orientam consumidores sem exigir inferência a partir de contagens. `content_changed=false` só é emitido após comparação dos hashes dos members.
+
+As leituras de `GET /updates/pending` e `GET /updates/pending/{id}` aplicam reparo idempotente aos registros legados comprováveis. Um item `triggered`, sem correlação atual e cujo `last_successful_run_id` aponta para uma run terminal bem-sucedida em `complete`, é promovido para `ingested`. Registros sem essa evidência permanecem inalterados.
 
 ### `pending_update_members`
 Detalhes de cada membro CSV interno para arquivos compactados (ZIP).
@@ -122,7 +128,8 @@ Usados para agrupar múltiplas atualizações sob um lote lógico de execução 
 ## 4. Uso via CLI (Interface de Linha de Comando)
 
 `POST /updates/pending/{id}/retry-ingestion` somente aceita atualizações em
-`ingestion_failed`. Conteúdo em `content_unchanged` continua oferecendo apenas
+`ingestion_failed` com `retryable=true`. Falhas não retentáveis usam
+`next_action=inspect_error`. Conteúdo em `content_unchanged` continua oferecendo apenas
 `acknowledge-reference`: equivalência é comprovada por SHA-256 dos members, nunca
 por igualdade de contagem de linhas.
 

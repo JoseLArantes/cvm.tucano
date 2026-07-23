@@ -13,11 +13,17 @@ from app.api.auth import gerar_hash_senha
 from app.models.ingestion import (
     IngestionFile,
     IngestionFileMember,
+    IngestionPhaseExecution,
     IngestionRun,
     SourceArtifactSnapshot,
     SourceMemberSnapshot,
 )
 from app.models.usuario import Usuario
+from app.updates.lifecycle import (
+    finalize_pending_update_for_run,
+    link_pending_update_to_run,
+    reconcile_pending_updates,
+)
 from app.updates.models import (
     AcknowledgedArtifactReference,
     PendingUpdate,
@@ -796,9 +802,12 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     task_id = trigger_update(db_session, pending.id, user="tester")
     
     assert task_id == "task-uuid-123"
-    assert pending.status == "ingestion_queued"
+    assert pending.status == "triggered"
+    assert pending.ingestion_task_id == "task-uuid-123"
+    assert pending.current_run_id is None
+    assert pending.current_execution_id is None
     assert pending.resolved_by == "tester"
-    assert pending.resolved_timestamp is not None
+    assert pending.resolved_timestamp is None
 
     # Discard update
     pending_discard = PendingUpdate(
@@ -813,6 +822,165 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     discarded = discard_update(db_session, pending_discard.id)
     assert discarded.status == "discarded"
     assert discarded.resolved_timestamp is not None
+
+
+def test_pending_update_running_run_remains_triggered(db_session: Session) -> None:
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/dfp.zip",
+        ingestion_task_id="task-running",
+    )
+    run = IngestionRun(
+        tipo_fonte="dfp",
+        ano=2025,
+        status="em_execucao",
+        phase="promote",
+        requested_by_task_id="task-running",
+    )
+    db_session.add_all([pending, run])
+    db_session.flush()
+
+    link_pending_update_to_run(
+        db_session,
+        pending_update_id=pending.id,
+        run=run,
+    )
+    db_session.commit()
+    result = reconcile_pending_updates(db_session, pending_update_id=pending.id)
+
+    assert result["updated"] == 0
+    assert pending.status == "triggered"
+    assert pending.current_run_id == run.id
+    assert pending.ingestion_task_id == "task-running"
+
+
+def test_pending_update_success_clears_transient_correlation(db_session: Session) -> None:
+    finished_at = datetime.now(UTC)
+    run = IngestionRun(
+        tipo_fonte="itr",
+        ano=2025,
+        status="sucesso",
+        phase="complete",
+        finished_at=finished_at,
+    )
+    pending = PendingUpdate(
+        fonte="itr",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/itr.zip",
+        ingestion_task_id="task-success",
+    )
+    db_session.add_all([run, pending])
+    db_session.flush()
+    pending.current_run_id = run.id
+
+    assert finalize_pending_update_for_run(
+        db_session,
+        pending=pending,
+        run=run,
+    ) is True
+    db_session.commit()
+
+    assert pending.status == "ingested"
+    assert pending.last_successful_run_id == run.id
+    assert pending.resolved_timestamp == finished_at
+    assert pending.current_run_id is None
+    assert pending.current_execution_id is None
+    assert pending.ingestion_task_id is None
+
+
+def test_pending_update_failure_respects_retryable(db_session: Session) -> None:
+    run = IngestionRun(
+        tipo_fonte="fca",
+        ano=2025,
+        status="falha",
+        phase="complete",
+        message="falha terminal",
+        finished_at=datetime.now(UTC),
+    )
+    pending = PendingUpdate(
+        fonte="fca",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/fca.zip",
+        ingestion_task_id="task-failure",
+    )
+    db_session.add_all([run, pending])
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run.id,
+            phase="complete",
+            status="failed_final",
+            attempt=1,
+            error_retryable=True,
+        )
+    )
+    pending.current_run_id = run.id
+    db_session.flush()
+
+    assert finalize_pending_update_for_run(
+        db_session,
+        pending=pending,
+        run=run,
+    ) is True
+    db_session.commit()
+
+    assert pending.status == "ingestion_failed"
+    assert pending.last_failed_run_id == run.id
+    assert pending.retryable is True
+    assert pending.next_action == "retry_ingestion"
+    assert pending.current_run_id is None
+    assert pending.ingestion_task_id is None
+
+
+def test_reconcile_legacy_triggered_is_idempotent_and_preserves_ambiguous(
+    db_session: Session,
+) -> None:
+    successful_run = IngestionRun(
+        tipo_fonte="dfp",
+        ano=2024,
+        status="sucesso",
+        phase="complete",
+        finished_at=datetime.now(UTC),
+    )
+    ambiguous_run = IngestionRun(
+        tipo_fonte="itr",
+        ano=2024,
+        status="sucesso",
+        phase="promote",
+    )
+    db_session.add_all([successful_run, ambiguous_run])
+    db_session.flush()
+    eligible = PendingUpdate(
+        fonte="dfp",
+        ano=2024,
+        status="triggered",
+        artifact_url="https://example.test/dfp.zip",
+        last_successful_run_id=successful_run.id,
+    )
+    ambiguous = PendingUpdate(
+        fonte="itr",
+        ano=2024,
+        status="triggered",
+        artifact_url="https://example.test/itr.zip",
+        last_successful_run_id=ambiguous_run.id,
+    )
+    db_session.add_all([eligible, ambiguous])
+    db_session.commit()
+
+    first = reconcile_pending_updates(db_session)
+    second = reconcile_pending_updates(db_session)
+
+    assert first["updated"] == 1
+    assert second["updated"] == 0
+    assert eligible.status == "ingested"
+    assert eligible.last_successful_run_id == successful_run.id
+    assert eligible.current_run_id is None
+    assert ambiguous.status == "triggered"
+    assert ambiguous.resolved_timestamp is None
 
 
 def test_acknowledge_content_unchanged_updates_reference_without_ingestion(db_session: Session) -> None:
@@ -1134,6 +1302,9 @@ def test_openapi_documenta_historico_e_saude_do_scanner(client: TestClient) -> N
     pending_schema = schemas["PendingUpdateSchema"]["properties"]
     assert "content_changed" in pending_schema
     assert "recommended_action" in pending_schema
+    assert "`triggered`" in pending_schema["status"]["description"]
+    assert "resolução terminal" in pending_schema["resolved_timestamp"]["description"]
+    assert "limpa na resolução terminal" in pending_schema["current_run_id"]["description"]
     assert "AcknowledgeArtifactReferenceResponseSchema" in schemas
 
 

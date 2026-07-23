@@ -9,6 +9,7 @@ from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_ap
 from app.api.deps import DbSession, PaginacaoQuery
 from app.core.config import get_settings
 from app.schemas.comum import Paginacao
+from app.updates.lifecycle import reconcile_pending_updates
 from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateScanRun, UpdateSession, UpdateSessionItem
 from app.updates.schemas import (
     AcknowledgeArtifactReferenceResponseSchema,
@@ -210,7 +211,13 @@ def get_scanner_history(db: DbSession) -> list[PendingUpdate]:
     response_model=list[PendingUpdateSchema],
     dependencies=[Depends(autenticar_requisicao)],
     summary="Listar Atualizações Pendentes",
-    description="Retorna a lista de todas as atualizações pendentes registradas no banco de dados, com suporte a filtros por tipo de fonte e status.",
+    description=(
+        "Retorna a lista de todas as atualizações registradas, com suporte a filtros por fonte e status. "
+        "Antes da leitura, reconcilia de forma idempotente correlações terminais comprovadas. "
+        "`triggered` significa despacho aceito ainda aguardando ou executando; `ingested` confirma ingestão "
+        "canônica concluída; `ingestion_failed` identifica falha terminal. `current_run_id` e "
+        "`current_execution_id` somente identificam trabalho ativo ou ainda pendente de correlação."
+    ),
     response_description="Lista filtrada de atualizações pendentes.",
 )
 def list_pending_updates(
@@ -230,6 +237,7 @@ def list_pending_updates(
     Retorna o catálogo de pendências de dados descobertas.
     Filtre por `status=ready_for_ingestion` para encontrar o lote pronto para disparo físico de ingestão.
     """
+    reconcile_pending_updates(db)
     stmt = select(PendingUpdate)
     if fonte:
         stmt = stmt.where(PendingUpdate.fonte == fonte)
@@ -267,6 +275,7 @@ def get_pending_update(
     """
     Retorna os detalhes de uma pendência específica, incluindo a URL de origem remota, hashes capturados no probe e o sumário consolidado de mudanças.
     """
+    reconcile_pending_updates(db, pending_update_id=id)
     pending = db.get(PendingUpdate, id)
     if pending is None:
         raise HTTPException(status_code=404, detail="PendingUpdate not found")
@@ -373,6 +382,8 @@ def acknowledge_pending_update_reference(
     summary="Disparar Ingestão Manual",
     description=(
         "Agenda ingestão somente para atualizações com conteúdo modificado e status `ready_for_ingestion`. "
+        "O item passa a `triggered` quando o Celery aceita o despacho e permanece assim enquanto aguarda ou executa. "
+        "O campo `status=ingestion_queued` da resposta confirma somente o aceite assíncrono. "
         "Itens `content_unchanged` devem usar `/acknowledge-reference` e não geram tarefas Celery."
     ),
     response_description="Dados de identificação do trigger e Celery Task ID da execução física.",
@@ -402,7 +413,10 @@ def trigger_pending_update(
     "/pending/{id}/retry-ingestion",
     response_model=TriggerResponseSchema,
     summary="Reenfileirar ingestao de atualizacao com falha",
-    description="Aceita apenas atualizacoes em `ingestion_failed`; a resposta confirma enfileiramento, nao conclusao da ingestao.",
+    description=(
+        "Aceita apenas atualizações em `ingestion_failed` com `retryable=true`; a resposta confirma "
+        "enfileiramento, não conclusão da ingestão."
+    ),
 )
 def retry_pending_update_ingestion(
     id: Annotated[uuid.UUID, Path(description="UUID da atualizacao com falha de ingestao")],
@@ -412,7 +426,7 @@ def retry_pending_update_ingestion(
     pending = db.get(PendingUpdate, id)
     if pending is None:
         raise HTTPException(status_code=404, detail="PendingUpdate not found")
-    if pending.status != "ingestion_failed":
+    if pending.status != "ingestion_failed" or not pending.retryable:
         raise HTTPException(status_code=409, detail={"reason_code": "UPDATE_NOT_RETRYABLE"})
     pending.status = "ready_for_ingestion"
     db.commit()

@@ -95,7 +95,11 @@ class PendingUpdateSchema(BaseModel):
         examples=[2025]
     )
     status: str = Field(
-        description="Estado atual do ciclo de vida da atualização pendente.",
+        description=(
+            "Estado atual: `triggered` indica despacho aceito ainda aguardando ou executando; "
+            "`ingested` confirma ingestão canônica concluída com sucesso; `ingestion_failed` "
+            "indica falha terminal."
+        ),
         examples=["ready_for_ingestion"],
         pattern="^(change_detected|analysis_queued|analyzing|analysis_failed|ready_for_ingestion|ingestion_queued|ingesting|ingestion_failed|ingested|content_unchanged|reference_updated|triggered|discarded|stale)$"
     )
@@ -123,7 +127,10 @@ class PendingUpdateSchema(BaseModel):
     )
     resolved_timestamp: BrazilianDateTime | None = Field(
         default=None,
-        description="Instante em que a atualizacao foi aprovada, disparada ou descartada, serializado em `DD/MM/AAAA HH:MM:SS`."
+        description=(
+            "Instante da resolução terminal da atualização (ingestão concluída, falha, referência reconhecida "
+            "ou descarte), serializado em `DD/MM/AAAA HH:MM:SS`. O simples despacho não preenche este campo."
+        )
     )
     resolved_by: str | None = Field(
         default=None,
@@ -176,10 +183,19 @@ class PendingUpdateSchema(BaseModel):
         description="UUID da IngestionRun gerada com sucesso a partir desta atualização.",
         examples=[uuid.uuid4()]
     )
-    current_execution_id: uuid.UUID | None = Field(default=None, description="Execucao administrativa atualmente vinculada a ingestao.")
-    current_run_id: uuid.UUID | None = Field(default=None, description="Run tecnica atualmente vinculada a ingestao.")
+    current_execution_id: uuid.UUID | None = Field(
+        default=None,
+        description="Execução administrativa ativa ou ainda pendente de correlação; é limpa na resolução terminal.",
+    )
+    current_run_id: uuid.UUID | None = Field(
+        default=None,
+        description="Run técnica ativa ou ainda pendente de correlação; é limpa na resolução terminal.",
+    )
     last_failed_run_id: uuid.UUID | None = Field(default=None, description="Ultima run que falhou para esta atualizacao.")
-    ingestion_task_id: str | None = Field(default=None, description="Task Celery da ingestao atual, quando enfileirada.")
+    ingestion_task_id: str | None = Field(
+        default=None,
+        description="Task Celery transitória da ingestão enquanto houver trabalho aguardando ou ativo.",
+    )
     ingestion_result: dict[str, Any] | None = Field(default=None, description="Resultado persistido da ultima ingestao; `triggered` nunca e evidencia de conclusao.")
     retryable: bool = Field(default=False, description="Indica se a falha de ingestao pode ser reenfileirada.")
     next_action: str = Field(default="none", description="Transicao de negocio recomendada, como `retry_ingestion` ou `update_reference`.")

@@ -699,9 +699,11 @@ def pre_processar_cadastro(
     task_id: str | None = None,
     force_reimport: bool = False,
     downloader: Any | None = None,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     from pathlib import Path
 
+    from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.file_manager import (
         count_csv_rows,
@@ -730,6 +732,15 @@ def pre_processar_cadastro(
         execucao_sincronizacao_id=execucao.id,
         requested_by_task_id=task_id,
     )
+    if pending_update_id is not None:
+        from app.updates.lifecycle import link_pending_update_to_run
+
+        link_pending_update_to_run(
+            db,
+            pending_update_id=pending_update_id,
+            run=run,
+        )
+        db.commit()
 
     url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
     url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
@@ -863,7 +874,16 @@ def pre_processar_cadastro(
             execucao_erro.status = "falha"
             execucao_erro.mensagem_erro = str(exc)
             execucao_erro.finalizada_em = _agora()
-            db.commit()
+        run_erro = db.get(IngestionRun, run.id)
+        if run_erro is not None:
+            update_run_state(
+                run_erro,
+                status="falha",
+                phase="complete",
+                message=str(exc),
+                finished_at=_agora(),
+            )
+        db.commit()
 
         import shutil
         try:
@@ -998,7 +1018,16 @@ def ingerir_cadastro(
             execucao_erro.status = "falha"
             execucao_erro.mensagem_erro = str(exc)
             execucao_erro.finalizada_em = _agora()
-            db.commit()
+        run_erro = db.get(IngestionRun, run.id) if run is not None else None
+        if run_erro is not None:
+            update_run_state(
+                run_erro,
+                status="falha",
+                phase="complete",
+                message=str(exc),
+                finished_at=_agora(),
+            )
+        db.commit()
 
         # Clean up files
         import shutil
@@ -1015,6 +1044,7 @@ def sincronizar_cadastro_companhias(
     task_id: str | None = None,
     force_reimport: bool = False,
     downloader: Any | None = None,
+    pending_update_id: str | None = None,
 ) -> dict[str, Any]:
     import uuid
 
@@ -1042,6 +1072,7 @@ def sincronizar_cadastro_companhias(
         task_id=task_id,
         force_reimport=force_reimport,
         downloader=downloader,
+        pending_update_id=pending_update_id,
     )
     if phase1_res["status"] == "skipped":
         return phase1_res

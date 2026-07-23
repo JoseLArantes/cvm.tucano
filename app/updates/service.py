@@ -1268,9 +1268,9 @@ def trigger_update(db: Session, pending_update_id: uuid.UUID, user: str | None =
         )
 
     # A task accepted by Celery is only queued; it is not evidence of completed ingestion.
-    pending.status = "ingestion_queued"
+    pending.status = "triggered"
     pending.ingestion_task_id = str(task_res.id)
-    pending.resolved_timestamp = _agora()
+    pending.resolved_timestamp = None
     pending.resolved_by = user or "api"
     db.commit()
     return str(task_res.id)

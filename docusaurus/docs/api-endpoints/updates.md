@@ -100,7 +100,7 @@ Cada item de `summary.items` informa `fonte`, `ano`, `artifact_decision`, `decis
 * **Parâmetros de Query:**
   * `fonte` (Opcional): Filtra por fonte (ex: `cadastro`, `itr`).
   * `status` (Opcional): Filtra por status (ex: `change_detected`, `ready_for_ingestion`).
-* **Descrição:** Retorna a lista de atualizações pendentes filtradas.
+* **Descrição:** Retorna a lista de atualizações filtradas após reconciliar correlações terminais comprovadas.
 
 Cada item também informa:
 
@@ -108,6 +108,13 @@ Cada item também informa:
 - `recommended_action`: `analyze`, `wait`, `ingest`, `update_reference` ou `none`;
 - `status=content_unchanged` quando todos os members mantêm o mesmo SHA-256;
 - `status=reference_updated` após reconhecimento da referência sem ingestão.
+- `status=triggered` enquanto o despacho aguarda uma run ou a run correlata permanece ativa;
+- `status=ingested` somente após conclusão terminal bem-sucedida e promoção canônica confirmada;
+- `status=ingestion_failed` após falha terminal;
+- `current_run_id`, `current_execution_id` e `ingestion_task_id` somente enquanto representam trabalho ativo ou pendente de correlação;
+- `last_successful_run_id` e `last_failed_run_id` preservam a última resolução correlacionada.
+
+O endpoint também repara, de forma idempotente, o caso legado comprovável em que um item `triggered` não tem IDs atuais, mas `last_successful_run_id` aponta para uma run bem-sucedida em fase `complete`. Casos ambíguos não são alterados.
 
 ### Detalhar Atualização
 * **Rota:** `GET /updates/pending/{id}`
@@ -134,12 +141,12 @@ Cada item também informa:
 
 ### Disparar Ingestão (Trigger)
 * **Rota:** `POST /updates/pending/{id}/trigger`
-* **Descrição:** Dispara a execução física da importação e atualiza o status para `triggered`. Retorna o ID da tarefa Celery que rodará a ingestão em background.
+* **Descrição:** Dispara a execução física da importação e atualiza o item para `triggered`. Esse estado é transitório e não comprova ingestão: permanece enquanto o despacho aguarda ou a run está ativa. A resposta confirma o aceite assíncrono como `ingestion_queued`.
 * **Pré-condição:** Somente `ready_for_ingestion`. Para `content_unchanged`, use a atualização de referência.
 * **Exemplo de Resposta:**
   ```json
   {
-    "status": "triggered",
+    "status": "ingestion_queued",
     "task_id": "7bf3bf00-e3b1-4f3d-a6b1-469fa781e3a6",
     "pending_update_id": "180bfa1e-61d5-4554-ba5f-b52f6b866c1f"
   }

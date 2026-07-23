@@ -80,12 +80,15 @@ class PendingUpdate(Base):
 
     @property
     def retryable(self) -> bool:
-        return self.status == "ingestion_failed"
+        if self.status != "ingestion_failed":
+            return False
+        result = self.ingestion_result or {}
+        return result.get("retryable") is True
 
     @property
     def next_action(self) -> str:
         if self.status == "ingestion_failed":
-            return "retry_ingestion"
+            return "retry_ingestion" if self.retryable else "inspect_error"
         return self.recommended_action
 
 

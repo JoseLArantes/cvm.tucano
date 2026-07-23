@@ -9,6 +9,30 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-23 - Resolução terminal do ciclo de vida de Updates
+
+### Superfícies afetadas
+
+- `GET /updates/pending` e `GET /updates/pending/{id}`
+- `POST /updates/pending/{id}/trigger`
+- `POST /updates/pending/{id}/retry-ingestion`
+
+### Comportamento entregue
+
+- o item persistido passa a `status=triggered` quando o Celery aceita o despacho; esse estado significa apenas espera ou execução ativa;
+- uma run em andamento mantém `triggered` e preenche `current_run_id` e `current_execution_id` assim que a correlação existe;
+- sucesso terminal em fase `complete` promove o item para `ingested`, preenche `resolved_timestamp`, preserva `last_successful_run_id` e limpa IDs de run, execução e tarefa transitórios;
+- falha terminal promove para `ingestion_failed`, preserva `last_failed_run_id` e deriva `retryable` e `next_action` da fase terminal;
+- `retry-ingestion` aceita somente falhas com `retryable=true`;
+- a leitura aplica reconciliação idempotente ao legado `triggered` sem IDs atuais quando `last_successful_run_id` comprova uma run terminal bem-sucedida; casos ambíguos não são alterados;
+- a resposta do `POST .../trigger` continua usando `status=ingestion_queued` exclusivamente como confirmação do aceite assíncrono.
+
+### Orientação para clientes
+
+- use o `status` do item de `GET /updates/pending` como estado do ciclo de vida;
+- trate `current_run_id` e `current_execution_id` como correlações exclusivamente transitórias;
+- use `last_successful_run_id` ou `last_failed_run_id` para a resolução histórica e `next_action` para decidir entre nova tentativa e inspeção.
+
 ## 2026-07-22 - Encerramento auditável de falhas de ingestão
 
 ### Superfícies afetadas
