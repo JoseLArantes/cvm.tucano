@@ -11,10 +11,19 @@ from pydantic import AnyUrl, ValidationError
 
 from app.core.config import Settings, get_settings
 from app.radar.classifier import classify_text
-from app.radar.models import RadarFeed, RadarItem, RadarState
-from app.radar.parser import extract_published_at, parse_channel_html
+from app.radar.models import RadarFeed, RadarFeedV2, RadarItem, RadarState
+from app.radar.parser import (
+    extract_published_at,
+    parse_channel_html,
+    parse_data_news_html,
+    parse_news_detail_html,
+    parse_news_sitemap,
+    parse_norm_index_html,
+    parse_rss_links,
+)
 from app.radar.service import run_radar_collection
 from app.radar.storage import LocalRadarPublisher, R2RadarPublisher
+from app.radar.tasks import run_radar_collection_task
 from app.worker.celery_app import celery_app, construir_beat_schedule
 
 NOTICIAS_HTML = """
@@ -28,8 +37,9 @@ NOTICIAS_HTML = """
 
 NOVIDADES_HTML = """
 <html><body>
-  <main>
-    <a href="/pages/novidades#layout-dfp">Atualizacao de layout DFP</a>
+  <main class="ckanext-pages-content">
+    <h2>20/06/2026</h2>
+    <p><a href="/pages/novidades#layout-dfp">Atualizacao de layout DFP</a></p>
     <p>20/06/2026: Inclusao de coluna em arquivo CSV do portal de dados. (Aviso publicado em 12/06/2026.)</p>
   </main>
 </body></html>
@@ -38,10 +48,8 @@ NOVIDADES_HTML = """
 NORMAS_HTML = """
 <html><body>
   <ul>
-    <li><a href="/cvm/pt-br/assuntos/normas/resolucoes/resolucao-cvm-999">Resolucao CVM 999</a></li>
-    <li><a href="/cvm/pt-br/assuntos/normas/deliberacoes/deliberacao-1">Deliberacao CVM 1</a></li>
-    <li><a href="/cvm/pt-br/assuntos/normas/pareceres-de-orientacao/parecer-1">Parecer de orientacao 1</a></li>
-    <li><a href="/cvm/pt-br/assuntos/normas/audiencias-publicas/audiencia-1">Audiencia publica 1</a></li>
+    <li><a href="/legislacao/resolucoes/resol999.html">Resolucao CVM 999</a> Publicada no DOU de 03.07.2026.</li>
+    <li><a href="/audiencias_publicas/ap_sdm/2026/sdm0126.html">Audiencia publica 1</a> Publicada em 02/07/2026.</li>
   </ul>
 </body></html>
 """
@@ -109,7 +117,12 @@ def _settings(tmp_path: Path) -> Settings:
     settings.radar_cvm_noticias_enabled = True
     settings.radar_cvm_novidades_dados_enabled = True
     settings.radar_cvm_normas_enabled = True
+    settings.radar_cvm_requests_per_second = 10000
     return settings
+
+
+def _radar_fixture(name: str) -> str:
+    return (Path(__file__).parents[1] / "fixtures/radar" / name).read_text()
 
 
 def test_settings_radar_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,17 +198,66 @@ def test_parser_prefere_date_published_estruturado() -> None:
 def test_parsers_extraem_snapshots_html() -> None:
     noticias = parse_channel_html("noticias", "https://www.gov.br/cvm/pt-br/assuntos/noticias", NOTICIAS_HTML)
     novidades = parse_channel_html("novidades_dados", "https://dados.cvm.gov.br/pages/novidades", NOVIDADES_HTML)
-    normas = parse_channel_html("normas", "https://www.gov.br/cvm/pt-br/assuntos/normas", NORMAS_HTML)
+    normas = parse_channel_html("normas", "https://conteudo.cvm.gov.br/legislacao/resolucoes.html", NORMAS_HTML)
     assert [item.title for item in noticias] == ["CVM publica nova resolucao"]
     assert novidades[0].title == "Atualizacao de layout DFP"
-    assert novidades[0].published_at == datetime(2026, 6, 20, tzinfo=UTC)
-    assert len(normas) == 4
+    assert novidades[0].published_at == datetime(2026, 6, 12, tzinfo=UTC)
+    assert len(normas) == 2
     assert {item.kind for item in normas} == {"norma", "consulta_publica"}
 
 
 def test_parser_normas_prefere_data_de_publicacao_no_dou() -> None:
     normas = parse_channel_html("normas", "http://conteudo.cvm.gov.br/legislacao/resolucoes.html", NORMAS_DOU_HTML)
     assert normas[0].published_at == datetime(2026, 7, 3, tzinfo=UTC)
+
+
+def test_sitemap_descarta_arquivo_anual_e_preserva_data_oficial() -> None:
+    items = parse_news_sitemap(_radar_fixture("noticias_sitemap.xml"))
+
+    assert len(items) == 1
+    assert items[0].published_at == datetime(2026, 6, 26, 12, 18, tzinfo=UTC)
+    assert "/noticias/2026" != str(items[0].url).removesuffix("/")
+
+
+def test_detalhe_de_noticia_ignora_menu_e_rodape_no_conteudo_semantico() -> None:
+    candidate = parse_news_sitemap(_radar_fixture("noticias_sitemap.xml"))[0]
+    original = parse_news_detail_html(candidate, _radar_fixture("noticia_gafi.html"))
+    changed_shell = parse_news_detail_html(
+        candidate,
+        _radar_fixture("noticia_gafi.html").replace("Alto-contraste", "Menu redesenhado").replace(
+            "Conteúdo atualizado pelo menu em 23/07/2026",
+            "Novo rodapé institucional em 24/07/2026",
+        ),
+    )
+
+    assert original.raw_text == changed_shell.raw_text
+    assert original.published_at == datetime(2026, 6, 26, 12, 18, tzinfo=UTC)
+
+
+def test_novidades_dados_gera_blocos_distintos_na_mesma_url() -> None:
+    items = parse_data_news_html(
+        "https://dados.cvm.gov.br/pages/novidades",
+        _radar_fixture("novidades_dados.html"),
+    )
+
+    assert len(items) == 2
+    assert {item.url for item in items} == {"https://dados.cvm.gov.br/pages/novidades"}
+    assert len({item.identity_key for item in items}) == 2
+    assert items[0].published_at == datetime(2026, 6, 12, tzinfo=UTC)
+    assert items[0].updated_at == datetime(2026, 6, 20, tzinfo=UTC)
+
+
+def test_indice_e_rss_normativos_canonicalizam_documentos_individuais() -> None:
+    items = parse_norm_index_html(
+        "normas_resolucoes",
+        "https://conteudo.cvm.gov.br/legislacao/resolucoes.html",
+        _radar_fixture("resolucoes.html"),
+    )
+    rss_links = parse_rss_links(_radar_fixture("legislacao.xml"))
+
+    assert len(items) == 1
+    assert items[0].published_at == datetime(2026, 7, 3, tzinfo=UTC)
+    assert rss_links == {"https://conteudo.cvm.gov.br/legislacao/resolucoes/resol245.html"}
 
 
 def test_run_radar_collection_enriquece_noticia_com_data_da_pagina(
@@ -208,7 +270,7 @@ def test_run_radar_collection_enriquece_noticia_com_data_da_pagina(
             return FakeResponse(NOTICIAS_HTML)
         return FakeResponse(NOTICIA_DETALHE_HTML)
 
-    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
     result = run_radar_collection(channels=["noticias"], settings=settings)
 
     assert result["published"] is True
@@ -253,14 +315,15 @@ def test_run_radar_collection_corrige_noticia_antiga_sem_data(
             return FakeResponse(NOTICIA_JSON_LD_HTML)
         return FakeResponse(NOTICIA_DETALHE_HTML)
 
-    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
     result = run_radar_collection(channels=["noticias"], settings=settings)
 
     assert result["published"] is True
     feed = RadarFeed.model_validate_json((tmp_path / "radar-cvm/latest.json").read_bytes())
     old_item = next(item for item in feed.items if item.title == "CVM multa administradores")
     assert old_item.published_at == datetime(2026, 6, 2, 23, 5, 38, tzinfo=UTC)
-    assert old_item.id.startswith("noticias:2026-06-02:")
+    assert old_item.id.startswith("noticias:")
+    assert "2026-06-02" not in old_item.id
 
 
 def test_run_radar_collection_coleta_normas_por_subcanais(
@@ -273,7 +336,7 @@ def test_run_radar_collection_coleta_normas_por_subcanais(
             return FakeResponse(NORMAS_DOU_HTML, url="http://conteudo.cvm.gov.br/legislacao/resolucoes.html")
         return FakeResponse("<html><body></body></html>", url=url)
 
-    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
     result = run_radar_collection(channels=["normas"], settings=settings)
 
     assert result["published"] is True
@@ -297,16 +360,17 @@ def test_run_radar_collection_publica_feed_local(monkeypatch: pytest.MonkeyPatch
             return responses["novidades"]
         return responses["normas"]
 
-    monkeypatch.setattr("app.radar.service.httpx.get", fake_get)
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
     result = run_radar_collection(settings=settings)
 
     assert result["published"] is True
     latest_path = tmp_path / "radar-cvm/latest.json"
-    state_path = tmp_path / "radar-cvm/state.json"
+    state_path = tmp_path / "radar-cvm/v2/state.json"
     assert latest_path.exists()
     assert state_path.exists()
+    assert (tmp_path / "radar-cvm/v2/latest.json").exists()
     feed = RadarFeed.model_validate_json(latest_path.read_bytes())
-    assert feed.summary.total_items >= 6
+    assert feed.summary.total_items >= 4
     assert feed.summary.channels_failed == 0
     assert (tmp_path / "radar-cvm/latest.json.sha256").exists()
 
@@ -315,14 +379,14 @@ def test_run_radar_collection_preserva_snapshot_anterior_quando_canal_falha(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     settings = _settings(tmp_path)
-    monkeypatch.setattr("app.radar.service.httpx.get", lambda *_args, **_kwargs: FakeResponse(NOTICIAS_HTML))
+    monkeypatch.setattr("app.radar.service._http_get", lambda *_args, **_kwargs: FakeResponse(NOTICIAS_HTML))
     first = run_radar_collection(channels=["noticias"], settings=settings)
     assert first["published"] is True
 
     def failing_get(*_args: Any, **_kwargs: Any) -> FakeResponse:
         raise RuntimeError("fora do ar")
 
-    monkeypatch.setattr("app.radar.service.httpx.get", failing_get)
+    monkeypatch.setattr("app.radar.service._http_get", failing_get)
     second = run_radar_collection(channels=["noticias"], settings=settings)
 
     assert second["published"] is True
@@ -331,11 +395,122 @@ def test_run_radar_collection_preserva_snapshot_anterior_quando_canal_falha(
     assert feed.items
 
 
+def test_execucao_sem_mudanca_preserva_id_data_e_posicao(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    sitemap = _radar_fixture("noticias_sitemap.xml")
+    detail = _radar_fixture("noticia_gafi.html")
+    instants = iter(
+        [
+            datetime(2026, 7, 23, 10, tzinfo=UTC),
+            datetime(2026, 7, 23, 14, tzinfo=UTC),
+        ]
+    )
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        if url.endswith("/sitemap.xml"):
+            return FakeResponse(sitemap, url=url)
+        if url.endswith("/assuntos/noticias"):
+            return FakeResponse("<ul class='listagem-noticias-com-foto'></ul>", url=url)
+        return FakeResponse(detail, url=url)
+
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
+    monkeypatch.setattr("app.radar.service.utc_now", lambda: next(instants))
+    first = run_radar_collection(channels=["noticias"], settings=settings)
+    first_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+    second = run_radar_collection(channels=["noticias"], settings=settings)
+    second_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+
+    assert first["items_new"] == 1
+    assert second["items_new"] == 0
+    assert second["items_changed"] == 0
+    assert [item.id for item in second_feed.items] == [item.id for item in first_feed.items]
+    assert second_feed.items[0].published_at == first_feed.items[0].published_at
+    assert second_feed.items[0].first_seen_at == first_feed.items[0].first_seen_at
+    assert second_feed.items[0].content_changed_at == first_feed.items[0].content_changed_at
+    assert second_feed.items[0].last_seen_at > first_feed.items[0].last_seen_at
+
+
+def test_mudanca_de_corpo_nao_promove_noticia_na_linha_do_tempo(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    sitemap = _radar_fixture("noticias_sitemap.xml")
+    detail = _radar_fixture("noticia_gafi.html")
+    current_detail = {"html": detail}
+    instants = iter(
+        [
+            datetime(2026, 7, 23, 10, tzinfo=UTC),
+            datetime(2026, 7, 24, 10, tzinfo=UTC),
+        ]
+    )
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        if url.endswith("/sitemap.xml"):
+            return FakeResponse(sitemap, url=url)
+        if url.endswith("/assuntos/noticias"):
+            return FakeResponse("<ul class='listagem-noticias-com-foto'></ul>", url=url)
+        return FakeResponse(current_detail["html"], url=url)
+
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
+    monkeypatch.setattr("app.radar.service.utc_now", lambda: next(instants))
+    run_radar_collection(channels=["noticias"], settings=settings)
+    first_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+    current_detail["html"] = detail.replace(
+        "O comunicado apresenta as jurisdições sob monitoramento.",
+        "O comunicado apresenta uma lista revisada de jurisdições sob monitoramento.",
+    )
+    second = run_radar_collection(channels=["noticias"], settings=settings)
+    second_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+
+    assert second["items_changed"] == 1
+    assert second_feed.items[0].id == first_feed.items[0].id
+    assert second_feed.items[0].published_at == first_feed.items[0].published_at
+    assert second_feed.items[0].first_seen_at == first_feed.items[0].first_seen_at
+    assert second_feed.items[0].content_changed_at > first_feed.items[0].content_changed_at
+
+
+def test_incremental_nao_substitui_hash_do_detalhe_por_hash_do_sitemap(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    settings = _settings(tmp_path)
+    sitemap = _radar_fixture("noticias_sitemap.xml")
+    detail = _radar_fixture("noticia_gafi.html").replace(
+        '<p class="documentDescription">CVM divulga atualização do organismo internacional.</p>',
+        "",
+    )
+    detail_calls = 0
+
+    def fake_get(url: str, **_: Any) -> FakeResponse:
+        nonlocal detail_calls
+        if url.endswith("/sitemap.xml"):
+            return FakeResponse(sitemap, url=url)
+        if url.endswith("/assuntos/noticias"):
+            return FakeResponse("<ul class='listagem-noticias-com-foto'></ul>", url=url)
+        detail_calls += 1
+        return FakeResponse(detail, url=url)
+
+    monkeypatch.setattr("app.radar.service._http_get", fake_get)
+    run_radar_collection(channels=["noticias"], mode="full", settings=settings)
+    first_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+    second = run_radar_collection(channels=["noticias"], mode="incremental", settings=settings)
+    second_feed = RadarFeedV2.model_validate_json((tmp_path / "radar-cvm/v2/latest.json").read_bytes())
+
+    assert detail_calls == 1
+    assert second["items_changed"] == 0
+    assert second_feed.items[0].content_hash == first_feed.items[0].content_hash
+    assert second_feed.items[0].content_changed_at == first_feed.items[0].content_changed_at
+
+
 def test_run_radar_collection_nao_publica_primeira_execucao_totalmente_falha(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     settings = _settings(tmp_path)
-    monkeypatch.setattr("app.radar.service.httpx.get", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("x")))
+    monkeypatch.setattr(
+        "app.radar.service._http_get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("x")),
+    )
 
     result = run_radar_collection(channels=["noticias"], settings=settings)
 
@@ -386,9 +561,9 @@ def test_r2_publisher_usa_put_object_com_cache_control(monkeypatch: pytest.Monke
 
     assert [call["Key"] for call in calls] == [
         "radar-cvm/history/2026/07/08/010203.json",
-        "radar-cvm/latest.json",
-        "radar-cvm/latest.json.sha256",
         "radar-cvm/state.json",
+        "radar-cvm/latest.json.sha256",
+        "radar-cvm/latest.json",
     ]
     assert all(call["CacheControl"] == "public, max-age=300" for call in calls)
     assert calls[0]["ContentType"] == "application/json; charset=utf-8"
@@ -403,8 +578,24 @@ def test_radar_beat_schedule_condicional(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(settings, "radar_cvm_enabled", True)
     schedule = construir_beat_schedule()
     assert schedule["radar-noticias-periodico"]["task"] == "app.radar.tasks.run_radar_collection_task"
-    assert schedule["radar-noticias-periodico"]["args"] == (["noticias"],)
+    assert schedule["radar-noticias-periodico"]["args"] == (["noticias"], "incremental")
     assert celery_app.conf.task_routes["app.radar.tasks.run_radar_collection_task"]["queue"] == settings.radar_cvm_queue_name
+
+
+def test_radar_task_nao_executa_sem_lock_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.radar.tasks.cache.acquire_lock", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "app.radar.tasks.run_radar_collection",
+        lambda **_kwargs: pytest.fail("a coleta não deve iniciar sem lock"),
+    )
+
+    result = run_radar_collection_task()
+
+    assert result == {
+        "status": "failed",
+        "published": False,
+        "reason": "collection_lock_unavailable",
+    }
 
 
 def _feed() -> RadarFeed:

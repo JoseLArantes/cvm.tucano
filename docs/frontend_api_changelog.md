@@ -9,6 +9,31 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-23 - Feed v2 do Radar com datas e identidades estáveis
+
+### Superfícies afetadas
+
+- novo feed canônico `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/v2/latest.json`;
+- projeção compatível `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`.
+
+### Comportamento entregue
+
+- `sources[]` expõe sitemaps, RSS e páginas índice como fontes monitoradas; essas URLs não aparecem em `items[]`;
+- `items[]` substitui `captured_at` por `first_seen_at` e `last_seen_at`, e `source_hash` por `content_hash`;
+- itens passam a expor `source_ids`, `updated_at`, `content_changed_at`, `published_at_precision` e `published_at_source`;
+- IDs não incluem data e permanecem estáveis após correções de `published_at`;
+- a ordenação usa somente `published_at ?? first_seen_at`; novas observações e atualizações não promovem conteúdo antigo;
+- notícias sem data oficial confirmada ficam fora do feed v2 até que a página de detalhe, listagem ou sitemap forneça a data;
+- falhas e quedas anormais de índices preservam publicações já conhecidas;
+- `summary` adiciona contagens de fontes, itens novos, itens alterados e itens sem data.
+
+### Migração do frontend
+
+- novas integrações devem usar o feed v2;
+- a seção “Fontes da CVM” deve ser construída com `sources[]`;
+- a linha do tempo deve usar `published_at ?? first_seen_at` e nunca `last_seen_at` ou `generated_at`;
+- `radar-cvm/latest.json` continua disponível no contrato v1 durante a migração.
+
 ## 2026-07-23 - Operação genérica de materializações analíticas
 
 ### Superfícies afetadas

@@ -228,6 +228,8 @@ class Settings(BaseSettings):
     radar_cvm_retention_days: int = Field(default=90, ge=1, alias="RADAR_CVM_RETENTION_DAYS")
     radar_cvm_max_items: int = Field(default=500, ge=1, alias="RADAR_CVM_MAX_ITEMS")
     radar_cvm_request_timeout_seconds: int = Field(default=30, ge=1, alias="RADAR_CVM_REQUEST_TIMEOUT_SECONDS")
+    radar_cvm_requests_per_second: float = Field(default=2.0, gt=0, alias="RADAR_CVM_REQUESTS_PER_SECOND")
+    radar_cvm_lock_ttl_seconds: int = Field(default=1800, ge=60, alias="RADAR_CVM_LOCK_TTL_SECONDS")
     radar_cvm_user_agent: str = Field(
         default="Radar-Informativo-Tucano-CVM/1.0",
         alias="RADAR_CVM_USER_AGENT",

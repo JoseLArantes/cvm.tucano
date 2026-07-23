@@ -84,12 +84,12 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
         beat_schedule["radar-noticias-periodico"] = {
             "task": "app.radar.tasks.run_radar_collection_task",
             "schedule": crontab(minute=15, hour="*/4"),
-            "args": (["noticias"],),
+            "args": (["noticias"], "incremental"),
         }
         beat_schedule["radar-completo-diario"] = {
             "task": "app.radar.tasks.run_radar_collection_task",
             "schedule": crontab(hour=6, minute=30),
-            "args": (["noticias", "novidades_dados", "normas"],),
+            "args": (["noticias", "novidades_dados", "normas"], "full"),
         }
     
     if settings.auto_trigger_updates:

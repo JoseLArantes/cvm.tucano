@@ -5,68 +5,172 @@ sidebar_position: 2
 
 # Radar Informativo Tucano CVM
 
-O Radar Informativo Tucano CVM publica um feed JSON estatico com novidades publicas da CVM. Ele nao cria endpoint FastAPI, nao consulta PostgreSQL durante leitura e nao dispara ingestao automaticamente.
+O Radar coleta publicações públicas da CVM de forma assíncrona e entrega arquivos JSON estáticos. A leitura não passa pelo FastAPI ou pelo PostgreSQL: o frontend acessa diretamente o Cloudflare R2 por domínio público e CDN.
 
-## Consumo pelo frontend
+## URLs públicas
 
-O frontend deve consumir apenas a URL publica do artefato:
+| Recurso | URL |
+| --- | --- |
+| Feed canônico v2 | `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/v2/latest.json` |
+| Checksum v2 | `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/v2/latest.json.sha256` |
+| Projeção compatível v1 | `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json` |
+| Checksum v1 | `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json.sha256` |
 
-```text
-{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json
+Novas integrações devem usar v2. A URL v1 continua publicada como projeção temporária para consumidores existentes.
+
+## Modelo
+
+O contrato distingue:
+
+- **fonte monitorada**: sitemap, RSS ou página índice usada para descoberta; aparece em `sources[]`, nunca em `items[]`;
+- **publicação**: notícia, novidade de dados, norma ou consulta individual exibida em `items[]`;
+- **observação**: inspeção operacional que atualiza `last_seen_at`, sem redefinir a data ou a posição da publicação.
+
+Landing pages, arquivos anuais, paginação, navegação, anexos e links de acessibilidade não são publicações.
+
+## Datas e identidade
+
+`published_at` é a data editorial oficial da CVM. A precedência para notícias é:
+
+1. `NewsArticle.datePublished`;
+2. texto visível `Publicado em`;
+3. card da listagem;
+4. sitemap oficial;
+5. valor previamente verificado.
+
+Para normas, a data rotulada de publicação no DOU tem precedência. `pubDate` dos RSS de legislação e audiências funciona apenas como sinal de descoberta ou alteração. Em novidades de dados, `Aviso publicado em` define `published_at`, o cabeçalho do bloco é o fallback e `Atualizado em` define `updated_at`.
+
+O ID é `channel` mais um hash da identidade canônica e não contém data. Corrigir `published_at` não altera o ID. O feed já vem ordenado por `published_at ?? first_seen_at`; `last_seen_at`, `updated_at` e `generated_at` não promovem um item na linha do tempo.
+
+## Contrato TypeScript
+
+```typescript
+export type RadarChannelKey =
+  | "noticias"
+  | "novidades_dados"
+  | "normas"
+  | "atos_declaratorios";
+
+export type RadarItemKind =
+  | "noticia"
+  | "novidade_dados"
+  | "norma"
+  | "ato_declaratorio"
+  | "consulta_publica"
+  | "outro";
+
+export type RadarStatus =
+  | "success"
+  | "not_modified"
+  | "partial"
+  | "failed"
+  | "disabled";
+
+export type RadarSourceType = "sitemap" | "rss" | "index" | "mutable_page";
+export type RadarSourceRole = "primary" | "fallback" | "signal" | "catalog";
+export type RadarDatePrecision = "date" | "datetime";
+export type RadarPublishedAtSource =
+  | "json_ld"
+  | "visible_label"
+  | "listing"
+  | "sitemap"
+  | "dou_text"
+  | "block_heading"
+  | "previous_verified";
+
+export interface RadarSource {
+  id: string;
+  channel: RadarChannelKey;
+  title: string;
+  url: string;
+  source_type: RadarSourceType;
+  role: RadarSourceRole;
+  status: RadarStatus;
+  last_checked_at: string;
+  last_success_at: string | null;
+  last_changed_at: string | null;
+  content_hash: string | null;
+  discovered_count: number;
+  error: string | null;
+}
+
+export interface RadarItemV2 {
+  id: string;
+  source_ids: string[];
+  channel: RadarChannelKey;
+  kind: RadarItemKind;
+  title: string;
+  summary: string | null;
+  url: string;
+  published_at: string | null;
+  published_at_precision: RadarDatePrecision | null;
+  published_at_source: RadarPublishedAtSource | null;
+  updated_at: string | null;
+  first_seen_at: string;
+  last_seen_at: string;
+  content_changed_at: string;
+  tags: string[];
+  relevance: "baixa" | "media" | "alta" | "normal" | "desconhecida";
+  signals: string[];
+  content_hash: string;
+}
+
+export interface RadarFeedV2 {
+  schema_version: "2.0";
+  generated_at: string;
+  window: {
+    days: number;
+    started_at: string;
+    ended_at: string;
+  };
+  summary: {
+    total_items: number;
+    channels_scanned: number;
+    channels_failed: number;
+    sources_scanned: number;
+    sources_failed: number;
+    items_new: number;
+    items_changed: number;
+    items_without_published_at: number;
+    checksum_sha256: string;
+  };
+  channels: Array<{
+    key: RadarChannelKey;
+    url: string;
+    status: RadarStatus;
+    last_success_at: string | null;
+    items_count: number;
+    error: string | null;
+  }>;
+  sources: RadarSource[];
+  items: RadarItemV2[];
+}
 ```
 
-O arquivo e publicado no Cloudflare R2 e deve ser servido por custom domain publico com Cache Rule da Cloudflare. O bucket/prefixo deve permitir `GET` e `HEAD` para `http://cvm.companhias.tucano.beakcloud.com`.
+## Coleta
 
-## Arquivos publicados
+- a cada quatro horas: sitemap e listagem de notícias, com detalhes apenas de URLs novas ou sem data;
+- diariamente: todas as fontes e revalidação semântica das notícias dentro da retenção;
+- até três tentativas para timeout, `429` e `5xx`, respeitando `Retry-After`;
+- limite padrão de duas requisições por segundo por host;
+- lock Redis de 30 minutos impede sobreposição entre execução agendada e manual;
+- `ETag` e `Last-Modified` evitam transferências quando confiáveis, mas o hash semântico decide se houve mudança.
 
-| Arquivo | Descricao |
-| --- | --- |
-| `radar-cvm/latest.json` | Feed atual e URL estavel para o frontend. |
-| `radar-cvm/history/YYYY/MM/DD/HHmmss.json` | Snapshot historico imutavel da execucao. |
-| `radar-cvm/latest.json.sha256` | Checksum do `latest.json`. |
-| `radar-cvm/state.json` | Estado operacional do coletor, incluindo `ETag` e `Last-Modified` por canal. |
+Uma queda superior a 50% em uma fonte que possuía pelo menos quatro registros gera `partial` e preserva o snapshot anterior. Falhas temporárias e desaparecimento de links também não removem imediatamente publicações retidas.
 
-## Contrato do feed
+## Publicação
 
-Datas usam ISO 8601 UTC. O schema e fechado: consumidores devem ignorar apenas campos futuros depois de uma nova versao de schema documentada.
+A ordem é:
 
-Campos de topo:
+1. `radar-cvm/v2/history/YYYY/MM/DD/HHmmss.json`;
+2. `radar-cvm/v2/state.json`;
+3. checksums;
+4. projeção `radar-cvm/latest.json`;
+5. ponteiro canônico `radar-cvm/v2/latest.json`.
 
-- `schema_version`: versao do contrato, atualmente `1.0`;
-- `generated_at`: instante UTC de geracao do feed;
-- `window`: janela de retencao usada no feed;
-- `summary`: totais e checksum;
-- `channels`: status de cada canal monitorado;
-- `items`: novidades normalizadas.
+O último passo evita que consumidores vejam um feed v2 antes do estado e do histórico correspondente.
 
-Cada item contem `id`, `channel`, `kind`, `title`, `summary`, `url`, `published_at`, `captured_at`, `tags`, `relevance`, `signals` e `source_hash`.
-
-`published_at` representa a melhor data oficial encontrada pelo coletor:
-
-- `noticias`: extraida da pagina de detalhe, preferindo metadados estruturados `NewsArticle.datePublished` e usando o texto visivel `Publicado em 03/07/2026 17h30` como fallback;
-- `novidades_dados`: extraida do cabecalho/data do bloco da novidade no portal de dados;
-- `normas`: extraida preferencialmente da publicacao no DOU, quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
-
-Noticias preservadas de snapshots anteriores que ainda estejam sem `published_at` sao reprocessadas pela URL de detalhe antes da publicacao do novo `latest.json`.
-O canal `normas` coleta diretamente os subcanais de resolucoes, deliberacoes, pareceres de orientacao e audiencias/consultas publicas, evitando publicar links de navegacao da pagina agregadora como itens.
-
-Quando a data oficial nao puder ser identificada, `published_at` fica `null` e o frontend deve usar `captured_at` apenas como indicador operacional de captura.
-
-## Staleness e falhas parciais
-
-O frontend deve usar:
-
-- `generated_at` para idade global do feed;
-- `channels[].last_success_at` para idade por canal;
-- `channels[].status` para distinguir `success`, `not_modified`, `partial`, `failed` e `disabled`;
-- `channels[].error` para exibir diagnostico simples sem depender de logs;
-- `summary.channels_failed` para alertas de degradacao.
-
-Atualizacao minima diaria e aceitavel. Falha total por mais de 24h deve ser tratada como feed obsoleto.
-
-## Configuracao backend
-
-Variaveis principais:
+## Configuração
 
 ```bash
 RADAR_CVM_ENABLED=false
@@ -77,6 +181,8 @@ RADAR_CVM_PUBLIC_BASE_URL=
 RADAR_CVM_RETENTION_DAYS=90
 RADAR_CVM_MAX_ITEMS=500
 RADAR_CVM_REQUEST_TIMEOUT_SECONDS=30
+RADAR_CVM_REQUESTS_PER_SECOND=2
+RADAR_CVM_LOCK_TTL_SECONDS=1800
 RADAR_CVM_USER_AGENT="Radar-Informativo-Tucano-CVM/1.0"
 RADAR_CVM_CACHE_CONTROL="public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
 
@@ -87,183 +193,36 @@ RADAR_CVM_R2_SECRET_ACCESS_KEY=
 RADAR_CVM_R2_REGION=auto
 ```
 
-`RADAR_CVM_ENABLED=false` e o padrao para evitar execucao acidental em ambientes sem R2. Em desenvolvimento, `RADAR_CVM_STORAGE_BACKEND=local` publica em `STORAGE_DIR/radar/`.
+`RADAR_CVM_ENABLED=false` é o padrão. O backend mantém as credenciais; o frontend recebe somente a URL pública. Em desenvolvimento, `RADAR_CVM_STORAGE_BACKEND=local` grava em `STORAGE_DIR/radar-cvm/`.
 
-## Integração com Sistemas Frontend
+O bucket/CDN deve permitir `GET` e `HEAD` para a origem do frontend e aplicar cache ao `latest.json`.
 
-Para que qualquer sistema frontend possa consumir e exibir os dados do Radar Informativo Tucano CVM como fonte, devem ser observadas as seguintes especificações de contrato, tipos de dados e diretrizes de integração.
+## Operação no Kubernetes
 
-### 1. URLs e Acesso aos Recursos
+Confirmar o schedule carregado:
 
-Os arquivos de feed são estáticos e estão hospedados em ambiente público (geralmente Cloudflare R2 servido sob CDN). O frontend deve buscar os dados diretamente das seguintes URLs:
-
-*   **Feed Completo (Mais Recente):** `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`
-*   **Checksum SHA-256 (Verificação Rápida):** `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json.sha256`
-*   **Snapshots Históricos (opcional):** `{RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/history/YYYY/MM/DD/HHmmss.json`
-
-> [!NOTE]
-> *   **CORS:** O bucket e a CDN estão configurados para permitir requisições do tipo `GET` e `HEAD` vindas da origem do frontend (ex: `http://cvm.companhias.tucano.beakcloud.com`).
-> *   **Autenticação:** Não é necessária chave de API ou assinatura de URL para leitura. O acesso é totalmente público.
-> *   **Headers de Cache:** O servidor responde com cabeçalhos de cache apropriados (ex: `Cache-Control: public, max-age=300, s-maxage=3600, stale-while-revalidate=86400`).
-
-### 2. Definições de Tipos (TypeScript)
-
-Para garantir a tipagem estrita no frontend, utilize as seguintes interfaces baseadas no contrato oficial do feed (`v1.0`):
-
-```typescript
-export type RadarChannelKey = "noticias" | "novidades_dados" | "normas" | "atos_declaratorios";
-
-export type RadarItemKind = 
-  | "noticia" 
-  | "novidade_dados" 
-  | "norma" 
-  | "ato_declaratorio" 
-  | "consulta_publica" 
-  | "outro";
-
-export type RadarRelevance = "baixa" | "media" | "alta" | "normal" | "desconhecida";
-
-export type RadarChannelStatus = "success" | "not_modified" | "partial" | "failed" | "disabled";
-
-export interface RadarWindow {
-  days: number;       // Janela de retenção configurada (ex: 90 dias)
-  started_at: string; // Instante UTC de início da janela (ISO 8601)
-  ended_at: string;   // Instante UTC de fim da janela (ISO 8601)
-}
-
-export interface RadarSummary {
-  total_items: number;
-  channels_scanned: number;
-  channels_failed: number;
-  checksum_sha256: string;
-}
-
-export interface RadarChannel {
-  key: RadarChannelKey;
-  url: string;
-  status: RadarChannelStatus;
-  last_success_at: string | null; // Instante UTC da última coleta bem-sucedida (ISO 8601)
-  items_count: number;
-  error: string | null;           // Mensagem de erro amigável em caso de falha no canal
-}
-
-export interface RadarItem {
-  id: string;               // Identificador único determinístico (ex: "noticias:2026-07-08:slug-do-titulo")
-  channel: RadarChannelKey; // Canal de origem do item
-  kind: RadarItemKind;      // Tipo/categoria de publicação
-  title: string;            // Título original da publicação
-  summary: string | null;   // Resumo simplificado da novidade (limite recomendado de 1.000 caracteres)
-  url: string;              // Link canônico no portal da CVM
-  published_at: string | null; // Data de publicação oficial pela CVM (ISO 8601, UTC)
-  captured_at: string;      // Instante de captura pelo coletor (ISO 8601, UTC)
-  tags: string[];           // Tags normalizadas em snake_case ASCII (ex: ["layout", "dados_abertos"])
-  relevance: RadarRelevance;
-  signals: string[];        // Sinais identificados que definiram a classificação (ex: ["layout_mudanca"])
-  source_hash: string;      // Hash SHA-256 do conteúdo bruto para detecção de alteração
-}
-
-export interface RadarFeed {
-  schema_version: "1.0";
-  generated_at: string;     // Instante UTC de geração do arquivo (ISO 8601)
-  window: RadarWindow;
-  summary: RadarSummary;
-  channels: RadarChannel[];
-  items: RadarItem[];
-}
+```bash
+kubectl exec deploy/tucano-cvm-beat -- \
+  celery -A app.worker.celery_app:celery_app inspect conf
 ```
 
-### 3. Exemplo de Payload JSON Completo
+Disparar uma execução completa na fila configurada:
 
-Abaixo está um exemplo representativo de um feed completo retornado por `/radar-cvm/latest.json`:
-
-```json
-{
-  "schema_version": "1.0",
-  "generated_at": "2026-07-08T13:00:00Z",
-  "window": {
-    "days": 90,
-    "started_at": "2026-04-09T00:00:00Z",
-    "ended_at": "2026-07-08T13:00:00Z"
-  },
-  "summary": {
-    "total_items": 2,
-    "channels_scanned": 3,
-    "channels_failed": 1,
-    "checksum_sha256": "8f9b9f71c4c1a2e3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7"
-  },
-  "channels": [
-    {
-      "key": "noticias",
-      "url": "https://www.gov.br/cvm/pt-br/assuntos/noticias",
-      "status": "success",
-      "last_success_at": "2026-07-08T13:00:00Z",
-      "items_count": 1,
-      "error": null
-    },
-    {
-      "key": "novidades_dados",
-      "url": "https://dados.cvm.gov.br/pages/novidades",
-      "status": "success",
-      "last_success_at": "2026-07-08T12:30:00Z",
-      "items_count": 1,
-      "error": null
-    },
-    {
-      "key": "normas",
-      "url": "https://www.gov.br/cvm/pt-br/assuntos/normas",
-      "status": "failed",
-      "last_success_at": "2026-07-07T06:00:00Z",
-      "items_count": 0,
-      "error": "Timeout de requisição após 30 segundos"
-    }
-  ],
-  "items": [
-    {
-      "id": "noticias:2026-07-08:presidente-da-cvm-reuniao-abrasca",
-      "channel": "noticias",
-      "kind": "noticia",
-      "title": "Presidente da CVM participa de reunião com representantes da ABRASCA",
-      "summary": "Encontro teve como pauta o desenvolvimento do mercado de capitais no Brasil.",
-      "url": "https://www.gov.br/cvm/pt-br/assuntos/noticias/presidente-da-cvm-participa-de-reuniao-com-representantes-da-abrasca",
-      "published_at": "2026-07-08T11:45:00Z",
-      "captured_at": "2026-07-08T13:00:00Z",
-      "tags": ["mercado_capitais"],
-      "relevance": "media",
-      "signals": ["noticia_institucional"],
-      "source_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-    },
-    {
-      "id": "novidades_dados:2026-07-08:novo-layout-dfp-2026",
-      "channel": "novidades_dados",
-      "kind": "novidade_dados",
-      "title": "Atualização de layout do conjunto de dados DFP",
-      "summary": "Inclusão de novos campos de classificação de contas a partir do exercício financeiro de 2026.",
-      "url": "https://dados.cvm.gov.br/pages/novidades#dfp-2026",
-      "published_at": "2026-07-08T08:00:00Z",
-      "captured_at": "2026-07-08T12:30:00Z",
-      "tags": ["layout", "dados_abertos"],
-      "relevance": "alta",
-      "signals": ["layout_mudanca", "dados_abertos_atualizacao"],
-      "source_hash": "7f83b1657ff1fc53b92dc18148a1d65dfcbd6dfa590a318371cc50040293a855"
-    }
-  ]
-}
+```bash
+kubectl exec deploy/tucano-cvm-worker -- \
+  celery -A app.worker.celery_app:celery_app call \
+  app.radar.tasks.run_radar_collection_task \
+  --args='[["noticias","novidades_dados","normas"],"full"]' \
+  --queue=celery
 ```
 
-### 4. Boas Práticas e Diretrizes de Implementação UI/UX
+Uma segunda execução concorrente retorna `status=skipped` e `reason=collection_already_running`.
 
-Ao renderizar o Radar Informativo, o frontend deve implementar os seguintes comportamentos para uma melhor experiência e tolerância a falhas:
+## Consumo no frontend
 
-1.  **Monitoramento de Staleness (Feed Desatualizado):**
-    *   Compare o campo `generated_at` com o horário atual do dispositivo do usuário.
-    *   Se a diferença for **superior a 24 horas**, exiba um banner ou indicador de aviso (ex: "Radar desatualizado: dados coletados em [data/hora]").
-2.  **Tratamento de Falhas de Canais:**
-    *   Verifique se `summary.channels_failed > 0`.
-    *   Caso haja canais falhos, verifique na lista `channels` quais possuem `status: "failed"` e exiba um alerta visual ou tooltip (utilizando a mensagem de erro contida em `error`) informando que o canal específico (ex: "Normas CVM") pode estar temporariamente sem novos itens.
-3.  **Ordenação dos Itens:**
-    *   Ordene a exibição dos itens na tela por data decrescente.
-    *   Use preferencialmente `published_at` (quando disponível). Se `published_at` for nulo, utilize `captured_at` como fallback de ordenação.
-4.  **Destaque de Relevância:**
-    *   Itens com `relevance: "alta"` devem ter destaque visual destacado (ex: borda colorida, ícone de alerta vermelho/laranja) para chamar a atenção imediata do operador.
-5.  **Filtros Rápidos:**
-    *   Disponibilize filtros interativos para permitir ao usuário filtrar a lista por **Canal** (`channel`), **Tipo** (`kind`) e por **Tags** de classificação (como `layout`, `normativa`, `dados_abertos`, etc.).
+- tratar `generated_at` superior a 24 horas como feed obsoleto;
+- mostrar degradação usando `channels[].status`, `sources[].status` e os campos `error`;
+- criar a seção “Fontes da CVM” a partir de `sources[]`;
+- usar a ordem recebida ou ordenar por `published_at ?? first_seen_at`;
+- nunca usar `last_seen_at` como data editorial;
+- usar `updated_at` apenas como indicação de atualização do conteúdo.

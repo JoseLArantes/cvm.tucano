@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+  <url>
+    <loc>https://www.gov.br/cvm/pt-br/assuntos/noticias/2026/confira-comunicado-do-gafi-fatf-sobre-paises-com-potencial-risco-ao-sistema-financeiro-1</loc>
+    <news:news>
+      <news:publication>
+        <news:name>Comissão de Valores Mobiliários</news:name>
+        <news:language>pt</news:language>
+      </news:publication>
+      <news:publication_date>2026-06-26T09:18:00-03:00</news:publication_date>
+      <news:title>Confira comunicado do GAFI/FATF sobre países com potencial risco ao sistema financeiro</news:title>
+    </news:news>
+  </url>
+  <url>
+    <loc>https://www.gov.br/cvm/pt-br/assuntos/noticias/2026</loc>
+    <news:news>
+      <news:publication_date>2026-07-23</news:publication_date>
+      <news:title>Arquivo de notícias de 2026</news:title>
+    </news:news>
+  </url>
+</urlset>

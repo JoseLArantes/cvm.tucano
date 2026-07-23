@@ -16,7 +16,13 @@ def utc_now() -> datetime:
 def canonical_url(base_url: str, url: str) -> str:
     resolved = urljoin(base_url, url.strip())
     parts = urlsplit(resolved)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path.rstrip("/") or "/", "", ""))
+    scheme = parts.scheme
+    netloc = parts.netloc.lower()
+    path = parts.path
+    if netloc in {"www.cvm.gov.br", "cvm.gov.br"}:
+        scheme = "https"
+        netloc = "conteudo.cvm.gov.br"
+    return urlunsplit((scheme, netloc, path.rstrip("/") or "/", "", ""))
 
 
 def slugify(value: str) -> str:
@@ -33,6 +39,11 @@ def normalize_space(value: str) -> str:
 def source_hash(*parts: str) -> str:
     raw = "\n".join(parts).encode("utf-8")
     return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def stable_id(channel: str, identity_key: str) -> str:
+    digest = hashlib.sha256(identity_key.encode("utf-8")).hexdigest()[:24]
+    return f"{channel}:{digest}"
 
 
 def sha256_bytes(content: bytes) -> str:
