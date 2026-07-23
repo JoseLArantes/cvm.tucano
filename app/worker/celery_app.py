@@ -3,7 +3,7 @@ from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from kombu import Queue
+from kombu import Exchange, Queue
 
 from app.core.config import get_settings
 
@@ -29,7 +29,14 @@ queue_names = (
     settings.analise_materializacao_queue_name,
     settings.radar_cvm_queue_name,
 )
-celery_app.conf.task_queues = tuple(Queue(queue_name) for queue_name in dict.fromkeys(queue_names))
+celery_app.conf.task_queues = tuple(
+    Queue(
+        queue_name,
+        Exchange(queue_name, type="direct"),
+        routing_key=queue_name,
+    )
+    for queue_name in dict.fromkeys(queue_names)
+)
 celery_app.conf.task_routes = {
     "app.worker.tasks.sincronizar_cadastro_companhias_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_member_task": {"queue": settings.ingestion_queue_name},

@@ -582,6 +582,15 @@ def test_radar_beat_schedule_condicional(monkeypatch: pytest.MonkeyPatch) -> Non
     assert celery_app.conf.task_routes["app.radar.tasks.run_radar_collection_task"]["queue"] == settings.radar_cvm_queue_name
 
 
+def test_celery_queues_possuem_exchange_e_routing_key_proprios() -> None:
+    queues = {queue.name: queue for queue in celery_app.conf.task_queues}
+
+    for queue_name, queue in queues.items():
+        assert queue.exchange.name == queue_name
+        assert queue.exchange.type == "direct"
+        assert queue.routing_key == queue_name
+
+
 def test_radar_task_nao_executa_sem_lock_redis(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("app.radar.tasks.cache.acquire_lock", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
