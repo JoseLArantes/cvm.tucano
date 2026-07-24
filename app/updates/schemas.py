@@ -1,9 +1,9 @@
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas.comum import BrazilianDateTime
+from app.schemas.comum import BrazilianDateTime, Paginacao
 
 
 class PendingUpdateMemberSchema(BaseModel):
@@ -95,9 +95,23 @@ class PendingUpdateSchema(BaseModel):
         examples=[2025]
     )
     status: str = Field(
-        description="Estado atual do ciclo de vida da atualização pendente.",
+        description=(
+            "Estado atual: `triggered` indica despacho aceito ainda aguardando ou executando; "
+            "`ingested` confirma ingestão canônica concluída com sucesso; `ingestion_failed` "
+            "indica falha terminal."
+        ),
         examples=["ready_for_ingestion"],
-        pattern="^(change_detected|analysis_queued|analyzing|analysis_failed|ready_for_ingestion|triggered|discarded|stale)$"
+        pattern="^(change_detected|analysis_queued|analyzing|analysis_failed|ready_for_ingestion|ingestion_queued|ingesting|ingestion_failed|ingested|content_unchanged|reference_updated|triggered|discarded|stale)$"
+    )
+    content_changed: bool | None = Field(
+        default=None,
+        description=(
+            "Resultado da comparação dos members. `false` significa equivalência comprovada por SHA-256; "
+            "nulo significa que a análise ainda não produziu conclusão."
+        ),
+    )
+    recommended_action: Literal["analyze", "wait", "ingest", "update_reference", "none"] = Field(
+        description="Próxima ação compatível com o estado e com o resultado da análise de conteúdo."
     )
     detection_timestamp: BrazilianDateTime = Field(
         description="Instante em que o scanner detectou a alteracao, serializado em `DD/MM/AAAA HH:MM:SS`.",
@@ -113,7 +127,10 @@ class PendingUpdateSchema(BaseModel):
     )
     resolved_timestamp: BrazilianDateTime | None = Field(
         default=None,
-        description="Instante em que a atualizacao foi aprovada, disparada ou descartada, serializado em `DD/MM/AAAA HH:MM:SS`."
+        description=(
+            "Instante da resolução terminal da atualização (ingestão concluída, falha, referência reconhecida "
+            "ou descarte), serializado em `DD/MM/AAAA HH:MM:SS`. O simples despacho não preenche este campo."
+        )
     )
     resolved_by: str | None = Field(
         default=None,
@@ -141,19 +158,24 @@ class PendingUpdateSchema(BaseModel):
     )
     change_type: str | None = Field(
         default=None,
-        description="Tipo de alteração detectada inicialmente (ex: 'artifact_changed').",
-        examples=["artifact_changed"]
+        description=(
+            "Classificação da mudança após análise: `artifact_content_changed` quando há members diferentes ou "
+            "`artifact_metadata_changed` quando o conteúdo permanece equivalente."
+        ),
+        examples=["artifact_metadata_changed"]
     )
     change_summary: dict[str, Any] | None = Field(
         default=None,
         description="Sumário estruturado do resultado da análise detalhada de membros.",
         examples=[{
             "artifact_changed": True,
+            "content_changed": True,
             "members_added": [],
             "members_removed": [],
             "members_modified": ["dfp_cia_aberta_DRE_con_2025.csv"],
             "required_missing": [],
-            "total_changes": 1
+            "total_changes": 1,
+            "recommended_action": "ingest"
         }]
     )
     last_successful_run_id: uuid.UUID | None = Field(
@@ -161,6 +183,22 @@ class PendingUpdateSchema(BaseModel):
         description="UUID da IngestionRun gerada com sucesso a partir desta atualização.",
         examples=[uuid.uuid4()]
     )
+    current_execution_id: uuid.UUID | None = Field(
+        default=None,
+        description="Execução administrativa ativa ou ainda pendente de correlação; é limpa na resolução terminal.",
+    )
+    current_run_id: uuid.UUID | None = Field(
+        default=None,
+        description="Run técnica ativa ou ainda pendente de correlação; é limpa na resolução terminal.",
+    )
+    last_failed_run_id: uuid.UUID | None = Field(default=None, description="Ultima run que falhou para esta atualizacao.")
+    ingestion_task_id: str | None = Field(
+        default=None,
+        description="Task Celery transitória da ingestão enquanto houver trabalho aguardando ou ativo.",
+    )
+    ingestion_result: dict[str, Any] | None = Field(default=None, description="Resultado persistido da ultima ingestao; `triggered` nunca e evidencia de conclusao.")
+    retryable: bool = Field(default=False, description="Indica se a falha de ingestao pode ser reenfileirada.")
+    next_action: str = Field(default="none", description="Transicao de negocio recomendada, como `retry_ingestion` ou `update_reference`.")
     created_at: BrazilianDateTime = Field(
         description="Data e hora de criacao do registro, em `DD/MM/AAAA HH:MM:SS`."
     )
@@ -239,6 +277,93 @@ class UpdateSummarySchema(BaseModel):
         description="Quantidade de atualizações prontas para ingestão imediata.",
         examples=[3]
     )
+    reference_update_count: int = Field(
+        default=0,
+        description="Quantidade de artefatos sem mudança de conteúdo aguardando atualização de referência.",
+    )
+
+
+class AcknowledgedArtifactReferenceSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    resource_url: str
+    remote_etag: str | None = None
+    remote_last_modified: str | None = None
+    remote_content_length: int | None = None
+    artifact_content_sha256: str | None = None
+    member_fingerprint: str
+    confirmation_method: Literal["member_sha256"]
+    confirmed_by: str | None = None
+    confirmed_at: BrazilianDateTime
+
+
+class AcknowledgeArtifactReferenceResponseSchema(BaseModel):
+    status: Literal["reference_updated"]
+    pending_update_id: uuid.UUID
+    ingestion_triggered: Literal[False] = False
+    acknowledged_references: list[AcknowledgedArtifactReferenceSchema]
+
+
+class UpdateScanMemberSummarySchema(BaseModel):
+    analyzed: bool = Field(description="Indica se o scanner analisou os members internos do artefato.")
+    stop_reason: str | None = Field(
+        default=None,
+        description=(
+            "Motivo pelo qual a checagem parou antes da análise de members: `artifact_unchanged`, "
+            "`probe_inconclusive`, `probe_error`, `no_scan_scope` ou `auto_analysis_disabled`."
+        ),
+    )
+    total_members: int | None = Field(default=None, ge=0)
+    changed_members: list[str] = Field(default_factory=list)
+    unchanged_members: list[str] = Field(default_factory=list)
+    changed_count: int = Field(default=0, ge=0)
+    unchanged_count: int = Field(default=0, ge=0)
+    members: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Detalhes compactos de cada member comparado quando a análise profunda foi executada.",
+    )
+
+
+class UpdateScanItemSchema(BaseModel):
+    fonte: str = Field(description="Fonte CVM checada, como `cadastro`, `dfp`, `itr` ou `fre`.")
+    ano: int | None = Field(default=None, description="Ano do artefato anual; nulo para `cadastro`.")
+    artifact_url: str | None = Field(default=None, description="URL remota efetivamente sondada.")
+    artifact_decision: Literal["changed", "unchanged", "unknown", "error", "skipped"]
+    decision_reason: str = Field(description="Código ou descrição estável que explica a decisão do artefato.")
+    probe_details: dict[str, Any] | None = Field(
+        default=None,
+        description="Metadados compactos das sondas usadas para tomar a decisão, sem conteúdo do arquivo.",
+    )
+    pending_update_id: str | None = None
+    pending_status: str | None = None
+    existing_pending_action: str | None = None
+    member_scan: UpdateScanMemberSummarySchema
+
+
+class UpdateScanSummarySchema(BaseModel):
+    status: str = Field(default="queued", description="Resultado agregado da execução.")
+    trigger: Literal["scheduled", "manual"] = Field(
+        default="manual",
+        description="Origem da execução: agendamento diário ou solicitação manual.",
+    )
+    coverage_status: Literal["complete", "degraded"] | None = Field(
+        default=None,
+        description="`complete` quando todos os escopos foram checados conclusivamente; caso contrário, `degraded`.",
+    )
+    source_count: int = Field(default=0, ge=0)
+    sources_scanned: list[str] = Field(default_factory=list)
+    sources_without_scope: list[str] = Field(default_factory=list)
+    expected_scopes: int = Field(default=0, ge=0)
+    scanned_scopes: int = Field(default=0, ge=0)
+    detected_count: int = Field(default=0, ge=0)
+    unchanged_count: int = Field(default=0, ge=0)
+    changed_count: int = Field(default=0, ge=0)
+    inconclusive_count: int = Field(default=0, ge=0)
+    error_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
+    detected_ids: list[str] = Field(default_factory=list)
+    items: list[UpdateScanItemSchema] = Field(default_factory=list)
 
 
 class UpdateScanRunSchema(BaseModel):
@@ -262,7 +387,7 @@ class UpdateScanRunSchema(BaseModel):
         default=None,
         description="Data e hora em que a execucao terminou e consolidou o resumo final, em `DD/MM/AAAA HH:MM:SS`."
     )
-    summary: dict[str, Any] | None = Field(
+    summary: UpdateScanSummarySchema | None = Field(
         default=None,
         description=(
             "Resumo operacional completo da varredura. "
@@ -317,6 +442,11 @@ class UpdateScanRunSchema(BaseModel):
     )
 
 
+class UpdateScanRunsListSchema(BaseModel):
+    dados: list[UpdateScanRunSchema]
+    paginacao: Paginacao
+
+
 class UpdateScanRunQueuedSchema(BaseModel):
     status: str = Field(
         description="Confirmação de que a execução do scanner foi enfileirada.",
@@ -335,15 +465,29 @@ class UpdateScanRunQueuedSchema(BaseModel):
 
 class UpdateScannerStatusSchema(BaseModel):
     status: str = Field(
-        description="Estado exposto pelo subsistema de scanner. Atualmente o endpoint reporta `idle` e complementa com a última execução persistida.",
+        description="Estado operacional imediato do scanner: `idle` ou `running`.",
         examples=["idle"],
     )
-    last_run: str | None = Field(
+    health_status: Literal["healthy", "degraded", "stale", "running", "never_run", "disabled"] = Field(
+        description=(
+            "Saúde da vigilância diária. `degraded` indica escopos inconclusivos, com erro ou sem baseline; "
+            "`stale` indica ausência de conclusão dentro da janela esperada."
+        )
+    )
+    scanner_enabled: bool = Field(description="Indica se `UPDATES_SERVICE_ENABLED` está ativo nesta instância.")
+    schedule_enabled: bool = Field(
+        description="Indica se o scanner diário está registrado no Celery Beat nesta instância."
+    )
+    schedule_status: Literal["healthy", "degraded", "stale", "running", "never_run", "disabled"] = Field(
+        description=(
+            "Saúde específica do agendamento diário. Execuções manuais não alteram este campo nem mascaram um Beat obsoleto."
+        )
+    )
+    last_run: BrazilianDateTime | None = Field(
         default=None,
         description=(
-            "Ultima data e hora em que alguma sonda remota atualizou `pending_updates.last_probe_timestamp`, "
-            "serializada em `DD/MM/AAAA HH:MM:SS`. Este campo e util para saber quando houve atividade de deteccao, "
-            "mas nao substitui o resumo persistido de `scan_run`."
+            "Data e hora de referência da execução persistida mais recente, serializada em `DD/MM/AAAA HH:MM:SS`. "
+            "Existe mesmo quando nenhuma atualização foi detectada."
         ),
     )
     last_scan_run_id: str | None = Field(
@@ -358,16 +502,48 @@ class UpdateScannerStatusSchema(BaseModel):
         description="Status da execução persistida mais recente (`queued`, `running`, `completed`, `failed`).",
         examples=["completed"],
     )
-    last_scan_finished_at: str | None = Field(
+    last_scan_finished_at: BrazilianDateTime | None = Field(
         default=None,
         description="Data e hora de termino da execucao persistida mais recente, em `DD/MM/AAAA HH:MM:SS`, quando disponivel.",
     )
+    last_scan_started_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Início da execução mais recente, manual ou agendada.",
+    )
+    last_scheduled_scan_run_id: str | None = Field(
+        default=None,
+        description="UUID da execução mais recente cujo `trigger` é `scheduled`.",
+    )
+    last_scheduled_scan_status: str | None = Field(
+        default=None,
+        description="Estado da execução agendada mais recente.",
+    )
+    last_scheduled_scan_started_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Início da última execução agendada, em `DD/MM/AAAA HH:MM:SS`.",
+    )
+    last_scheduled_scan_finished_at: BrazilianDateTime | None = Field(
+        default=None,
+        description="Conclusão da última execução agendada, em `DD/MM/AAAA HH:MM:SS`.",
+    )
+    expected_interval_hours: int = Field(description="Periodicidade esperada entre varreduras automáticas.")
+    stale_after_hours: int = Field(description="Janela após a qual a última execução é classificada como obsoleta.")
+    trigger: Literal["scheduled", "manual"] | None = None
+    coverage_status: Literal["complete", "degraded"] | None = None
+    expected_scopes: int = Field(default=0, description="Escopos fonte/ano esperados na execução mais recente.")
+    scanned_scopes: int = Field(default=0, description="Escopos fonte/ano efetivamente checados na execução mais recente.")
+    changed_count: int = 0
+    unchanged_count: int = 0
+    inconclusive_count: int = 0
+    error_count: int = 0
+    skipped_count: int = 0
+    sources_without_scope: list[str] = Field(default_factory=list)
 
 
 class TriggerResponseSchema(BaseModel):
     status: str = Field(
         description="Confirmação de disparo com sucesso.",
-        examples=["triggered"]
+        examples=["ingestion_queued"]
     )
     task_id: str | None = Field(
         default=None,

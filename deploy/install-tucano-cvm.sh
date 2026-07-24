@@ -4,7 +4,6 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CHART_DIR="${ROOT_DIR}/deploy/helm/tucano-cvm"
-SECRET_FILE="${ROOT_DIR}/secrets.yaml"
 
 NAMESPACE="${NAMESPACE:-tucano-services}"
 RELEASE_NAME="${RELEASE_NAME:-tucano-cvm}"
@@ -15,13 +14,15 @@ WAIT_TIMEOUT="${WAIT_TIMEOUT:-10m}"
 HELM_WAIT="${HELM_WAIT:-false}"
 IMAGE_REPOSITORY="${IMAGE_REPOSITORY:-registry.beakcloud.com/tucano-cvm}"
 IMAGE_TAG="${IMAGE_TAG:-latest}"
-INGRESS_ENABLED="${INGRESS_ENABLED:-false}"
-INGRESS_CLASS_NAME="${INGRESS_CLASS_NAME:-}"
-INGRESS_HOST="${INGRESS_HOST:-cvm.tucano.beakcloud.com}"
+HTTPPROXY_ENABLED="${HTTPPROXY_ENABLED:-true}"
+HTTPPROXY_FQDN="${HTTPPROXY_FQDN:-cvm.tucano.beakcloud.com}"
+HTTPPROXY_TLS_ENABLED="${HTTPPROXY_TLS_ENABLED:-true}"
+HTTPPROXY_TLS_SECRET_NAME="${HTTPPROXY_TLS_SECRET_NAME:-tucano-cvm-tls}"
+CERT_MANAGER_ENABLED="${CERT_MANAGER_ENABLED:-false}"
 ENABLE_METRICS="${ENABLE_METRICS:-false}"
-SERVICE_TYPE="${SERVICE_TYPE:-NodePort}"
+SERVICE_TYPE="${SERVICE_TYPE:-ClusterIP}"
 SERVICE_PORT="${SERVICE_PORT:-8110}"
-NODE_PORT="${NODE_PORT:-30110}"
+NODE_PORT="${NODE_PORT:-}"
 
 if ! command -v kubectl >/dev/null 2>&1; then
   echo "kubectl is required" >&2
@@ -33,26 +34,10 @@ if ! command -v helm >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ ! -f "${SECRET_FILE}" ]]; then
-  echo "Missing secret manifest: ${SECRET_FILE}" >&2
-  exit 1
-fi
-
 if [[ ! -d "${CHART_DIR}" ]]; then
   echo "Missing Helm chart: ${CHART_DIR}" >&2
   exit 1
 fi
-
-require_secret_key() {
-  local key="$1"
-  if ! grep -Eq "^[[:space:]]+${key}:" "${SECRET_FILE}"; then
-    echo "Required key ${key} not found in ${SECRET_FILE}" >&2
-    exit 1
-  fi
-}
-
-require_secret_key "DATABASE_URL"
-require_secret_key "TUCANO_CVM_TOKEN"
 
 echo "==> Ensuring namespace ${NAMESPACE}"
 kubectl get namespace "${NAMESPACE}" >/dev/null 2>&1 || kubectl create namespace "${NAMESPACE}"
@@ -71,11 +56,21 @@ if ! kubectl get crd rollouts.argoproj.io >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "==> Applying application secret to namespace ${NAMESPACE}"
-sed -E "s/^([[:space:]]*namespace:).*/\\1 ${NAMESPACE}/" "${SECRET_FILE}" | kubectl apply -f -
-
 if ! kubectl -n "${NAMESPACE}" get secret "${APP_SECRET_NAME}" >/dev/null 2>&1; then
-  echo "Secret ${APP_SECRET_NAME} was not found in namespace ${NAMESPACE} after apply" >&2
+  echo "Required Kubernetes Secret ${APP_SECRET_NAME} was not found in namespace ${NAMESPACE}." >&2
+  echo "Please create it before running this install script." >&2
+  exit 1
+fi
+
+if ! kubectl -n "${NAMESPACE}" get secret "${APP_SECRET_NAME}" -o jsonpath='{.data.MCP_TOKEN}' | grep -q .; then
+  cat >&2 <<EOF
+Required key MCP_TOKEN was not found in Kubernetes Secret ${APP_SECRET_NAME}.
+Create or patch it before deploying the public MCP endpoint, for example:
+
+kubectl -n ${NAMESPACE} patch secret ${APP_SECRET_NAME} \\
+  --type='merge' \\
+  -p '{"stringData":{"MCP_TOKEN":"<long-random-token>"}}'
+EOF
   exit 1
 fi
 
@@ -105,13 +100,15 @@ HELM_ARGS=(
   --set "env.ENABLE_PROMETHEUS_METRICS=${ENABLE_METRICS}"
   --set "service.type=${SERVICE_TYPE}"
   --set "service.port=${SERVICE_PORT}"
-  --set "service.nodePort=${NODE_PORT}"
-  --set "ingress.enabled=${INGRESS_ENABLED}"
-  --set "ingress.hosts[0].host=${INGRESS_HOST}"
+  --set "httpProxy.enabled=${HTTPPROXY_ENABLED}"
+  --set "httpProxy.fqdn=${HTTPPROXY_FQDN}"
+  --set "httpProxy.tls.enabled=${HTTPPROXY_TLS_ENABLED}"
+  --set "httpProxy.tls.secretName=${HTTPPROXY_TLS_SECRET_NAME}"
+  --set "certManager.enabled=${CERT_MANAGER_ENABLED}"
 )
 
-if [[ -n "${INGRESS_CLASS_NAME}" ]]; then
-  HELM_ARGS+=(--set "ingress.className=${INGRESS_CLASS_NAME}")
+if [[ -n "${NODE_PORT}" && "${SERVICE_TYPE}" == "NodePort" ]]; then
+  HELM_ARGS+=(--set "service.nodePort=${NODE_PORT}")
 fi
 
 if [[ "${HELM_WAIT}" == "true" ]]; then
@@ -149,5 +146,7 @@ Useful commands:
   helm -n ${NAMESPACE} status ${RELEASE_NAME}
 
 Expected service exposure:
-  ${SERVICE_PORT}:${NODE_PORT}
+  Service Type:   ${SERVICE_TYPE}
+  HTTPProxy FQDN: ${HTTPPROXY_FQDN} (TLS: ${HTTPPROXY_TLS_ENABLED})
+  MCP Endpoint:   https://${HTTPPROXY_FQDN}/mcp
 EOF

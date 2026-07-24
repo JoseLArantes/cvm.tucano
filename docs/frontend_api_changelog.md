@@ -9,6 +9,572 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-07-23 - Feed v2 do Radar com datas e identidades estáveis
+
+### Superfícies afetadas
+
+- novo feed canônico `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/v2/latest.json`;
+- projeção compatível `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`.
+
+### Comportamento entregue
+
+- `sources[]` expõe sitemaps, RSS e páginas índice como fontes monitoradas; essas URLs não aparecem em `items[]`;
+- `items[]` substitui `captured_at` por `first_seen_at` e `last_seen_at`, e `source_hash` por `content_hash`;
+- itens passam a expor `source_ids`, `updated_at`, `content_changed_at`, `published_at_precision` e `published_at_source`;
+- IDs não incluem data e permanecem estáveis após correções de `published_at`;
+- a ordenação usa somente `published_at ?? first_seen_at`; novas observações e atualizações não promovem conteúdo antigo;
+- notícias sem data oficial confirmada ficam fora do feed v2 até que a página de detalhe, listagem ou sitemap forneça a data;
+- falhas e quedas anormais de índices preservam publicações já conhecidas;
+- `summary` adiciona contagens de fontes, itens novos, itens alterados e itens sem data.
+
+### Migração do frontend
+
+- novas integrações devem usar o feed v2;
+- a seção “Fontes da CVM” deve ser construída com `sources[]`;
+- a linha do tempo deve usar `published_at ?? first_seen_at` e nunca `last_seen_at` ou `generated_at`;
+- `radar-cvm/latest.json` continua disponível no contrato v1 durante a migração.
+
+## 2026-07-23 - Operação genérica de materializações analíticas
+
+### Superfícies afetadas
+
+- `GET /analise/materializacoes` e `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+- `POST /analise/materializacoes/{execucao_id}/reconcile`
+- previews de campanhas em monitoramento
+
+### Comportamento entregue
+
+- execuções expõem `operational_state`, `reason_code`, `liveness`, `completion`, `recovery`, `allowed_actions` e `has_action_required`;
+- `completion_pending` identifica progresso técnico integral sem task, chunk ou lease ativo e sem finalização persistida;
+- o novo endpoint reconcilia uma execução para `success` ou `failed` somente mediante evidências suficientes, registra auditoria persistida e é idempotente;
+- `409` informa `reason_code`, evidências e ações autorizadas; indisponibilidade da inspeção Celery retorna `503`, `retryable=true` e `Retry-After`;
+- o monitoramento agrega `operational_counts` e previews de execuções pendentes de conclusão ou paradas sem recuperação;
+- a listagem aceita `operational_state`, `materialization_mode`, `has_action_required`, período e ordenação estável, com contagens por status persistido e estado operacional;
+- campanhas históricas `success`, `failed` ou `partial` não são classificadas como ativas;
+- um sweep periódico promove automaticamente apenas `completion_pending` comprovado, sem apagar revisões, artefatos, chunks ou logs.
+
+### Orientação para consumidores
+
+- autorize operações exclusivamente por `allowed_actions`;
+- não derive ação a partir de `status=running` ou de um booleano `stalled`;
+- use `reason_code` e `recovery.eligible` em consoles, CLIs, automações e integrações externas.
+
+## 2026-07-23 - Resolução terminal do ciclo de vida de Updates
+
+### Superfícies afetadas
+
+- `GET /updates/pending` e `GET /updates/pending/{id}`
+- `POST /updates/pending/{id}/trigger`
+- `POST /updates/pending/{id}/retry-ingestion`
+
+### Comportamento entregue
+
+- o item persistido passa a `status=triggered` quando o Celery aceita o despacho; esse estado significa apenas espera ou execução ativa;
+- uma run em andamento mantém `triggered` e preenche `current_run_id` e `current_execution_id` assim que a correlação existe;
+- sucesso terminal em fase `complete` promove o item para `ingested`, preenche `resolved_timestamp`, preserva `last_successful_run_id` e limpa IDs de run, execução e tarefa transitórios;
+- falha terminal promove para `ingestion_failed`, preserva `last_failed_run_id` e deriva `retryable` e `next_action` da fase terminal;
+- `retry-ingestion` aceita somente falhas com `retryable=true`;
+- a leitura aplica reconciliação idempotente ao legado `triggered` sem IDs atuais quando `last_successful_run_id` comprova uma run terminal bem-sucedida; casos ambíguos não são alterados;
+- a resposta do `POST .../trigger` continua usando `status=ingestion_queued` exclusivamente como confirmação do aceite assíncrono.
+
+### Orientação para clientes
+
+- use o `status` do item de `GET /updates/pending` como estado do ciclo de vida;
+- trate `current_run_id` e `current_execution_id` como correlações exclusivamente transitórias;
+- use `last_successful_run_id` ou `last_failed_run_id` para a resolução histórica e `next_action` para decidir entre nova tentativa e inspeção.
+
+## 2026-07-22 - Encerramento auditável de falhas de ingestão
+
+### Superfícies afetadas
+
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/runs/{run_id}/acknowledge-failure`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items` e `GET /ingestion/work-items/{id}`
+
+### Comportamento entregue
+
+- falha ao publicar recovery no Celery termina a run como falha não retentável e cria fase `failed_final`; a resposta usa `RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`;
+- runs já existentes com a mensagem `Falha ao agendar recovery de member:` também são classificadas como não retentáveis, sem exigir backfill;
+- essa run deixa imediatamente de `recoverable_runs` e passa a `next_action=inspect_error`;
+- falhas aguardando investigação oferecem `allowed_actions[].code=acknowledge_failure`;
+- o novo endpoint recebe `{ "reason": "..." }` e retorna `{ acknowledged_at, acknowledged_by, reason, failure_key }`;
+- depois do reconhecimento, `next_action=none`, a run sai do filtro `next_action=inspect_error` e continua disponível como histórico `state=failed`;
+- nenhum dado, staging ou fila é removido pelo reconhecimento; `start_ingestion` permanece disponível para novo dispatch equivalente.
+
+## 2026-07-22 - Saturação do pool PostgreSQL
+
+### Superfícies afetadas
+
+- endpoints REST autenticados;
+- `GET /ingestion/events/stream`.
+
+### Comportamento entregue
+
+- autenticação por token de usuário libera a conexão PostgreSQL imediatamente após validar o usuário, inclusive para conexões SSE longas;
+- o orçamento padrão por processo passa a ser `DB_POOL_SIZE=5`, `DB_MAX_OVERFLOW=3` e `DB_POOL_TIMEOUT_SECONDS=10`;
+- saturação residual retorna `503`, `detail.reason_code=DATABASE_POOL_EXHAUSTED`, `detail.retryable=true` e `Retry-After: 1`, em vez de `500` com stack trace.
+
+## 2026-07-21 - Elegibilidade explicita de recovery de ingestion
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Comportamento entregue
+
+- os resumos de run e os previews operacionais passam a expor `recovery: { eligible, strategy, reason_code }`;
+- `next_action=recover` e `recoverable_runs` so aparecem quando existe uma estrategia que o backend consegue executar: `replay_staged_rows` ou `rerun_member_execution`;
+- runs sem fonte executavel retornam `recovery.reason_code=NO_RECOVERY_SOURCE`, usam `next_action=inspect_error` e nao sao anunciadas como recuperaveis;
+- `POST /ingestion/runs/{run_id}/recover` passa a retornar `409` estruturado com `reason_code=NO_RECOVERY_SOURCE` e o objeto `recovery`, em vez de sucesso com `rows: []`.
+
+### Orientação para clientes
+
+- habilite recovery somente se `recovery.eligible=true`;
+- trate `NO_RECOVERY_SOURCE` como erro de inspeção operacional, não como conclusão de recovery.
+
+## 2026-07-21 - Continuidade explícita para runs aguardando ingestão
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items/{id}`
+
+### Comportamento entregue
+
+- uma run com `state=waiting` e execução correlata em `aguardando_ingestao` passa a expor `next_action=start_ingestion`;
+- o work item expõe `allowed_actions[]` com a rota autoritativa `POST /ingestion/sincronizacoes/{execucao_id}/ingerir` e `reason_code=AWAITING_INGESTION`;
+- clientes não devem iniciar um novo dispatch para esse escopo: ele ainda é trabalho ativo e pode retornar `409 ACTIVE_EQUIVALENT_WORK`.
+
+### Ajuste de members pendentes de um ZIP pai falho
+
+- quando uma run `waiting` representa um member com execução pai em falha, o backend passa a expor `next_action=recover` e permite `POST /ingestion/runs/{run_id}/recover` para retomar somente esse member;
+- runs `waiting` normais continuam usando `next_action=start_ingestion`.
+- recovery de member agora responde `status=agendada` e executa pela fila Celery, evitando que a requisição HTTP retenha conexões do pool durante o processamento.
+
+## 2026-07-22 - Recovery terminal e novo dispatch equivalente
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/operations`
+- `GET /ingestion/work-items/{id}`
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/dispatch/plan` e `POST /ingestion/dispatch`
+
+### Comportamento entregue
+
+- a existência histórica de uma execução filha ou de staging não mantém uma run terminal recuperável;
+- runs concluídas expõem `recovery.eligible=false` com `reason_code=RUN_ALREADY_COMPLETED`;
+- falhas não retentáveis expõem `recovery.eligible=false`, `reason_code=NON_RETRYABLE_FAILURE` e `next_action=inspect_error`;
+- um member que termina sem processar linhas passa a finalizar com `status=falha` e mensagem `NO_ROWS_PROCESSED`, em vez de sucesso vazio;
+- runs terminais deixam `recoverable_runs`; work items com falha terminal expõem `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, permitindo novo dispatch equivalente sem limpeza de filas.
+
+## 2026-07-21 - Resiliência do stream SSE sob saturação temporária do banco
+
+### Superfície afetada
+
+- `GET /ingestion/events/stream`
+
+### Comportamento entregue
+
+- quando não houver conexão PostgreSQL disponível no pool, o SSE não encerra a resposta com erro ASGI;
+- o stream envia `heartbeat` com `reason_code=DATABASE_POOL_EXHAUSTED` e `data.retry_after_seconds`, liberando o cliente para manter a conexão até a próxima tentativa;
+- índices incrementais foram adicionados para as leituras por `updated_at` de runs, members e campanhas usadas pelo stream.
+
+## 2026-07-20 - Contratos de controle operacional de ingestão
+
+### Superfícies afetadas
+
+- `GET /ingestion/work-items`, `GET /ingestion/work-items/{id}` e `GET /ingestion/work-items/{id}/events`
+- `POST /ingestion/dispatch/plan` e `POST /ingestion/dispatch`
+- `GET /ingestion/scopes`, `GET /ingestion/runs/{run_id}/completion-evidence` e `GET /ingestion/quarentena/grupos`
+- `GET /ingestion/operations`, `GET /ingestion/runs`, `GET /ingestion/sincronizacoes` e `GET /updates/pending`
+- `POST /updates/pending/{id}/retry-ingestion`
+
+### Comportamento entregue
+
+- o backend correlaciona atualização, execução administrativa, run e resultado por work item estável (`fonte:ano`), eliminando correlação manual pelo cliente;
+- despacho passa pelo fluxo plano → confirmação, exige `Idempotency-Key` e retorna `409` estruturado para plano incompatível, expirado ou trabalho equivalente ativo;
+- `force_reimport` exige motivo no novo fluxo de despacho e fica auditado;
+- `operations` informa revisão, intervalo de polling, totais não truncados, ações pendentes, progresso e saúde por fila;
+- runs, sincronizações e atualizações aceitam filtros e paginação no servidor; em `updates/pending`, os metadados de paginação ficam nos headers `X-Total-Count`, `X-Page` e `X-Page-Size` para preservar o corpo em lista;
+- atualizações usam `ingestion_queued`, `ingesting`, `ingestion_failed` e `ingested`; `triggered` não é mais evidência de ingestão concluída;
+- `content_unchanged` permanece elegível somente para atualização de referência baseada em SHA-256.
+
+### Orientação para clientes
+
+- use `allowed_actions` e `next_action` retornados pelo backend, sem inferir autorização de status ou fase;
+- trate `ingestion_queued` como aceite assíncrono e consulte work item/run para conclusão;
+- migre listagens extensas para filtros server-side; não carregue histórico completo para filtrar localmente.
+
+## 2026-07-21 - Stream SSE operacional de ingestão
+
+### Superfície afetada
+
+- `GET /ingestion/events/stream`
+
+### Comportamento entregue
+
+- stream SSE autenticado por bearer, sem dependência de frontend específico;
+- suporte a retomada por `Last-Event-ID`, `cursor` ou `since_revision`;
+- eventos compactos para operações, runs, work items, members, filas e materialização, além de heartbeat;
+- o envelope inclui `event_id`, `revision`, `occurred_at`, `entity_type`, `entity_id`, `reason_code` e `data`.
+
+### Orientação para clientes
+
+- use SSE para invalidar ou atualizar pontualmente recursos e consulte REST para detalhes completos;
+- persista o último `id` recebido e envie-o na reconexão;
+- não trate `heartbeat` como alteração operacional.
+
+## 2026-07-15 - Contadores de efeito da sincronização do Cadastro
+
+### Superfícies afetadas
+
+- `GET /ingestion/sincronizacoes`
+- `GET /ingestion/sincronizacoes/{id_execucao}`
+- execuções criadas por `POST /ingestion/sincronizacoes/cadastro`
+
+### Comportamento entregue
+
+- URLs, query params e nomes dos campos permanecem inalterados;
+- em novas execuções de `cadastro`, `total_inseridos` deixa de repetir o volume total promovido e passa a contar apenas linhas que criaram registro CVM ou vínculo de mercado inexistente;
+- `total_atualizados` conta linhas que alteraram ao menos um campo de negócio existente;
+- `total_inalterados` conta linhas reprocessadas sem mudança de negócio;
+- alterações somente de arquivo, hash, linha de origem ou outra proveniência técnica não contam como atualização;
+- a soma `total_inseridos + total_atualizados + total_inalterados + total_rejeitados` corresponde a `total_linhas_lidas` em uma conclusão normal;
+- execuções históricas mantêm os contadores originalmente persistidos e não são recalculadas.
+
+### Orientação para clientes
+
+- não apresente `total_inseridos` como sinônimo de linhas processadas;
+- um artefato detectado como diferente pode produzir somente `total_inalterados` quando a diferença não modifica o domínio;
+- para volume de processamento, use `total_linhas_lidas`; para efeito canônico, use os três contadores de resultado.
+
+## 2026-07-15 - Saúde, histórico e resolução das checagens de atualizações
+
+### Superfícies afetadas
+
+- `GET /updates/scanner/status`
+- `GET /updates/scanner/runs`
+- `GET /updates/scanner/runs/latest`
+- `GET /updates/scanner/runs/{scan_run_id}`
+- `POST /updates/scanner/run`
+- `GET /updates/pending`
+- `GET /updates/pending/{id}`
+- `GET /updates/summary`
+- `POST /updates/pending/{id}/acknowledge-reference`
+
+### Comportamento entregue
+
+- toda varredura automática ou manual é persistida, mesmo quando nenhuma atualização é detectada;
+- o novo `GET /updates/scanner/runs` lista o histórico paginado e aceita filtro por `status`;
+- cada execução identifica `summary.trigger`, `summary.coverage_status`, os contadores de decisão e `summary.items` por fonte/ano;
+- `/scanner/status` adiciona `health_status`, cobertura, contadores, janela de obsolescência e fontes sem escopo;
+- `/scanner/status` também informa `scanner_enabled`, `schedule_enabled`, `schedule_status` e a última execução agendada; uma execução manual não mascara um job diário obsoleto;
+- anos monitorados passam a ser derivados das ingestões bem-sucedidas, sem depender de `ANOS_INICIAIS_*`;
+- probes inconclusivos não resolvem nem ocultam uma atualização pendente existente;
+- `cadastro` usa comparação SHA-256 em streaming quando os headers HTTP não permitem uma decisão conclusiva.
+- análise com `total_changes=0` passa a usar `status=content_unchanged`, sem classificá-la como pronta para ingestão;
+- pendências expõem `content_changed` e `recommended_action`; a ação canônica desse caso é `update_reference`;
+- o novo `POST /updates/pending/{id}/acknowledge-reference` registra a referência remota e responde `ingestion_triggered=false`;
+- após reconhecimento, o status é `reference_updated` e o scanner deixa de redetectar os mesmos headers enquanto a ingestão canônica permanecer vigente;
+- `GET /updates/summary` adiciona `reference_update_count`.
+
+### Orientação para clientes
+
+- uma lista vazia em `/updates/pending` significa apenas que não há mudança confirmada pendente;
+- para afirmar que não houve novidade, valide `health_status=healthy`, `coverage_status=complete`, `inconclusive_count=0` e `error_count=0`;
+- mostre `summary.items[].decision_reason` quando a cobertura estiver degradada.
+- para `content_unchanged`, apresente **Atualizar referência** em vez de **Aprovar e ingerir**;
+- não trate igualdade de contagem de linhas como evidência suficiente: o backend só retorna `content_changed=false` após equivalência SHA-256;
+- **Descartar** não atualiza a referência e pode permitir que o mesmo artefato reapareça.
+
+## 2026-07-13 - Entrega eficiente do relatório fundamentalista
+
+### Superfície afetada
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- URL, query params e schema JSON permanecem inalterados.
+- respostas passam a incluir `ETag`, `Cache-Control: private`, `X-Analise-Source` e `X-Analise-Generation`;
+- clientes podem enviar `If-None-Match` com o `ETag` anterior e receber `304 Not Modified` sem corpo quando o relatório não mudou;
+- `X-Analise-Source` pode ser `redis_cache`, `redis_cache_wait`, `db_snapshot`, `compiled_canonical` ou `compiled_runtime`;
+- `X-Analise-Generation` informa o UUID da materialização canônica vigente ou `runtime` quando não há geração canônica;
+- o read model e o cache de entrega não alteram `resolution.mode`: a resposta continua informando `canonical` ou `runtime_fallback` conforme a camada analítica utilizada.
+
+### Orientação para clientes
+
+- tratar `304` como reutilização válida do payload associado ao `ETag` enviado;
+- não usar `X-Analise-Source` para decidir semântica financeira ou renderização; o campo existe para diagnóstico operacional;
+- não armazenar a resposta autenticada em cache público compartilhado.
+
+## 2026-07-12 - Precisão Contábil, Temporal e Neutralidade na Análise Fundamentalista
+
+### Superfícies afetadas
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- **Cálculo de TTM Preciso para Razões (Anual e Trimestral)**: Indicadores percentuais e múltiplos (margens, ROE, ROA, alavancagem, conversão de lucro em caixa) passam a ser recalculados a partir de seus componentes TTM ou saldos médios (ao invés de somados linearmente). O ROE e o ROA anuais (FY) também passam a ser calculados pela média de abertura e encerramento do patrimônio líquido/ativo total.
+- **ROE e ROA com Saldos Médios**: O cálculo de ROE e ROA em bases trimestrais passa a utilizar a média aritmética entre o saldo atual e o saldo de 12 meses atrás nos denominadores (patrimônio líquido e ativo total).
+- **Capital de Giro Operacional**: O campo `net_operating_working_capital` passa a retornar `null` (ausente) devido à limitação factual de dados operacionais estruturados nas tabelas atuais do backend, evitando falsas aproximações.
+- **Consistência Temporal de Mudanças Materiais**: O campo `event_date` nos itens de mudanças materiais passa a aceitar `null` e não utiliza mais a data de execução (`date.today()`) para eventos sem data explícita, mantendo a consistência temporal sob cortes históricos `as_of`.
+- **Prevenção de Falsas Diferenças Contábeis**: Ausências de valores (`before_value` ou `after_value`) em reapresentações contábeis não são convertidas em zero, retornando `null` no impacto financeiro final. O efeito imediato em caixa é classificado como `unknown` (desconhecido).
+- **Fatores de Atenção e Conclusões Factualmente Neutros**: Remoção de adjetivações e limiares universais arbitrários (como limite de 3x para alavancagem ou palavras avaliativas como "sob controle", "alerta", "robusta").
+- **Novo Campo `observed_changes` em `NeutralConclusion`**: Criado o campo `observed_changes: list[str]` na resposta para abrigar variações factuais isoladas (receita, alavancagem, liquidez) sem agrupá-las arbitrariamente sob "fundamentos suportados" ou "pontos de pressão".
+- **Tipagem de `recorte_efetivo`**: A propriedade `recorte_efetivo` da etapa 1 passa a ser tipada formalmente pelo modelo `AnaliseRecorteEfetivo` (eliminando a definição genérica de dicionário aberto). Os campos `base_efetiva`, `resolution_mode` e `as_of` dentro do recorte passam a usar tipos formais (`Literal` e `date`), sendo serializados com precisão nas respostas e documentados no OpenAPI. Exposição da base efetiva de cálculo utilizada pelo motor analítico (retornando `"ttm"` para consultas trimestrais e o próprio `base_periodo` nos demais casos).
+
+## 2026-07-10 - Evoluções Aditivas da Análise Fundamentalista
+
+### Superfícies afetadas
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}`
+
+### Comportamento entregue
+
+- O relatório de análise fundamentalista continua compatível e passa a retornar campos aditivos para a revisão de UX.
+- `etapas.caixa_solidez.ponte_caixa` entrega a ponte de caixa calculada pelo backend por período, com `role`, `value`, `unit` e `evidence_ids`. Quando não há componentes compatíveis, o período pode retornar `unavailable_reason`.
+- `etapas.caixa_solidez.painel_posicao_financeira` separa `monetary_series` de `ratio_series`, preservando `AnaliseSeriesObservation` completo.
+- `changed_accounts` em reapresentações passa a incluir `account_label`, `statement_label`, `unit`, `display_rank`, `is_focus`, `reason_if_available` e `evidence_id`.
+- `event_buckets` agrega eventos por período, família e severidade. O detalhamento paginado fica em `GET /fundamentalista/eventos`.
+- `evidence_dossier` retorna evidências factuais agrupadas em `available`, `attention` e `limitation`.
+- `GET /fundamentalista/evidencias/{evidence_id}/trilha` retorna uma trilha focal limitada a `depth=1` e até 12 nós, usando relações factuais estáveis.
+- O frontend deve tratar `evidence_id` como opaco e não deve inferir ponte de caixa, agrupamentos financeiros, ranking de contas, prioridade de evidências ou relações entre nós.
+- O backend não expõe score, recomendação, preço-alvo, previsão ou classificação de companhia.
+
+## 2026-07-09 - Datas oficiais no Radar Informativo Tucano CVM
+
+### Superficie afetada
+
+- `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`
+
+### Comportamento entregue
+
+- `items[].published_at` passa a usar a melhor data oficial encontrada pelo coletor, sem mudar o nome ou o tipo do campo.
+- Para `noticias`, a data e extraida da pagina de detalhe, preferindo `NewsArticle.datePublished` com timezone e usando texto como `Publicado em 03/07/2026 17h30` como fallback.
+- Noticias preservadas de snapshots anteriores que ainda estejam sem `published_at` sao reprocessadas pela URL de detalhe antes da publicacao do proximo `latest.json`.
+- Para `novidades_dados`, a data continua vindo do bloco da novidade no portal de dados.
+- Para `normas`, a data passa a preferir a publicacao no DOU quando o bloco informar textos como `Publicada no DOU de 03.07.2026`.
+- O canal `normas` passa a coletar diretamente os subcanais de resolucoes, deliberacoes, pareceres de orientacao e audiencias/consultas publicas, evitando links de navegacao da pagina agregadora.
+- Quando a data oficial nao for encontrada, `published_at` permanece `null` e `captured_at` segue indicando apenas o momento da coleta.
+
+## 2026-07-08 - Radar Informativo Tucano CVM via feed estatico
+
+### Superficie nova
+
+- `GET {RADAR_CVM_PUBLIC_BASE_URL}/radar-cvm/latest.json`
+
+### Comportamento entregue
+
+- O backend passa a produzir um feed JSON estatico com novidades publicas da CVM, publicado fora da API FastAPI em Cloudflare R2 ou storage local.
+- O frontend deve ler o feed diretamente pela URL publica; nenhuma chamada ao backend ou consulta ao PostgreSQL ocorre durante leitura.
+- O feed inclui `generated_at`, `window`, `summary`, `channels` e `items`.
+- Falhas parciais de coleta aparecem em `channels[].status`, `channels[].error` e `summary.channels_failed`.
+- A UI deve tratar feed com mais de 24h sem sucesso como obsoleto.
+
+### Campos principais para consumo
+
+- `items[].channel`: `noticias`, `novidades_dados`, `normas` ou `atos_declaratorios`
+- `items[].kind`: `noticia`, `novidade_dados`, `norma`, `ato_declaratorio`, `consulta_publica` ou `outro`
+- `items[].relevance`: `baixa`, `media`, `alta` ou `desconhecida`
+- `items[].tags` e `items[].signals`: classificacao deterministica usada pela UI para filtros e explicabilidade
+
+## 2026-07-04 - Exposição Pública de Companhias Selecionadas via Redis Cache
+
+### Endpoints novos
+
+- `GET /public/analise/companhias/{codigo_cvm}` (Manifesto público)
+- `GET /public/analise/companhias/{codigo_cvm}/coverage` (Cobertura analítica pública)
+- `GET /public/analise/companhias/{codigo_cvm}/series` (Séries analíticas públicas)
+- `GET /public/analise/companhias/{codigo_cvm}/series/diagnostico` (Diagnóstico público)
+- `GET /public/analise/companhias/{codigo_cvm}/comparacoes` (YoY/QoQ/CAGR público)
+- `GET /public/analise/companhias/{codigo_cvm}/qualidade` (Qualidade de dados pública)
+- `GET /public/analise/companhias/{codigo_cvm}/sinais` (Sinais públicos)
+- `GET /public/analise/companhias/{codigo_cvm}/eventos` (Timeline pública)
+- `GET /public/analise/companhias/{codigo_cvm}/governanca` (Governança pública)
+- `GET /public/analise/companhias/{codigo_cvm}/pessoas` (Pessoas e remuneração pública)
+- `GET /public/analise/companhias/{codigo_cvm}/brief` (Brief analítico público)
+- `GET /public/analise/companhias/{codigo_cvm}/restatements` (Reapresentações públicas)
+
+### Comportamento entregue
+
+- A API passa a expor rotas analíticas públicas sob o prefixo `/public/analise/companhias/{codigo_cvm}` completamente independentes e sem exigência de autenticação bearer.
+- O acesso a essas rotas é restrito a uma lista de companhias autorizadas configurada via variável de ambiente `PUBLIC_COMPANIES_CVM` (ex: `PUBLIC_COMPANIES_CVM=12345,67890`). CVMs não permitidos recebem `403 Forbidden`.
+- Um cache de tipo *Read-Through* no Redis armazena os payloads das respostas com um TTL configurável via `PUBLIC_CACHE_TTL_SECONDS` (padrão de 24 horas), eliminando requisições recorrentes ao banco PostgreSQL.
+
+## 2026-07-03 - CORS configuravel para clientes web
+
+### Superficie afetada
+
+- Middleware HTTP da API
+- Variavel de ambiente `BACKEND_CORS_ORIGINS`
+
+### Comportamento entregue
+
+- a API passa a habilitar CORS quando `BACKEND_CORS_ORIGINS` estiver preenchida
+- a variavel aceita lista separada por virgulas com origins completas, por exemplo `http://localhost:3000,http://localhost:5173`
+- origins devem usar formato `scheme://host[:port]`, sem path
+- quando a variavel estiver vazia, CORS permanece desabilitado
+- nenhum endpoint, query param, payload ou status code foi alterado
+
+### Impacto para frontend
+
+- ambientes web devem configurar `BACKEND_CORS_ORIGINS` no backend com a origin exata da aplicacao frontend
+- chamadas autenticadas com `Authorization` passam a responder corretamente ao preflight do navegador para origins autorizadas
+
+## 2026-07-02 - Diagnostico de disponibilidade dos datasets FRE
+
+### Endpoint novo
+
+- `GET /fre/datasets/disponibilidade`
+
+### Comportamento entregue
+
+- a API passa a expor um diagnostico operacional por `ano` e `dataset` FRE
+- o diagnostico cruza catalogo de fontes, snapshot do pacote anual, snapshot/indexacao do CSV membro e contagem da tabela promovida que alimenta o endpoint publico
+- quando um endpoint FRE estiver vazio, o frontend consegue distinguir:
+  - pacote anual nao ingerido
+  - CSV membro ausente no ZIP anual conhecido
+  - CSV membro existente, mas sem linhas
+  - CSV membro com linhas, mas promocao ausente
+  - endpoint/tabela nao promovidos
+  - endpoint disponivel com linhas promovidas
+
+### Campos principais
+
+- `resumo.total`
+- `resumo.available`
+- `resumo.package_not_ingested`
+- `resumo.source_member_missing`
+- `resumo.source_member_empty`
+- `resumo.promotion_missing`
+- `resumo.not_promoted`
+- `resumo.unsupported_dataset`
+- `dados[].ano`
+- `dados[].dataset`
+- `dados[].endpoint`
+- `dados[].member_name`
+- `dados[].row_kind`
+- `dados[].destino_promovido`
+- `dados[].source_package_seen`
+- `dados[].source_member_exists`
+- `dados[].source_member_row_count`
+- `dados[].member_ingested`
+- `dados[].promoted_rows`
+- `dados[].endpoint_available`
+- `dados[].diagnosis_code`
+- `dados[].diagnosis_message`
+- `dados[].latest_ingestion_run_id`
+- `dados[].latest_execucao_id`
+
+### Códigos estáveis
+
+- `AVAILABLE`
+- `PACKAGE_NOT_INGESTED`
+- `SOURCE_MEMBER_MISSING`
+- `SOURCE_MEMBER_EMPTY`
+- `PROMOTION_MISSING`
+- `NOT_PROMOTED`
+- `UNSUPPORTED_DATASET`
+
+### Leitura recomendada pelo frontend
+
+- quando uma tela de FRE receber `total=0` em um endpoint tematico, chamar `/fre/datasets/disponibilidade` com o mesmo `ano` e o `dataset` correspondente
+- se `diagnosis_code=SOURCE_MEMBER_MISSING`, apresentar que a CVM nao publicou ou o sistema nao indexou aquele CSV membro no ZIP conhecido
+- se `diagnosis_code=PROMOTION_MISSING`, tratar como problema operacional de ingestao/promocao e oferecer reprocessamento do membro
+- se `diagnosis_code=AVAILABLE`, o endpoint tematico deve retornar dados para o ano; divergencia entre os dois contratos deve ser tratada como bug
+- para datasets historicos ou esparsos de valores mobiliarios/tesouraria, usar o diagnostico antes de concluir que o endpoint e inutil
+
+## 2026-07-02 - Coverage e diagnostico de lacunas analiticas
+
+### Endpoints novos
+
+- `GET /analise/companhias/{codigo_cvm}/coverage`
+- `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+
+### Endpoints estendidos
+
+- `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+
+### Comportamento entregue
+
+- `/coverage` retorna uma matriz por periodo cruzando dado bruto, contexto canonico, fatos canonicos e ultima execucao de materializacao
+- `/coverage` passa a distinguir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `has_series`, `metrics_count` e `unavailable_count`
+- `/coverage` aceita `periodicidade`, `base_periodo` e `horizonte_anos` para alinhar a mesma janela usada por `/series`
+- `/series` passa a aplicar `horizonte_anos` por períodos distintos, não por quantidade de observações; quando `/coverage` indica `has_series=true` e `metrics_count>0`, os fatos materializados do mesmo período entram em `/series` para os mesmos filtros
+- `/series/diagnostico` usa os mesmos filtros de `/series`, mas retorna periodos candidatos, periodos retornados, periodos rejeitados, status completo do pipeline e motivos de indisponibilidade por metrica
+- cada item de `rejected_periods` passa a incluir `has_raw_data`, `has_canonical_context`, `has_canonical_facts`, `has_materialized_metrics`, `materialization_status`, `materialization_execution_id`, `latest_execution_id`, `metrics_count`, `unavailable_count` e `metric_reasons`
+- cada item de `metric_reasons` inclui `metric_id`, `reason_code`, `reason_message`, `layer`, `remediation_code` e `remediation_message`
+- reason codes estaveis: `RAW_DATA_MISSING`, `CANONICAL_CONTEXT_MISSING`, `CANONICAL_FACTS_MISSING`, `MATERIALIZATION_MISSING`, `MATERIALIZATION_PENDING`, `MATERIALIZATION_RUNNING`, `MATERIALIZATION_FAILED`, `SCOPE_MISMATCH`, `PERIODICITY_MISMATCH`, `BASE_PERIOD_MISMATCH`, `METRIC_MAPPING_MISSING`, `METRIC_INPUT_ACCOUNT_MISSING`, `METRIC_CALCULATION_UNAVAILABLE`, `INSUFFICIENT_SERIES_POINTS`
+- remediation codes estaveis: `INGEST_SOURCE`, `RUN_MATERIALIZATION`, `WAIT_MATERIALIZATION`, `REBUILD_CANONICAL_CONTEXT`, `FIX_METRIC_MAPPING`, `CHANGE_SCOPE`, `CHANGE_PERIODICITY`, `CHANGE_BASE_PERIOD`, `SELECT_DIFFERENT_METRIC`
+- `/analise/materializacoes/companhias/{codigo_cvm}/repair` cria uma campanha `manual_repair` focada por companhia, escopo e periodos; `metricas` valida/explica a solicitacao, mas a recomposicao real continua por companhia/escopo/janela
+- o manifesto passa a incluir `periodos_disponiveis_por_metrica`, com `metric_id` e `period_ids`, para a UI decidir se um grafico pode existir sem chamar `/series`
+- o status de materializacao por companhia passa a incluir `periodos_detalhe`
+- cada item de `anos` no status de materializacao passa a incluir `period_id`, `has_context_revision`, `has_fact_revision`, `metrics_count` e `unavailable_count`
+
+### Leitura recomendada pelo frontend
+
+- usar `/coverage` para explicar diferenca entre dado bruto existente e camada canonica ausente
+- usar `/series/diagnostico` quando um grafico tiver poucos pontos ou nenhum ponto
+- nao consultar endpoints brutos DFP/ITR para explicar gaps de grafico; a explicacao canonica deve vir de `/coverage` e `/series/diagnostico`
+- quando `metric_reasons[].remediation_code=RUN_MATERIALIZATION`, oferecer acao operacional baseada em `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+- se `/repair` retornar `NO_MISSING_METRICS` para o mesmo período/métrica/escopo, `/series/diagnostico` não deve recomendar `RUN_MATERIALIZATION`; se houver exclusão por filtro, o motivo vem na camada `filter`
+- exemplo de mensagem: `FY2023 tem dado bruto DFP, mas nao tem fatos canonicos para EBITDA e lucro_liquido. Execute repair/materializacao para codigo_cvm=9512, escopo=consolidated, period_id=FY2023.`
+- usar `periodos_disponiveis_por_metrica` no manifesto para habilitar/desabilitar secoes de grafico sem consultas extras
+- usar `periodos_detalhe` no status de materializacao para mostrar se a lacuna esta em contexto canonico, fatos canonicos ou indisponibilidade de metrica
+
+## 2026-07-02 - Status de materializacao por companhia
+
+### Endpoint novo
+
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+
+### Comportamento entregue
+
+- o backend passa a expor um snapshot direto para telas de companhia consultarem a materializacao de um `codigo_cvm` em um `escopo`
+- o endpoint combina revisao canonica atual, ultima execucao conhecida e eventual item ativo ou pendente de campanha
+- `anos` traz status por ano fiscal anual `FY` quando ha revisao canonica
+- `dados`, `periodos` e `materializacoes` sao aliases de `anos` para consumidores desacoplados
+- `status_por_ano` fornece o mesmo conteudo indexado por ano fiscal
+- quando ainda nao ha revisao canonica, o backend tenta inferir o ano por `active_item.invalidated_from` ou pela ultima execucao; se nao houver dado suficiente, retorna `status=missing` e `anos=[]`
+
+### Campos principais
+
+- `codigo_cvm`
+- `escopo`
+- `status`
+- `coverage_complete`
+- `latest_execution`
+- `active_item`
+- `anos`
+- `dados`
+- `periodos`
+- `materializacoes`
+- `status_por_ano`
+- `generated_at`
+- `updated_at`
+
+### Leitura recomendada pelo frontend
+
+- para o painel de detalhe da companhia, consumir este endpoint em vez de derivar estado a partir de `/analise/materializacoes`
+- usar `anos` ou `status_por_ano` para renderizar indicadores por ano
+- tratar `pending`, `queued` e `running` como trabalho aceito ou em processamento
+- tratar `missing` como ausencia de materializacao conhecida para o escopo consultado
+
 ## 2026-07-01 - Disparo de ingestao passa a acionar o gate de materializacao imediatamente
 
 ### Endpoints e superficies com impacto operacional visivel

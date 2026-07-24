@@ -30,6 +30,7 @@ Campos principais:
 | `cancellation` | `object \| null` | ultimo cancelamento |
 | `last_error` | `object \| null` | erro mais recente |
 | `next_action` | `string \| null` | acao recomendada |
+| `recovery` | `object` | elegibilidade e estrategia executavel de recovery |
 | `remote_probe` | `object \| null` | decisao de preflight remoto |
 | `change_summary` | `object \| null` | mudanca estrutural detectada |
 | `quality_summary` | `object \| null` | resumo principal de progresso |
@@ -235,6 +236,30 @@ Campos:
 - `materialization_gate`
 - `active_runs`
 - `recoverable_runs`
+
+Os previews em `active_runs` e `recoverable_runs` incluem `recovery` com:
+
+- `eligible`: se o estado atual autoriza recovery e existe uma fonte executavel;
+- `strategy`: `replay_staged_rows` ou `rerun_member_execution`, quando elegivel;
+- `reason_code`: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, `RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`.
+
+`recoverable_runs` inclui somente runs com `next_action=recover` e `recovery.eligible=true`.
+Runs concluidas ou com falha nao retentavel permanecem terminais, nao entram nessa lista e nao bloqueiam um novo dispatch equivalente. Para falhas terminais, `allowed_actions[]` inclui `start_ingestion` com `reason_code=TERMINAL_RUN_REDISPATCH_ALLOWED`.
+
+Runs falhadas podem incluir `failure_acknowledgement`:
+
+- `acknowledged_at`: momento do reconhecimento;
+- `acknowledged_by`: ator autenticado;
+- `reason`: conclusao da investigacao;
+- `failure_key`: identificador da ocorrencia exata reconhecida.
+
+Antes do reconhecimento, uma falha não retentável expõe as ações `inspect_error`, `acknowledge_failure` e `start_ingestion`. Depois de `POST /ingestion/runs/{run_id}/acknowledge-failure`, `next_action=none` e as ações passam a ser `inspect` e `start_ingestion`. O reconhecimento remove a pendência operacional, mas preserva `state=failed`, `last_error` e toda a trilha histórica.
+
+## Controle de despacho e trabalho
+
+`IngestionDispatchPlanRequest` recebe `scopes[]`, `strategy` (`direct` ou `two_step`), `force_reimport` e motivo opcional. A resposta inclui `plan_token`, expiração, escopos válidos/inválidos, conflitos e impacto no gate. `IngestionDispatchRequest` deve repetir o plano e usar `Idempotency-Key`.
+
+O work item contém `id`, `fonte`, `ano`, correlação de atualização, execução e run, `state`, `next_action` e `allowed_actions[]`. Cada ação é orientada a máquina: `code`, `operation`, `resource`, `requires_confirmation`, `reason_code` e `constraints`.
 
 ## `QuarantineItemResposta`
 

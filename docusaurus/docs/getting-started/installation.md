@@ -94,8 +94,57 @@ Resposta esperada:
 |----------|-----------|---------|
 | `DATABASE_URL` | URL de conexão PostgreSQL | `postgresql://user:pass@host:5432/db` |
 | `REDIS_URL` | URL de conexão Redis | `redis://host:6379/0` |
+| `DB_POOL_SIZE` | Conexões persistentes por processo da aplicação | `5` |
+| `DB_MAX_OVERFLOW` | Conexões adicionais temporárias por processo | `3` |
+| `DB_POOL_TIMEOUT_SECONDS` | Espera máxima por uma conexão livre | `10` |
+| `DB_POOL_RECYCLE_SECONDS` | Idade máxima antes de reciclar uma conexão | `1800` |
 | `LOG_LEVEL` | Nível de log | `INFO`, `DEBUG`, `WARNING` |
 | `AMBIENTE` | Ambiente de execução | `development`, `production` |
+| `BACKEND_CORS_ORIGINS` | Origins liberadas para navegadores, separadas por vírgula | `http://localhost:3000,http://localhost:5173` |
+
+`BACKEND_CORS_ORIGINS` deve conter apenas origins completas no formato `scheme://host[:port]`, sem path. Quando vazio, o middleware CORS não é habilitado.
+
+O pool é criado por processo. Dimensione o total como a soma de `(DB_POOL_SIZE + DB_MAX_OVERFLOW)` para cada processo da API, ingestão, materialização e demais consumidores SQLAlchemy. Em bancos pequenos, mantenha esse orçamento abaixo de `max_connections` com margem para Alembic e operação administrativa.
+
+A autenticação por token de usuário libera sua transação imediatamente após validar o usuário. Assim, streams SSE e esperas por inspeção Celery não retêm uma conexão PostgreSQL apenas por permanecerem abertos. Se o orçamento ainda for excedido, a API responde `503` com `reason_code=DATABASE_POOL_EXHAUSTED`, `retryable=true` e `Retry-After: 1`, em vez de `500`.
+
+### Entrega da Análise Fundamentalista
+
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `ANALISE_FUNDAMENTALISTA_SNAPSHOT_ENABLED` | Lê e persiste o read model canônico do relatório agregado. | `true` |
+| `ANALISE_FUNDAMENTALISTA_PREWARM_ENABLED` | Compila o recorte padrão após materialização canônica bem-sucedida. | `true` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_ENABLED` | Ativa a cópia de entrega no Redis e o singleflight de cache miss. | `false` no código; `true` no `.env.example` e Helm |
+| `ANALISE_FUNDAMENTALISTA_CACHE_TTL_SECONDS` | TTL do payload canônico no Redis. | `21600` |
+| `ANALISE_FUNDAMENTALISTA_RUNTIME_CACHE_TTL_SECONDS` | TTL curto para resposta `runtime_fallback`. | `60` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_LOCK_SECONDS` | Validade do lock de compilação concorrente. | `120` |
+| `ANALISE_FUNDAMENTALISTA_CACHE_WAIT_SECONDS` | Espera por outro request que esteja compilando o mesmo contexto. | `15` |
+| `ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS` | `max-age` privado enviado no `Cache-Control`. | `60` |
+
+Redis não armazena estado canônico. Se ele estiver indisponível, a API continua atendendo pelo read model PostgreSQL ou pelo compilador do service. O prewarm aumenta o trabalho do worker de materialização somente uma vez por companhia/escopo e evita recomposição no caminho comum da API.
+
+### MCP Analitico Read-Only
+
+| Variável | Descrição | Padrão |
+|----------|-----------|--------|
+| `MCP_PROFILE` | Perfil do servidor MCP. O primeiro corte aceita somente `analyst`. | `analyst` |
+| `MCP_HTTP_ENABLED` | Monta o servidor MCP HTTP na instancia FastAPI em `/mcp`. | `false` |
+| `MCP_HTTP_REQUIRE_BEARER` | Exige `Authorization: Bearer <MCP_TOKEN>` no transporte HTTP. | `true` |
+| `MCP_HTTP_ALLOWED_HOSTS` | Hosts aceitos pela proteção contra DNS rebinding do transporte MCP. | `localhost,127.0.0.1,127.0.0.1:*` |
+| `MCP_HTTP_ALLOWED_ORIGINS` | Origins aceitas pela proteção contra DNS rebinding do transporte MCP. | vazio |
+| `MCP_REQUIRE_TOKEN` | Quando `true`, toda ferramenta exige o argumento `token` com o valor de `MCP_TOKEN`. | `false` |
+| `MCP_TOKEN` | Token exclusivo do MCP. Tokens REST/API nao liberam MCP automaticamente. | vazio |
+| `MCP_MAX_ROWS` | Limite de linhas por resposta compacta. | `50` |
+| `MCP_MAX_PERIODS` | Limite de periodos em coverage, series e diagnostico. | `20` |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Limite operacional configurado para execucao de ferramentas. | `30` |
+| `MCP_INCLUDE_RAW_DEFAULT` | Inclui payload bruto dos schemas compartilhados por padrao. | `false` |
+
+Valide o servidor MCP local:
+
+```bash
+docker compose run --rm cvm_api python -m app.cli.mcp --help
+docker compose run --rm cvm_api python -m app.cli.mcp smoke-test
+```
 
 ### Autenticação
 

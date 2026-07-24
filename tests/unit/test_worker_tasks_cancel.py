@@ -118,13 +118,13 @@ def test_reconciliar_ingestion_stale_task_marca_falha_recuperavel(db_session: Se
     db_session.refresh(run)
     phase = db_session.scalar(select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == run.id))
     assert resultado["stale_candidates"] >= 1
-    assert str(run.id) in resultado["failed_retryable_runs"]
+    assert str(run.id) in resultado["failed_non_recoverable_runs"]
     assert execucao.status == "falha"
     assert run.status == "falha"
     assert phase is not None
     assert phase.status == "failed_final"
     assert phase.error_type == "stale_phase"
-    assert phase.error_retryable is True
+    assert phase.error_retryable is False
 
 
 def test_reconciliar_ingestion_stale_task_conclui_cancelamento_propagado(db_session: Session) -> None:
@@ -245,6 +245,7 @@ def test_sincronizar_member_internal_passa_reconcile_required_no_worker_split(
         captured["reconcile_required"] = kwargs["reconcile_required"]
         contadores = kwargs["contadores"]
         contadores["lidas"] = 1
+        contadores["inalterados"] = 1
 
     monkeypatch.setattr(
         "app.services.ingestion.financeiro._process_financeiro_member",
@@ -355,6 +356,7 @@ def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
         captured["header_map"] = kwargs["header_map"]
         contadores = kwargs["contadores"]
         contadores["lidas"] = 1
+        contadores["inalterados"] = 1
 
     monkeypatch.setattr(
         "app.services.ingestion.financeiro._process_financeiro_member",

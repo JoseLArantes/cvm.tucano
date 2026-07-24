@@ -43,7 +43,9 @@ Endpoints cobertos:
 
 - `GET /analise/metricas`
 - `GET /analise/companhias/{codigo_cvm}`
+- `GET /analise/companhias/{codigo_cvm}/coverage`
 - `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
 - `GET /analise/companhias/{codigo_cvm}/comparacoes`
 - `GET /analise/companhias/{codigo_cvm}/qualidade`
 - `GET /analise/companhias/{codigo_cvm}/sinais`
@@ -64,6 +66,8 @@ Pagina:
 Endpoints cobertos:
 
 - `GET /analise/materializacoes`
+- `GET /analise/materializacoes/companhias/{codigo_cvm}/status`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
 - `GET /analise/materializacoes/monitoramento`
 - `GET /analise/materializacoes/controle`
 - `POST /analise/materializacoes/controle/pause`
@@ -72,7 +76,31 @@ Endpoints cobertos:
 - `POST /analise/materializacoes/campanhas/{campanha_id}/recuperar`
 - `POST /analise/materializacoes/campanhas/{campanha_id}/reativar`
 - `POST /analise/materializacoes/recuperacao/trigger`
+- `POST /analise/materializacoes/{execucao_id}/reconcile`
 - `GET /analise/materializacoes/{execucao_id}`
+
+### 4. Análise Pública de Companhias Selecionadas
+
+Use esta documentação para integrar com as rotas públicas (sem autenticação) que expõem os mesmos dados de análise para companhias autorizadas de forma cacheada no Redis.
+
+Pagina:
+
+- [Análise Pública de Companhias Selecionadas](./public-analise.md)
+
+Endpoints cobertos:
+
+- `GET /public/analise/companhias/{codigo_cvm}` (Manifesto público)
+- `GET /public/analise/companhias/{codigo_cvm}/coverage` (Matriz de Cobertura pública)
+- `GET /public/analise/companhias/{codigo_cvm}/series` (Séries analíticas públicas)
+- `GET /public/analise/companhias/{codigo_cvm}/series/diagnostico` (Diagnóstico público)
+- `GET /public/analise/companhias/{codigo_cvm}/comparacoes` (YoY/QoQ/CAGR público)
+- `GET /public/analise/companhias/{codigo_cvm}/qualidade` (Qualidade de dados pública)
+- `GET /public/analise/companhias/{codigo_cvm}/sinais` (Sinais públicos)
+- `GET /public/analise/companhias/{codigo_cvm}/eventos` (Timeline pública)
+- `GET /public/analise/companhias/{codigo_cvm}/governanca` (Governança pública)
+- `GET /public/analise/companhias/{codigo_cvm}/pessoas` (Pessoas e remuneração pública)
+- `GET /public/analise/companhias/{codigo_cvm}/brief` (Brief analítico público)
+- `GET /public/analise/companhias/{codigo_cvm}/restatements` (Reapresentações públicas)
 
 ## Como escolher a documentacao certa
 

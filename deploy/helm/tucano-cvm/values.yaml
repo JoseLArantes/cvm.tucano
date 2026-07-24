@@ -39,33 +39,21 @@ api:
 
 worker:
   enabled: true
-  replicaCount: 6
+  replicaCount: 1
   command:
-    - celery
-    - -A
-    - app.worker.celery_app
-    - worker
-    - --loglevel=info
-    - --concurrency=1
-    - -Ofair
-    - -Q
-    - celery
+    - sh
+    - -c
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery"
   resources: {}
   podAnnotations: {}
 
 materializationWorker:
   enabled: true
-  replicaCount: 2
+  replicaCount: 1
   command:
-    - celery
-    - -A
-    - app.worker.celery_app
-    - worker
-    - --loglevel=info
-    - --concurrency=1
-    - -Ofair
-    - -Q
-    - analise_materializacao
+    - sh
+    - -c
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Ofair -Q ${ANALISE_MATERIALIZACAO_QUEUE_NAME:-analise_materializacao}"
   resources: {}
   podAnnotations: {}
 
@@ -80,23 +68,26 @@ beat:
   podAnnotations: {}
 
 env:
-  REDIS_URL: "redis://redis.beakcloud.com:6379/0"
   CVM_BASE_URL: "https://dados.cvm.gov.br/dados"
+  DB_POOL_SIZE: "2"
+  DB_MAX_OVERFLOW: "1"
+  DB_POOL_TIMEOUT_SECONDS: "5"
+  DB_POOL_RECYCLE_SECONDS: "1800"
   LOG_LEVEL: "INFO"
-  AMBIENTE: "producao"
+  AMBIENTE: "desenvolvimento"
   ENABLE_PROMETHEUS_METRICS: "false"
-  ANOS_INICIAIS_DFP: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_ITR: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_FRE: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_FCA: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_IPE: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_VLMO: "2021,2022,2023,2024,2025"
-  ANOS_INICIAIS_CGVN: "2021,2022,2023,2024,2025"
+  ANOS_INICIAIS_DFP: ""
+  ANOS_INICIAIS_ITR: ""
+  ANOS_INICIAIS_FRE: ""
+  ANOS_INICIAIS_FCA: ""
+  ANOS_INICIAIS_IPE: ""
+  ANOS_INICIAIS_VLMO: ""
+  ANOS_INICIAIS_CGVN: ""
   INGESTION_PROMOTE_ENABLED: "true"
   INGESTION_PROVISIONAL_COMPANY_ENABLED: "false"
   INGESTION_MAX_RETRIES: "5"
   INGESTION_RETRY_BACKOFF_MAX_SECONDS: "600"
-  INGESTION_COMPANY_MISSING_MAX_RATIO: "0.01"
+  INGESTION_COMPANY_MISSING_MAX_RATIO: "0.10"
   ANALISE_MATERIALIZACAO_CHUNK_SIZE: "25"
   ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS: "1"
   ANALISE_MATERIALIZACAO_QUEUE_NAME: "analise_materializacao"
@@ -104,7 +95,49 @@ env:
   INGESTION_STAGE_BATCH_SIZE: "5000"
   INGESTION_PROMOTE_BATCH_SIZE: "5000"
   STORAGE_DIR: "data/storage"
-  BACKEND_CORS_ORIGINS: "http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com"
+  INGESTION_V2_ENABLED: "true"
+  INGESTION_V2_PROMOTE_ENABLED: "true"
+  INGESTION_DUCKDB_STAGING_ENABLED: "true"
+  CELERY_WORKER_MAX_TASKS_PER_CHILD: "1"
+  CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB: "1500000"
+  ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN: "10"
+  ANALISE_FUNDAMENTALISTA_SNAPSHOT_ENABLED: "true"
+  ANALISE_FUNDAMENTALISTA_PREWARM_ENABLED: "true"
+  ANALISE_FUNDAMENTALISTA_CACHE_ENABLED: "true"
+  ANALISE_FUNDAMENTALISTA_CACHE_TTL_SECONDS: "21600"
+  ANALISE_FUNDAMENTALISTA_RUNTIME_CACHE_TTL_SECONDS: "60"
+  ANALISE_FUNDAMENTALISTA_CACHE_LOCK_SECONDS: "120"
+  ANALISE_FUNDAMENTALISTA_CACHE_WAIT_SECONDS: "15"
+  ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS: "60"
+  UPDATES_SERVICE_ENABLED: "true"
+  UPDATES_SCANNER_STALE_AFTER_HOURS: "36"
+  INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "1"
+  BACKEND_CORS_ORIGINS: http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com,https://cvm.companhias.tucano.beakcloud.com
+  API_URL: https://cvm.tucano.beakcloud.com
+  MCP_HTTP_ENABLED: "true"
+  MCP_HTTP_REQUIRE_BEARER: "true"
+  MCP_HTTP_ALLOWED_HOSTS: "cvm.tucano.beakcloud.com,cvm.tucano.beakcloud.com:443"
+  MCP_HTTP_ALLOWED_ORIGINS: "https://cvm.tucano.beakcloud.com"
+  MCP_PROFILE: "analyst"
+  MCP_REQUIRE_TOKEN: "true"
+  MCP_MAX_ROWS: "50"
+  MCP_MAX_PERIODS: "20"
+  MCP_TOOL_TIMEOUT_SECONDS: "30"
+  MCP_INCLUDE_RAW_DEFAULT: "false"
+  PUBLIC_COMPANIES_CVM: "23264,22616,19348,4170,9512"
+  RADAR_CVM_R2_ENDPOINT_URL: "https://54f6d15a41f0acc9c00980b88502baf6.r2.cloudflarestorage.com"
+  RADAR_CVM_R2_BUCKET: "tucano-cvm"
+  RADAR_CVM_R2_REGION: "auto"
+  RADAR_CVM_ENABLED: "true"
+  RADAR_CVM_QUEUE_NAME: "celery"
+  RADAR_CVM_STORAGE_BACKEND: "r2"
+  RADAR_CVM_STORAGE_PREFIX: "radar-cvm/"
+  RADAR_CVM_PUBLIC_BASE_URL: "https://cvm.radar.tucano.beakcloud.com"
+  RADAR_CVM_RETENTION_DAYS: "90"
+  RADAR_CVM_MAX_ITEMS: "500"
+  RADAR_CVM_REQUEST_TIMEOUT_SECONDS: "30"
+  RADAR_CVM_USER_AGENT: "Radar-Informativo-Tucano-CVM/1.0"
+  RADAR_CVM_CACHE_CONTROL: "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
 
 appSecret:
   name: "cvm-secret"
@@ -112,21 +145,43 @@ appSecret:
 secretEnv: {}
 
 service:
-  type: NodePort
+  type: ClusterIP
   port: 8110
   targetPort: 8007
-  nodePort: 30110
 
-ingress:
-  enabled: false
-  className: ""
+httpProxy:
+  enabled: true
+  fqdn: "cvm.tucano.beakcloud.com"
   annotations: {}
-  hosts:
-    - host: cvm.tucano.beakcloud.com
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  tls:
+    enabled: true
+    secretName: "tucano-cvm-tls"
+    minimumProtocolVersion: "1.2"
+  responseTimeout: "60s"
+  mcpResponseTimeout: "300s"
+  retryPolicy:
+    enabled: false
+    count: 2
+    perTryTimeout: "10s"
+  loadBalancerPolicy: "RoundRobin"
+
+certManager:
+  enabled: false
+  issuerRef:
+    kind: "ClusterIssuer"
+    name: "letsencrypt-prod"
+  dnsNames: []
+
+persistence:
+  enabled: false
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteMany
+  size: 10Gi
+  mountPath: /app/data
+
+migration:
+  enabled: false
 
 nodeSelector: {}
 tolerations: []

@@ -154,6 +154,16 @@ def test_build_quality_summary_and_quality_gate(db_session: Session) -> None:
     assert message is not None
 
 
+def test_quality_gate_rejeita_member_sem_linhas_processadas() -> None:
+    status, message = enforce_quality_gate(
+        quality_summary={"row_status_counts": {}},
+        require_rows=True,
+    )
+
+    assert status == "falha"
+    assert message == "NO_ROWS_PROCESSED"
+
+
 def test_build_quality_summary_prefers_persisted_run_summary(db_session: Session) -> None:
     run = IngestionRun(
         tipo_fonte="dfp",

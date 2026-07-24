@@ -57,6 +57,14 @@ Variáveis importantes:
 - `CVM_BASE_URL`
 - `LOG_LEVEL`
 - `AMBIENTE`
+- `BACKEND_CORS_ORIGINS`
+- `MCP_PROFILE`
+- `MCP_HTTP_ENABLED`
+- `MCP_HTTP_REQUIRE_BEARER`
+- `MCP_REQUIRE_TOKEN`
+- `MCP_TOKEN`
+- `MCP_MAX_ROWS`
+- `MCP_MAX_PERIODS`
 - `ANOS_INICIAIS_DFP`
 - `ANOS_INICIAIS_ITR`
 - `ANOS_INICIAIS_FRE`
@@ -76,8 +84,26 @@ docker compose run --rm cvm_api alembic upgrade head
 docker compose run --rm cvm_api python -m pytest -q
 docker compose run --rm cvm_api ruff check .
 docker compose run --rm cvm_api mypy .
+docker compose run --rm cvm_api python -m app.cli.mcp smoke-test
 scripts/purge-local-db.sh --yes
 ```
+
+### MCP Analitico Read-Only
+
+O projeto inclui um servidor MCP local via `stdio`, voltado para ferramentas analiticas read-only. Ele reutiliza os services das APIs REST e nao executa ingestao, materializacao, repair, cancelamento ou SQL arbitrario.
+
+```bash
+docker compose run --rm -i cvm_api python -m app.cli.mcp serve
+```
+
+Para validar configuracao e listagem de ferramentas:
+
+```bash
+docker compose run --rm cvm_api python -m app.cli.mcp --help
+docker compose run --rm cvm_api python -m app.cli.mcp smoke-test
+```
+
+Em ambientes HTTP, a API pode montar o MCP na mesma instancia FastAPI em `/mcp` com `MCP_HTTP_ENABLED=true` e `MCP_HTTP_REQUIRE_BEARER=true`.
 
 ## API e autenticação
 

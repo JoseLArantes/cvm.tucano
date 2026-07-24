@@ -34,6 +34,7 @@ npm --prefix docusaurus run build
 | Analysis | `/analise` endpoints, canonical annual analysis, materialization campaigns, materialization monitoring, analysis schemas/models/services | `app/services/CONTEXT.md` |
 | Ingestion | CVM acquisition, staging, validation, identity resolution, promotion, quarantine, replay, Celery ingestion tasks, source registry | `app/services/ingestion/CONTEXT.md` |
 | Persistence | SQLAlchemy models, Alembic migrations, table contracts, portability between SQLite tests and PostgreSQL runtime | `app/models/CONTEXT.md` |
+| Radar Informativo | Coleta semântica da CVM, reconciliação temporal, fontes monitoradas, publicações e feed estático | `app/radar/CONTEXT.md` |
 | Documentation | Docusaurus docs, public API docs, frontend changelog, user-facing product text | `docusaurus/CONTEXT.md` |
 
 ## Cross-context work

@@ -1,34 +1,57 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import gerar_hash_senha
 from app.models.ingestion import (
     IngestionFile,
     IngestionFileMember,
+    IngestionPhaseExecution,
     IngestionRun,
     SourceArtifactSnapshot,
     SourceMemberSnapshot,
 )
 from app.models.usuario import Usuario
-from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateScanRun, UpdateSessionItem
+from app.updates.lifecycle import (
+    finalize_pending_update_for_run,
+    link_pending_update_to_run,
+    reconcile_pending_updates,
+)
+from app.updates.models import (
+    AcknowledgedArtifactReference,
+    PendingUpdate,
+    PendingUpdateMember,
+    UpdateScanRun,
+    UpdateSessionItem,
+)
 from app.updates.service import (
+    acknowledge_artifact_reference,
     add_session_item,
     create_scan_run,
     create_session,
     discard_update,
     get_latest_scan_run,
+    get_scanner_status_snapshot,
     remove_session_item,
     run_deep_analysis,
     run_scanner,
     trigger_update,
 )
+from app.updates.tasks import run_daily_scanner_task
+
+
+def _seed_successful_scope(db: Session, fonte: str, ano: int) -> IngestionRun:
+    run = IngestionRun(tipo_fonte=fonte, ano=ano, status="sucesso", phase="complete")
+    db.add(run)
+    db.commit()
+    return run
 
 
 @pytest.fixture
@@ -86,6 +109,7 @@ def test_scanner_detects_changes(
         "resource_content_length": "1000",
     }
     mock_run_deep_analysis.side_effect = lambda db, pending_id: db.get(PendingUpdate, pending_id)
+    _seed_successful_scope(db_session, "dfp", 2025)
 
     # Run scanner
     detected = run_scanner(db_session)
@@ -130,6 +154,7 @@ def test_scanner_does_not_flag_unknown_probe_as_artifact_changed(
         "resource_last_modified": None,
         "resource_content_length": None,
     }
+    _seed_successful_scope(db_session, "dfp", 2025)
 
     detected = run_scanner(db_session)
 
@@ -217,7 +242,7 @@ def test_scanner_cadastro_considers_both_files_before_creating_pending(
 @patch("app.updates.service.probe_remote_source")
 @patch("app.updates.service.listar_fontes")
 @patch("app.updates.service.get_settings")
-def test_scanner_marks_existing_pending_as_stale_when_probe_is_not_confirmed_change(
+def test_scanner_preserves_existing_pending_when_probe_is_inconclusive(
     mock_get_settings: MagicMock,
     mock_listar_fontes: MagicMock,
     mock_probe: MagicMock,
@@ -241,6 +266,7 @@ def test_scanner_marks_existing_pending_as_stale_when_probe_is_not_confirmed_cha
     )
     db_session.add(pending)
     db_session.commit()
+    _seed_successful_scope(db_session, "dfp", 2025)
 
     mock_probe.return_value = {
         "decision": "unknown",
@@ -251,9 +277,88 @@ def test_scanner_marks_existing_pending_as_stale_when_probe_is_not_confirmed_cha
 
     db_session.refresh(pending)
     assert detected["detected_count"] == 0
-    assert pending.status == "stale"
-    assert pending.resolved_by == "scanner"
-    assert pending.resolved_timestamp is not None
+    assert pending.status == "change_detected"
+    assert pending.resolved_by is None
+    assert pending.resolved_timestamp is None
+
+
+@patch("app.updates.service.download_file_to_disk")
+@patch("app.updates.service._head_remote_resource")
+@patch("app.updates.service.listar_fontes")
+@patch("app.updates.service.get_settings")
+def test_scanner_cadastro_confirma_conteudo_quando_head_e_inconclusivo(
+    mock_get_settings: MagicMock,
+    mock_listar_fontes: MagicMock,
+    mock_head: MagicMock,
+    mock_download: MagicMock,
+    db_session: Session,
+) -> None:
+    settings_mock = MagicMock(cvm_base_url="http://fake-cvm.gov.br", temp_dir="data/temp_updates")
+    mock_get_settings.return_value = settings_mock
+    source_mock = MagicMock(fonte="cadastro")
+    mock_listar_fontes.return_value = [source_mock]
+
+    run = IngestionRun(tipo_fonte="cadastro", ano=None, status="sucesso", phase="complete")
+    db_session.add(run)
+    db_session.flush()
+    artifact = SourceArtifactSnapshot(
+        ingestion_run_id=run.id,
+        tipo_fonte="cadastro",
+        ano=None,
+        resource_url="http://fake-cvm.gov.br/cadastro",
+        source_filename="cadastro",
+        status="sucesso",
+    )
+    db_session.add(artifact)
+    db_session.flush()
+    db_session.add_all(
+        [
+            SourceMemberSnapshot(
+                artifact_snapshot_id=artifact.id,
+                member_name="cad_cia_aberta.csv",
+                member_sha256="sha-aberta",
+                row_count=1,
+                header_hash="header-aberta",
+                header=["A"],
+                row_kind="cadastro_registro_cvm",
+                required_member=True,
+                schema_status="ok",
+                delivery_index_role="none",
+                lifecycle_status="processed",
+            ),
+            SourceMemberSnapshot(
+                artifact_snapshot_id=artifact.id,
+                member_name="cad_cia_estrang.csv",
+                member_sha256="sha-estrang",
+                row_count=1,
+                header_hash="header-estrang",
+                header=["A"],
+                row_kind="cadastro_registro_cvm",
+                required_member=True,
+                schema_status="ok",
+                delivery_index_role="none",
+                lifecycle_status="processed",
+            ),
+        ]
+    )
+    db_session.commit()
+    mock_head.return_value = {"probe_sources": ["head"]}
+    mock_download.side_effect = ["sha-aberta", "sha-estrang"]
+
+    result = run_scanner(db_session, trigger="scheduled")
+
+    assert result["coverage_status"] == "complete"
+    assert result["unchanged_count"] == 1
+    assert result["inconclusive_count"] == 0
+    assert result["items"][0]["decision_reason"] == "all_sources_matched"
+    assert all(
+        check["decision_reason"] == "content_matched:sha256"
+        for check in result["items"][0]["probe_details"]["change_summary"]["checks"]
+    )
+    persisted = get_latest_scan_run(db_session)
+    assert persisted is not None
+    assert persisted.summary is not None
+    assert persisted.summary["trigger"] == "scheduled"
 
 
 @patch("app.updates.service.download_file_to_disk")
@@ -281,6 +386,7 @@ def test_deep_analyzer_processes_members(
     db_session.commit()
 
     # Mock helpers
+    mock_download.return_value = "artifact-sha"
     mock_compute_sha.return_value = "dummy-sha-256"
     mock_detect_enc.return_value = ("utf-8", ",")
     mock_get_header.return_value = ["CNPJ_CIA", "DENOM_CIA", "VERSAO"]
@@ -411,7 +517,11 @@ def test_deep_analysis_prefers_source_member_snapshot_baseline(
         mock_zip.return_value.__enter__.return_value.namelist.return_value = ["dfp_cia_aberta_2025.csv"]
         analyzed = run_deep_analysis(db_session, pending.id)
 
-    assert analyzed.status == "ready_for_ingestion"
+    assert analyzed.status == "content_unchanged"
+    assert analyzed.content_changed is False
+    assert analyzed.recommended_action == "update_reference"
+    assert analyzed.change_summary is not None
+    assert analyzed.change_summary["recommended_action"] == "update_reference"
     members = db_session.scalars(
         select(PendingUpdateMember).where(PendingUpdateMember.pending_update_id == pending.id)
     ).all()
@@ -490,7 +600,7 @@ def test_deep_analysis_falls_back_to_ingestion_file_member_when_snapshot_absent(
         mock_zip.return_value.__enter__.return_value.namelist.return_value = ["dfp_cia_aberta_2025.csv"]
         analyzed = run_deep_analysis(db_session, pending.id)
 
-    assert analyzed.status == "ready_for_ingestion"
+    assert analyzed.status == "content_unchanged"
     member = db_session.scalar(select(PendingUpdateMember).where(PendingUpdateMember.pending_update_id == pending.id))
     assert member is not None
     assert member.change_category == "unchanged"
@@ -665,7 +775,7 @@ def test_deep_analysis_cadastro_uses_previous_snapshot_without_false_added(
 
     analyzed = run_deep_analysis(db_session, pending.id)
 
-    assert analyzed.status == "ready_for_ingestion"
+    assert analyzed.status == "content_unchanged"
     assert analyzed.change_summary is not None
     assert analyzed.change_summary["members_added"] == []
     members = db_session.scalars(
@@ -693,8 +803,11 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     
     assert task_id == "task-uuid-123"
     assert pending.status == "triggered"
+    assert pending.ingestion_task_id == "task-uuid-123"
+    assert pending.current_run_id is None
+    assert pending.current_execution_id is None
     assert pending.resolved_by == "tester"
-    assert pending.resolved_timestamp is not None
+    assert pending.resolved_timestamp is None
 
     # Discard update
     pending_discard = PendingUpdate(
@@ -709,6 +822,309 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     discarded = discard_update(db_session, pending_discard.id)
     assert discarded.status == "discarded"
     assert discarded.resolved_timestamp is not None
+
+
+def test_pending_update_running_run_remains_triggered(db_session: Session) -> None:
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/dfp.zip",
+        ingestion_task_id="task-running",
+    )
+    run = IngestionRun(
+        tipo_fonte="dfp",
+        ano=2025,
+        status="em_execucao",
+        phase="promote",
+        requested_by_task_id="task-running",
+    )
+    db_session.add_all([pending, run])
+    db_session.flush()
+
+    link_pending_update_to_run(
+        db_session,
+        pending_update_id=pending.id,
+        run=run,
+    )
+    db_session.commit()
+    result = reconcile_pending_updates(db_session, pending_update_id=pending.id)
+
+    assert result["updated"] == 0
+    assert pending.status == "triggered"
+    assert pending.current_run_id == run.id
+    assert pending.ingestion_task_id == "task-running"
+
+
+def test_pending_update_success_clears_transient_correlation(db_session: Session) -> None:
+    finished_at = datetime.now(UTC)
+    run = IngestionRun(
+        tipo_fonte="itr",
+        ano=2025,
+        status="sucesso",
+        phase="complete",
+        finished_at=finished_at,
+    )
+    pending = PendingUpdate(
+        fonte="itr",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/itr.zip",
+        ingestion_task_id="task-success",
+    )
+    db_session.add_all([run, pending])
+    db_session.flush()
+    pending.current_run_id = run.id
+
+    assert finalize_pending_update_for_run(
+        db_session,
+        pending=pending,
+        run=run,
+    ) is True
+    db_session.commit()
+
+    assert pending.status == "ingested"
+    assert pending.last_successful_run_id == run.id
+    assert pending.resolved_timestamp == finished_at
+    assert pending.current_run_id is None
+    assert pending.current_execution_id is None
+    assert pending.ingestion_task_id is None
+
+
+def test_pending_update_failure_respects_retryable(db_session: Session) -> None:
+    run = IngestionRun(
+        tipo_fonte="fca",
+        ano=2025,
+        status="falha",
+        phase="complete",
+        message="falha terminal",
+        finished_at=datetime.now(UTC),
+    )
+    pending = PendingUpdate(
+        fonte="fca",
+        ano=2025,
+        status="triggered",
+        artifact_url="https://example.test/fca.zip",
+        ingestion_task_id="task-failure",
+    )
+    db_session.add_all([run, pending])
+    db_session.flush()
+    db_session.add(
+        IngestionPhaseExecution(
+            ingestion_run_id=run.id,
+            phase="complete",
+            status="failed_final",
+            attempt=1,
+            error_retryable=True,
+        )
+    )
+    pending.current_run_id = run.id
+    db_session.flush()
+
+    assert finalize_pending_update_for_run(
+        db_session,
+        pending=pending,
+        run=run,
+    ) is True
+    db_session.commit()
+
+    assert pending.status == "ingestion_failed"
+    assert pending.last_failed_run_id == run.id
+    assert pending.retryable is True
+    assert pending.next_action == "retry_ingestion"
+    assert pending.current_run_id is None
+    assert pending.ingestion_task_id is None
+
+
+def test_reconcile_legacy_triggered_is_idempotent_and_preserves_ambiguous(
+    db_session: Session,
+) -> None:
+    successful_run = IngestionRun(
+        tipo_fonte="dfp",
+        ano=2024,
+        status="sucesso",
+        phase="complete",
+        finished_at=datetime.now(UTC),
+    )
+    ambiguous_run = IngestionRun(
+        tipo_fonte="itr",
+        ano=2024,
+        status="sucesso",
+        phase="promote",
+    )
+    db_session.add_all([successful_run, ambiguous_run])
+    db_session.flush()
+    eligible = PendingUpdate(
+        fonte="dfp",
+        ano=2024,
+        status="triggered",
+        artifact_url="https://example.test/dfp.zip",
+        last_successful_run_id=successful_run.id,
+    )
+    ambiguous = PendingUpdate(
+        fonte="itr",
+        ano=2024,
+        status="triggered",
+        artifact_url="https://example.test/itr.zip",
+        last_successful_run_id=ambiguous_run.id,
+    )
+    db_session.add_all([eligible, ambiguous])
+    db_session.commit()
+
+    first = reconcile_pending_updates(db_session)
+    second = reconcile_pending_updates(db_session)
+
+    assert first["updated"] == 1
+    assert second["updated"] == 0
+    assert eligible.status == "ingested"
+    assert eligible.last_successful_run_id == successful_run.id
+    assert eligible.current_run_id is None
+    assert ambiguous.status == "triggered"
+    assert ambiguous.resolved_timestamp is None
+
+
+def test_acknowledge_content_unchanged_updates_reference_without_ingestion(db_session: Session) -> None:
+    baseline_run = IngestionRun(tipo_fonte="cgvn", ano=2026, status="sucesso", phase="complete")
+    db_session.add(baseline_run)
+    db_session.flush()
+    baseline_file = IngestionFile(
+        ingestion_run_id=baseline_run.id,
+        source_url="https://example.test/cgvn_cia_aberta_2026.zip",
+        source_filename="cgvn_cia_aberta_2026.zip",
+        content_sha256="old-artifact-sha",
+        content_length_bytes=105000,
+        last_modified="Wed, 01 Jul 2026 10:00:00 GMT",
+        is_zip=True,
+    )
+    db_session.add(baseline_file)
+    pending = PendingUpdate(
+        fonte="cgvn",
+        ano=2026,
+        status="content_unchanged",
+        artifact_url="https://example.test/cgvn_cia_aberta_2026.zip",
+        probe_etag='"6a537c26-19b01"',
+        probe_last_modified="Wed, 15 Jul 2026 18:00:00 GMT",
+        probe_content_length=105217,
+        last_successful_run_id=baseline_run.id,
+        change_summary={
+            "content_changed": False,
+            "total_changes": 0,
+            "recommended_action": "update_reference",
+        },
+    )
+    db_session.add(pending)
+    db_session.flush()
+    db_session.add_all(
+        [
+            PendingUpdateMember(
+                pending_update_id=pending.id,
+                member_name="cgvn_cia_aberta_2026.csv",
+                previous_member_sha256="same-a",
+                current_member_sha256="same-a",
+                previous_row_count=9,
+                current_row_count=9,
+                change_category="unchanged",
+                status="unchanged",
+            ),
+            PendingUpdateMember(
+                pending_update_id=pending.id,
+                member_name="cgvn_cia_aberta_praticas_2026.csv",
+                previous_member_sha256="same-b",
+                current_member_sha256="same-b",
+                previous_row_count=486,
+                current_row_count=486,
+                change_category="unchanged",
+                status="unchanged",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    resolved, references = acknowledge_artifact_reference(db_session, pending.id, user="tester")
+
+    assert resolved.status == "reference_updated"
+    assert resolved.resolved_by == "tester"
+    assert len(references) == 1
+    assert references[0].baseline_ingestion_run_id == baseline_run.id
+    assert references[0].remote_etag == '"6a537c26-19b01"'
+    assert references[0].confirmation_method == "member_sha256"
+    assert len(references[0].member_fingerprint) == 64
+    assert baseline_file.last_modified == "Wed, 01 Jul 2026 10:00:00 GMT"
+    assert baseline_file.content_sha256 == "old-artifact-sha"
+
+
+@patch("app.updates.service.probe_remote_source")
+@patch("app.updates.service.listar_fontes")
+@patch("app.updates.service.get_settings")
+def test_scanner_uses_acknowledged_reference_without_redetecting_update(
+    mock_get_settings: MagicMock,
+    mock_listar_fontes: MagicMock,
+    mock_probe: MagicMock,
+    db_session: Session,
+) -> None:
+    source_url = "http://fake-cvm.gov.br/CIA_ABERTA/DOC/CGVN/DADOS/cgvn_cia_aberta_2026.zip"
+    settings_mock = MagicMock(cvm_base_url="http://fake-cvm.gov.br", auto_analyze_on_detect=False)
+    mock_get_settings.return_value = settings_mock
+    mock_listar_fontes.return_value = [MagicMock(fonte="cgvn")]
+
+    baseline_run = IngestionRun(tipo_fonte="cgvn", ano=2026, status="sucesso", phase="complete")
+    db_session.add(baseline_run)
+    db_session.flush()
+    db_session.add(
+        IngestionFile(
+            ingestion_run_id=baseline_run.id,
+            source_url=source_url,
+            source_filename="cgvn_cia_aberta_2026.zip",
+            content_sha256="old-artifact-sha",
+            content_length_bytes=100000,
+            is_zip=True,
+        )
+    )
+    pending = PendingUpdate(
+        fonte="cgvn",
+        ano=2026,
+        status="reference_updated",
+        artifact_url=source_url,
+        last_successful_run_id=baseline_run.id,
+    )
+    db_session.add(pending)
+    db_session.flush()
+    db_session.add(
+        AcknowledgedArtifactReference(
+            pending_update_id=pending.id,
+            baseline_ingestion_run_id=baseline_run.id,
+            fonte="cgvn",
+            ano=2026,
+            resource_url=source_url,
+            resource_key="resource-key",
+            remote_etag='"ack-etag"',
+            remote_last_modified="Wed, 15 Jul 2026 18:00:00 GMT",
+            remote_content_length=105217,
+            member_fingerprint="member-fingerprint",
+            confirmation_method="member_sha256",
+            confirmed_by="tester",
+            confirmed_at=datetime.now(UTC),
+        )
+    )
+    db_session.commit()
+    mock_probe.return_value = {
+        "decision": "changed",
+        "decision_reason": "metadata_changed:resource_etag",
+        "resource_etag": '"ack-etag"',
+        "resource_last_modified": "Wed, 15 Jul 2026 18:00:00 GMT",
+        "resource_content_length": "105217",
+        "probe_sources": ["head"],
+    }
+
+    result = run_scanner(db_session, trigger="manual")
+
+    assert result["changed_count"] == 0
+    assert result["unchanged_count"] == 1
+    assert result["detected_count"] == 0
+    assert result["items"][0]["decision_reason"] == "acknowledged_reference_matched:resource_etag"
+    assert db_session.scalar(
+        select(func.count(PendingUpdate.id)).where(PendingUpdate.fonte == "cgvn")
+    ) == 1
 
 
 def test_session_management_flow(db_session: Session) -> None:
@@ -744,6 +1160,8 @@ def test_api_scanner_endpoints(client: TestClient, auth_headers: dict[str, str],
     res = client.get("/updates/scanner/status", headers=auth_headers)
     assert res.status_code == 200
     assert res.json()["status"] == "idle"
+    assert res.json()["health_status"] == "never_run"
+    assert res.json()["schedule_status"] == "never_run"
 
     with patch("app.updates.router.run_daily_scanner_task.delay") as mock_delay:
         mock_delay.return_value = MagicMock(id="scanner-task-1")
@@ -756,9 +1174,15 @@ def test_api_scanner_endpoints(client: TestClient, auth_headers: dict[str, str],
         persisted = db_session.get(UpdateScanRun, uuid.UUID(payload["scan_run_id"]))
         assert persisted is not None
 
-    scan_run = create_scan_run(db_session)
+    scan_run = create_scan_run(db_session, trigger="scheduled")
     scan_run.status = "completed"
-    scan_run.summary = {"scanned_scopes": 1, "items": []}
+    scan_run.summary = {
+        "status": "success",
+        "trigger": "scheduled",
+        "coverage_status": "complete",
+        "scanned_scopes": 1,
+        "items": [],
+    }
     db_session.commit()
 
     res_latest = client.get("/updates/scanner/runs/latest", headers=auth_headers)
@@ -769,6 +1193,19 @@ def test_api_scanner_endpoints(client: TestClient, auth_headers: dict[str, str],
     res_detail = client.get(f"/updates/scanner/runs/{scan_run.id}", headers=auth_headers)
     assert res_detail.status_code == 200
     assert res_detail.json()["id"] == str(scan_run.id)
+
+    res_runs = client.get("/updates/scanner/runs?pagina=1&tamanho_pagina=1", headers=auth_headers)
+    assert res_runs.status_code == 200
+    assert res_runs.json()["paginacao"]["total"] >= 2
+    assert len(res_runs.json()["dados"]) == 1
+    assert res_runs.json()["dados"][0]["summary"]["trigger"] == "scheduled"
+
+    res_status = client.get("/updates/scanner/status", headers=auth_headers)
+    assert res_status.status_code == 200
+    assert res_status.json()["health_status"] == "healthy"
+    assert res_status.json()["schedule_status"] == "healthy"
+    assert res_status.json()["coverage_status"] == "complete"
+    assert res_status.json()["scanned_scopes"] == 1
 
     # 2. History
     pending = PendingUpdate(
@@ -796,6 +1233,81 @@ def test_service_create_and_get_latest_scan_run(db_session: Session) -> None:
     assert latest.id == second.id
 
 
+def test_execucao_manual_nao_mascara_agendamento_obsoleto(db_session: Session) -> None:
+    stale_at = datetime.now(UTC) - timedelta(hours=48)
+    scheduled = create_scan_run(db_session, trigger="scheduled")
+    scheduled.status = "completed"
+    scheduled.started_at = stale_at
+    scheduled.finished_at = stale_at
+    scheduled.summary = {
+        "status": "success",
+        "trigger": "scheduled",
+        "coverage_status": "complete",
+        "expected_scopes": 1,
+        "scanned_scopes": 1,
+        "items": [],
+    }
+    db_session.commit()
+
+    manual = create_scan_run(db_session, trigger="manual")
+    manual.status = "completed"
+    manual.started_at = datetime.now(UTC)
+    manual.finished_at = datetime.now(UTC)
+    manual.summary = {
+        "status": "success",
+        "trigger": "manual",
+        "coverage_status": "complete",
+        "expected_scopes": 1,
+        "scanned_scopes": 1,
+        "items": [],
+    }
+    db_session.commit()
+
+    snapshot = get_scanner_status_snapshot(db_session, stale_after_hours=36)
+
+    assert snapshot["last_scan_run_id"] == str(manual.id)
+    assert snapshot["last_scheduled_scan_run_id"] == str(scheduled.id)
+    assert snapshot["schedule_status"] == "stale"
+    assert snapshot["health_status"] == "stale"
+
+
+def test_scheduled_task_identifica_origem_e_fecha_sessao() -> None:
+    fake_db = MagicMock()
+    with (
+        patch("app.updates.tasks.SessionLocal", return_value=fake_db),
+        patch("app.updates.tasks.run_scanner", return_value={"status": "success"}) as mock_scanner,
+    ):
+        result = run_daily_scanner_task.run()
+
+    assert result == {"status": "success"}
+    mock_scanner.assert_called_once_with(fake_db, scan_run_id=None, trigger="scheduled")
+    fake_db.close.assert_called_once_with()
+
+
+def test_openapi_documenta_historico_e_saude_do_scanner(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    openapi = response.json()
+
+    assert "/updates/scanner/runs" in openapi["paths"]
+    assert "/updates/pending/{id}/acknowledge-reference" in openapi["paths"]
+    schemas = openapi["components"]["schemas"]
+    assert "UpdateScanSummarySchema" in schemas
+    assert "UpdateScanItemSchema" in schemas
+    status_schema = schemas["UpdateScannerStatusSchema"]["properties"]
+    assert "health_status" in status_schema
+    assert "schedule_status" in status_schema
+    assert "last_scheduled_scan_run_id" in status_schema
+    assert "coverage_status" in status_schema
+    pending_schema = schemas["PendingUpdateSchema"]["properties"]
+    assert "content_changed" in pending_schema
+    assert "recommended_action" in pending_schema
+    assert "`triggered`" in pending_schema["status"]["description"]
+    assert "resolução terminal" in pending_schema["resolved_timestamp"]["description"]
+    assert "limpa na resolução terminal" in pending_schema["current_run_id"]["description"]
+    assert "AcknowledgeArtifactReferenceResponseSchema" in schemas
+
+
 def test_api_pending_endpoints(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:
     pending = PendingUpdate(
         fonte="dfp",
@@ -821,8 +1333,60 @@ def test_api_pending_endpoints(client: TestClient, auth_headers: dict[str, str],
         mock_trig.return_value = "celery-task-id-abc"
         res_trig = client.post(f"/updates/pending/{pending.id}/trigger", headers=auth_headers)
         assert res_trig.status_code == 200
-        assert res_trig.json()["status"] == "triggered"
+        assert res_trig.json()["status"] == "ingestion_queued"
         assert res_trig.json()["task_id"] == "celery-task-id-abc"
+
+
+def test_api_acknowledges_reference_without_triggering_ingestion(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    db_session: Session,
+) -> None:
+    baseline_run = IngestionRun(tipo_fonte="dfp", ano=2025, status="sucesso", phase="complete")
+    db_session.add(baseline_run)
+    db_session.flush()
+    pending = PendingUpdate(
+        fonte="dfp",
+        ano=2025,
+        status="content_unchanged",
+        artifact_url="https://example.test/dfp_cia_aberta_2025.zip",
+        probe_etag='"current-etag"',
+        probe_content_length=123,
+        last_successful_run_id=baseline_run.id,
+        change_summary={"content_changed": False, "total_changes": 0},
+    )
+    db_session.add(pending)
+    db_session.flush()
+    db_session.add(
+        PendingUpdateMember(
+            pending_update_id=pending.id,
+            member_name="dfp_cia_aberta_2025.csv",
+            previous_member_sha256="same",
+            current_member_sha256="same",
+            change_category="unchanged",
+            status="unchanged",
+        )
+    )
+    db_session.commit()
+
+    summary_before = client.get("/updates/summary", headers=auth_headers)
+    assert summary_before.status_code == 200
+    assert summary_before.json()["reference_update_count"] == 1
+
+    response = client.post(
+        f"/updates/pending/{pending.id}/acknowledge-reference",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "reference_updated"
+    assert payload["ingestion_triggered"] is False
+    assert len(payload["acknowledged_references"]) == 1
+    assert payload["acknowledged_references"][0]["remote_etag"] == '"current-etag"'
+    summary_after = client.get("/updates/summary", headers=auth_headers)
+    assert summary_after.status_code == 200
+    assert summary_after.json()["reference_update_count"] == 0
 
 
 def test_api_session_endpoints(client: TestClient, auth_headers: dict[str, str], db_session: Session) -> None:

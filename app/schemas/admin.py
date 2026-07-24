@@ -46,10 +46,25 @@ class ExecucaoSincronizacaoResumo(BaseModel):
     finalizada_em: BrazilianDateTime | None = Field(
         description="Data e hora de finalização da execução, em `DD/MM/AAAA HH:MM:SS`."
     )
-    total_linhas_lidas: int = Field(description="Total de linhas lidas.")
-    total_inseridos: int = Field(description="Total de registros inseridos.")
-    total_atualizados: int = Field(description="Total de registros atualizados.")
-    total_inalterados: int = Field(description="Total de registros sem alteração de negócio.")
+    total_linhas_lidas: int = Field(description="Total de linhas de dados lidas nos arquivos da execução.")
+    total_inseridos: int = Field(
+        description=(
+            "Total de linhas válidas que criaram um registro ou vínculo de domínio inexistente. "
+            "Não representa simplesmente o volume processado por um upsert."
+        )
+    )
+    total_atualizados: int = Field(
+        description=(
+            "Total de linhas válidas associadas a registros existentes que modificaram ao menos "
+            "um campo de negócio. Mudanças apenas de proveniência não entram neste total."
+        )
+    )
+    total_inalterados: int = Field(
+        description=(
+            "Total de linhas válidas já representadas no domínio e sem alteração de negócio. "
+            "O arquivo remoto pode ter mudado em bytes ou metadados mesmo quando este total é positivo."
+        )
+    )
     total_rejeitados: int = Field(description="Total de registros enviados para quarentena.")
     analise_arquivos: list[AnaliseArquivo] | None = Field(
         default=None, description="Análise dos arquivos processados nesta execução."
@@ -137,10 +152,19 @@ class ExecucaoSincronizacaoDetalhe(BaseModel):
     )
     iniciada_em: BrazilianDateTime = Field(description="Data e hora de início, em `DD/MM/AAAA HH:MM:SS`.")
     finalizada_em: BrazilianDateTime | None = Field(description="Data e hora de fim, em `DD/MM/AAAA HH:MM:SS`.")
-    total_linhas_lidas: int = Field(description="Total de linhas lidas.")
-    total_inseridos: int = Field(description="Total de inserções.")
-    total_atualizados: int = Field(description="Total de atualizações.")
-    total_inalterados: int = Field(description="Total de inalterados.")
+    total_linhas_lidas: int = Field(description="Total de linhas de dados lidas nos arquivos da execução.")
+    total_inseridos: int = Field(
+        description=(
+            "Linhas válidas que criaram registro ou vínculo de domínio inexistente; "
+            "não é o total processado pelo upsert."
+        )
+    )
+    total_atualizados: int = Field(
+        description="Linhas válidas que modificaram campos de negócio de registros existentes."
+    )
+    total_inalterados: int = Field(
+        description="Linhas válidas reprocessadas sem alteração de negócio; proveniência técnica não conta como mudança."
+    )
     total_rejeitados: int = Field(description="Total rejeitado para quarentena.")
     mensagem_erro: str | None = Field(description="Mensagem de erro in caso de falha.")
     analise_arquivos: list[AnaliseArquivo] | None = Field(
@@ -502,6 +526,34 @@ class ListaIngestionRunMembers(BaseModel):
     paginacao: Paginacao = Field(description="Metadados de paginacao da listagem.")
 
 
+class IngestionRecovery(BaseModel):
+    eligible: bool = Field(description="Indica se o estado atual da run autoriza recovery e existe uma fonte executavel.")
+    strategy: str | None = Field(
+        default=None,
+        description="Estrategia executavel atual: `replay_staged_rows` ou `rerun_member_execution`.",
+    )
+    reason_code: str = Field(
+        description="Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, `RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`."
+    )
+
+
+class IngestionFailureAcknowledgementRequest(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    reason: str = Field(
+        min_length=3,
+        max_length=2000,
+        description="Conclusao operacional da investigacao que permite retirar a falha da fila de acao.",
+    )
+
+
+class IngestionFailureAcknowledgement(BaseModel):
+    acknowledged_at: BrazilianDateTime = Field(description="Momento em que a falha foi reconhecida.")
+    acknowledged_by: str = Field(description="Ator autenticado que reconheceu a falha.")
+    reason: str = Field(description="Conclusao operacional informada pelo ator.")
+    failure_key: str = Field(description="Identificador da ocorrencia de falha reconhecida.")
+
+
 class IngestionOperationRunPreview(BaseModel):
     id: str = Field(description="ID da run.")
     execucao_sincronizacao_id: str | None = Field(default=None, description="Execucao correlata, quando houver.")
@@ -511,6 +563,11 @@ class IngestionOperationRunPreview(BaseModel):
     phase: str = Field(description="Fase persistida da run.")
     state: str = Field(description="Estado operacional agregado desta run.")
     next_action: str | None = Field(default=None, description="Acao recomendada para consumidor desacoplado.")
+    recovery: IngestionRecovery = Field(description="Elegibilidade e estrategia executavel de recuperacao da run.")
+    failure_acknowledgement: IngestionFailureAcknowledgement | None = Field(
+        default=None,
+        description="Reconhecimento da falha atual, quando a investigacao ja foi encerrada.",
+    )
     liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
     blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
 
@@ -533,6 +590,54 @@ class IngestionOperationsResumo(BaseModel):
     recoverable_runs: list[IngestionOperationRunPreview] = Field(
         description="Preview das runs que hoje pedem `recover` ou outra acao administrativa equivalente."
     )
+    revision: int = Field(default=0, description="Revisao monotona do snapshot observada pelo consumidor.")
+    poll_after_ms: int = Field(default=5000, description="Intervalo sugerido para polling quando SSE nao estiver disponivel.")
+    action_counts: dict[str, int] = Field(default_factory=dict, description="Contagem global por proxima acao de negocio.")
+    waiting_for_operator_count: int = Field(default=0, description="Runs aguardando decisao ou continuidade explicita.")
+    oldest_action_required_at: BrazilianDateTime | None = Field(default=None, description="Timestamp do item que espera acao ha mais tempo.")
+    queue_health: list[dict[str, Any]] = Field(default_factory=list, description="Capacidade e backlog observados por fila Celery.")
+    active_runs_total: int = Field(default=0, description="Total real de runs ativas, antes do preview.")
+    recoverable_runs_total: int = Field(default=0, description="Total real de runs recuperaveis, antes do preview.")
+    previews_truncated: bool = Field(default=False, description="Indica que algum preview foi truncado.")
+    aggregate_progress: dict[str, int] = Field(default_factory=dict, description="Contadores agregados de progresso das runs.")
+
+
+class IngestionScopeRequest(BaseModel):
+    fonte: str = Field(description="Fonte CVM do escopo, por exemplo `dfp` ou `itr`.")
+    ano: int | None = Field(default=None, ge=2003, description="Ano da fonte anual; nulo apenas para cadastro.")
+
+
+class IngestionDispatchPlanRequest(BaseModel):
+    scopes: list[IngestionScopeRequest] = Field(min_length=1, max_length=50)
+    strategy: str = Field(default="direct", pattern="^(direct|two_step)$")
+    force_reimport: bool = False
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class IngestionDispatchPlanResponse(BaseModel):
+    plan_token: str
+    expires_at: BrazilianDateTime
+    valid_scopes: list[dict[str, Any]]
+    invalid_scopes: list[dict[str, Any]]
+    dependencies: list[dict[str, Any]] = Field(default_factory=list)
+    conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    materialization_gate_impact: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestionDispatchRequest(IngestionDispatchPlanRequest):
+    plan_token: str = Field(min_length=16)
+
+
+class IngestionDispatchResponse(BaseModel):
+    status: str
+    work_items: list[dict[str, Any]]
+    idempotent_replay: bool = False
+
+
+class IngestionWorkItemList(BaseModel):
+    dados: list[dict[str, Any]]
+    paginacao: Paginacao
 
 
 class IngestionRunResumo(BaseModel):
@@ -810,9 +915,16 @@ class IngestionRunResumo(BaseModel):
     next_action: str | None = Field(
         default=None,
         description=(
-            "Proxima acao recomendada para consumidor desacoplado: `wait`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
-            "`recover` pode aparecer tanto em estado `stale` quanto em falha marcada como recuperavel pelo recovery sweep."
+            "Proxima acao recomendada para consumidor desacoplado: `wait`, `start_ingestion`, `recover`, `inspect_error`, `inspect_quarantine` ou `none`. "
+            "`recover` aparece quando `recovery.eligible=true`, inclusive para um member aguardando retomada apos falha do ZIP pai; em falhas sem fonte reaplicavel a acao e `inspect_error`."
         ),
+    )
+    recovery: IngestionRecovery = Field(
+        description="Elegibilidade, estrategia e motivo da avaliacao de recovery. Clientes devem usar este campo antes de oferecer o comando de recovery."
+    )
+    failure_acknowledgement: IngestionFailureAcknowledgement | None = Field(
+        default=None,
+        description="Reconhecimento auditavel da falha atual. Quando presente, `next_action` deixa de ser `inspect_error`.",
     )
     links: dict[str, str] | None = Field(
         default=None,

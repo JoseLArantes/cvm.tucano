@@ -12,6 +12,7 @@ from app.api.routers.fre import router as fre_router
 from app.api.routers.health import router as health_router
 from app.api.routers.ipe import router as ipe_router
 from app.api.routers.mestre import router as mestre_router
+from app.api.routers.public_analise import router as public_analise_router
 from app.api.routers.usuarios import router as usuarios_router
 from app.api.routers.vlmo import router as vlmo_router
 from app.updates.router import router as updates_router
@@ -19,6 +20,7 @@ from app.updates.router import router as updates_router
 public_router = APIRouter()
 public_router.include_router(auth_router, tags=["auth"])
 public_router.include_router(health_router, tags=["health"])
+public_router.include_router(public_analise_router, tags=["public-analise"])
 
 protected_router = APIRouter()
 protected_router.include_router(analise_router, tags=["analise"])

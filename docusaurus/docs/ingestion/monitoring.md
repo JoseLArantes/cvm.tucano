@@ -237,12 +237,47 @@ Uso recomendado:
 - paineis de NOC;
 - alertas de stale, gate e backlog.
 
+## Contratos de controle de ingestao
+
+### Stream de eventos SSE
+
+`GET /ingestion/events/stream` entrega eventos `text/event-stream` autenticados com
+o mesmo bearer usado pela superfície de ingestão. O endpoint aceita
+`Last-Event-ID`, `cursor` ou `since_revision` (apenas um por conexão) e
+`scope=fonte:ano` para limitar um escopo operacional real.
+
+Os tipos estáveis são `ingestion.operations.updated`, `ingestion.run.updated`,
+`ingestion.work_item.updated`, `ingestion.member.updated`,
+`ingestion.queue.updated`, `ingestion.materialization.updated` e `heartbeat`.
+Cada payload inclui `event_id`, `revision`, `occurred_at`, `entity_type`,
+`entity_id`, `reason_code` e `data`. O SSE é uma notificação compacta de
+invalidação; detalhes autoritativos permanecem nos endpoints REST.
+
+Se o pool de banco estiver temporariamente saturado, a conexão não é encerrada:
+o stream envia `heartbeat` com `reason_code=DATABASE_POOL_EXHAUSTED` e
+`data.retry_after_seconds`, depois tenta novamente. Clientes devem manter a
+conexão e usar o polling REST apenas como contingência.
+
+Nas chamadas REST, saturação residual do pool retorna `503` com
+`detail.reason_code=DATABASE_POOL_EXHAUSTED`, `detail.retryable=true` e
+`Retry-After: 1`. A autenticação não mantém uma conexão reservada durante a
+vida do SSE nem durante operações externas como a inspeção Celery.
+
+`GET /ingestion/work-items` entrega uma linha por escopo fonte/ano, correlacionando atualização, execução administrativa, run técnica, resultado, próxima transição e `allowed_actions`. A lista aceita filtros por estado, ação, fonte, ano, origem, datas, quarentena e drift, além de paginação e ordenação no servidor. Use `GET /ingestion/work-items/{id}` para detalhe e `GET /ingestion/work-items/{id}/events` para a timeline cursorizada.
+
+`GET /ingestion/scopes` consolida cobertura por fonte e ano sem N+1: baseline, última run, members esperados, atualização pendente, trabalho ativo, quarentena, estado de cobertura e próxima ação. `GET /ingestion/runs/{run_id}/completion-evidence` separa members processados e reutilizados, escrita canônica, reconcile, quarentena, drift e contadores de promoção. `GET /ingestion/quarentena/grupos` agrega a fila por motivo, fonte, ano, arquivo, row kind ou reparabilidade.
+
+`POST /ingestion/dispatch/plan` valida escopos e devolve `plan_token` de validade curta, conflitos, possibilidade de reuso por SHA-256 e impacto no gate de materialização. `POST /ingestion/dispatch` confirma o mesmo conjunto com `plan_token` e o header obrigatório `Idempotency-Key`. A resposta é persistida por ator/operação/chave durante 24h; chave repetida com payload diferente retorna `409`. `force_reimport=true` exige `reason` e gera auditoria persistida.
+
+`GET /ingestion/operations` também informa `revision`, `poll_after_ms`, `action_counts`, `waiting_for_operator_count`, progresso agregado, totais reais, truncamento de preview e `queue_health[]`. Cada fila inclui workers observados, slots ocupados, tasks ativas/reservadas/agendadas, backlog e estado `ready`, `paused` ou `without_worker`.
+
 ## Interpretacao de `next_action`
 
 | Valor | Significado |
 | --- | --- |
 | `wait` | run em andamento ou aguardando continuidade normal |
-| `recover` | run stale ou falha recuperavel |
+| `start_ingestion` | pre-processamento concluido; use a execucao correlata para iniciar a fase 2 |
+| `recover` | run stale, falha recuperavel ou member aguardando retomada apos falha do ZIP pai, desde que possua fonte executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |
 | `none` | sem acao sugerida |
@@ -253,6 +288,39 @@ O sistema executa recovery sweep sobre fases stale.
 
 Efeitos esperados:
 
-- uma run stale pode continuar em `state=stale` e `next_action=recover`;
-- uma run pode sair de stale para `state=failed`, mas manter `last_error.retryable=true` e `next_action=recover`;
+- uma run stale so usa `next_action=recover` quando `recovery.eligible=true`;
+- uma run pode sair de stale para `state=failed` e manter `last_error.retryable=true` apenas quando houver staging reaplicavel ou execucao de member correlata;
+- sem uma estrategia executavel, `recovery` retorna `{ "eligible": false, "strategy": null, "reason_code": "NO_RECOVERY_SOURCE" }`, `next_action=inspect_error` e a run nao entra em `recoverable_runs`;
+- `recovery.eligible` representa autorizacao no estado atual, nao apenas existencia historica de uma fonte: runs concluidas usam `RUN_ALREADY_COMPLETED` e falhas nao retentaveis usam `NON_RETRYABLE_FAILURE`;
+- processamento de member que nao le nenhuma linha termina como `falha` com mensagem `NO_ROWS_PROCESSED`, em vez de sucesso vazio;
+- runs terminais nao bloqueiam novo dispatch do mesmo escopo, e o work item oferece `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, sem exigir limpeza de filas ou staging para liberar a nova execucao;
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
+
+`POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
+
+Quando a estrategia for `rerun_member_execution`, o comando agenda uma task na fila de ingestao e responde `status=agendada`; ele nao executa o processamento pesado dentro da requisicao HTTP.
+
+Se a publicacao dessa task falhar, inclusive por indisponibilidade do result backend Celery, a run e a execucao filha terminam em `falha`. A run recebe uma fase `failed_final` com `error_retryable=false`, passa a expor `recovery.reason_code=NON_RETRYABLE_FAILURE` e deixa imediatamente de `recoverable_runs`. A resposta do comando e `503` com `reason_code=RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`. O backend nao limpa filas nem tenta anunciar um recovery que nao foi publicado. Runs antigas cuja mensagem persistida começa com `Falha ao agendar recovery de member:` recebem a mesma classificação terminal durante a leitura, mesmo que uma fase anterior ainda esteja marcada como retentável.
+
+## Encerramento de falhas investigadas
+
+`POST /ingestion/runs/{run_id}/acknowledge-failure` encerra uma pendencia `inspect_error` depois da investigacao. O payload exige:
+
+```json
+{
+  "reason": "Falha de infraestrutura confirmada; novo dispatch sera criado."
+}
+```
+
+A operacao nao apaga run, fases, staging, quarentena, filas ou dados promovidos. Ela grava uma auditoria imutavel com ator, motivo e uma chave da ocorrencia da falha. A resposta e `failure_acknowledgement` com `acknowledged_at`, `acknowledged_by`, `reason` e `failure_key`.
+
+Depois do reconhecimento:
+
+- a run preserva `state=failed` e `last_error` para historico;
+- `next_action` passa de `inspect_error` para `none`;
+- o work item deixa de aparecer em `GET /ingestion/work-items?next_action=inspect_error`;
+- `allowed_actions[]` troca `inspect_error` e `acknowledge_failure` por `inspect`, mantendo `start_ingestion` para um novo dispatch equivalente;
+- repeticao do comando e idempotente para a mesma ocorrencia;
+- uma falha posterior na mesma run possui outra `failure_key` e exige novo reconhecimento.
+
+Use `acknowledge-failure` para limpar a fila de atencao sem perda de evidencia. `cleanup-transient-state` tem outra finalidade: remove estado transitorio quando uma reconstrução administrativa exigir essa limpeza.

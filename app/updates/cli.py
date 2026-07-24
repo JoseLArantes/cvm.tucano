@@ -5,15 +5,18 @@ import sys
 import uuid
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.services.normalizacao import datetime_para_string_br
 from app.updates.models import PendingUpdate, PendingUpdateMember, UpdateSession, UpdateSessionItem
 from app.updates.service import (
+    acknowledge_artifact_reference,
     add_session_item,
     create_session,
     discard_update,
+    get_scanner_status_snapshot,
     run_deep_analysis,
     run_scanner,
     trigger_session,
@@ -63,6 +66,12 @@ def parse_args() -> argparse.Namespace:
     
     trigger_p = pending_sub.add_parser("trigger", help="Trigger ingestion for a pending update")
     trigger_p.add_argument("id", type=str, help="Pending Update UUID")
+
+    acknowledge_p = pending_sub.add_parser(
+        "acknowledge-reference",
+        help="Acknowledge remote metadata for content-equivalent artifacts",
+    )
+    acknowledge_p.add_argument("id", type=str, help="Pending Update UUID")
     
     discard_p = pending_sub.add_parser("discard", help="Discard a pending update")
     discard_p.add_argument("id", type=str, help="Pending Update UUID")
@@ -96,16 +105,31 @@ def main() -> int:
             if args.subcommand == "run":
                 print("Running updates scanner...")
                 result = run_scanner(db)
-                detected = result.get("detected_updates", [])
-                print(f"Scanner run complete. Detected {len(detected)} new updates.")
-                for update_item in detected:
-                    print(f" - [{update_item.fonte}] Year: {update_item.ano} | URL: {update_item.artifact_url}")
+                print(
+                    "Scanner run complete. "
+                    f"Checked {result.get('scanned_scopes', 0)} scopes, "
+                    f"detected {result.get('detected_count', 0)} updates, "
+                    f"coverage={result.get('coverage_status', 'unknown')}."
+                )
             
             elif args.subcommand == "status":
-                stmt = select(func.max(PendingUpdate.last_probe_timestamp))
-                last_run = db.scalar(stmt)
-                print("Scanner status: IDLE")
-                print(f"Last Probe Run: {datetime_para_string_br(last_run) if last_run else 'Never'}")
+                settings = get_settings()
+                scanner_status = get_scanner_status_snapshot(
+                    db,
+                    stale_after_hours=settings.updates_scanner_stale_after_hours,
+                    scanner_enabled=settings.updates_service_enabled,
+                    schedule_enabled=settings.updates_service_enabled and not settings.auto_trigger_updates,
+                )
+                print(f"Scanner status: {str(scanner_status['health_status']).upper()}")
+                print(f"Schedule status: {str(scanner_status['schedule_status']).upper()}")
+                last_run = scanner_status.get("last_run")
+                print(f"Last Scan Run: {datetime_para_string_br(last_run) if last_run else 'Never'}")
+                print(
+                    f"Coverage: {scanner_status.get('coverage_status') or 'unknown'} | "
+                    f"Scopes: {scanner_status.get('scanned_scopes', 0)} | "
+                    f"Inconclusive: {scanner_status.get('inconclusive_count', 0)} | "
+                    f"Errors: {scanner_status.get('error_count', 0)}"
+                )
 
         elif args.command == "pending":
             if args.subcommand == "list":
@@ -161,6 +185,14 @@ def main() -> int:
                 print(f"Triggering ingestion for update {update_id}...")
                 task_id = trigger_update(db, update_id, user="cli")
                 print(f"Successfully triggered. Celery Ingestion Task ID: {task_id}")
+
+            elif args.subcommand == "acknowledge-reference":
+                update_id = uuid.UUID(args.id)
+                pending_reference, references = acknowledge_artifact_reference(db, update_id, user="cli")
+                print(
+                    f"PendingUpdate {pending_reference.id} marked as {pending_reference.status}; "
+                    f"acknowledged {len(references)} remote reference(s) without ingestion."
+                )
 
             elif args.subcommand == "discard":
                 update_id = uuid.UUID(args.id)
