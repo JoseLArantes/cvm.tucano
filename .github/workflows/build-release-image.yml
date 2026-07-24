@@ -3,22 +3,83 @@ name: Build Release Image
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release to build
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-image-${{ github.event.release.tag_name }}
+  group: release-image-${{ github.event.release.tag_name || inputs.version }}
   cancel-in-progress: false
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          release="$(gh release view "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json databaseId,isDraft,isPrerelease,name,tagName,targetCommitish,url)"
+
+          is_draft="$(jq -r '.isDraft' <<<"${release}")"
+          if [[ "${is_draft}" == "true" && "${EVENT_NAME}" != "workflow_dispatch" ]]; then
+            echo "Draft releases can only be built with workflow_dispatch."
+            exit 1
+          fi
+
+          resolved_tag="$(jq -r '.tagName' <<<"${release}")"
+          test -n "${resolved_tag}" || { echo "Release tag could not be resolved."; exit 1; }
+          release_id="$(jq -r '.databaseId' <<<"${release}")"
+          release_name="$(jq -r '.name // .tagName' <<<"${release}")"
+          release_url="$(jq -r '.url' <<<"${release}")"
+          is_prerelease="$(jq -r '.isPrerelease' <<<"${release}")"
+
+          checkout_ref="${resolved_tag}"
+          image_tag="${resolved_tag}"
+          if [[ "${is_draft}" == "true" ]]; then
+            target_commitish="$(jq -r '.targetCommitish' <<<"${release}")"
+            if [[ -z "${target_commitish}" || "${target_commitish}" == "null" ]]; then
+              echo "Draft release target could not be resolved."
+              exit 1
+            fi
+            checkout_ref="$(gh api \
+              --method GET \
+              "repos/${GITHUB_REPOSITORY}/commits" \
+              -f "sha=${target_commitish}" \
+              -f per_page=1 \
+              --jq '.[0].sha')"
+            test -n "${checkout_ref}" || { echo "Draft release commit could not be resolved."; exit 1; }
+            image_tag="rc-${resolved_tag}"
+          fi
+
+          echo "checkout_ref=${checkout_ref}" >> "${GITHUB_OUTPUT}"
+          echo "image_tag=${image_tag}" >> "${GITHUB_OUTPUT}"
+          echo "is_draft=${is_draft}" >> "${GITHUB_OUTPUT}"
+          echo "is_prerelease=${is_prerelease}" >> "${GITHUB_OUTPUT}"
+          echo "release_id=${release_id}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=${release_name}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${resolved_tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_url=${release_url}" >> "${GITHUB_OUTPUT}"
+
       - name: Checkout release
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.release.tag_name }}
+          ref: ${{ steps.release.outputs.checkout_ref }}
+
+      - name: Capture source revision
+        id: source
+        run: echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -34,8 +95,64 @@ jobs:
           test -n "${REGISTRY_PASS}" || { echo "REGISTRY_PASS is not configured."; exit 1; }
 
       - name: Build and push release image
+        id: build
         env:
           REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
           REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
           REGISTRY_PASS: ${{ secrets.REGISTRY_PASS }}
-        run: ./build_and_push.sh "${{ github.event.release.tag_name }}"
+        run: ./build_and_push.sh "${{ steps.release.outputs.image_tag }}"
+
+      - name: Publish workflow summary
+        if: always()
+        env:
+          REGISTRY_URL: ${{ secrets.REGISTRY_URL }}
+          IMAGE_NAME: tucano-cvm
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_NAME: ${{ steps.release.outputs.release_name }}
+          RELEASE_TAG: ${{ steps.release.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          IS_DRAFT: ${{ steps.release.outputs.is_draft }}
+          IS_PRERELEASE: ${{ steps.release.outputs.is_prerelease }}
+          COMMIT_SHA: ${{ steps.source.outputs.commit_sha }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          registry="${REGISTRY_URL#http://}"
+          registry="${registry#https://}"
+          registry="${registry%/}"
+          image_reference="${registry}/${IMAGE_NAME}:${IMAGE_TAG}"
+
+          if [[ "${BUILD_OUTCOME}" == "success" ]]; then
+            status="✅ Published"
+          else
+            status="❌ ${BUILD_OUTCOME:-failed}"
+          fi
+
+          {
+            echo "# 🚀 Tucano CVM container build"
+            echo
+            echo "> ${status}"
+            echo
+            echo "| Detail | Value |"
+            echo "| --- | --- |"
+            echo "| Image | \`${image_reference}\` |"
+            echo "| Release | [${RELEASE_NAME:-Unavailable}](${RELEASE_URL:-${RUN_URL}}) |"
+            echo "| Release ID | \`${RELEASE_ID:-Unavailable}\` |"
+            echo "| Release tag | \`${RELEASE_TAG:-Unavailable}\` |"
+            echo "| Image tag | \`${IMAGE_TAG:-Unavailable}\` |"
+            echo "| Draft | \`${IS_DRAFT:-Unavailable}\` |"
+            echo "| Prerelease | \`${IS_PRERELEASE:-Unavailable}\` |"
+            echo "| Source commit | \`${COMMIT_SHA:-Unavailable}\` |"
+            echo "| Trigger | \`${EVENT_NAME}\` |"
+            echo "| Started by | \`${ACTOR}\` |"
+            echo "| Workflow run | [Open run](${RUN_URL}) |"
+            echo
+            echo "## Pull this image"
+            echo
+            echo "\`\`\`bash"
+            echo "docker pull ${image_reference}"
+            echo "\`\`\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
