@@ -1,0 +1,7 @@
+*
+!pyproject.toml
+!app/
+!app/**/*.py
+!alembic.ini
+!alembic/
+!alembic/**/*.py
