@@ -3,7 +3,7 @@ services:
     build:
       context: .
       target: development
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${WORKER_CONCURRENCY:-1} -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
     env_file:
       - .env
     mem_limit: ${WORKER_MEM_LIMIT:-4g}
@@ -21,7 +21,7 @@ services:
     build:
       context: .
       target: development
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=3 -Ofair -Q analise_materializacao
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${ANALISE_MATERIALIZACAO_WORKER_CONCURRENCY:-3} -Ofair -Q analise_materializacao
     env_file:
       - .env
     mem_limit: ${ANALISE_MATERIALIZACAO_WORKER_MEM_LIMIT:-2g}

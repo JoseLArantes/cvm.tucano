@@ -3,7 +3,7 @@ from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from kombu import Exchange, Queue
+from kombu import Exchange, Queue  # type: ignore[attr-defined]
 
 from app.core.config import get_settings
 
@@ -30,9 +30,9 @@ queue_names = (
     settings.radar_cvm_queue_name,
 )
 celery_app.conf.task_queues = tuple(
-    Queue(
+    Queue(  # type: ignore[no-untyped-call]
         queue_name,
-        Exchange(queue_name, type="direct"),
+        Exchange(queue_name, type="direct"),  # type: ignore[no-untyped-call]
         routing_key=queue_name,
     )
     for queue_name in dict.fromkeys(queue_names)

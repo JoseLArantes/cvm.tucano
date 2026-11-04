@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, cast
@@ -29,9 +30,25 @@ STATUS_PROVISIONAL_CREATED = "provisional_created"
 def _session_cache(db: Session) -> Any:
     return cast(Any, db)
 
+@dataclass(frozen=True)
+class CompanhiaCacheEntry:
+    id: UUID
+    cnpj_companhia: str | None
+    codigo_cvm: int | None
+
+
+_PROCESS_COMPANHIA_CACHE_TS: float = 0.0
+_PROCESS_COMPANHIA_BY_CNPJ: dict[str, CompanhiaCacheEntry] = {}
+_PROCESS_COMPANHIA_BY_CODIGO: dict[int, CompanhiaCacheEntry] = {}
+_PROCESS_CACHE_TTL_SECONDS: float = 900.0  # 15 minutes
+
+
 # Session-scoped caching helper functions for company resolution
 def limpar_caches_resolver() -> None:
-    pass
+    global _PROCESS_COMPANHIA_CACHE_TS, _PROCESS_COMPANHIA_BY_CNPJ, _PROCESS_COMPANHIA_BY_CODIGO
+    _PROCESS_COMPANHIA_CACHE_TS = 0.0
+    _PROCESS_COMPANHIA_BY_CNPJ = {}
+    _PROCESS_COMPANHIA_BY_CODIGO = {}
 
 def _ensure_identifiers_loaded(db: Session) -> None:
     if getattr(db, "_identifiers_loaded", False):
@@ -66,12 +83,25 @@ def _ensure_repair_rules_loaded(db: Session) -> None:
     )
 
 def _ensure_companhias_loaded(db: Session) -> None:
+    global _PROCESS_COMPANHIA_CACHE_TS, _PROCESS_COMPANHIA_BY_CNPJ, _PROCESS_COMPANHIA_BY_CODIGO
     if hasattr(db, "_companhia_by_cnpj_cache"):
         return
-    companhias = db.execute(select(Companhia)).scalars().all()
+    agora_ts = time.monotonic()
+    if agora_ts - _PROCESS_COMPANHIA_CACHE_TS < _PROCESS_CACHE_TTL_SECONDS and _PROCESS_COMPANHIA_BY_CNPJ:
+        session_cache = _session_cache(db)
+        session_cache._companhia_by_cnpj_cache = _PROCESS_COMPANHIA_BY_CNPJ
+        session_cache._companhia_by_codigo_cache = _PROCESS_COMPANHIA_BY_CODIGO
+        return
+
+    rows = db.execute(select(Companhia.id, Companhia.cnpj_companhia, Companhia.codigo_cvm)).all()
+    entries = [CompanhiaCacheEntry(id=row[0], cnpj_companhia=row[1], codigo_cvm=row[2]) for row in rows]
+    _PROCESS_COMPANHIA_BY_CNPJ = {c.cnpj_companhia: c for c in entries if c.cnpj_companhia}
+    _PROCESS_COMPANHIA_BY_CODIGO = {c.codigo_cvm: c for c in entries if c.codigo_cvm is not None}
+    _PROCESS_COMPANHIA_CACHE_TS = agora_ts
+
     session_cache = _session_cache(db)
-    session_cache._companhia_by_cnpj_cache = {c.cnpj_companhia: c for c in companhias if c.cnpj_companhia}
-    session_cache._companhia_by_codigo_cache = {c.codigo_cvm: c for c in companhias if c.codigo_cvm is not None}
+    session_cache._companhia_by_cnpj_cache = _PROCESS_COMPANHIA_BY_CNPJ
+    session_cache._companhia_by_codigo_cache = _PROCESS_COMPANHIA_BY_CODIGO
 
 
 

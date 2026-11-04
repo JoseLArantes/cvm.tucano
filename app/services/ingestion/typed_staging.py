@@ -19,6 +19,7 @@ from app.services.normalizacao import (
     normalizar_inteiro,
     normalizar_texto,
 )
+from app.services.sincronizacao_financeiro import gerar_chave_negocio_demonstracao
 
 _STAGE_COLUMNS = [
     "id",
@@ -31,6 +32,7 @@ _STAGE_COLUMNS = [
     "linha_origem",
     "normalized_hash",
     "hash_origem",
+    "chave_negocio",
     "companhia_id",
     "natural_key",
     "tipo_formulario",
@@ -120,6 +122,8 @@ def _normalize_stage_row(
         "linha_origem": normalizar_inteiro(row.get("linha_origem")) or 0,
         "normalized_hash": row["normalized_hash"],
         "hash_origem": row.get("hash_origem") or row["normalized_hash"],
+        "chave_negocio": normalizar_texto(row.get("chave_negocio"))
+        or (gerar_chave_negocio_demonstracao(row) if row.get("row_kind") == "demonstracao_financeira" else None),
         "companhia_id": _parse_uuid(row.get("companhia_id")),
         "natural_key": _parse_json(row.get("natural_key")),
         "tipo_formulario": normalizar_texto(row.get("tipo_formulario")),

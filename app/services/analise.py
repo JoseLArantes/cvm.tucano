@@ -3176,6 +3176,7 @@ def _remuneracao_yoy(db: Session, companhia: Companhia) -> tuple[int | None, Dec
     _, previous_total = rows[-2]
     if current_year is None or current_total is None or previous_total in (None, 0):
         return None, None
+    assert current_total is not None and previous_total is not None
     return int(current_year), (Decimal(current_total) - Decimal(previous_total)) / abs(Decimal(previous_total))
 
 
@@ -6840,14 +6841,15 @@ def materializar_analise_companhia(
     db.flush()
 
     try:
-        if not all_knowledge_dates:
+        if not all_knowledge_dates or not execution_knowledge_dates:
             execucao.status = "success"
-            execucao.coverage_complete = False
+            execucao.coverage_complete = latest_execucao.coverage_complete if latest_execucao else False
             execucao.finished_at = datetime.now(UTC)
             execucao.updated_at = execucao.finished_at
             execucao.summary = {
                 "mode": materialization_mode,
                 "invalidated_from": effective_invalidated_from.isoformat() if effective_invalidated_from is not None else None,
+                "skipped_reason": "NO_KNOWLEDGE_DATES" if not all_knowledge_dates else "NO_NEW_KNOWLEDGE_DATES",
                 "knowledge_dates": 0,
                 "window_total_knowledge_dates": 0,
                 "window_processed_knowledge_dates": 0,

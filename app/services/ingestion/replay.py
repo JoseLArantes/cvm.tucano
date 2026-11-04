@@ -39,6 +39,14 @@ from app.services.ingestion.validation import (
 
 def _build_header_map_for_run(db: Session, *, run_id: Any) -> dict[Any, Any]:
     header_map: dict[Any, Any] = {}
+    run = db.get(IngestionRun, run_id) if run_id else None
+    if run is not None and run.tipo_fonte and run.ano is not None:
+        from app.worker.tasks import _seed_member_reprocess_header_map
+        try:
+            header_map.update(_seed_member_reprocess_header_map(db, tipo_fonte=run.tipo_fonte, ano=run.ano))
+        except Exception:
+            pass
+
     rows = list(
         db.execute(
             select(IngestionRow).where(

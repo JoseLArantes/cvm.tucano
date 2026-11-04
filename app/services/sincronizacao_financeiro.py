@@ -27,6 +27,29 @@ from app.services.normalizacao import (
 
 _BATCH_COMMIT_LINHAS = 5000
 
+_CAMPOS_CHAVE_NATURAL_DEMONSTRACAO: tuple[str, ...] = (
+    "tipo_formulario",
+    "tipo_demonstracao",
+    "escopo_demonstracao",
+    "cnpj_companhia",
+    "data_referencia",
+    "versao",
+    "grupo_demonstracao",
+    "ordem_exercicio",
+    "data_inicio_exercicio",
+    "data_fim_exercicio",
+    "codigo_conta",
+    "coluna_df",
+)
+
+
+def gerar_chave_negocio_demonstracao(dados: Any) -> str:
+    from app.services.ingestion.validation import _natural_key_demonstracao
+
+    chave_dict = _natural_key_demonstracao(dict(dados))
+    return gerar_hash_canonico(chave_dict)
+
+
 _CAMPOS_NEGOCIO_DOCUMENTOS = {
     "companhia_id",
     "tipo_formulario",
@@ -212,6 +235,7 @@ def _normalizar_demonstracao(
     }
     if dados["data_referencia"] is None or dados["versao"] is None:
         raise ValueError("campo_obrigatorio_ausente")
+    dados["chave_negocio"] = gerar_chave_negocio_demonstracao(dados)
     return dados
 
 
@@ -333,12 +357,15 @@ def _upsert_registro(
     execucao_id: Any,
     contadores: dict[str, int],
 ) -> Any:
+    if model is DemonstracaoFinanceira and ("chave_negocio" not in dados or not dados["chave_negocio"]):
+        dados["chave_negocio"] = gerar_chave_negocio_demonstracao(dados)
+
     filtro = [getattr(model, campo) == dados[campo] for campo in campos_chave]
     query: Select[tuple[Any]] = select(model).where(*filtro)
     existente = db.scalar(query)
     agora = _agora()
 
-    dados_para_hash = {k: v for k, v in dados.items() if k not in {"linha_origem"}}
+    dados_para_hash = {k: v for k, v in dados.items() if k not in {"linha_origem", "chave_negocio"}}
     dados["hash_origem"] = gerar_hash_canonico(dados_para_hash, campos_ignorados={"hash_origem"})
 
     if existente is None:

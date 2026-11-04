@@ -9,6 +9,27 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-03 - Reengenharia de Armazenamento e Ingestão Vetorizada DuckDB
+
+### Superfícies afetadas
+
+- `GET /dfp/demonstracoes` e `GET /itr/demonstracoes`
+- `GET /dfp/documentos` e `GET /itr/documentos`
+- `GET /analise/companhias/...` (séries temporais, demonstrativos e materialização)
+- Pipeline de ingestão assíncrona (`dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`)
+
+### Comportamento entregue
+
+- **Compatibilidade Contratual Total**: Nenhuma quebra de contrato nos endpoints de DFP, ITR, FRE, FCA, IPE, VLMO, CGVN, Mestre ou Análise. Todos os atributos, filtros e ordenações continuam retornando os mesmos esquemas de dados.
+- **Deduplicação e Chave Negocial Determinística**: As demonstrações financeiras passam a adotar chave negocial unívoca de 64 caracteres (`chave_negocio`), substituindo a restrição de unicidade composta de 12 colunas por lookup de índice único hash O(1).
+- **Ingestão Vetorizada (DuckDB)**: Arquivos de demonstrações financeiras de DFP e ITR são processados diretamente em C++ via engine analítico DuckDB, com deduplicação intra-arquivo em memória por window functions (`QUALIFY ROW_NUMBER() ... = 1`), eliminando gargalos de I/O de SQLite em disco e normalização linha a linha em Python.
+- **Redução Massiva de I/O em Ingestão**: Re-ingestões de demonstrativos inalterados não disparam regravação física (`ON CONFLICT DO UPDATE ... WHERE is_distinct_from`), evitando inchaço de tabela e geração de WAL desnecessária.
+- **Alinhamento do Plano de Consulta de Análise e Materialização**: Consultas de carregamento analítico operam indexadas por código CVM e escopo, e itens sem novas datas de conhecimento na janela invalidada são concluídos com short-circuit sem recálculo custoso.
+
+### Migração do frontend
+
+- Nenhuma alteração de chamada, payload ou chave é necessária pelo frontend. Todas as respostas e filtros permanecem 100% retrocompatíveis.
+
 ## 2026-07-23 - Feed v2 do Radar com datas e identidades estáveis
 
 ### Superfícies afetadas

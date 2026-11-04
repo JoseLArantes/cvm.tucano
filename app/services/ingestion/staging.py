@@ -519,8 +519,9 @@ def find_reusable_member_match(
         if parent_run_status in STATUSS_REAPROVEITAVEIS_EXECUCAO
         else "child_execution"
     )
+    member_id = str(member.id) if hasattr(member, "id") else str(member)
     return {
-        "member_id": str(member.id),
+        "member_id": member_id,
         "parent_run_status": parent_run_status,
         "parent_execucao_status": parent_execucao_status,
         "child_execucao_id": None if child_execucao_id is None else str(child_execucao_id),

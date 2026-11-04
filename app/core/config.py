@@ -65,7 +65,7 @@ class Settings(BaseSettings):
         alias="INGESTION_COMPANY_MISSING_MAX_RATIO",
     )
     celery_worker_max_tasks_per_child: int = Field(
-        default=1,
+        default=100,
         ge=1,
         alias="CELERY_WORKER_MAX_TASKS_PER_CHILD",
     )

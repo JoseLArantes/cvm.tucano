@@ -29,6 +29,10 @@ from app.services.ingestion.artifact_store import describe_member_artifact, memb
 from app.services.ingestion.change_tracking import reconcile_promoted_rows
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.dependencies import ensure_identity_graph_ready
+from app.services.ingestion.duckdb_financeiro import (
+    can_use_duckdb_for_member,
+    process_demonstracao_member_duckdb,
+)
 from app.services.ingestion.engine import ZipIngestionSpec, process_zip_members
 from app.services.ingestion.lifecycle import (
     build_custom_remote_probe,
@@ -91,6 +95,7 @@ from app.services.sincronizacao_financeiro import (
     _registrar_quarentena,
     _upsert_registro,
     _valor_historico,
+    gerar_chave_negocio_demonstracao,
 )
 
 
@@ -277,20 +282,7 @@ def _financeiro_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str
         return (
             DemonstracaoFinanceira,
             "demonstracoes_financeiras",
-            (
-                "tipo_formulario",
-                "tipo_demonstracao",
-                "escopo_demonstracao",
-                "cnpj_companhia",
-                "data_referencia",
-                "versao",
-                "grupo_demonstracao",
-                "ordem_exercicio",
-                "data_inicio_exercicio",
-                "data_fim_exercicio",
-                "codigo_conta",
-                "coluna_df",
-            ),
+            ("chave_negocio",),
             _CAMPOS_NEGOCIO_DEMONSTRACOES,
         )
     if row_kind.endswith("_composicao_capital"):
@@ -381,8 +373,11 @@ def _is_postgresql(db: Session) -> bool:
 
 def _preparar_dados_promocao(dados: dict[str, Any]) -> dict[str, Any]:
     dados_promocao = dict(dados)
-    dados_para_hash = {k: v for k, v in dados_promocao.items() if k not in {"linha_origem"}}
-    dados_promocao["hash_origem"] = gerar_hash_canonico(dados_para_hash, campos_ignorados={"hash_origem"})
+    if "tipo_demonstracao" in dados_promocao and not dados_promocao.get("chave_negocio"):
+        dados_promocao["chave_negocio"] = gerar_chave_negocio_demonstracao(dados_promocao)
+    dados_para_hash = {k: v for k, v in dados_promocao.items() if k not in {"linha_origem", "chave_negocio"}}
+    if not dados_promocao.get("hash_origem"):
+        dados_promocao["hash_origem"] = gerar_hash_canonico(dados_para_hash, campos_ignorados={"hash_origem"})
     return dados_promocao
 
 
@@ -466,10 +461,17 @@ def _promote_financeiro_payloads_postgresql(
         existente_hash = existentes_hash_por_chave.get(chave)
         if existente_hash is None:
             contadores["inseridos"] += 1
-            row_id = uuid.uuid4()
+            payload_upsert.append(
+                {
+                    "id": uuid.uuid4(),
+                    **dados,
+                    "criado_em": agora,
+                    "sincronizado_em": agora,
+                    "alterado_em": agora,
+                }
+            )
         elif existente_hash["hash_origem"] == dados["hash_origem"]:
             contadores["inalterados"] += 1
-            row_id = existente_hash["id"]
         else:
             row_id = existente_hash["id"]
             existente = existentes_por_chave[chave]
@@ -499,15 +501,15 @@ def _promote_financeiro_payloads_postgresql(
             else:
                 contadores["inalterados"] += 1
 
-        payload_upsert.append(
-            {
-                "id": row_id,
-                **dados,
-                "criado_em": agora,
-                "sincronizado_em": agora,
-                "alterado_em": agora,
-            }
-        )
+            payload_upsert.append(
+                {
+                    "id": row_id,
+                    **dados,
+                    "criado_em": agora,
+                    "sincronizado_em": agora,
+                    "alterado_em": agora,
+                }
+            )
 
     if payload_upsert:
         for batch in iter_parameter_batches(payload_upsert, parameter_width=mapping_parameter_width(payload_upsert)):
@@ -542,6 +544,7 @@ def _promote_financeiro_payloads_postgresql(
                 stmt.on_conflict_do_update(
                     index_elements=[getattr(model, campo) for campo in campos_chave],
                     set_=update_columns,
+                    where=(model.hash_origem.is_distinct_from(stmt.excluded.hash_origem)),
                 )
             )
         db.flush()
@@ -622,22 +625,6 @@ def _promote_financeiro_payloads_fallback(
             contadores["inseridos"] += 1
             continue
         if existente_hash["hash_origem"] == dados["hash_origem"]:
-            atualizacao = payload_atualizacao.setdefault(
-                existente_hash["id"],
-                {
-                    "id": existente_hash["id"],
-                    "sincronizado_em": agora,
-                    "arquivo_origem": dados["arquivo_origem"],
-                    "ano_origem": dados["ano_origem"],
-                    "linha_origem": dados["linha_origem"],
-                    "hash_origem": dados["hash_origem"],
-                },
-            )
-            atualizacao["sincronizado_em"] = agora
-            atualizacao["arquivo_origem"] = dados["arquivo_origem"]
-            atualizacao["ano_origem"] = dados["ano_origem"]
-            atualizacao["linha_origem"] = dados["linha_origem"]
-            atualizacao["hash_origem"] = dados["hash_origem"]
             contadores["inalterados"] += 1
             continue
 
@@ -868,6 +855,8 @@ def _stage_row_to_promocao_payload(stage_row: IngestionFinanceiroStageRow) -> di
         "arquivo_origem": stage_row.arquivo_origem,
         "ano_origem": stage_row.ano_origem,
         "linha_origem": stage_row.linha_origem,
+        "chave_negocio": stage_row.chave_negocio,
+        "hash_origem": stage_row.hash_origem,
     }
 
 
@@ -993,6 +982,7 @@ def _financeiro_stage_target_columns(model: type[Any]) -> tuple[str, ...]:
         )
     if model is DemonstracaoFinanceira:
         return (
+            "chave_negocio",
             "companhia_id",
             "tipo_formulario",
             "tipo_demonstracao",
@@ -1564,177 +1554,202 @@ def process_financeiro_member_direct_from_disk(
 
     update_run_state(run, phase="normalize_artifact")
     db.commit()
-    duplicate_classifier = DiskBackedDuplicateClassifier()
-    for linha_origem, raw_data in row_iter:
-        total_rows += 1
-        contadores["lidas"] += 1
+
+    duckdb_result = None
+    if can_use_duckdb_for_member(member_name, row_kind):
         try:
-            resolved_row_kind, dados = normalizar_financeiro_row(
+            duckdb_result = process_demonstracao_member_duckdb(
+                db,
+                file_path=file_path,
+                member_name=member_name,
+                tipo_formulario=tipo_formulario,
                 prefixo=prefixo,
-                tipo_formulario=tipo_formulario,
-                arquivo_origem=member_name,
-                ano_origem=ano,
-                linha_origem=linha_origem,
-                linha=raw_data,
-            )
-        except Exception as exc:
-            result = invalid_result(
-                f"normalizacao_invalida: {exc}",
-                details={"erro": str(exc)},
-                repairable=True,
-            )
-            _create_financeiro_quarantine_row(
-                db,
-                execucao_id=execucao_id,
-                run=run,
-                member=member,
-                arquivo_origem=member_name,
                 ano=ano,
-                linha_origem=linha_origem,
-                row_kind=row_kind,
-                raw_data=raw_data,
-                result=result,
-                legacy_reason=f"normalizacao_invalida: {exc}",
-            )
-            contadores["rejeitados"] += 1
-            assert isinstance(reason_counts, Counter)
-            assert isinstance(top_quarantine_files, Counter)
-            reason_counts["normalizacao_invalida"] += 1
-            top_quarantine_files[member_name] += 1
-            continue
-
-        natural_key = build_natural_key(resolved_row_kind, dados)
-        duplicate_result = duplicate_classifier.classify(
-            row_kind=resolved_row_kind,
-            natural_key=natural_key,
-            normalized_hash=gerar_hash_canonico(dados),
-            normalized_data=dados,
-        )
-        if duplicate_result.status == "ignored_duplicate":
-            contadores["inalterados"] += 1
-            continue
-        if duplicate_result.status == "invalid":
-            _create_financeiro_quarantine_row(
-                db,
-                execucao_id=execucao_id,
-                run=run,
-                member=member,
-                arquivo_origem=member_name,
-                ano=ano,
-                linha_origem=linha_origem,
-                row_kind=resolved_row_kind,
-                raw_data=raw_data,
-                result=duplicate_result,
-                normalized_data=dados,
-                natural_key=natural_key,
-            )
-            contadores["rejeitados"] += 1
-            assert isinstance(reason_counts, Counter)
-            assert isinstance(top_quarantine_files, Counter)
-            reason_counts[duplicate_result.reason_code or "chave_natural_duplicada_conflitante"] += 1
-            top_quarantine_files[member_name] += 1
-            continue
-
-        resolver_result = resolve_companhia(
-            db,
-            _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
-            header_map=header_map,
-            provisional_enabled=True,
-        )
-        if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
-            result = invalid_result(
-                resolver_result.resolution_method or "companhia_nao_encontrada",
-                details=resolver_result.details,
-                repairable=True,
-            )
-            _create_financeiro_quarantine_row(
-                db,
-                execucao_id=execucao_id,
-                run=run,
-                member=member,
-                arquivo_origem=member_name,
-                ano=ano,
-                linha_origem=linha_origem,
-                row_kind=resolved_row_kind,
-                raw_data=raw_data,
-                result=result,
-                legacy_reason=resolver_result.resolution_method or "companhia_nao_encontrada",
-                normalized_data=dados,
-                natural_key=natural_key,
-            )
-            contadores["rejeitados"] += 1
-            assert isinstance(reason_counts, Counter)
-            assert isinstance(top_quarantine_files, Counter)
-            reason_counts[resolver_result.resolution_method or "companhia_nao_encontrada"] += 1
-            top_quarantine_files[member_name] += 1
-            continue
-
-        assert isinstance(resolver_methods, Counter)
-        resolver_methods[resolver_result.resolution_method or "none"] += 1
-        if resolver_result.status == STATUS_PROVISIONAL_CREATED:
-            provisional_raw = quality_counters.get("provisional_company_count", 0)
-            quality_counters["provisional_company_count"] = (
-                (provisional_raw if isinstance(provisional_raw, int) else 0) + 1
-            )
-        dados["companhia_id"] = resolver_result.companhia_id
-        if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
-            companhia = db.get(Companhia, resolver_result.companhia_id)
-            if companhia is not None:
-                dados["codigo_cvm"] = companhia.codigo_cvm
-        model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
-        dados_promocao = _preparar_dados_promocao(_filtrar_payload_promocao_por_modelo(model, dados))
-
-        writer = normalized_writers.get(resolved_row_kind)
-        if writer is None:
-            writer = NormalizedArtifactWriter(
-                run_id=str(run_id),
-                member_id=str(member_id),
-                member_name=member.member_name,
-                row_kind=resolved_row_kind,
-            )
-            normalized_writers[resolved_row_kind] = writer
-        writer.write_row(
-            {
-                "row_kind": resolved_row_kind,
-                "linha_origem": linha_origem,
-                "arquivo_origem": member_name,
-                "ano_origem": ano,
-                "companhia_id": dados.get("companhia_id"),
-                "normalized_hash": gerar_hash_canonico(dados),
-                "hash_origem": dados_promocao["hash_origem"],
-                "natural_key": natural_key,
-                **dados,
-            }
-        )
-        current_row_kinds_by_model.setdefault(model, set()).add(resolved_row_kind)
-        if resolved_row_kind.endswith("_documento") and resolver_result.companhia_id is not None:
-            register_document_header(
-                header_map,
-                tipo_formulario=tipo_formulario,
-                id_documento=dados.get("id_documento"),
-                versao=dados.get("versao"),
-                data_referencia=dados.get("data_referencia"),
-                companhia_id=resolver_result.companhia_id,
-                cnpj_companhia=dados.get("cnpj_companhia"),
-                codigo_cvm=dados.get("codigo_cvm"),
-            )
-
-        if total_rows % chunk_size == 0:
-            member.row_count = total_rows
-            touch_run_heartbeat(
-                db,
+                encoding=encoding,
+                delimiter=delimiter,
                 run_id=run_id,
-                metrics={
-                    "rows_read": contadores["lidas"],
-                    "rows_normalized": total_rows - contadores["rejeitados"],
-                },
+                member_id=member_id,
+                header_map=header_map,
+                contadores=contadores,
+                quality_counters=quality_counters,
             )
-            _atualizar_execucao(execucao, contadores)
-            db.commit()
+        except Exception:
+            duckdb_result = None
 
-    duplicate_classifier.close()
-    member.row_count = total_rows
-    normalized_artifacts = {kind: writer.close() for kind, writer in normalized_writers.items()}
+    if duckdb_result is not None:
+        total_rows, normalized_artifacts = duckdb_result
+        current_row_kinds_by_model.setdefault(DemonstracaoFinanceira, set()).add(f"{prefixo}_demonstracao")
+    else:
+        duplicate_classifier = DiskBackedDuplicateClassifier()
+        for linha_origem, raw_data in row_iter:
+            total_rows += 1
+            contadores["lidas"] += 1
+            try:
+                resolved_row_kind, dados = normalizar_financeiro_row(
+                    prefixo=prefixo,
+                    tipo_formulario=tipo_formulario,
+                    arquivo_origem=member_name,
+                    ano_origem=ano,
+                    linha_origem=linha_origem,
+                    linha=raw_data,
+                )
+            except Exception as exc:
+                result = invalid_result(
+                    f"normalizacao_invalida: {exc}",
+                    details={"erro": str(exc)},
+                    repairable=True,
+                )
+                _create_financeiro_quarantine_row(
+                    db,
+                    execucao_id=execucao_id,
+                    run=run,
+                    member=member,
+                    arquivo_origem=member_name,
+                    ano=ano,
+                    linha_origem=linha_origem,
+                    row_kind=row_kind,
+                    raw_data=raw_data,
+                    result=result,
+                    legacy_reason=f"normalizacao_invalida: {exc}",
+                )
+                contadores["rejeitados"] += 1
+                assert isinstance(reason_counts, Counter)
+                assert isinstance(top_quarantine_files, Counter)
+                reason_counts["normalizacao_invalida"] += 1
+                top_quarantine_files[member_name] += 1
+                continue
+
+            natural_key = build_natural_key(resolved_row_kind, dados)
+            duplicate_result = duplicate_classifier.classify(
+                row_kind=resolved_row_kind,
+                natural_key=natural_key,
+                normalized_hash=gerar_hash_canonico(dados),
+                normalized_data=dados,
+            )
+            if duplicate_result.status == "ignored_duplicate":
+                contadores["inalterados"] += 1
+                continue
+            if duplicate_result.status == "invalid":
+                _create_financeiro_quarantine_row(
+                    db,
+                    execucao_id=execucao_id,
+                    run=run,
+                    member=member,
+                    arquivo_origem=member_name,
+                    ano=ano,
+                    linha_origem=linha_origem,
+                    row_kind=resolved_row_kind,
+                    raw_data=raw_data,
+                    result=duplicate_result,
+                    normalized_data=dados,
+                    natural_key=natural_key,
+                )
+                contadores["rejeitados"] += 1
+                assert isinstance(reason_counts, Counter)
+                assert isinstance(top_quarantine_files, Counter)
+                reason_counts[duplicate_result.reason_code or "chave_natural_duplicada_conflitante"] += 1
+                top_quarantine_files[member_name] += 1
+                continue
+
+            resolver_result = resolve_companhia(
+                db,
+                _resolver_input_from_data(dados, tipo_formulario=tipo_formulario),
+                header_map=header_map,
+                provisional_enabled=True,
+            )
+            if resolver_result.status not in {STATUS_RESOLVED, STATUS_PROVISIONAL_CREATED}:
+                result = invalid_result(
+                    resolver_result.resolution_method or "companhia_nao_encontrada",
+                    details=resolver_result.details,
+                    repairable=True,
+                )
+                _create_financeiro_quarantine_row(
+                    db,
+                    execucao_id=execucao_id,
+                    run=run,
+                    member=member,
+                    arquivo_origem=member_name,
+                    ano=ano,
+                    linha_origem=linha_origem,
+                    row_kind=resolved_row_kind,
+                    raw_data=raw_data,
+                    result=result,
+                    legacy_reason=resolver_result.resolution_method or "companhia_nao_encontrada",
+                    normalized_data=dados,
+                    natural_key=natural_key,
+                )
+                contadores["rejeitados"] += 1
+                assert isinstance(reason_counts, Counter)
+                assert isinstance(top_quarantine_files, Counter)
+                reason_counts[resolver_result.resolution_method or "companhia_nao_encontrada"] += 1
+                top_quarantine_files[member_name] += 1
+                continue
+
+            assert isinstance(resolver_methods, Counter)
+            resolver_methods[resolver_result.resolution_method or "none"] += 1
+            if resolver_result.status == STATUS_PROVISIONAL_CREATED:
+                provisional_raw = quality_counters.get("provisional_company_count", 0)
+                quality_counters["provisional_company_count"] = (
+                    (provisional_raw if isinstance(provisional_raw, int) else 0) + 1
+                )
+            dados["companhia_id"] = resolver_result.companhia_id
+            if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
+                companhia = db.get(Companhia, resolver_result.companhia_id)
+                if companhia is not None:
+                    dados["codigo_cvm"] = companhia.codigo_cvm
+            model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
+            dados_promocao = _preparar_dados_promocao(_filtrar_payload_promocao_por_modelo(model, dados))
+
+            writer = normalized_writers.get(resolved_row_kind)
+            if writer is None:
+                writer = NormalizedArtifactWriter(
+                    run_id=str(run_id),
+                    member_id=str(member_id),
+                    member_name=member.member_name,
+                    row_kind=resolved_row_kind,
+                )
+                normalized_writers[resolved_row_kind] = writer
+            writer.write_row(
+                {
+                    "row_kind": resolved_row_kind,
+                    "linha_origem": linha_origem,
+                    "arquivo_origem": member_name,
+                    "ano_origem": ano,
+                    "companhia_id": dados.get("companhia_id"),
+                    "normalized_hash": gerar_hash_canonico(dados),
+                    "hash_origem": dados_promocao["hash_origem"],
+                    "natural_key": natural_key,
+                    **dados,
+                }
+            )
+            current_row_kinds_by_model.setdefault(model, set()).add(resolved_row_kind)
+            if resolved_row_kind.endswith("_documento") and resolver_result.companhia_id is not None:
+                register_document_header(
+                    header_map,
+                    tipo_formulario=tipo_formulario,
+                    id_documento=dados.get("id_documento"),
+                    versao=dados.get("versao"),
+                    data_referencia=dados.get("data_referencia"),
+                    companhia_id=resolver_result.companhia_id,
+                    cnpj_companhia=dados.get("cnpj_companhia"),
+                    codigo_cvm=dados.get("codigo_cvm"),
+                )
+
+            if total_rows % chunk_size == 0:
+                member.row_count = total_rows
+                touch_run_heartbeat(
+                    db,
+                    run_id=run_id,
+                    metrics={
+                        "rows_read": contadores["lidas"],
+                        "rows_normalized": total_rows - contadores["rejeitados"],
+                    },
+                )
+                _atualizar_execucao(execucao, contadores)
+                db.commit()
+
+        duplicate_classifier.close()
+        normalized_artifacts = {kind: writer.close() for kind, writer in normalized_writers.items()}
     for artifact in normalized_artifacts.values():
         record_phase_artifact(db, run_id=run_id, direction="output", artifact=artifact)
 
