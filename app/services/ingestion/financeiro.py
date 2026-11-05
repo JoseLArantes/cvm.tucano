@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from collections import Counter
 from collections.abc import Collection, Iterable, Sequence
@@ -50,6 +51,7 @@ from app.services.ingestion.resolver import (
     STATUS_PROVISIONAL_CREATED,
     STATUS_RESOLVED,
     ResolverInput,
+    get_cached_companhia_entry,
     limpar_caches_resolver,
     persist_resolution_result,
     register_document_header,
@@ -97,6 +99,8 @@ from app.services.sincronizacao_financeiro import (
     _valor_historico,
     gerar_chave_negocio_demonstracao,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def map_financeiro_members(prefixo: str, ano: int) -> tuple[dict[str, str], set[str]]:
@@ -1353,7 +1357,7 @@ def _process_financeiro_rows(
             persist_resolution_result(db, ingestion_row=row, result=resolver_result)
             dados["companhia_id"] = resolver_result.companhia_id
             if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
-                companhia = db.get(Companhia, resolver_result.companhia_id)
+                companhia = get_cached_companhia_entry(db, resolver_result.companhia_id)
                 if companhia is not None:
                     dados["codigo_cvm"] = companhia.codigo_cvm
 
@@ -1573,11 +1577,19 @@ def process_financeiro_member_direct_from_disk(
                 contadores=contadores,
                 quality_counters=quality_counters,
             )
-        except Exception:
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "no space left" in msg or "database or disk is full" in msg or "out of memory" in msg:
+                logger.error("DuckDB pipeline resource failure for %s: %s; aborting member to allow retry", member_name, exc)
+                raise
+            logger.warning("DuckDB pipeline error for %s: %s; falling back to Python", member_name, exc)
             duckdb_result = None
 
+    duckdb_stage_loaded = False
     if duckdb_result is not None:
-        total_rows, normalized_artifacts = duckdb_result
+        total_rows = duckdb_result[0]
+        normalized_artifacts = duckdb_result[1]
+        duckdb_stage_loaded = duckdb_result[2] if len(duckdb_result) > 2 else False
         current_row_kinds_by_model.setdefault(DemonstracaoFinanceira, set()).add(f"{prefixo}_demonstracao")
     else:
         duplicate_classifier = DiskBackedDuplicateClassifier()
@@ -1694,7 +1706,7 @@ def process_financeiro_member_direct_from_disk(
                 )
             dados["companhia_id"] = resolver_result.companhia_id
             if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
-                companhia = db.get(Companhia, resolver_result.companhia_id)
+                companhia = get_cached_companhia_entry(db, resolver_result.companhia_id)
                 if companhia is not None:
                     dados["codigo_cvm"] = companhia.codigo_cvm
             model, _, _, _ = _financeiro_promotion_spec(resolved_row_kind)
@@ -1755,29 +1767,30 @@ def process_financeiro_member_direct_from_disk(
 
     update_run_state(run, phase="load_typed_staging")
     db.commit()
-    for artifact in normalized_artifacts.values():
-        load_result = load_financeiro_artifact_to_stage(
-            db,
-            ingestion_run_id=run_id,
-            ingestion_file_member_id=member_id,
-            artifact_uri=str(artifact["uri"]),
-        )
-        rows_loaded = quality_counters.get("typed_stage_rows_loaded", 0)
-        bytes_loaded = quality_counters.get("typed_stage_bytes_loaded", 0)
-        rows_replaced = quality_counters.get("typed_stage_rows_replaced", 0)
-        copy_loads = quality_counters.get("typed_stage_copy_loads", 0)
-        quality_counters["typed_stage_rows_loaded"] = (
-            (rows_loaded if isinstance(rows_loaded, int) else 0) + load_result.rows_loaded
-        )
-        quality_counters["typed_stage_bytes_loaded"] = (
-            (bytes_loaded if isinstance(bytes_loaded, int) else 0) + load_result.bytes_loaded
-        )
-        quality_counters["typed_stage_rows_replaced"] = (
-            (rows_replaced if isinstance(rows_replaced, int) else 0) + load_result.rows_replaced
-        )
-        if load_result.copy_used:
-            quality_counters["typed_stage_copy_loads"] = (copy_loads if isinstance(copy_loads, int) else 0) + 1
-    db.commit()
+    if not duckdb_stage_loaded:
+        for artifact in normalized_artifacts.values():
+            load_result = load_financeiro_artifact_to_stage(
+                db,
+                ingestion_run_id=run_id,
+                ingestion_file_member_id=member_id,
+                artifact_uri=str(artifact["uri"]),
+            )
+            rows_loaded = quality_counters.get("typed_stage_rows_loaded", 0)
+            bytes_loaded = quality_counters.get("typed_stage_bytes_loaded", 0)
+            rows_replaced = quality_counters.get("typed_stage_rows_replaced", 0)
+            copy_loads = quality_counters.get("typed_stage_copy_loads", 0)
+            quality_counters["typed_stage_rows_loaded"] = (
+                (rows_loaded if isinstance(rows_loaded, int) else 0) + load_result.rows_loaded
+            )
+            quality_counters["typed_stage_bytes_loaded"] = (
+                (bytes_loaded if isinstance(bytes_loaded, int) else 0) + load_result.bytes_loaded
+            )
+            quality_counters["typed_stage_rows_replaced"] = (
+                (rows_replaced if isinstance(rows_replaced, int) else 0) + load_result.rows_replaced
+            )
+            if load_result.copy_used:
+                quality_counters["typed_stage_copy_loads"] = (copy_loads if isinstance(copy_loads, int) else 0) + 1
+        db.commit()
 
     if promote_enabled:
         update_run_state(run, phase="promote")
@@ -2098,7 +2111,7 @@ def _process_financeiro_member(
                 )
             dados["companhia_id"] = resolver_result.companhia_id
             if dados.get("codigo_cvm") is None and resolver_result.companhia_id is not None:
-                companhia = db.get(Companhia, resolver_result.companhia_id)
+                companhia = get_cached_companhia_entry(db, resolver_result.companhia_id)
                 if companhia is not None:
                     dados["codigo_cvm"] = companhia.codigo_cvm
 

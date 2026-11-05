@@ -7124,21 +7124,25 @@ def materializar_analise_companhia(
         snapshot_status = "disabled"
         snapshot_source: str | None = None
         if _settings.analise_fundamentalista_prewarm_enabled:
-            try:
-                snapshot_result = prewarm_fundamentalista_snapshot(db, companhia, execucao)
-                snapshot_status = "success" if snapshot_result is not None else "disabled"
-                snapshot_source = snapshot_result.source if snapshot_result is not None else None
-            except Exception as exc:
-                snapshot_status = "failed"
-                logger.exception(
-                    "Falha no prewarm fundamentalista codigo_cvm=%s execution_id=%s",
-                    companhia.codigo_cvm,
-                    execucao.id,
-                )
-                execucao.summary = {
-                    **(execucao.summary or {}),
-                    "fundamentalista_snapshot_error": type(exc).__name__,
-                }
+            summary_facts = (execucao.summary or {}).get("fact_revisions", 0)
+            if summary_facts == 0:
+                snapshot_status = "skipped_no_facts"
+            else:
+                try:
+                    snapshot_result = prewarm_fundamentalista_snapshot(db, companhia, execucao)
+                    snapshot_status = "success" if snapshot_result is not None else "disabled"
+                    snapshot_source = snapshot_result.source if snapshot_result is not None else None
+                except Exception as exc:
+                    snapshot_status = "failed"
+                    logger.exception(
+                        "Falha no prewarm fundamentalista codigo_cvm=%s execution_id=%s",
+                        companhia.codigo_cvm,
+                        execucao.id,
+                    )
+                    execucao.summary = {
+                        **(execucao.summary or {}),
+                        "fundamentalista_snapshot_error": type(exc).__name__,
+                    }
         execucao.summary = {
             **(execucao.summary or {}),
             "fundamentalista_snapshot_status": snapshot_status,
@@ -8044,6 +8048,9 @@ def prewarm_fundamentalista_snapshot(
     execution: AnaliseMaterializacaoExecucao,
 ) -> FundamentalistaServiceResult | None:
     if not _settings.analise_fundamentalista_prewarm_enabled:
+        return None
+    summary_facts = (execution.summary or {}).get("fact_revisions", 0)
+    if summary_facts == 0:
         return None
     clear_analysis_session_cache(db)
     result = obter_fundamentalista_com_metadata(

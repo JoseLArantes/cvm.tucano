@@ -95,7 +95,7 @@ def adotar_ou_criar_execucao_sincronizacao(
             .where(
                 ExecucaoSincronizacao.id_tarefa == task_id,
                 ExecucaoSincronizacao.tipo_fonte == tipo_fonte.lower().strip(),
-                ExecucaoSincronizacao.status == "agendada",
+                ExecucaoSincronizacao.status.in_(["agendada", "aguardando_ingestao", "em_execucao"]),
             )
             .order_by(ExecucaoSincronizacao.iniciada_em.desc())
             .limit(1)
@@ -114,7 +114,8 @@ def adotar_ou_criar_execucao_sincronizacao(
         )
         db.add(execucao)
     else:
-        execucao.status = "em_execucao"
+        if execucao.status != "aguardando_ingestao":
+            execucao.status = "em_execucao"
         execucao.finalizada_em = None
         if arquivo is not None:
             execucao.arquivo = arquivo

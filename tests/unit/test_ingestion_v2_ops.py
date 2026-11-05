@@ -3,6 +3,7 @@ import os
 import uuid
 import zipfile
 from collections.abc import Generator
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -20,6 +21,10 @@ from app.models.ingestion import IngestionAttempt, IngestionRow, IngestionRun, Q
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.backfill import build_dark_launch_parity_report, run_backfill_years
 from app.services.ingestion.metrics import RunTimer, get_ingestion_metrics
+from app.services.ingestion.operational import (
+    _cascade_terminal_state_to_children,
+    reconcile_stale_ingestion_phase_executions,
+)
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.sql_batches import (
     iter_lookup_batches,
@@ -162,6 +167,16 @@ def test_quality_gate_rejeita_member_sem_linhas_processadas() -> None:
 
     assert status == "falha"
     assert message == "NO_ROWS_PROCESSED"
+
+
+def test_quality_gate_aceita_member_sem_linhas_quando_require_rows_falso() -> None:
+    status, message = enforce_quality_gate(
+        quality_summary={"row_status_counts": {}},
+        require_rows=False,
+    )
+
+    assert status == "sucesso"
+    assert message is None
 
 
 def test_build_quality_summary_prefers_persisted_run_summary(db_session: Session) -> None:
@@ -551,3 +566,85 @@ def test_iter_lookup_batches_uses_smaller_budget_for_large_key_lookups() -> None
     batches = list(iter_lookup_batches(rows, parameter_width=12))
 
     assert [len(batch) for batch in batches] == [500, 500, 200]
+
+
+def test_cascade_terminal_state_to_children(db_session: Session) -> None:
+    parent = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_fonte="fca",
+        ano=2024,
+        status="falha",
+        arquivo="fca_cia_aberta_2024.zip",
+        url="https://dados.cvm.gov.br/dados/fca.zip",
+        iniciada_em=datetime.now(UTC),
+    )
+    db_session.add(parent)
+    db_session.flush()
+
+    child = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        parent_execucao_id=parent.id,
+        tipo_fonte="fca",
+        ano=2024,
+        status="aguardando_ingestao",
+        arquivo="fca_cia_aberta_geral_2024.csv",
+        url="https://dados.cvm.gov.br/dados/fca_geral.csv",
+        iniciada_em=datetime.now(UTC),
+    )
+    db_session.add(child)
+
+    child_run = IngestionRun(
+        id=uuid.uuid4(),
+        execucao_sincronizacao_id=child.id,
+        tipo_fonte="fca",
+        ano=2024,
+        status="aguardando_ingestao",
+        phase="stage",
+        started_at=datetime.now(UTC),
+    )
+    db_session.add(child_run)
+    db_session.commit()
+
+    _cascade_terminal_state_to_children(db_session, parent.id, "falha", "Parent falhou")
+    db_session.commit()
+
+    db_session.refresh(child)
+    db_session.refresh(child_run)
+    assert child.status == "falha"
+    assert "Parent falhou" in (child.mensagem_erro or "")
+    assert child_run.status == "falha"
+
+
+def test_reconcile_stale_ingestion_phase_executions_sweeps_orphan_children(db_session: Session) -> None:
+    parent = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_fonte="itr",
+        ano=2024,
+        status="falha",
+        arquivo="itr_cia_aberta_2024.zip",
+        url="https://dados.cvm.gov.br/dados/itr.zip",
+        iniciada_em=datetime.now(UTC),
+        finalizada_em=datetime.now(UTC),
+    )
+    db_session.add(parent)
+    db_session.flush()
+
+    child = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        parent_execucao_id=parent.id,
+        tipo_fonte="itr",
+        ano=2024,
+        status="aguardando_ingestao",
+        arquivo="itr_cia_aberta_BPP_ind_2024.csv",
+        url="https://dados.cvm.gov.br/dados/bpp.csv",
+        iniciada_em=datetime.now(UTC),
+    )
+    db_session.add(child)
+    db_session.commit()
+
+    reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    db_session.refresh(child)
+    assert child.status == "falha"
+    assert "parent em estado falha" in (child.mensagem_erro or "").lower()

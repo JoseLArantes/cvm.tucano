@@ -11,6 +11,7 @@ from app.models.financeiro import DocumentoFinanceiro
 from app.models.ingestion import IngestionCancellationRequest, IngestionFile, IngestionPhaseExecution, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
+from app.services.ingestion.retry import RetryableIngestionError
 from app.services.ingestion.staging import create_run, register_file
 from app.worker import tasks as worker_tasks
 from app.worker.tasks import sincronizar_member_internal
@@ -678,3 +679,165 @@ def test_finalizar_sincronizacao_zip_resume_quality_summary_explicit_reuse(
     assert run_pai_atual.quality_summary["members_reprocessed"] == 1
     assert run_pai_atual.quality_summary["members_reused_from_previous"] == 1
     assert run_pai_atual.quality_summary["members_reused_from_failed_parent"] == 1
+
+
+def test_sincronizar_member_internal_trata_excecao_permanente_sem_quebrar_chord(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    execucao_filha = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_BPA_ind_2025.csv",
+        url="http://exemplo/dfp/bpa",
+        status="agendada",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_filha)
+    db_session.flush()
+
+    run_pai = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_pai.id,
+        status="sucesso",
+        phase="complete",
+    )
+    register_file(
+        db_session,
+        ingestion_run=run_pai,
+        source_url=execucao_pai.url,
+        source_filename=execucao_pai.arquivo,
+        content_sha256="zip-sha",
+        content_length_bytes=1,
+        is_zip=True,
+    )
+    db_session.commit()
+
+    extracted_dir = tmp_path / str(execucao_pai.id) / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    member_path = extracted_dir / execucao_filha.arquivo
+    member_path.write_text("dummy-content\n", encoding="latin1")
+
+    monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_financeiro_direct_path_enabled", False)
+
+    def _raise_permanent_error(*args: Any, **kwargs: Any) -> None:
+        raise ValueError("Permanent parsing failure")
+
+    monkeypatch.setattr(
+        "app.services.ingestion.financeiro._process_financeiro_member",
+        _raise_permanent_error,
+    )
+
+    resultado = sincronizar_member_internal(
+        db=db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        member_name=execucao_filha.arquivo,
+        parent_execucao_id=str(execucao_pai.id),
+        child_execucao_id=str(execucao_filha.id),
+        force_reimport=False,
+        task_id="task-fail-safe",
+    )
+
+    db_session.refresh(execucao_filha)
+    assert resultado["status"] == "falha"
+    assert resultado["execucao_id"] == str(execucao_filha.id)
+    assert "Permanent parsing failure" in resultado["error"]
+    assert execucao_filha.status == "falha"
+    assert "Permanent parsing failure" in (execucao_filha.mensagem_erro or "")
+
+
+def test_sincronizar_member_internal_repassa_excecao_autoretry(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    execucao_filha = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_BPA_ind_2025.csv",
+        url="http://exemplo/dfp/bpa",
+        status="agendada",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_filha)
+    db_session.flush()
+
+    run_pai = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_pai.id,
+        status="sucesso",
+        phase="complete",
+    )
+    register_file(
+        db_session,
+        ingestion_run=run_pai,
+        source_url=execucao_pai.url,
+        source_filename=execucao_pai.arquivo,
+        content_sha256="zip-sha",
+        content_length_bytes=1,
+        is_zip=True,
+    )
+    db_session.commit()
+
+    extracted_dir = tmp_path / str(execucao_pai.id) / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    member_path = extracted_dir / execucao_filha.arquivo
+    member_path.write_text("dummy-content\n", encoding="latin1")
+
+    monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_financeiro_direct_path_enabled", False)
+
+    def _raise_retryable_error(*args: Any, **kwargs: Any) -> None:
+        raise RetryableIngestionError("Temporary database lock")
+
+    monkeypatch.setattr(
+        "app.services.ingestion.financeiro._process_financeiro_member",
+        _raise_retryable_error,
+    )
+
+    with pytest.raises(RetryableIngestionError):
+        sincronizar_member_internal(
+            db=db_session,
+            tipo_fonte="dfp",
+            ano=2025,
+            member_name=execucao_filha.arquivo,
+            parent_execucao_id=str(execucao_pai.id),
+            child_execucao_id=str(execucao_filha.id),
+            force_reimport=False,
+            task_id="task-retryable",
+        )
+
+    db_session.refresh(execucao_filha)
+    assert execucao_filha.status == "falha"
+

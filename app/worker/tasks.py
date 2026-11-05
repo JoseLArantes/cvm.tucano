@@ -15,16 +15,18 @@ from app.worker.celery_app import celery_app
 
 _settings = get_settings()
 _logger = logging.getLogger(__name__)
+_AUTORETRY_FOR: tuple[type[Exception], ...] = (
+    httpx.TimeoutException,
+    httpx.TransportError,
+    RetryableIngestionError,
+    RetryableHttpStatus,
+    DependencyNotReady,
+    sqlalchemy.exc.OperationalError,
+    sqlalchemy.exc.InterfaceError,
+)
+
 _RETRY_KWARGS = {
-    "autoretry_for": (
-        httpx.TimeoutException,
-        httpx.TransportError,
-        RetryableIngestionError,
-        RetryableHttpStatus,
-        DependencyNotReady,
-        sqlalchemy.exc.OperationalError,
-        sqlalchemy.exc.InterfaceError,
-    ),
+    "autoretry_for": _AUTORETRY_FOR,
     "retry_backoff": True,
     "retry_backoff_max": _settings.ingestion_retry_backoff_max_seconds,
     "retry_jitter": True,
@@ -343,7 +345,7 @@ def materializar_analise_campanha_task(self: Any, campanha_id: str) -> dict[str,
             db,
             campanha_uuid,
             chunk_size=campanha.chunk_size,
-            max_chunks=available_chunk_slots,
+            max_chunks=_settings.analise_materializacao_max_active_chunks_per_campaign,
         )
         if not claimed:
             campanha = db.get(AnaliseMaterializacaoCampanha, campanha_uuid)
@@ -1006,6 +1008,11 @@ def pre_processar_sincronizacao_zip(
     db.commit()
     db.refresh(execucao)
 
+    zip_dir = Path(settings.storage_dir) / str(execucao.id)
+    if execucao.status == "aguardando_ingestao" and zip_dir.exists():
+        db.close()
+        return {"execucao_id": str(execucao.id), "status": "aguardando_ingestao"}
+
     run = create_run(
         db,
         tipo_fonte=tipo_fonte,
@@ -1477,6 +1484,15 @@ def _coordenar_sincronizacao_zip(
 
     from app.db.session import SessionLocal
 
+    # Check dependency gate BEFORE pre-processing (downloading/extracting ZIPs)
+    db_check = SessionLocal()
+    try:
+        from app.services.ingestion.dependencies import ensure_identity_graph_ready
+
+        ensure_identity_graph_ready(db_check)
+    finally:
+        db_check.close()
+
     # 1. Run Phase 1
     phase1_res = pre_processar_sincronizacao_zip(
         tipo_fonte=tipo_fonte,
@@ -1819,7 +1835,7 @@ def sincronizar_member_internal(
         quality_summary = build_contadores_quality_summary(contadores)
         status_execucao, mensagem_status = enforce_quality_gate(
             quality_summary=quality_summary,
-            require_rows=True,
+            require_rows=False,
         )
 
         execucao = db.get(ExecucaoSincronizacao, execucao.id)
@@ -1866,7 +1882,10 @@ def sincronizar_member_internal(
                 finished_at=datetime.now(UTC)
             )
         db.commit()
-        raise
+        if isinstance(exc, _AUTORETRY_FOR):
+            raise
+        _logger.error("Member task %s failed permanently: %s", member_name, exc)
+        return {"status": "falha", "execucao_id": str(execucao.id), "error": str(exc)}
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_member_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]

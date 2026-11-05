@@ -314,6 +314,35 @@ def build_liveness_snapshot(
     }
 
 
+def _cascade_terminal_state_to_children(
+    db: Session,
+    parent_execucao_id: Any,
+    status: str,
+    message: str,
+) -> None:
+    non_terminal = {"agendada", "em_execucao", "aguardando_ingestao"}
+    child_execs = list(
+        db.scalars(
+            select(ExecucaoSincronizacao).where(
+                ExecucaoSincronizacao.parent_execucao_id == parent_execucao_id,
+                ExecucaoSincronizacao.status.in_(non_terminal),
+            )
+        ).all()
+    )
+    now = _agora()
+    for child in child_execs:
+        child.status = status
+        child.mensagem_erro = message
+        child.finalizada_em = now
+        child_run = db.scalar(
+            select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == child.id)
+        )
+        if child_run is not None and child_run.status not in {"cancelada", "sucesso", "sem_alteracao", "skipped", "falha"}:
+            child_run.status = status
+            child_run.message = message
+            child_run.finished_at = now
+
+
 def reconcile_stale_ingestion_phase_executions(
     db: Session,
     *,
@@ -365,6 +394,7 @@ def reconcile_stale_ingestion_phase_executions(
                 execucao.status = "cancelada"
                 execucao.mensagem_erro = message
                 execucao.finalizada_em = _agora()
+                _cascade_terminal_state_to_children(db, execucao.id, "cancelada", message)
             update_cancellation_request(cancellation_request, status="completed")
             cancelled_run_ids.append(str(run.id))
         else:
@@ -386,11 +416,41 @@ def reconcile_stale_ingestion_phase_executions(
                 execucao.status = "falha"
                 execucao.mensagem_erro = message
                 execucao.finalizada_em = _agora()
+                _cascade_terminal_state_to_children(db, execucao.id, "falha", message)
             if recovery.eligible:
                 failed_retryable_run_ids.append(str(run.id))
             else:
                 failed_non_recoverable_run_ids.append(str(run.id))
         recovered_run_ids.append(str(run.id))
+
+    # Sweep orphaned child executions whose parent is already terminal
+    terminal_statuses = {"sucesso", "sem_alteracao", "skipped", "falha", "cancelada"}
+    terminal_parents = select(ExecucaoSincronizacao.id).where(
+        ExecucaoSincronizacao.status.in_(terminal_statuses)
+    )
+    orphan_children = list(
+        db.scalars(
+            select(ExecucaoSincronizacao).where(
+                ExecucaoSincronizacao.parent_execucao_id.in_(terminal_parents),
+                ExecucaoSincronizacao.status.in_({"agendada", "em_execucao", "aguardando_ingestao"}),
+            ).limit(limit)
+        ).all()
+    )
+    now = _agora()
+    for child in orphan_children:
+        parent = db.get(ExecucaoSincronizacao, child.parent_execucao_id)
+        parent_status = parent.status if parent else "falha"
+        child_status = "cancelada" if parent_status == "cancelada" else "falha"
+        child.status = child_status
+        child.mensagem_erro = f"Execucao orfa finalizada pelo sweep: parent em estado {parent_status}."
+        child.finalizada_em = now
+        child_run = db.scalar(select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == child.id))
+        if child_run is not None and child_run.status not in terminal_statuses:
+            child_run.status = child_status
+            child_run.message = child.mensagem_erro
+            child_run.finished_at = now
+            recovered_run_ids.append(str(child_run.id))
+
     db.flush()
     return {
         "stale_candidates": len(stale_phases),

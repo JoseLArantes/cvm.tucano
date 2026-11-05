@@ -75,7 +75,8 @@ def test_process_demonstracao_member_duckdb_normalizes_and_deduplicates(
     )
 
     assert result is not None
-    total_raw_rows, artifacts = result
+    total_raw_rows, artifacts, stage_loaded = result
+    assert stage_loaded is True
     assert total_raw_rows == 3
     assert contadores["lidas"] == 3
     assert contadores["inalterados"] == 1  # 1 duplicate filtered out

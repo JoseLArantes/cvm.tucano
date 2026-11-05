@@ -12,7 +12,7 @@ services:
     volumes:
       - .:/app
     deploy:
-      replicas: ${WORKER_REPLICAS:-6}
+      replicas: ${WORKER_REPLICAS:-2}
     depends_on:
       cvm_redis:
         condition: service_healthy

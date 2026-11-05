@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
-from sqlalchemy import and_, delete, insert, or_, select
+from sqlalchemy import and_, delete, func, insert, or_, select, update
 from sqlalchemy.orm import Session, aliased, load_only, object_session
 
 from app.core.config import get_settings
@@ -20,10 +20,13 @@ from app.models.ingestion import (
     IngestionFile,
     IngestionFileMember,
     IngestionFileMemberPayload,
+    IngestionFinanceiroStageRow,
     IngestionRow,
     IngestionRowEvent,
     IngestionRun,
     QuarantineItem,
+    SourceDeliverySnapshot,
+    SourceMemberSnapshot,
 )
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.artifact_store import (
@@ -315,6 +318,17 @@ def register_file(
                 (IngestionRow.ingestion_run_id == existing_run.id) |
                 (IngestionRow.ingestion_file_member_id.in_(member_ids_stmt))
             ))
+            db.execute(delete(IngestionFinanceiroStageRow).where(IngestionFinanceiroStageRow.ingestion_file_member_id.in_(member_ids_stmt)))
+            db.execute(
+                update(SourceMemberSnapshot)
+                .where(SourceMemberSnapshot.ingestion_file_member_id.in_(member_ids_stmt))
+                .values(ingestion_file_member_id=None)
+            )
+            db.execute(
+                update(SourceDeliverySnapshot)
+                .where(SourceDeliverySnapshot.ingestion_file_member_id.in_(member_ids_stmt))
+                .values(ingestion_file_member_id=None)
+            )
             db.execute(delete(IngestionFileMember).where(IngestionFileMember.ingestion_file_id == existing.id))
             db.execute(delete(IngestionAttempt).where(IngestionAttempt.ingestion_run_id == existing_run.id))
             db.execute(delete(IngestionFile).where(IngestionFile.id == existing.id))
@@ -698,18 +712,29 @@ def purge_member_success_rows(
     ingestion_file_member_id: Any,
 ) -> int:
     db.flush()
+    has_rows = db.scalar(
+        select(func.count())
+        .select_from(IngestionRow)
+        .where(IngestionRow.ingestion_file_member_id == ingestion_file_member_id)
+    )
+    if not has_rows:
+        return 0
+
+    quarantine_ids_stmt = select(QuarantineItem.ingestion_row_id).where(
+        QuarantineItem.ingestion_row_id.isnot(None)
+    )
     row_ids_stmt = (
         select(IngestionRow.id)
         .where(
             IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
-            ~IngestionRow.id.in_(select(QuarantineItem.ingestion_row_id)),
+            ~IngestionRow.id.in_(quarantine_ids_stmt),
         )
     )
     db.execute(delete(IngestionRowEvent).where(IngestionRowEvent.ingestion_row_id.in_(row_ids_stmt)))
     deleted_rows = db.execute(
         delete(IngestionRow).where(
             IngestionRow.ingestion_file_member_id == ingestion_file_member_id,
-            ~IngestionRow.id.in_(select(QuarantineItem.ingestion_row_id)),
+            ~IngestionRow.id.in_(quarantine_ids_stmt),
         )
     )
     db.flush()

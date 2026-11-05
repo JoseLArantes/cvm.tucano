@@ -14,7 +14,6 @@ from sqlalchemy.orm.util import identity_key
 
 from app.core.config import get_settings
 from app.models.cgvn import CgvnDocumento, CgvnPratica
-from app.models.companhia import Companhia
 from app.models.ingestion import IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.services.ingestion.acquisition import annotate_probe_with_sha_confirmation, probe_remote_source
@@ -43,6 +42,7 @@ from app.services.ingestion.resolver import (
     STATUS_PROVISIONAL_CREATED,
     STATUS_RESOLVED,
     ResolverInput,
+    get_cached_companhia_entry,
     limpar_caches_resolver,
     persist_resolution_result,
     resolve_companhia,
@@ -760,7 +760,7 @@ def _process_cgvn_member(
                 continue
 
             persist_resolution_result(db, ingestion_row=row, result=resolver_result)
-            companhia = db.get(Companhia, resolver_result.companhia_id) if resolver_result.companhia_id else None
+            companhia = get_cached_companhia_entry(db, resolver_result.companhia_id) if resolver_result.companhia_id else None
             dados["companhia_id"] = resolver_result.companhia_id
             if dados.get("cnpj_companhia") is None and companhia is not None:
                 dados["cnpj_companhia"] = companhia.cnpj_companhia
