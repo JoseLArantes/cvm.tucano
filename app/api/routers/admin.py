@@ -2445,7 +2445,11 @@ def listar_alteracoes(
     "/dashboard",
     response_model=DashboardExecucoesResposta,
     summary="Dashboard de Execucoes",
-    description="Consolidado simples para operacao: status, rejeicoes e ultimas execucoes.",
+    description=(
+        "Consolidado operacional de execucoes de sincronizacao e estado atual da quarentena. "
+        "`total_rejeitados` reporta o total historico consolidado por execucoes primarias/raiz (sem contagem dupla pai-filho). "
+        "`total_quarentena_pendente` indica a quantidade real de registros atualmente retidos em quarentena aguardando resolucao."
+    ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dashboardExecucoesAdmin",
 )
@@ -2474,7 +2478,22 @@ def dashboard_execucoes(
         )
         or 0
     )
-    total_rejeitados = db.scalar(select(func.coalesce(func.sum(ExecucaoSincronizacao.total_rejeitados), 0))) or 0
+    total_rejeitados = (
+        db.scalar(
+            select(func.coalesce(func.sum(ExecucaoSincronizacao.total_rejeitados), 0)).where(
+                ExecucaoSincronizacao.parent_execucao_id.is_(None)
+            )
+        )
+        or 0
+    )
+    total_quarentena_pendente = (
+        db.scalar(
+            select(func.count())
+            .select_from(QuarantineItem)
+            .where(QuarantineItem.status == "pendente")
+        )
+        or 0
+    )
     ultimas = (
         db.execute(select(ExecucaoSincronizacao).order_by(ExecucaoSincronizacao.iniciada_em.desc()).limit(10))
         .scalars()
@@ -2486,6 +2505,7 @@ def dashboard_execucoes(
         total_sem_alteracao=total_sem_alteracao,
         total_falha=total_falha,
         total_rejeitados=total_rejeitados,
+        total_quarentena_pendente=total_quarentena_pendente,
         ultimas_execucoes=[
             ExecucaoSincronizacaoResumo(
                 id=str(item.id),

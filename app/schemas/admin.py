@@ -382,7 +382,13 @@ class DashboardExecucoesResposta(BaseModel):
     total_sucesso: int = Field(description="Quantidade de execucoes com status sucesso.")
     total_sem_alteracao: int = Field(description="Quantidade de execucoes sem alteracao.")
     total_falha: int = Field(description="Quantidade de execucoes com falha.")
-    total_rejeitados: int = Field(description="Total acumulado de linhas rejeitadas em quarentena.")
+    total_rejeitados: int = Field(
+        description="Total historico acumulado de linhas rejeitadas por execucoes primarias (desduplicado, sem sobreposicao pai-filho)."
+    )
+    total_quarentena_pendente: int = Field(
+        default=0,
+        description="Total atual de registros pendentes em quarentena ativa na plataforma que requerem atencao ou resolucao.",
+    )
     ultimas_execucoes: list[ExecucaoSincronizacaoResumo] = Field(
         description="Ultimas execucoes registradas (ordenadas por inicio desc)."
     )

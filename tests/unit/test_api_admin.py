@@ -399,6 +399,8 @@ def test_admin_dashboard_quarentena_alteracoes(client: TestClient, db_session: S
     resposta_dashboard = client.get("/ingestion/dashboard")
     assert resposta_dashboard.status_code == 200
     assert resposta_dashboard.json()["total_execucoes"] == 1
+    assert "total_quarentena_pendente" in resposta_dashboard.json()
+    assert "total_rejeitados" in resposta_dashboard.json()
 
     resposta_quarentena = client.get("/ingestion/quarentena")
     assert resposta_quarentena.status_code == 200

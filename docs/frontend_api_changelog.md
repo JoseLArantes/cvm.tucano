@@ -9,6 +9,27 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-05 - Correcao de Metricas do Dashboard de Ingestao (GET /ingestion/dashboard)
+
+### Superfícies afetadas
+
+- `GET /ingestion/dashboard`
+- Schema de resposta `DashboardExecucoesResposta`
+
+### Comportamento entregue
+
+- **Eliminação de Dupla Contagem em `total_rejeitados`**: Anteriormente, a rota somava indiscriminadamente os contadores de `total_rejeitados` de todas as linhas de `ExecucaoSincronizacao`, gerando duplicação artificial ao somar a execução pai (`.zip`) e as execuções filhas (`.csv`). A consulta agora filtra exclusivamente execuções primárias/raiz (`parent_execucao_id IS NULL`), reportando o valor histórico desduplicado.
+- **Novo Campo `total_quarentena_pendente`**: Adicionado o campo `total_quarentena_pendente: int` no payload de resposta do dashboard. Ele expõe a contagem em tempo real de registros retidos em quarentena com status `pendente` na base (`QuarantineItem`).
+- **Diferenciação Semântica Clara para Clientes**:
+  - `total_rejeitados`: odômetro histórico desduplicado de rejeições ocorridas ao longo do tempo.
+  - `total_quarentena_pendente`: indicador operacional acionável em tempo real. Deve ser o campo monitorado por dashboards e alertas operacionais para identificar se há pendências reais no pipeline.
+
+### Migração do frontend e consumidores
+
+- **Ajuste de Cards e Métricas no Frontend**:
+  - Telas de monitoramento que exibiam `total_rejeitados` como alerta de erro devem passar a consumir `total_quarentena_pendente`. Se `total_quarentena_pendente === 0`, o sistema está completamente saudável e sem nenhuma linha retida em quarentena.
+  - O campo `total_rejeitados` permanece disponível para fins de histórico e telemetria acumulada, agora sem o ruído da dupla contagem pai-filho.
+
 ## 2026-11-05 - Auto-Reparo e Replay de Quarentena & Otimizacao da Materializacao Analitica
 
 ### Superfícies afetadas
