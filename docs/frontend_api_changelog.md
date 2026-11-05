@@ -9,6 +9,29 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-05 - Rastreabilidade de Runs Superadas e Limpeza Operacional (Cleanup Superseded)
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- novo endpoint `POST /ingestion/runs/cleanup-superseded`
+- rotina periódica do scheduler `reconciliar_ingestion_stale_task`
+
+### Comportamento entregue
+
+- **Identificação de Runs Superadas (`superseded`)**: Runs em estado terminal (`falha` ou `cancelada`) que já possuem uma execução de sucesso posterior para o mesmo arquivo/ano passam a expor `superseded: true` e o objeto estruturado `superseded_by: {"run_id", "execucao_id", "status", "completed_at", "arquivo"}`.
+- **Encerramento Automático de Pendência Operacional**: Para runs marcadas como `superseded`, o campo `next_action` transiciona de `inspect_error` para `none`. Isso remove ruído operacional imediato da consulta `GET /ingestion/runs?next_action=inspect_error`, garantindo que apenas falhas que realmente requeiram intervenção humana sejam exibidas.
+- **Filtro Explícito `superseded`**: O endpoint `GET /ingestion/runs` aceita o parâmetro de query opcional `superseded=true|false` para filtrar runs históricas superadas.
+- **Ações Estruturadas de Descarte e Inspeção**: A lista de `actions` de runs superadas expõe `inspect_replacement` (apontando diretamente para a run com sucesso que a substituiu) e `cleanup_transient_state`.
+- **Endpoint em Lote de Limpeza (`POST /ingestion/runs/cleanup-superseded`)**: Novo endpoint para administradores e rotinas de manutenção limparem estados transitórios (staging/quarentena) e registrarem auto-reconhecimento auditado em lote para todas as runs superadas.
+- **Auto-Reconciliação no Scheduler**: O sweep de reconciliação periódica que roda a cada minuto agora detecta automaticamente runs com falha cujo escopo foi superado por sucesso e registra o encerramento auditado de forma contínua e autônoma.
+
+### Migração do frontend
+
+- Consumidores da listagem `GET /ingestion/runs?next_action=inspect_error` deixam de receber erros obsoletos de execuções já sucedidas.
+- Telas de detalhes e tabelas de histórico podem renderizar o badge ou link direto para a run substituta via `run.superseded_by.run_id`.
+
 ## 2026-11-03 - Reengenharia de Armazenamento e Ingestão Vetorizada DuckDB
 
 ### Superfícies afetadas

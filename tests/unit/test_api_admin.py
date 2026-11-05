@@ -1878,3 +1878,93 @@ def test_admin_run_concluida_com_execucao_filha_nao_expoe_recovery(
     recover = client.post(f"/ingestion/runs/{run_id}/recover")
     assert recover.status_code == 409
     assert recover.json()["detail"]["reason_code"] == "RUN_ALREADY_COMPLETED"
+
+
+def test_ingestion_runs_superseded_detection_and_cleanup_endpoint(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    old_child_id = uuid.uuid4()
+    old_run_id = uuid.uuid4()
+    new_child_id = uuid.uuid4()
+    new_run_id = uuid.uuid4()
+
+    # Old failed execution
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=old_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DRE_ind_2024.csv",
+                url="http://exemplo/itr-2024/dre",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now - timedelta(hours=2),
+                finalizada_em=now - timedelta(hours=2),
+                mensagem_erro="Falha temporaria de download.",
+            ),
+            IngestionRun(
+                id=old_run_id,
+                execucao_sincronizacao_id=old_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="falha",
+                phase="stage",
+                started_at=now - timedelta(hours=2),
+                message="Falha temporaria de download.",
+            ),
+            # Newer successful execution for the same file
+            ExecucaoSincronizacao(
+                id=new_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DRE_ind_2024.csv",
+                url="http://exemplo/itr-2024/dre",
+                status="sucesso",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now - timedelta(minutes=10),
+                finalizada_em=now - timedelta(minutes=5),
+            ),
+            IngestionRun(
+                id=new_run_id,
+                execucao_sincronizacao_id=new_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="sucesso",
+                phase="complete",
+                started_at=now - timedelta(minutes=10),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # 1. Detail old run: must be marked superseded with next_action=none
+    res_old = client.get(f"/ingestion/runs/{old_run_id}")
+    assert res_old.status_code == 200
+    old_payload = res_old.json()
+    assert old_payload["superseded"] is True
+    assert old_payload["superseded_by"] is not None
+    assert old_payload["superseded_by"]["run_id"] == str(new_run_id)
+    assert old_payload["superseded_by"]["status"] == "sucesso"
+    assert old_payload["next_action"] == "none"
+
+    # 2. Querying with next_action=inspect_error must NOT return the superseded run
+    res_list = client.get("/ingestion/runs?next_action=inspect_error")
+    assert res_list.status_code == 200
+    ids_returned = [r["id"] for r in res_list.json()["dados"]]
+    assert str(old_run_id) not in ids_returned
+
+    # 3. Call cleanup-superseded endpoint
+    res_cleanup = client.post("/ingestion/runs/cleanup-superseded")
+    assert res_cleanup.status_code == 200
+    cleanup_payload = res_cleanup.json()
+    assert cleanup_payload["status"] == "sucesso"
+    assert cleanup_payload["total_superseded_cleaned"] >= 1
+    assert any(c["run_id"] == str(old_run_id) for c in cleanup_payload["cleaned_runs"])
+
+    # 4. Detail old run again: failure_acknowledgement is now present
+    res_old_after = client.get(f"/ingestion/runs/{old_run_id}")
+    assert res_old_after.status_code == 200
+    assert res_old_after.json()["failure_acknowledgement"] is not None

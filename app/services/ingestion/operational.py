@@ -7,7 +7,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.ingestion import IngestionCancellationRequest, IngestionPhaseExecution, IngestionRun
+from app.models.ingestion import (
+    IngestionCancellationRequest,
+    IngestionOperationAudit,
+    IngestionPhaseExecution,
+    IngestionRun,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.recovery import assess_ingestion_run_recovery
 
@@ -450,6 +455,56 @@ def reconcile_stale_ingestion_phase_executions(
             child_run.message = child.mensagem_erro
             child_run.finished_at = now
             recovered_run_ids.append(str(child_run.id))
+
+    # Auto-acknowledge failed/cancelled runs that have already been superseded by a successful execution
+    superseded_candidates = list(
+        db.scalars(
+            select(IngestionRun)
+            .where(
+                IngestionRun.status.in_(["falha", "cancelada"]),
+                IngestionRun.execucao_sincronizacao_id.is_not(None),
+            )
+            .limit(limit)
+        ).all()
+    )
+    for s_run in superseded_candidates:
+        exec_cand = db.get(ExecucaoSincronizacao, s_run.execucao_sincronizacao_id)
+        if exec_cand is None:
+            continue
+        newer_success = db.scalar(
+            select(ExecucaoSincronizacao.id)
+            .where(
+                ExecucaoSincronizacao.arquivo == exec_cand.arquivo,
+                ExecucaoSincronizacao.tipo_fonte == exec_cand.tipo_fonte,
+                ExecucaoSincronizacao.ano == exec_cand.ano,
+                ExecucaoSincronizacao.status.in_(["sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"]),
+                ExecucaoSincronizacao.id != exec_cand.id,
+                ExecucaoSincronizacao.iniciada_em >= exec_cand.iniciada_em,
+            )
+            .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+            .limit(1)
+        )
+        if newer_success is not None:
+            has_ack = db.scalar(
+                select(IngestionOperationAudit.id)
+                .where(
+                    IngestionOperationAudit.scope_type == "run",
+                    IngestionOperationAudit.scope_id == str(s_run.id),
+                    IngestionOperationAudit.operation == "acknowledge_failure",
+                )
+                .limit(1)
+            )
+            if has_ack is None:
+                audit = IngestionOperationAudit(
+                    scope_type="run",
+                    scope_id=str(s_run.id),
+                    operation="acknowledge_failure",
+                    requested_by="system:recovery_sweep",
+                    reason=f"Auto-reconhecido pelo recovery sweep: superado com sucesso pela execucao {newer_success}.",
+                    consequence={"superseded_by_execucao_id": str(newer_success)},
+                )
+                db.add(audit)
+                recovered_run_ids.append(str(s_run.id))
 
     db.flush()
     return {

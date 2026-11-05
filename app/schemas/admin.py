@@ -568,6 +568,8 @@ class IngestionOperationRunPreview(BaseModel):
         default=None,
         description="Reconhecimento da falha atual, quando a investigacao ja foi encerrada.",
     )
+    superseded: bool = Field(default=False, description="Indica se esta run foi superada por uma execucao de sucesso posterior.")
+    superseded_by: dict[str, Any] | None = Field(default=None, description="Metadados da execucao de sucesso posterior que substituiu esta run.")
     liveness: IngestionOperationalLiveness | None = Field(default=None, description="Snapshot resumido de liveness.")
     blocking: IngestionOperationalBlocking | None = Field(default=None, description="Motivo agregado de espera/bloqueio.")
 
@@ -926,10 +928,41 @@ class IngestionRunResumo(BaseModel):
         default=None,
         description="Reconhecimento auditavel da falha atual. Quando presente, `next_action` deixa de ser `inspect_error`.",
     )
+    superseded: bool = Field(
+        default=False,
+        description="Indica se esta run foi superada por uma execucao de sucesso posterior para o mesmo recurso.",
+    )
+    superseded_by: dict[str, Any] | None = Field(
+        default=None,
+        description="Metadados da execucao de sucesso posterior que substituiu esta run com sucesso.",
+    )
     links: dict[str, str] | None = Field(
         default=None,
         description="Links relativos para drill-down desta run, incluindo detalhe, fases, replay e quarentena correlata.",
     )
+
+
+class IngestionCleanupSupersededResposta(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "status": "sucesso",
+                "total_superseded_cleaned": 9,
+                "cleaned_runs": [
+                    {
+                        "run_id": "0bf4663e-eb8f-42f3-b46a-e9ba966d6861",
+                        "arquivo": "itr_cia_aberta_DRE_ind_2023.csv",
+                        "superseded_by_run_id": "7a28fcb3-6df0-4014-a18d-214e1885d6f9",
+                        "superseded_by_status": "sucesso",
+                    }
+                ],
+            }
+        }
+    )
+
+    status: str = Field(description="Status consolidado da operacao de limpeza.")
+    total_superseded_cleaned: int = Field(description="Quantidade de runs superadas que foram limpas e reconhecidas.")
+    cleaned_runs: list[dict[str, Any]] = Field(description="Lista com detalhes das runs limpas e de suas substitutas.")
 
 
 class ListaIngestionRuns(BaseModel):

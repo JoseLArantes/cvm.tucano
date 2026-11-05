@@ -49,6 +49,7 @@ from app.schemas.admin import (
     FonteDetalheResposta,
     FonteResumoResposta,
     HistoricoAlteracaoCampoResposta,
+    IngestionCleanupSupersededResposta,
     IngestionDispatchPlanRequest,
     IngestionDispatchPlanResponse,
     IngestionDispatchRequest,
@@ -464,6 +465,42 @@ def _serialize_last_error(*, message: str | None, phase_execution: Any, status: 
     return None
 
 
+def _find_superseding_execution(db: DbSession, run: IngestionRun) -> dict[str, Any] | None:
+    if run.execucao_sincronizacao_id is None:
+        return None
+    exec_item = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+    if exec_item is None:
+        return None
+
+    stmt = (
+        select(ExecucaoSincronizacao)
+        .where(
+            ExecucaoSincronizacao.arquivo == exec_item.arquivo,
+            ExecucaoSincronizacao.tipo_fonte == exec_item.tipo_fonte,
+            ExecucaoSincronizacao.ano == exec_item.ano,
+            ExecucaoSincronizacao.status.in_(["sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"]),
+            ExecucaoSincronizacao.id != exec_item.id,
+            ExecucaoSincronizacao.iniciada_em >= exec_item.iniciada_em,
+        )
+        .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+        .limit(1)
+    )
+    newer_exec = db.scalar(stmt)
+    if newer_exec is None:
+        return None
+
+    newer_run = db.scalar(
+        select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == newer_exec.id)
+    )
+    return {
+        "execucao_id": str(newer_exec.id),
+        "run_id": str(newer_run.id) if newer_run is not None else None,
+        "status": newer_exec.status,
+        "completed_at": newer_exec.finalizada_em.isoformat() if newer_exec.finalizada_em else None,
+        "arquivo": newer_exec.arquivo,
+    }
+
+
 def _next_action(
     *,
     state: str,
@@ -471,6 +508,7 @@ def _next_action(
     recovery: dict[str, Any] | None = None,
     failure_acknowledged: bool = False,
     rejected_total: int | None = None,
+    superseded: bool = False,
 ) -> str:
     if state in {"queued", "running"}:
         return "wait"
@@ -479,9 +517,11 @@ def _next_action(
             return "recover"
         return "start_ingestion"
     if state == "stale":
+        if superseded:
+            return "none"
         return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
     if state == "failed":
-        if failure_acknowledged:
+        if failure_acknowledged or superseded:
             return "none"
         if last_error is not None and last_error.get("retryable") is True:
             return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
@@ -540,6 +580,8 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
         error_retryable=bool(last_error and last_error.get("retryable")),
     ).as_dict()
     failure_acknowledgement = _failure_acknowledgement(db, run=run, latest_phase=latest_phase)
+    superseding_info = _find_superseding_execution(db, run)
+    is_superseded = superseding_info is not None
     return {
         "state": state,
         "progress": _build_progress_for_run(run),
@@ -549,12 +591,15 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
         "last_error": last_error,
         "recovery": recovery,
         "failure_acknowledgement": failure_acknowledgement,
+        "superseded": is_superseded,
+        "superseded_by": superseding_info,
         "next_action": _next_action(
             state=state,
             last_error=last_error,
             recovery=recovery,
             failure_acknowledged=failure_acknowledgement is not None,
             rejected_total=quality_summary.get("quarantine_total"),
+            superseded=is_superseded,
         ),
         "links": {
             "run_detail": f"/ingestion/runs/{run.id}",
@@ -635,6 +680,8 @@ def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperati
         next_action=operational["next_action"],
         recovery=IngestionRecovery(**operational["recovery"]),
         failure_acknowledgement=operational["failure_acknowledgement"],
+        superseded=operational["superseded"],
+        superseded_by=operational["superseded_by"],
         liveness=operational["liveness"],
         blocking=operational["blocking"],
     )
@@ -905,6 +952,53 @@ def _allowed_actions_for_run(
     if run.status == "em_execucao":
         return [{"code": "cancel", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/cancel", "requires_confirmation": True, "reason_code": "RUN_ACTIVE", "constraints": {}}]
     if run.status == "falha":
+        if operational.get("superseded") and operational.get("superseded_by"):
+            superseded_by = operational["superseded_by"]
+            actions = []
+            if superseded_by.get("run_id"):
+                actions.append(
+                    {
+                        "code": "inspect_replacement",
+                        "operation": "GET",
+                        "resource": f"/ingestion/runs/{superseded_by['run_id']}",
+                        "requires_confirmation": False,
+                        "reason_code": "SUPERSEDED_BY_SUCCESSFUL_RUN",
+                        "constraints": {"replacement_run_id": superseded_by["run_id"]},
+                    }
+                )
+            actions.append(
+                {
+                    "code": "cleanup_transient_state",
+                    "operation": "POST",
+                    "resource": f"/ingestion/runs/{run.id}/cleanup-transient-state",
+                    "requires_confirmation": True,
+                    "reason_code": "TRANSIENT_STATE_CLEANUP",
+                    "constraints": {},
+                }
+            )
+            if operational["failure_acknowledgement"] is None:
+                actions.append(
+                    {
+                        "code": "acknowledge_failure",
+                        "operation": "POST",
+                        "resource": f"/ingestion/runs/{run.id}/acknowledge-failure",
+                        "requires_confirmation": True,
+                        "reason_code": "SUPERSEDED_BY_SUCCESSFUL_RUN",
+                        "constraints": {"reason_required": False},
+                    }
+                )
+            actions.append(
+                {
+                    "code": "inspect",
+                    "operation": "GET",
+                    "resource": f"/ingestion/runs/{run.id}",
+                    "requires_confirmation": False,
+                    "reason_code": "RUN_SUPERSEDED",
+                    "constraints": {},
+                }
+            )
+            return actions
+
         if operational["next_action"] == "recover":
             return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": recovery["reason_code"], "constraints": {"strategy": recovery["strategy"]}}]
         actions = []
@@ -2436,6 +2530,7 @@ def listar_ingestion_runs(
     status: str | None = None,
     phase: str | None = None,
     next_action: str | None = None,
+    superseded: bool | None = None,
     fonte: str | None = None,
     ano: int | None = None,
     started_from: datetime | None = None,
@@ -2462,7 +2557,13 @@ def listar_ingestion_runs(
     def include(run: IngestionRun) -> bool:
         fields = _build_run_operational_fields(db, run)
         quarantine = int(db.scalar(select(func.count(QuarantineItem.id)).where(QuarantineItem.ingestion_run_id == run.id)) or 0)
-        return ((state is None or fields["state"] == state) and (next_action is None or fields["next_action"] == next_action) and (has_quarantine is None or bool(quarantine) == has_quarantine) and (has_error is None or bool(fields.get("last_error")) == has_error))
+        return (
+            (state is None or fields["state"] == state)
+            and (next_action is None or fields["next_action"] == next_action)
+            and (superseded is None or fields.get("superseded") == superseded)
+            and (has_quarantine is None or bool(quarantine) == has_quarantine)
+            and (has_error is None or bool(fields.get("last_error")) == has_error)
+        )
     candidates = [run for run in candidates if include(run)]
     candidates.sort(key=lambda run: run.started_at, reverse=not ordenar.endswith(":asc"))
     total = len(candidates)
@@ -3322,6 +3423,84 @@ def cleanup_ingestion_run_transient_state(
         raise HTTPException(status_code=409, detail="A run precisa estar cancelada ou falha para limpeza transitoria.")
     resultado = _cleanup_transient_state_for_run(db, run=run)
     return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/runs/cleanup-superseded",
+    response_model=IngestionCleanupSupersededResposta,
+    summary="Limpar e reconhecer runs superadas por sucesso posterior",
+    description=(
+        "Localiza runs em estado terminal (`falha` ou `cancelada`) que ja foram substituidas "
+        "com sucesso por uma execucao posterior para o mesmo arquivo/ano. "
+        "Executa a limpeza de estado transitorio (staging/quarentena) e registra o reconhecimento auditavel "
+        "da falha apontando para a run que a substituiu, eliminando pendencias operacionais obsoletas."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="cleanupSupersededIngestionRunsAdmin",
+)
+def cleanup_superseded_ingestion_runs(
+    db: DbSession,
+    auth: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    tipo_fonte: str | None = None,
+    ano: int | None = None,
+) -> IngestionCleanupSupersededResposta:
+    stmt = select(IngestionRun).where(IngestionRun.status.in_(["falha", "cancelada"]))
+    if tipo_fonte is not None:
+        stmt = stmt.where(IngestionRun.tipo_fonte == tipo_fonte.lower().strip())
+    if ano is not None:
+        stmt = stmt.where(IngestionRun.ano == ano)
+
+    candidates = list(db.scalars(stmt).all())
+    cleaned_runs: list[dict[str, Any]] = []
+    actor_name = _actor(auth)
+
+    for run in candidates:
+        superseding_info = _find_superseding_execution(db, run)
+        if superseding_info is None:
+            continue
+
+        _cleanup_transient_state_for_run(db, run=run)
+
+        latest_phase = get_latest_phase_execution(db, run_id=run.id)
+        failure_key = _failure_key(run, latest_phase)
+        existing_ack = db.scalar(
+            select(IngestionOperationAudit)
+            .where(
+                IngestionOperationAudit.scope_type == "run",
+                IngestionOperationAudit.scope_id == str(run.id),
+                IngestionOperationAudit.operation == "acknowledge_failure",
+            )
+            .limit(1)
+        )
+        if existing_ack is None:
+            audit = IngestionOperationAudit(
+                scope_type="run",
+                scope_id=str(run.id),
+                operation="acknowledge_failure",
+                requested_by=actor_name,
+                reason=f"Superada com sucesso por {superseding_info.get('arquivo')} na run {superseding_info.get('run_id')}.",
+                consequence={
+                    "failure_key": failure_key,
+                    "superseded_by": superseding_info,
+                },
+            )
+            db.add(audit)
+
+        cleaned_runs.append(
+            {
+                "run_id": str(run.id),
+                "arquivo": superseding_info.get("arquivo"),
+                "superseded_by_run_id": superseding_info.get("run_id"),
+                "superseded_by_status": superseding_info.get("status"),
+            }
+        )
+
+    db.commit()
+    return IngestionCleanupSupersededResposta(
+        status="sucesso",
+        total_superseded_cleaned=len(cleaned_runs),
+        cleaned_runs=cleaned_runs,
+    )
 
 
 @router.get(
