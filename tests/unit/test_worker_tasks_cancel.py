@@ -87,6 +87,107 @@ def test_sincronizar_member_internal_cancela_filho_quando_pai_ja_cancelado(db_se
     assert execucao_filha.finalizada_em is not None
 
 
+def test_sincronizar_member_internal_ignora_execucao_filha_em_status_terminal(db_session: Session) -> None:
+    execucao = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_DRE_ind_2025.csv",
+        url="http://exemplo/itr/dre",
+        status="falha",
+        finalizada_em=datetime.now(UTC),
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    resultado = sincronizar_member_internal(
+        db=db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        member_name=execucao.arquivo,
+        parent_execucao_id=str(execucao.id),
+        child_execucao_id=str(execucao.id),
+        force_reimport=False,
+        task_id="task-duplicada",
+    )
+
+    db_session.refresh(execucao)
+    assert resultado["status"] == "falha"
+    assert execucao.status == "falha"
+
+
+def test_sincronizar_member_internal_aborta_filho_quando_pai_ja_com_falha(db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr",
+        status="falha",
+        finalizada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    execucao_filha = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_DRE_ind_2025.csv",
+        url="http://exemplo/itr/dre",
+        status="agendada",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_filha)
+    db_session.commit()
+
+    resultado = sincronizar_member_internal(
+        db=db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        member_name=execucao_filha.arquivo,
+        parent_execucao_id=str(execucao_pai.id),
+        child_execucao_id=str(execucao_filha.id),
+        force_reimport=False,
+        task_id="task-filha-falha",
+    )
+
+    db_session.refresh(execucao_filha)
+    assert resultado["status"] == "falha"
+    assert execucao_filha.status == "falha"
+    assert execucao_filha.finalizada_em is not None
+
+
+def test_disparar_dependentes_task_aborta_quando_pai_com_falha(
+    db_session: Session,
+    monkeypatch: Any,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr",
+        status="falha",
+        finalizada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.commit()
+
+    class _SessionProxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(db_session, name)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
+
+    from app.worker import tasks as worker_tasks
+
+    resultado = worker_tasks.disparar_dependentes_task.run(str(execucao_pai.id))
+    assert resultado["status"] == "falha"
+
+
 def test_reconciliar_ingestion_stale_task_marca_falha_recuperavel(db_session: Session) -> None:
     agora = datetime.now(UTC)
     execucao = ExecucaoSincronizacao(

@@ -1571,19 +1571,29 @@ def sincronizar_member_internal(
     if execucao is None:
         raise ValueError(f"Execution not found: {child_execucao_id}")
 
-    if execucao.status == "cancelada":
-        return _resultado_cancelado(execucao.id, "Execution was cancelled before member processing started.")
+    if execucao.status in _STATUS_FINAL_EXECUCAO and not force_reimport:
+        if execucao.status == "cancelada":
+            return _resultado_cancelado(execucao.id, "Execution was cancelled before member processing started.")
+        _logger.warning(
+            "Member task %s for execution %s already in terminal state '%s', skipping duplicate processing.",
+            member_name,
+            execucao.id,
+            execucao.status,
+        )
+        return {"status": execucao.status, "execucao_id": str(execucao.id)}
 
     parent_execucao = db.get(ExecucaoSincronizacao, uuid.UUID(parent_execucao_id))
     if parent_execucao is None:
         raise ValueError(f"Parent execution not found: {parent_execucao_id}")
-    if parent_execucao.status == "cancelada":
+    if parent_execucao.status in ("cancelada", "falha") and not force_reimport:
         if execucao.status not in _STATUS_FINAL_EXECUCAO:
-            execucao.status = "cancelada"
+            execucao.status = parent_execucao.status
             execucao.finalizada_em = datetime.now(UTC)
-            execucao.mensagem_erro = "Execucao cancelada porque a sincronizacao pai foi cancelada."
+            execucao.mensagem_erro = f"Execucao cancelada/abortada porque a sincronizacao pai terminou com status '{parent_execucao.status}'."
             db.commit()
-        return _resultado_cancelado(execucao.id, "Parent execution was cancelled before member processing started.")
+        if parent_execucao.status == "cancelada":
+            return _resultado_cancelado(execucao.id, "Parent execution was cancelled before member processing started.")
+        return {"status": "falha", "execucao_id": str(execucao.id), "error": f"Parent execution {parent_execucao_id} failed."}
 
     if task_id:
         execucao.id_tarefa = task_id
@@ -1605,15 +1615,15 @@ def sincronizar_member_internal(
         db.commit()
         db.refresh(run)
 
-    ingestion_file = db.scalar(
-        select(IngestionFile)
-        .join(IngestionRun)
-        .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
-    )
-    if ingestion_file is None:
-        raise ValueError(f"IngestionFile not found for parent execution: {parent_execucao_id}")
-
     try:
+        ingestion_file = db.scalar(
+            select(IngestionFile)
+            .join(IngestionRun)
+            .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
+        )
+        if ingestion_file is None:
+            raise ValueError(f"IngestionFile not found for parent execution: {parent_execucao_id}")
+
         # Check if member file exists locally, otherwise self-heal
         zip_dir = Path(_settings.storage_dir) / str(parent_execucao.id)
         member_path = zip_dir / "extracted" / member_name
@@ -1939,6 +1949,8 @@ def disparar_dependentes_task(
             raise ValueError(f"Parent execution not found: {parent_execucao_id}")
         if execucao.status == "cancelada":
             return _resultado_cancelado(execucao.id, "Parent execution was cancelled before dependent dispatch.")
+        if execucao.status == "falha":
+            return {"status": "falha", "parent_execucao_id": parent_execucao_id, "error": "Parent execution already failed."}
 
         document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
         header_exec = db.scalar(
