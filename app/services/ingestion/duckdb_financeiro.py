@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import logging
 import shutil
 import tempfile
@@ -172,7 +173,7 @@ def process_demonstracao_member_duckdb(
     
         # Step 2: Vectorized parsing, joining companies, and deterministic deduplication in DuckDB
         con.execute(f"""
-            CREATE TEMPORARY TABLE parsed AS
+            CREATE VIEW parsed AS
             SELECT
                 r.linha_origem,
                 '{tipo_formulario}' as tipo_formulario,
@@ -243,6 +244,8 @@ def process_demonstracao_member_duckdb(
             contadores["inalteradas"] += duplicates_ignored
         else:
             contadores["inalterados"] = duplicates_ignored
+
+        con.execute("DROP VIEW parsed; DROP TABLE raw_csv; DROP TABLE resolved_companies;")
     
         # Step 3: Exact bit-for-bit SQL macros matching Python JSON / SHA256 canonical hashing
         con.execute("""
@@ -295,9 +298,9 @@ def process_demonstracao_member_duckdb(
         artifact_path = root / f"{stem}__{resolved_row_kind}.typed.csv"
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
     
-        # Step 4: Build stage_rows temporary table with exact columns matching _STAGE_COLUMNS
+        # Step 4: Build stage_rows view with exact columns matching _STAGE_COLUMNS
         con.execute(f"""
-            CREATE TEMPORARY TABLE stage_rows AS
+            CREATE VIEW stage_rows AS
             SELECT
                 gen_random_uuid() as id,
                 CAST('{str(run_id)}' AS UUID) as ingestion_run_id,
@@ -406,7 +409,7 @@ def process_demonstracao_member_duckdb(
                 select_res = con.execute(f"SELECT {', '.join(_STAGE_COLUMNS)} FROM stage_rows ORDER BY linha_origem ASC")
                 try:
                     with cursor.copy(copy_sql) as copy:
-                        while batch := select_res.fetchmany(20000):
+                        while batch := select_res.fetchmany(10000):
                             for row in batch:
                                 copy.write_row(row)
                                 rows_loaded += 1
@@ -433,6 +436,7 @@ def process_demonstracao_member_duckdb(
         except Exception:
             pass
         shutil.rmtree(temp_spill, ignore_errors=True)
+        gc.collect()
 
     # Step 7: Build artifact metadata
     artifact_size = artifact_path.stat().st_size if artifact_path.exists() else 0
