@@ -85,14 +85,17 @@ def _publicar_fontes_anuais_agendadas(
 @celery_app.task(bind=True, name="app.worker.tasks.reconciliar_ingestion_stale_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def reconciliar_ingestion_stale_task(self: Any) -> dict[str, Any]:
     from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
+    from app.services.ingestion.replay import auto_repair_and_replay_quarantine
 
     db = SessionLocal()
     try:
         resultado = reconcile_stale_ingestion_phase_executions(db)
+        quarantine_repair = auto_repair_and_replay_quarantine(db, max_items=100)
         db.commit()
         return {
             "status": "completed",
             **resultado,
+            "quarantine_repair": quarantine_repair,
         }
     finally:
         db.close()

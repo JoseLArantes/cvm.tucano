@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections import OrderedDict, defaultdict
@@ -6724,6 +6725,8 @@ def materializar_analise_companhia(
     task_id: str | None = None,
     position_in_chunk: int | None = None,
 ) -> AnaliseMaterializacaoExecucao:
+    last_commit_time = 0.0
+
     def atualizar_execucao_progresso(
         *,
         processed_knowledge_dates: int,
@@ -6731,7 +6734,20 @@ def materializar_analise_companhia(
         current_known_from: date | None,
         context_revisions: int,
         fact_revisions: int,
+        force_commit: bool = False,
     ) -> None:
+        nonlocal last_commit_time
+        now_ts = time.monotonic()
+        should_commit = (
+            force_commit
+            or processed_knowledge_dates == 0
+            or processed_knowledge_dates == total_knowledge_dates
+            or (now_ts - last_commit_time) >= 3.0
+            or (processed_knowledge_dates % 10 == 0)
+        )
+        if not should_commit:
+            return
+
         progress_ratio = (processed_knowledge_dates / total_knowledge_dates) if total_knowledge_dates > 0 else None
         execucao.summary = {
             **(execucao.summary or {}),
@@ -6746,6 +6762,7 @@ def materializar_analise_companhia(
         }
         execucao.updated_at = datetime.now(UTC)
         db.commit()
+        last_commit_time = now_ts
 
     if _companhia_tem_registro_cancelado(companhia) and not incluir_canceladas:
         started_at = datetime.now(UTC)
@@ -6889,13 +6906,17 @@ def materializar_analise_companhia(
             current_known_from=None,
             context_revisions=0,
             fact_revisions=0,
+            force_commit=True,
         )
 
+        previous_snapshot: dict[tuple[str, str, str, str], dict[str, Any]] | None = None
         for index, known_from in enumerate(execution_knowledge_dates, start=1):
             context_payload = _context_snapshot_payload(db, companhia, scope, known_from)
+            context_changed = False
             if current_context is None:
                 current_context = context_payload
                 current_context_start = known_from
+                context_changed = True
             elif current_context["fingerprint"] != context_payload["fingerprint"]:
                 context_revisions_payloads.append(
                     {
@@ -6906,8 +6927,14 @@ def materializar_analise_companhia(
                 )
                 current_context = context_payload
                 current_context_start = known_from
+                context_changed = True
 
-            current_snapshot = _series_snapshot_payloads(db, companhia, scope, known_from)
+            if not context_changed and previous_snapshot is not None:
+                current_snapshot = previous_snapshot
+            else:
+                current_snapshot = _series_snapshot_payloads(db, companhia, scope, known_from)
+                previous_snapshot = current_snapshot
+
             snapshot_keys = set(current_snapshot)
 
             for key in list(active_facts):
@@ -6944,6 +6971,16 @@ def materializar_analise_companhia(
                 current_known_from=known_from,
                 context_revisions=len(context_revisions_payloads),
                 fact_revisions=len(fact_revisions_payloads),
+            )
+
+        if total_knowledge_dates > 0:
+            atualizar_execucao_progresso(
+                processed_knowledge_dates=total_knowledge_dates,
+                total_knowledge_dates=total_knowledge_dates,
+                current_known_from=execution_knowledge_dates[-1],
+                context_revisions=len(context_revisions_payloads),
+                fact_revisions=len(fact_revisions_payloads),
+                force_commit=True,
             )
 
         if current_context is not None and current_context_start is not None:

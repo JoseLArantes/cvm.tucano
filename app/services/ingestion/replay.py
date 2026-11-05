@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
 from app.models.ingestion import IngestionRow, IngestionRun, QuarantineItem
-from app.models.sincronizacao import ExecucaoSincronizacao
+from app.models.sincronizacao import ExecucaoSincronizacao, RegistroQuarentena
 from app.services.ingestion.fca import _promote_fca_row, normalizar_fca_row
 from app.services.ingestion.financeiro import _promote_financeiro_row, normalizar_financeiro_row
 from app.services.ingestion.fre import _promote_fre_row, normalizar_fre_row
@@ -35,6 +35,7 @@ from app.services.ingestion.validation import (
     invalid_result,
     write_validation_result,
 )
+from app.services.ingestion.vlmo import _promote_vlmo_row, normalizar_vlmo_row
 
 
 def _build_header_map_for_run(db: Session, *, run_id: Any) -> dict[Any, Any]:
@@ -172,6 +173,13 @@ def _renormalize_row(db: Session, row: IngestionRow) -> tuple[str, dict[str, Any
             linha_origem=row.linha_origem,
             linha=row.raw_data,
         )
+    if row.row_kind.startswith("vlmo_"):
+        return normalizar_vlmo_row(
+            arquivo_origem=row.arquivo_origem,
+            ano_origem=row.ano_origem or 0,
+            linha_origem=row.linha_origem,
+            linha=row.raw_data,
+        )
     raise ValueError(f"row_kind_nao_suportado_para_replay: {row.row_kind}")
 
 
@@ -182,7 +190,13 @@ def _resolver_input_for_row(row_kind: str, dados: dict[str, Any]) -> ResolverInp
         denominacao_companhia=dados.get("denominacao_companhia") or dados.get("nome_companhia"),
         tipo_formulario=dados.get(
             "tipo_formulario",
-            "FRE" if row_kind.startswith("fre_") else "FCA" if row_kind.startswith("fca_") else row_kind[:3].upper(),
+            "FRE"
+            if row_kind.startswith("fre_")
+            else "FCA"
+            if row_kind.startswith("fca_")
+            else "VLMO"
+            if row_kind.startswith("vlmo_")
+            else row_kind[:3].upper(),
         ),
         id_documento=dados.get("id_documento"),
         versao=dados.get("versao"),
@@ -316,6 +330,15 @@ def replay_ingestion_row(
                 execucao_id=run.execucao_sincronizacao_id,
                 contadores=contadores,
             )
+        elif row_kind.startswith("vlmo_"):
+            _promote_vlmo_row(
+                db,
+                row_kind=row_kind,
+                row=row,
+                dados=dados,
+                execucao_id=run.execucao_sincronizacao_id,
+                contadores=contadores,
+            )
         else:
             _promote_fre_row(
                 db,
@@ -328,6 +351,19 @@ def replay_ingestion_row(
         if quarantine is not None:
             register_quarantine_replay_attempt(quarantine, success=True)
             mark_quarantine_resolved(db, item=quarantine, status="resolvido_auto", resolved_by=resolved_by)
+
+        # Sincroniza / limpa quarentena legada correspondente
+        registros_legados = list(
+            db.scalars(
+                select(RegistroQuarentena).where(
+                    RegistroQuarentena.arquivo_origem == row.arquivo_origem,
+                    RegistroQuarentena.ano_origem == row.ano_origem,
+                    RegistroQuarentena.linha_origem == row.linha_origem,
+                )
+            ).all()
+        )
+        for reg in registros_legados:
+            db.delete(reg)
         register_row_event(
             db,
             ingestion_row=row,
@@ -413,3 +449,58 @@ def replay_quarantine(
             processed.append({"status": "falha", "row_id": str(item.ingestion_row_id), "reason": str(e)})
             
     return {"status": "sucesso", "total": len(processed), "items": processed}
+
+
+def auto_repair_and_replay_quarantine(
+    db: Session,
+    *,
+    reason_code: str | None = None,
+    arquivo_origem: str | None = None,
+    ano: int | None = None,
+    max_items: int = 500,
+) -> dict[str, Any]:
+    """
+    Identifica itens pendentes em quarentena (priorizando reparaveis),
+    executa auto-correcao e replay idempotente, registrando o historico de resolucao.
+    """
+    query = select(QuarantineItem).where(QuarantineItem.status == "pendente")
+    if reason_code is not None:
+        query = query.where(QuarantineItem.motivo_codigo == reason_code)
+    if arquivo_origem is not None:
+        query = query.where(QuarantineItem.arquivo_origem == arquivo_origem)
+    if ano is not None:
+        query = query.where(QuarantineItem.ano_origem == ano)
+
+    items = list(
+        db.execute(
+            query.order_by(
+                QuarantineItem.reparavel.desc(),
+                QuarantineItem.created_at.asc(),
+            ).limit(max_items)
+        ).scalars()
+    )
+
+    resolvidos = 0
+    falhados = 0
+    detalhes: list[dict[str, Any]] = []
+
+    for item in items:
+        try:
+            res = replay_ingestion_row(db, row_id=item.ingestion_row_id, resolved_by="auto_repair")
+            if res.get("status") == "sucesso":
+                resolvidos += 1
+                detalhes.append({"id": str(item.id), "status": "resolvido", "row_id": str(item.ingestion_row_id)})
+            else:
+                falhados += 1
+                detalhes.append({"id": str(item.id), "status": "falha", "reason": res.get("reason")})
+        except Exception as exc:
+            falhados += 1
+            detalhes.append({"id": str(item.id), "status": "falha", "reason": str(exc)})
+
+    return {
+        "status": "completed",
+        "candidatos": len(items),
+        "resolvidos": resolvidos,
+        "falhados": falhados,
+        "itens": detalhes,
+    }

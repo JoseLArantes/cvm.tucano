@@ -145,6 +145,15 @@ def map_fre_members(ano: int) -> tuple[dict[str, str], set[str], set[str]]:
     return row_kind_map, required, optional
 
 
+def _limitar_tamanho_texto(valor: Any, max_len: int = 500) -> str | None:
+    texto = normalizar_texto(valor)
+    if texto is None:
+        return None
+    if len(texto) > max_len:
+        return texto[:max_len]
+    return texto
+
+
 def _download(url: str, *, timeout: float) -> bytes:
     response = httpx.get(url, timeout=timeout)
     response.raise_for_status()
@@ -568,26 +577,36 @@ def normalizar_fre_row(
             },
         )
     if tipo == "relacao_familiar":
-        nome_admin = normalizar_texto(linha.get("Nome_Administrador"))
-        nome_rel = normalizar_texto(linha.get("Nome_Pessoa_Relacionada"))
+        nome_admin = _limitar_tamanho_texto(linha.get("Nome_Administrador"), 500)
+        nome_rel = _limitar_tamanho_texto(linha.get("Nome_Pessoa_Relacionada"), 500)
         if nome_admin is None or nome_rel is None:
             raise ValueError("campo_obrigatorio_ausente")
+        cargo_rel_original = normalizar_texto(linha.get("Cargo_Pessoa_Relacionada"))
+        cargo_rel = _limitar_tamanho_texto(cargo_rel_original, 500)
+        cargo_admin = _limitar_tamanho_texto(linha.get("Cargo_Administrador"), 500)
+        nome_emissor = _limitar_tamanho_texto(linha.get("Nome_Emissor"), 500)
+        nome_emissor_rel = _limitar_tamanho_texto(linha.get("Nome_Emissor_Pessoa_Relacionada"), 500)
+        tipo_parentesco = _limitar_tamanho_texto(linha.get("Tipo_Parentesco"), 255)
+        observacao = normalizar_texto(linha.get("Observacao"))
+        if cargo_rel_original is not None and len(cargo_rel_original) > 500:
+            detalhe = f"[Cargo_Pessoa_Relacionada original ({len(cargo_rel_original)} caracteres)]: {cargo_rel_original}"
+            observacao = f"{observacao}\n{detalhe}" if observacao else detalhe
         return (
             "fre_relacao_familiar",
             base
             | {
                 "nome_administrador": nome_admin,
                 "cpf_administrador": _digitos(linha.get("CPF_Administrador")),
-                "nome_emissor": normalizar_texto(linha.get("Nome_Emissor")),
+                "nome_emissor": nome_emissor,
                 "cnpj_emissor": normalizar_cnpj_opcional(linha.get("CNPJ_Emissor")),
-                "cargo_administrador": normalizar_texto(linha.get("Cargo_Administrador")),
+                "cargo_administrador": cargo_admin,
                 "nome_pessoa_relacionada": nome_rel,
                 "cpf_pessoa_relacionada": _digitos(linha.get("CPF_Pessoa_Relacionada")),
-                "nome_emissor_pessoa_relacionada": normalizar_texto(linha.get("Nome_Emissor_Pessoa_Relacionada")),
+                "nome_emissor_pessoa_relacionada": nome_emissor_rel,
                 "cnpj_emissor_pessoa_relacionada": normalizar_cnpj_opcional(linha.get("CNPJ_Emissor_Pessoa_Relacionada")),
-                "cargo_Pessoa_relacionada": normalizar_texto(linha.get("Cargo_Pessoa_Relacionada")),
-                "tipo_parentesco": normalizar_texto(linha.get("Tipo_Parentesco")),
-                "observacao": normalizar_texto(linha.get("Observacao")),
+                "cargo_Pessoa_relacionada": cargo_rel,
+                "tipo_parentesco": tipo_parentesco,
+                "observacao": observacao,
             },
         )
     if tipo == "participacao_sociedade":

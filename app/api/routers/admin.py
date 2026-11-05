@@ -101,8 +101,11 @@ from app.services.ingestion.recovery import (
     assess_ingestion_run_recovery,
     assess_ingestion_run_recovery_eligibility,
 )
+from app.services.ingestion.replay import (
+    auto_repair_and_replay_quarantine,
+    replay_quarantine,
+)
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
-from app.services.ingestion.replay import replay_quarantine
 from app.services.ingestion.scheduling import (
     criar_execucao_sincronizacao_agendada,
     marcar_agendamento_com_falha,
@@ -3733,6 +3736,42 @@ def replay_ingestion_quarentena(
 ) -> ReplayResposta:
     payload = payload or ReplayQuarantineRequisicao()
     resultado = replay_quarantine(
+        db,
+        reason_code=payload.reason_code,
+        arquivo_origem=payload.arquivo_origem,
+        ano=payload.ano,
+    )
+    return ReplayResposta(status="sucesso", detalhe=resultado)
+
+
+@router.post(
+    "/quarantine/auto-repair",
+    response_model=ReplayResposta,
+    summary="Auto-Reparo e Replay de Quarentena",
+    description=(
+        "Executa rotina de auto-reparo e replay automatico para itens pendentes em quarentena. "
+        "Aplica regras de correcao (strings sentinelas nulas, truncamento seguro de campos de chave e "
+        "resolucao de conflitos de chaves secundarias em VLMO), promovendo os registros recuperados e "
+        "atualizando a rastreabilidade e auditoria da quarentena."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="autoRepairQuarantineAdmin",
+)
+def auto_repair_quarentena(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    payload: Annotated[
+        ReplayQuarantineRequisicao | None,
+        Body(
+            examples=[
+                {"reason_code": "normalizacao_invalida"},
+                {"arquivo_origem": "fre_cia_aberta_relacao_familiar_2022.csv", "ano": 2022},
+            ]
+        ),
+    ] = None,
+) -> ReplayResposta:
+    payload = payload or ReplayQuarantineRequisicao()
+    resultado = auto_repair_and_replay_quarantine(
         db,
         reason_code=payload.reason_code,
         arquivo_origem=payload.arquivo_origem,

@@ -9,6 +9,32 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-05 - Auto-Reparo e Replay de Quarentena & Otimizacao da Materializacao Analitica
+
+### Superfícies afetadas
+
+- novo endpoint `POST /quarantine/auto-repair`
+- endpoint existente `POST /quarantine/replay`
+- pipeline de ingestão e normalização (`fre`, `vlmo`, `financeiro`)
+- rotina periódica do scheduler `reconciliar_ingestion_stale_task`
+- camada de cálculo de materialização analítica (`POST /analise/materializacoes/...` e worker `analise_materializacao`)
+
+### Comportamento entregue
+
+- **Auto-Cura e Resiliência de Normalização de Datas**: O normalizador de datas passa a reconhecer e mapear sistematicamente valores sentinelas de ausência (`"N/A"`, `"-"`, `"ND"`, `"SEM DATA"`, `"0000-00-00"`, etc.) para `None`, além de aceitar com resiliência formatos com timestamp e formato brasileiro (`DD/MM/YYYY`).
+- **Proteção contra Estouro de Índices BTree (8191 bytes)**: Campos textuais informados por emissores em relações familiares e governança que compõem chaves naturais/índices (`cargo_Pessoa_relacionada`, etc.) são sanitizados e limitados a 500 caracteres, preservando o texto integral original no campo `observacao`, impedindo que textos extensos inseridos pelas companhias quebrem constraints no PostgreSQL.
+- **Resolução de Conflitos de Chaves Secundárias em VLMO**: O pipeline de promoção e upsert de VLMO detecta reapresentações e documentos com novos protocolos de entrega sobre a mesma chave alternativa (`cnpj_companhia`, `codigo_cvm`, `data_referencia`, `categoria`, `tipo`, `data_entrega`, `versao`), atualizando o registro existente de forma idempotente sem violar a constraint `uq_vlmo_documentos_chave_alternativa`.
+- **Suporte Integral de Replay para Linhas VLMO**: Adicionado suporte completo a normalização e promoção de linhas `vlmo_` em `replay_ingestion_row`.
+- **Novo Endpoint `POST /quarantine/auto-repair` e Reconciliação Contínua**: Permite acionamento de auto-reparo e replay direcionado a itens pendentes em quarentena, sincronizando e limpando tanto `QuarantineItem` quanto a tabela de quarentena legada (`RegistroQuarentena`). Integrado também ao sweep periódico do worker/scheduler para auto-recuperação sem intervenção manual.
+- **Otimização de Throughput na Materialização Analítica**:
+  - **Throttling de commits de progresso**: Em `materializar_analise_companhia`, os commits síncronos de WAL para atualização de progresso deixam de ocorrer a cada knowledge date e passam a ser limitados a intervalos mínimos de tempo ou marcos (reduzindo em mais de 80% o overhead de I/O de disco).
+  - **Short-circuit de snapshots idênticos**: Quando knowledge dates consecutivas não alteram o contexto contábil nem introduzem novas demonstrações financeiras, o cálculo de séries temporais reutiliza o snapshot anterior em memória sem disparar recálculos custosos.
+
+### Migração do frontend
+
+- Novos endpoints e parâmetros são retrocompatíveis.
+- O painel de administração pode chamar `POST /quarantine/auto-repair` para acionar a cura imediata de itens pendentes em quarentena.
+
 ## 2026-11-05 - Rastreabilidade de Runs Superadas e Limpeza Operacional (Cleanup Superseded)
 
 ### Superfícies afetadas

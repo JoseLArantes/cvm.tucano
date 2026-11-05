@@ -57,11 +57,55 @@ def normalizar_cnpj(valor: str | None) -> str:
     return numeros
 
 
+_DATA_SENTINELAS_NULAS = {
+    "-",
+    "--",
+    "---",
+    "N/A",
+    "NA",
+    "N.A.",
+    "N.A",
+    "ND",
+    "N/D",
+    "N.D.",
+    "NI",
+    "N/I",
+    "NULL",
+    "NAN",
+    "NONE",
+    "SEM DATA",
+    "NAO INFORMADO",
+    "NÃO INFORMADO",
+    "0000-00-00",
+}
+
+
 def normalizar_data(valor: Any) -> date | None:
     texto = normalizar_texto(valor)
     if texto is None:
         return None
-    return date.fromisoformat(texto)
+    if texto.upper() in _DATA_SENTINELAS_NULAS:
+        return None
+    try:
+        return date.fromisoformat(texto)
+    except ValueError:
+        pass
+
+    # Formatos alternativos comuns: data com timestamp (ex: "2023-01-01 00:00:00" ou com T)
+    if len(texto) >= 10 and (texto[4] == "-" and texto[7] == "-"):
+        try:
+            return date.fromisoformat(texto[:10])
+        except ValueError:
+            pass
+
+    # Formato brasileiro DD/MM/YYYY
+    if len(texto) >= 10 and (texto[2] == "/" and texto[5] == "/"):
+        try:
+            return datetime.strptime(texto[:10], "%d/%m/%Y").date()
+        except ValueError:
+            pass
+
+    raise ValueError(f"Data invalida: {valor}")
 
 
 def normalizar_inteiro(valor: Any) -> int | None:

@@ -8,7 +8,7 @@ from itertools import chain
 from typing import Any
 
 import httpx
-from sqlalchemy import case, insert, or_, select, tuple_
+from sqlalchemy import case, insert, or_, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.util import identity_key
@@ -216,10 +216,21 @@ def _resolver_input_from_data(row_kind: str, dados: dict[str, Any]) -> ResolverI
     )
 
 
+_VLMO_DOC_CHAVE_ALTERNATIVA: tuple[str, ...] = (
+    "cnpj_companhia",
+    "codigo_cvm",
+    "data_referencia",
+    "categoria",
+    "tipo",
+    "data_entrega",
+    "versao",
+)
+
+
 def _vlmo_documento_campos_chave(dados: dict[str, Any]) -> tuple[str, ...]:
     if dados.get("protocolo_entrega") is not None:
         return ("protocolo_entrega", "versao")
-    return ("cnpj_companhia", "codigo_cvm", "data_referencia", "categoria", "tipo", "data_entrega", "versao")
+    return _VLMO_DOC_CHAVE_ALTERNATIVA
 
 
 def _vlmo_consolidado_campos_chave() -> tuple[str, ...]:
@@ -396,10 +407,64 @@ def _promote_vlmo_chunk_postgresql(
             campos_select=("id", *group_campos, *campos_negocio),
             chaves=chaves_com_mudanca,
         )
+        existentes_alt_por_chave: dict[tuple[Any, ...], dict[str, Any]] = {}
+        if row_kind == "vlmo_documento" and group_campos == ("protocolo_entrega", "versao"):
+            chaves_alt = list(dict.fromkeys(_key_tuple(dados, _VLMO_DOC_CHAVE_ALTERNATIVA) for dados in grupo))
+            existentes_alt_por_chave = _load_existing_rows(
+                db,
+                model=model,
+                campos_chave=_VLMO_DOC_CHAVE_ALTERNATIVA,
+                campos_select=("id", *_VLMO_DOC_CHAVE_ALTERNATIVA, "hash_origem", *campos_negocio, "protocolo_entrega"),
+                chaves=chaves_alt,
+            )
         payload_upsert: list[dict[str, Any]] = []
         for dados in grupo:
             chave = _key_tuple(dados, group_campos)
             existente_hash = existentes_hash_por_chave.get(chave)
+            if (
+                existente_hash is None
+                and row_kind == "vlmo_documento"
+                and group_campos == ("protocolo_entrega", "versao")
+            ):
+                chave_alt = _key_tuple(dados, _VLMO_DOC_CHAVE_ALTERNATIVA)
+                existente_alt = existentes_alt_por_chave.get(chave_alt)
+                if existente_alt is not None:
+                    existente_id = existente_alt["id"]
+                    houve_alteracao = False
+                    campos_verificar = set(campos_negocio) | {"protocolo_entrega"}
+                    for campo in campos_verificar:
+                        antigo = existente_alt.get(campo)
+                        novo = dados.get(campo)
+                        if _equivalente(antigo, novo):
+                            continue
+                        houve_alteracao = True
+                        historicos.append(
+                            {
+                                "entidade": entidade,
+                                "entidade_id": existente_id,
+                                "companhia_id": dados.get("companhia_id"),
+                                "campo": campo,
+                                "valor_anterior": None if antigo is None else str(antigo),
+                                "valor_novo": None if novo is None else str(novo),
+                                "alterado_em": agora,
+                                "execucao_sincronizacao_id": execucao_id,
+                                "arquivo_origem": dados["arquivo_origem"],
+                                "ano_origem": dados["ano_origem"],
+                            }
+                        )
+                    update_values = {
+                        campo: dados[campo]
+                        for campo in {*campos_negocio, "protocolo_entrega", "arquivo_origem", "ano_origem", "linha_origem", "hash_origem"}
+                        if campo in dados
+                    }
+                    update_values["sincronizado_em"] = agora
+                    if houve_alteracao:
+                        update_values["alterado_em"] = agora
+                        contadores["atualizados"] += 1
+                    else:
+                        contadores["inalterados"] += 1
+                    db.execute(update(model).where(model.id == existente_id).values(**update_values))
+                    continue
             if existente_hash is None:
                 contadores["inseridos"] += 1
                 row_id = uuid.uuid4()
@@ -529,6 +594,16 @@ def _promote_vlmo_chunk_fallback(
             campos_select=("id", *group_campos, *campos_negocio),
             chaves=chaves_com_mudanca,
         )
+        existentes_alt_por_chave: dict[tuple[Any, ...], dict[str, Any]] = {}
+        if row_kind == "vlmo_documento" and group_campos == ("protocolo_entrega", "versao"):
+            chaves_alt = list(dict.fromkeys(_key_tuple(dados, _VLMO_DOC_CHAVE_ALTERNATIVA) for _, dados in grupo))
+            existentes_alt_por_chave = _load_existing_rows(
+                db,
+                model=model,
+                campos_chave=_VLMO_DOC_CHAVE_ALTERNATIVA,
+                campos_select=("id", *_VLMO_DOC_CHAVE_ALTERNATIVA, "hash_origem", *campos_negocio, "protocolo_entrega"),
+                chaves=chaves_alt,
+            )
 
         chaves_no_lote: dict[tuple[Any, ...], dict[str, Any]] = {}
         for _row, dados in grupo:
@@ -546,6 +621,53 @@ def _promote_vlmo_chunk_fallback(
                 continue
             existente_hash = existentes_hash_por_chave.get(chave)
             if existente_hash is None:
+                if row_kind == "vlmo_documento" and group_campos == ("protocolo_entrega", "versao"):
+                    chave_alt = _key_tuple(dados, _VLMO_DOC_CHAVE_ALTERNATIVA)
+                    existente_alt = existentes_alt_por_chave.get(chave_alt)
+                    if existente_alt is not None:
+                        existente_id = existente_alt["id"]
+                        houve_alteracao = False
+                        campos_verificar = set(campos_negocio) | {"protocolo_entrega"}
+                        for campo in campos_verificar:
+                            antigo = existente_alt.get(campo)
+                            novo = dados.get(campo)
+                            if _equivalente(antigo, novo):
+                                continue
+                            houve_alteracao = True
+                            historicos.append(
+                                {
+                                    "entidade": entidade,
+                                    "entidade_id": existente_id,
+                                    "companhia_id": dados.get("companhia_id"),
+                                    "campo": campo,
+                                    "valor_anterior": None if antigo is None else str(antigo),
+                                    "valor_novo": None if novo is None else str(novo),
+                                    "alterado_em": agora,
+                                    "execucao_sincronizacao_id": execucao_id,
+                                    "arquivo_origem": dados["arquivo_origem"],
+                                    "ano_origem": dados["ano_origem"],
+                                }
+                            )
+                        atualizacao = payload_atualizacao.setdefault(
+                            existente_id,
+                            {
+                                "id": existente_id,
+                                "sincronizado_em": agora,
+                                "arquivo_origem": dados["arquivo_origem"],
+                                "ano_origem": dados["ano_origem"],
+                                "linha_origem": dados["linha_origem"],
+                                "hash_origem": dados["hash_origem"],
+                            },
+                        )
+                        for campo in campos_verificar:
+                            if campo in dados:
+                                atualizacao[campo] = dados[campo]
+                        if houve_alteracao:
+                            atualizacao["alterado_em"] = agora
+                            contadores["atualizados"] += 1
+                        else:
+                            contadores["inalterados"] += 1
+                        continue
                 chaves_no_lote[chave] = dados
                 novo_id = uuid.uuid4()
                 payload_insercao.append(
