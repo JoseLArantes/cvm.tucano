@@ -114,6 +114,7 @@ Campos complementares:
 | `POST` | `/ingestion/runs/{run_id}/members/{member_id}/cancel` | cancelar somente um member |
 | `POST` | `/ingestion/runs/{run_id}/recover` | recuperar run stale ou com erro recuperavel |
 | `POST` | `/ingestion/runs/{run_id}/replay` | replay completo da run |
+| `POST` | `/ingestion/sincronizacoes/{id_execucao}/replay` | replay direto de sincronizacao (pai ou membro) |
 
 ### Quarentena
 

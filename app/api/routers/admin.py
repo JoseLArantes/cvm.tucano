@@ -464,7 +464,7 @@ def _serialize_last_error(*, message: str | None, phase_execution: Any, status: 
             "phase": phase_execution.phase,
         }
     if status == "falha" and message:
-        return {"error_type": "run_failed", "error_message": message, "retryable": False, "phase": None}
+        return {"error_type": "run_failed", "error_message": message, "retryable": True, "phase": None}
     return None
 
 
@@ -480,7 +480,7 @@ def _find_superseding_execution(db: DbSession, run: IngestionRun) -> dict[str, A
         .where(
             ExecucaoSincronizacao.arquivo == exec_item.arquivo,
             ExecucaoSincronizacao.tipo_fonte == exec_item.tipo_fonte,
-            ExecucaoSincronizacao.ano == exec_item.ano,
+            ExecucaoSincronizacao.ano.is_(None) if exec_item.ano is None else ExecucaoSincronizacao.ano == exec_item.ano,
             ExecucaoSincronizacao.status.in_(["sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"]),
             ExecucaoSincronizacao.id != exec_item.id,
             ExecucaoSincronizacao.iniciada_em >= exec_item.iniciada_em,
@@ -522,12 +522,12 @@ def _next_action(
     if state == "stale":
         if superseded:
             return "none"
-        return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
+        return "recover" if recovery is not None and recovery.get("eligible") else "inspect_error"
     if state == "failed":
         if failure_acknowledged or superseded:
             return "none"
-        if last_error is not None and last_error.get("retryable") is True:
-            return "recover" if recovery is not None and recovery["eligible"] else "inspect_error"
+        if recovery is not None and recovery.get("eligible"):
+            return "recover"
         return "inspect_error"
     if rejected_total and rejected_total > 0:
         return "inspect_quarantine"
@@ -628,6 +628,7 @@ def _build_execucao_operational_fields(
     links = {
         "execucao_detail": f"/ingestion/sincronizacoes/{execucao.id}",
         "quarantine": f"/ingestion/quarentena?execucao_sincronizacao_id={execucao.id}",
+        "replay": f"/ingestion/sincronizacoes/{execucao.id}/replay",
     }
     if run_detail is not None:
         links["run_detail"] = run_detail
@@ -1003,7 +1004,14 @@ def _allowed_actions_for_run(
             return actions
 
         if operational["next_action"] == "recover":
-            return [{"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": recovery["reason_code"], "constraints": {"strategy": recovery["strategy"]}}]
+            actions = [
+                {"code": "recover", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/recover", "requires_confirmation": True, "reason_code": recovery["reason_code"], "constraints": {"strategy": recovery["strategy"]}},
+            ]
+            if operational["failure_acknowledgement"] is None:
+                actions.append(
+                    {"code": "acknowledge_failure", "operation": "POST", "resource": f"/ingestion/runs/{run.id}/acknowledge-failure", "requires_confirmation": True, "reason_code": "INVESTIGATION_REQUIRED", "constraints": {"reason_required": True}},
+                )
+            return actions
         actions = []
         if operational["failure_acknowledgement"] is None:
             actions.extend(
@@ -2387,6 +2395,165 @@ def detalhar_execucao(
     )
 
 
+@router.post(
+    "/sincronizacoes/{id_execucao}/replay",
+    response_model=ReplayResposta,
+    summary="Executar replay de execucao de sincronizacao",
+    description=(
+        "Executa o replay ou reprocessamento de uma execucao de sincronizacao (pai ou membro filho). "
+        "Para execucoes pai (arquivo principal), reagenda a tarefa principal com force_reimport=True. "
+        "Para execucoes membro (filho), reagenda a sincronizacao do member correspondente mantendo a linhagem "
+        "e reaproveitando a extracao pai. Se houver IngestionRun associada, seus estados operacionais sao sincronizados."
+    ),
+    responses={
+        **_RESPOSTA_TOKEN_INVALIDO,
+        404: {"description": "Execucao nao encontrada."},
+        422: {"description": "Fonte ou arquivo nao suportado para replay."},
+        503: {"description": "Falha ao despachar tarefa no Celery ou pool esgotado."},
+    },
+    operation_id="replaySincronizacaoAdmin",
+)
+def replay_sincronizacao(
+    id_execucao: Annotated[UUID, Path(description="ID da execucao de sincronizacao.", examples=["uuid"])],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)] = None,
+) -> ReplayResposta:
+    execucao = db.get(ExecucaoSincronizacao, id_execucao)
+    if execucao is None:
+        raise HTTPException(status_code=404, detail="Execucao nao encontrada.")
+
+    run = db.scalar(select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id))
+
+    if execucao.parent_execucao_id is None:
+        task_mapper = {
+            "cadastro": sincronizar_cadastro_companhias_task,
+            "dfp": sincronizar_dfp_task,
+            "itr": sincronizar_itr_task,
+            "fre": sincronizar_fre_task,
+            "fca": sincronizar_fca_task,
+            "ipe": sincronizar_ipe_task,
+            "vlmo": sincronizar_vlmo_task,
+            "cgvn": sincronizar_cgvn_task,
+        }
+        task_func = task_mapper.get(execucao.tipo_fonte)
+        if task_func is None:
+            raise HTTPException(status_code=422, detail=f"Fonte {execucao.tipo_fonte} nao suportada para replay de arquivo principal.")
+
+        task_id = novo_task_id()
+        execucao.id_tarefa = task_id
+        execucao.status = "agendada"
+        execucao.finalizada_em = None
+        execucao.mensagem_erro = None
+        if run is not None:
+            run.status = "agendada"
+            run.requested_by_task_id = task_id
+            run.message = "Replay de arquivo principal agendado."
+            run.finished_at = None
+        db.commit()
+        try:
+            kwargs: dict[str, Any] = {"force_reimport": True}
+            args: tuple[Any, ...] = ()
+            if execucao.ano is not None:
+                args = (execucao.ano,)
+            task_func.apply_async(args=args, kwargs=kwargs, task_id=task_id)
+        except Exception as exc:
+            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
+            if run is not None:
+                update_run_state(
+                    run,
+                    status="falha",
+                    phase="complete",
+                    message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
+                    finished_at=_agora(),
+                )
+            db.commit()
+            detail = {
+                "reason_code": "RECOVERY_DISPATCH_FAILED",
+                "retryable": False,
+            }
+            if run is not None:
+                detail["run_id"] = str(run.id)
+            else:
+                detail["execucao_id"] = str(execucao.id)
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+            ) from exc
+        return ReplayResposta(
+            status="agendada",
+            detalhe={
+                "task_id": task_id,
+                "strategy": "rerun_parent_execution",
+                "execucao_id": str(execucao.id),
+                "tipo_fonte": execucao.tipo_fonte,
+                "ano": execucao.ano,
+                "arquivo": execucao.arquivo,
+            },
+        )
+    else:
+        from app.worker.tasks import sincronizar_member_task
+
+        parent_id = execucao.parent_execucao_id
+        task_id = novo_task_id()
+        execucao.id_tarefa = task_id
+        execucao.status = "agendada"
+        execucao.finalizada_em = None
+        execucao.mensagem_erro = None
+        if run is not None:
+            run.status = "agendada"
+            run.requested_by_task_id = task_id
+            run.message = "Replay de member agendado."
+            run.finished_at = None
+        db.commit()
+        try:
+            sincronizar_member_task.apply_async(
+                kwargs={
+                    "tipo_fonte": execucao.tipo_fonte,
+                    "ano": execucao.ano or 0,
+                    "member_name": execucao.arquivo,
+                    "parent_execucao_id": str(parent_id),
+                    "child_execucao_id": str(execucao.id),
+                    "force_reimport": True,
+                },
+                task_id=task_id,
+            )
+        except Exception as exc:
+            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
+            if run is not None:
+                update_run_state(
+                    run,
+                    status="falha",
+                    phase="complete",
+                    message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
+                    finished_at=_agora(),
+                )
+            db.commit()
+            detail = {
+                "reason_code": "RECOVERY_DISPATCH_FAILED",
+                "retryable": False,
+            }
+            if run is not None:
+                detail["run_id"] = str(run.id)
+            else:
+                detail["execucao_id"] = str(execucao.id)
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+            ) from exc
+        return ReplayResposta(
+            status="agendada",
+            detalhe={
+                "task_id": task_id,
+                "strategy": "rerun_member_execution",
+                "execucao_id": str(execucao.id),
+                "tipo_fonte": execucao.tipo_fonte,
+                "ano": execucao.ano,
+                "arquivo": execucao.arquivo,
+                "parent_execucao_id": str(parent_id),
+            },
+        )
+
+
 
 @router.get(
     "/alteracoes",
@@ -3298,54 +3465,10 @@ def recover_ingestion_run(
     recovery = operational["recovery"]
     if operational["next_action"] != "recover" or not recovery["eligible"]:
         raise HTTPException(status_code=409, detail={"reason_code": recovery["reason_code"], "recovery": recovery})
-    if recovery["strategy"] == "rerun_member_execution":
-        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
-        parent_id = None if execucao is None else execucao.parent_execucao_id
-        if execucao is None or parent_id is None:
+    if recovery["strategy"] in {"rerun_parent_execution", "rerun_member_execution"}:
+        if run.execucao_sincronizacao_id is None:
             raise HTTPException(status_code=409, detail={"reason_code": "NO_RECOVERY_SOURCE", "recovery": recovery})
-        from app.worker.tasks import sincronizar_member_task
-
-        task_id = novo_task_id()
-        execucao.id_tarefa = task_id
-        execucao.status = "agendada"
-        execucao.finalizada_em = None
-        execucao.mensagem_erro = None
-        run.status = "agendada"
-        run.requested_by_task_id = task_id
-        run.message = "Recovery de member agendado."
-        run.finished_at = None
-        db.commit()
-        try:
-            sincronizar_member_task.apply_async(
-                kwargs={
-                    "tipo_fonte": execucao.tipo_fonte,
-                    "ano": execucao.ano or 0,
-                    "member_name": execucao.arquivo,
-                    "parent_execucao_id": str(parent_id),
-                    "child_execucao_id": str(execucao.id),
-                    "force_reimport": True,
-                },
-                task_id=task_id,
-            )
-        except Exception as exc:
-            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-            update_run_state(
-                run,
-                status="falha",
-                phase="complete",
-                message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
-                finished_at=_agora(),
-            )
-            db.commit()
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "reason_code": "RECOVERY_DISPATCH_FAILED",
-                    "retryable": False,
-                    "run_id": str(run.id),
-                },
-            ) from exc
-        return ReplayResposta(status="agendada", detalhe={"task_id": task_id, "strategy": recovery["strategy"]})
+        return replay_sincronizacao(id_execucao=run.execucao_sincronizacao_id, db=db)
     try:
         resultado = replay_ingestion_run_service(db, run_id=run_id)
     except NoRecoverySourceError:
@@ -3386,7 +3509,7 @@ def acknowledge_ingestion_run_failure(
     existing = operational["failure_acknowledgement"]
     if existing is not None:
         return IngestionFailureAcknowledgement(**existing)
-    if operational["state"] != "failed" or operational["next_action"] != "inspect_error":
+    if operational["state"] != "failed" or operational["next_action"] not in {"inspect_error", "recover"}:
         raise HTTPException(
             status_code=409,
             detail={"reason_code": "FAILURE_NOT_ACKNOWLEDGEABLE"},
@@ -3824,6 +3947,10 @@ def replay_ingestion_run(
     run = db.get(IngestionRun, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Run nao encontrado.")
+    if run.execucao_sincronizacao_id is not None:
+        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+        if execucao is not None and execucao.parent_execucao_id is None:
+            return replay_sincronizacao(id_execucao=execucao.id, db=db)
     try:
         resultado = replay_ingestion_run_service(db, run_id=run_id)
     except NoRecoverySourceError:

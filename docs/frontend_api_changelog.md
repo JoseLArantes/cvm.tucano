@@ -9,6 +9,37 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-06 - Recuperacao Deterministica de Falhas de Ingestao e Replay de Sincronizacoes
+
+### Superficies afetadas
+
+- novo endpoint `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}` (campo `links.replay`)
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/runs/{run_id}/replay`
+- `POST /ingestion/runs/{run_id}/acknowledge-failure`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}` (campos `next_action`, `recovery.strategy`, `links`)
+- Worker de ingestao e sweep de recuperacao (`reconcile_stale_ingestion_phase_executions`, `_cascade_terminal_state_to_children`)
+
+### Comportamento entregue
+
+- **Eliminacao do Beco Sem Saida em Falhas de Ingestao**: Anteriormente, quando uma sincronizacao pai (arquivo ZIP principal de DFP, ITR, FRE, etc.) sofria falha transitoria (timeout, reinicio de container worker, kill de processo ou heartbeat stale), o sistema marcava a execucao com `error_retryable: false` e `next_action: inspect_error` sem rota direta de recuperacao. Agora:
+  - Arquivos principais com falha sao reconhecidos como elegiveis para recuperacao com estrategia `rerun_parent_execution`.
+  - O campo `next_action` transiciona automaticamente para `recover`, habilitando os botoes de recuperacao e replay na UI.
+- **Novo Endpoint `POST /ingestion/sincronizacoes/{id_execucao}/replay`**: Permite reexecutar qualquer sincronizacao diretamente a partir do identificador da execucao (`ExecucaoSincronizacao.id`), sem depender de lookup previo de run ID.
+  - Para execucoes pai (arquivo principal): reagenda a tarefa correspondente no Celery com `force_reimport=True`.
+  - Para execucoes membro (arquivo filho CSV): reagenda a tarefa `sincronizar_member_task` reaproveitando os artefatos extraidos pelo pai e mantendo a linhagem.
+  - Responde com `status: "agendada"` e detalhamento da tarefa Celery despachada.
+- **Link `replay` Disponivel em Todas as Execucoes**: O dicionario `links` em `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}` agora inclui `replay: "/ingestion/sincronizacoes/{id_execucao}/replay"`.
+- **Reconhecimento Flexivel de Falhas (`acknowledge-failure`)**: O endpoint `POST /ingestion/runs/{run_id}/acknowledge-failure` agora aceita requisicoes nao apenas quando `next_action == "inspect_error"`, mas tambem quando `next_action == "recover"`. Isso permite que operadores descartem conscientemente execucoes falhas que nao desejem retentar, transitando `next_action` para `none` e eliminando alarmes de monitoramento.
+- **Resiliencia em Cascata para Filhos Orfaos**: Quando o arquivo pai sofre encerramento terminal ou timeout, as fases de execucoes filhas abertas sao encerradas como `failed_final` com `error_retryable: true`, garantindo que os membros possam ser recuperados individualmente assim que o pai for restabelecido.
+- **Fallback de IngestionFile em Workers**: O processamento de membros suporta fallback para reaproveitamento de artefatos pai da mesma fonte/ano caso o `parent_execucao_id` tenha sido recriado ou substituido, eliminando erros do tipo `ValueError: IngestionFile not found for parent execution`.
+
+### Migracao do frontend e consumidores
+
+- Telas de listagem e detalhe de sincronizacoes (`/sincronizacoes`) podem adicionar botao "Replay" / "Reprocessar" diretamente consumindo `item.links.replay` com metodo `POST`.
+- Consumidores de `POST /ingestion/runs/{run_id}/acknowledge-failure` podem invocar o endpoint em qualquer run falha (mesmo com `next_action: "recover"`).
+
 ## 2026-11-05 - Correcao de Metricas do Dashboard de Ingestao (GET /ingestion/dashboard)
 
 ### Superfícies afetadas

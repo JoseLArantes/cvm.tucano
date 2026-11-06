@@ -52,6 +52,15 @@ def assess_ingestion_run_recovery(db: Session, *, run: IngestionRun) -> Ingestio
             reason_code="STAGED_ROWS_AVAILABLE",
         )
 
+    if run.execucao_sincronizacao_id is not None:
+        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+        if execucao is not None and execucao.parent_execucao_id is None:
+            return IngestionRecoveryAssessment(
+                eligible=True,
+                strategy="rerun_parent_execution",
+                reason_code="PARENT_EXECUTION_AVAILABLE",
+            )
+
     return IngestionRecoveryAssessment(
         eligible=False,
         strategy=None,
@@ -69,7 +78,9 @@ def assess_ingestion_run_recovery_eligibility(
     """Combina a fonte disponivel com o estado operacional atual da run."""
 
     source = assess_ingestion_run_recovery(db, run=run)
-    if state == "waiting" and source.strategy == "rerun_member_execution":
+    if state == "waiting" and source.strategy in {"rerun_member_execution", "rerun_parent_execution"}:
+        if source.strategy == "rerun_parent_execution":
+            return source
         execucao = (
             db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
             if run.execucao_sincronizacao_id is not None
@@ -84,7 +95,13 @@ def assess_ingestion_run_recovery_eligibility(
             return source
     if state == "stale":
         return source
-    if state == "failed" and error_retryable:
+    if state == "failed" and error_retryable is False:
+        return IngestionRecoveryAssessment(
+            eligible=False,
+            strategy=None,
+            reason_code="NON_RETRYABLE_FAILURE",
+        )
+    if state == "failed" and (error_retryable is True or source.eligible):
         return source
     if state == "failed":
         return IngestionRecoveryAssessment(

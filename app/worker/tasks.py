@@ -1625,7 +1625,20 @@ def sincronizar_member_internal(
             .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
         )
         if ingestion_file is None:
-            raise ValueError(f"IngestionFile not found for parent execution: {parent_execucao_id}")
+            ingestion_file = db.scalar(
+                select(IngestionFile)
+                .join(IngestionRun)
+                .join(ExecucaoSincronizacao, IngestionRun.execucao_sincronizacao_id == ExecucaoSincronizacao.id)
+                .where(
+                    ExecucaoSincronizacao.arquivo == parent_execucao.arquivo,
+                    ExecucaoSincronizacao.tipo_fonte == parent_execucao.tipo_fonte,
+                    ExecucaoSincronizacao.ano == parent_execucao.ano,
+                )
+                .order_by(IngestionRun.created_at.desc())
+                .limit(1)
+            )
+        if ingestion_file is None:
+            raise ValueError(f"IngestionFile not found for parent execution: {parent_execucao_id}. O arquivo principal precisa ser reprocessado primeiro.")
 
         # Check if member file exists locally, otherwise self-heal
         zip_dir = Path(_settings.storage_dir) / str(parent_execucao.id)

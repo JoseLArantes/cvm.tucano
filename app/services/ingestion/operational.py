@@ -346,6 +346,18 @@ def _cascade_terminal_state_to_children(
             child_run.status = status
             child_run.message = message
             child_run.finished_at = now
+            latest_phase = db.scalar(
+                select(IngestionPhaseExecution)
+                .where(IngestionPhaseExecution.ingestion_run_id == child_run.id)
+                .order_by(IngestionPhaseExecution.started_at.desc())
+                .limit(1)
+            )
+            if latest_phase is not None and latest_phase.status not in _TERMINAL_PHASE_STATUSES:
+                latest_phase.status = "failed_final" if status == "falha" else "cancelled"
+                latest_phase.error_type = "parent_failed"
+                latest_phase.error_message = message
+                latest_phase.error_retryable = True
+                latest_phase.finished_at = now
 
 
 def reconcile_stale_ingestion_phase_executions(
@@ -454,6 +466,18 @@ def reconcile_stale_ingestion_phase_executions(
             child_run.status = child_status
             child_run.message = child.mensagem_erro
             child_run.finished_at = now
+            latest_phase = db.scalar(
+                select(IngestionPhaseExecution)
+                .where(IngestionPhaseExecution.ingestion_run_id == child_run.id)
+                .order_by(IngestionPhaseExecution.started_at.desc())
+                .limit(1)
+            )
+            if latest_phase is not None and latest_phase.status not in _TERMINAL_PHASE_STATUSES:
+                latest_phase.status = "failed_final" if child_status == "falha" else "cancelled"
+                latest_phase.error_type = "orphan_child"
+                latest_phase.error_message = child.mensagem_erro
+                latest_phase.error_retryable = True
+                latest_phase.finished_at = now
             recovered_run_ids.append(str(child_run.id))
 
     # Auto-acknowledge failed/cancelled runs that have already been superseded by a successful execution

@@ -17,7 +17,7 @@ os.environ["TUCANO_CVM_TOKEN"] = "token-teste"
 
 from app.core.config import Settings, get_settings
 from app.db.base import Base
-from app.models.ingestion import IngestionAttempt, IngestionRow, IngestionRun, QuarantineItem
+from app.models.ingestion import IngestionAttempt, IngestionPhaseExecution, IngestionRow, IngestionRun, QuarantineItem
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.backfill import build_dark_launch_parity_report, run_backfill_years
 from app.services.ingestion.metrics import RunTimer, get_ingestion_metrics
@@ -603,6 +603,19 @@ def test_cascade_terminal_state_to_children(db_session: Session) -> None:
         started_at=datetime.now(UTC),
     )
     db_session.add(child_run)
+    db_session.flush()
+
+    open_phase = IngestionPhaseExecution(
+        ingestion_run_id=child_run.id,
+        execucao_sincronizacao_id=child.id,
+        phase="stage",
+        status="running",
+        attempt=1,
+        lease_owner="worker-1",
+        started_at=datetime.now(UTC),
+        heartbeat_at=datetime.now(UTC),
+    )
+    db_session.add(open_phase)
     db_session.commit()
 
     _cascade_terminal_state_to_children(db_session, parent.id, "falha", "Parent falhou")
@@ -610,9 +623,13 @@ def test_cascade_terminal_state_to_children(db_session: Session) -> None:
 
     db_session.refresh(child)
     db_session.refresh(child_run)
+    db_session.refresh(open_phase)
     assert child.status == "falha"
     assert "Parent falhou" in (child.mensagem_erro or "")
     assert child_run.status == "falha"
+    assert open_phase.status == "failed_final"
+    assert open_phase.error_type == "parent_failed"
+    assert open_phase.error_retryable is True
 
 
 def test_reconcile_stale_ingestion_phase_executions_sweeps_orphan_children(db_session: Session) -> None:

@@ -11,3 +11,4 @@ services:
       - .env
     volumes:
       - .:/app
+      - /Volumes/SSD-1T/TEMP_DATA_TUCANO:/Volumes/SSD-1T/TEMP_DATA_TUCANO

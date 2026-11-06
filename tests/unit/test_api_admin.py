@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -686,6 +687,10 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
     rota_stream = payload["paths"]["/ingestion/events/stream"]["get"]
     rota_acknowledge_failure = payload["paths"]["/ingestion/runs/{run_id}/acknowledge-failure"]["post"]
+    rota_replay_sincronizacao = payload["paths"]["/ingestion/sincronizacoes/{id_execucao}/replay"]["post"]
+
+    assert rota_replay_sincronizacao["operationId"] == "replaySincronizacaoAdmin"
+    assert rota_replay_sincronizacao["summary"] == "Executar replay de execucao de sincronizacao"
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
@@ -903,7 +908,7 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert run_payload["liveness"]["is_stale"] is True
     assert run_payload["blocking"]["reason_code"] == "stale"
     assert run_payload["cancellation"]["status"] == "propagated"
-    assert run_payload["next_action"] == "inspect_error"
+    assert run_payload["next_action"] == "recover"
     assert run_payload["links"]["run_phases"] == f"/ingestion/runs/{run_id}/phases"
 
     resposta_run = client.get(f"/ingestion/runs/{run_id}")
@@ -1970,3 +1975,199 @@ def test_ingestion_runs_superseded_detection_and_cleanup_endpoint(
     res_old_after = client.get(f"/ingestion/runs/{old_run_id}")
     assert res_old_after.status_code == 200
     assert res_old_after.json()["failure_acknowledgement"] is not None
+
+
+def test_admin_parent_execution_failed_allows_recover_with_rerun_parent_execution(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                tipo_fonte="dfp",
+                ano=2021,
+                arquivo="dfp_cia_aberta_2021.zip",
+                url="http://exemplo/dfp-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                mensagem_erro="Timeout ao baixar arquivo CVM",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=execucao_id,
+                tipo_fonte="dfp",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+                message="Timeout ao baixar arquivo CVM",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # 1. Detail run: next_action should be 'recover' with strategy 'rerun_parent_execution'
+    res_run = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run.status_code == 200
+    payload = res_run.json()
+    assert payload["state"] == "failed"
+    assert payload["next_action"] == "recover"
+    assert payload["recovery"]["eligible"] is True
+    assert payload["recovery"]["strategy"] == "rerun_parent_execution"
+
+    # 2. Mock Celery apply_async on sincronizar_dfp_task
+    dispatched_args: dict[str, Any] = {}
+
+    def dummy_apply_async(*args: Any, **kwargs: Any) -> Any:
+        dispatched_args.update(kwargs)
+        return type("DummyAsyncResult", (), {"id": kwargs.get("task_id", "dummy-task-id")})()
+
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_dfp_task.apply_async", dummy_apply_async)
+
+    # 3. Recover the run
+    res_recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert res_recover.status_code == 200
+    recover_payload = res_recover.json()
+    assert recover_payload["status"] == "agendada"
+    assert recover_payload["detalhe"]["strategy"] == "rerun_parent_execution"
+
+
+def test_admin_sincronizacao_replay_endpoint_parent_and_member(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_2021.zip",
+                url="http://exemplo/itr-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_BPA_ind_2021.csv",
+                url="http://exemplo/itr-2021/bpa",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="falha",
+                phase="stage",
+                started_at=now,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # Verify links in GET /ingestion/sincronizacoes/{id}
+    res_parent_detail = client.get(f"/ingestion/sincronizacoes/{parent_id}")
+    assert res_parent_detail.status_code == 200
+    assert res_parent_detail.json()["links"]["replay"] == f"/ingestion/sincronizacoes/{parent_id}/replay"
+
+    # Mock Celery tasks
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_itr_task.apply_async", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", lambda *args, **kwargs: None)
+
+    # Replay parent execution
+    res_replay_parent = client.post(f"/ingestion/sincronizacoes/{parent_id}/replay")
+    assert res_replay_parent.status_code == 200
+    assert res_replay_parent.json()["status"] == "agendada"
+    assert res_replay_parent.json()["detalhe"]["strategy"] == "rerun_parent_execution"
+
+    # Replay child execution
+    res_replay_child = client.post(f"/ingestion/sincronizacoes/{child_id}/replay")
+    assert res_replay_child.status_code == 200
+    assert res_replay_child.json()["status"] == "agendada"
+    assert res_replay_child.json()["detalhe"]["strategy"] == "rerun_member_execution"
+
+
+def test_admin_run_acknowledge_failure_when_next_action_recover(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                tipo_fonte="fre",
+                ano=2021,
+                arquivo="fre_cia_aberta_2021.zip",
+                url="http://exemplo/fre-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                mensagem_erro="Falha transitoria",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=execucao_id,
+                tipo_fonte="fre",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+                message="Falha transitoria",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # Pre-check: next_action is recover
+    res_run = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run.status_code == 200
+    assert res_run.json()["next_action"] == "recover"
+
+    # Operator acknowledges the failure
+    res_ack = client.post(
+        f"/ingestion/runs/{run_id}/acknowledge-failure",
+        json={"reason": "Investigado e descartado manualmente pelo operador."},
+    )
+    assert res_ack.status_code == 200
+    ack_data = res_ack.json()
+    assert ack_data["reason"] == "Investigado e descartado manualmente pelo operador."
+
+    # Post-check: failure acknowledged, next_action transitions to 'none'
+    res_run_after = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run_after.status_code == 200
+    assert res_run_after.json()["next_action"] == "none"
+    assert res_run_after.json()["failure_acknowledgement"] is not None
