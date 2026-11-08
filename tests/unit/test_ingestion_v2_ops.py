@@ -3,7 +3,7 @@ import os
 import uuid
 import zipfile
 from collections.abc import Generator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -665,3 +665,205 @@ def test_reconcile_stale_ingestion_phase_executions_sweeps_orphan_children(db_se
     db_session.refresh(child)
     assert child.status == "falha"
     assert "parent em estado falha" in (child.mensagem_erro or "").lower()
+
+
+def test_reconcile_stale_parent_refreshes_heartbeat_when_child_has_recent_activity(db_session: Session) -> None:
+    now = datetime.now(UTC)
+    stale_time = now - timedelta(minutes=30)
+    parent = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_fonte="itr",
+        ano=2024,
+        status="em_execucao",
+        arquivo="itr_cia_aberta_2024.zip",
+        url="https://dados.cvm.gov.br/dados/itr.zip",
+        iniciada_em=stale_time,
+    )
+    parent_run = IngestionRun(
+        id=uuid.uuid4(),
+        execucao_sincronizacao_id=parent.id,
+        tipo_fonte="itr",
+        ano=2024,
+        status="em_execucao",
+        phase="process_members",
+        started_at=stale_time,
+    )
+    parent_phase = IngestionPhaseExecution(
+        ingestion_run_id=parent_run.id,
+        execucao_sincronizacao_id=parent.id,
+        phase="process_members",
+        status="running",
+        attempt=1,
+        lease_owner="worker-1",
+        started_at=stale_time,
+        heartbeat_at=stale_time,
+    )
+    child = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        parent_execucao_id=parent.id,
+        tipo_fonte="itr",
+        ano=2024,
+        status="em_execucao",
+        arquivo="itr_cia_aberta_DFC_MI_con_2024.csv",
+        url="https://dados.cvm.gov.br/dados/dfc.csv",
+        iniciada_em=now - timedelta(minutes=2),
+    )
+    child_run = IngestionRun(
+        id=uuid.uuid4(),
+        execucao_sincronizacao_id=child.id,
+        tipo_fonte="itr",
+        ano=2024,
+        status="em_execucao",
+        phase="promote",
+        started_at=now - timedelta(minutes=2),
+    )
+    child_phase = IngestionPhaseExecution(
+        ingestion_run_id=child_run.id,
+        execucao_sincronizacao_id=child.id,
+        phase="promote",
+        status="running",
+        attempt=1,
+        lease_owner="worker-1",
+        started_at=now - timedelta(minutes=2),
+        heartbeat_at=now - timedelta(seconds=15),
+    )
+    db_session.add_all([parent, parent_run, parent_phase, child, child_run, child_phase])
+    db_session.commit()
+
+    stale_rows = reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    assert stale_rows["failed_retryable_runs"] == []
+    assert stale_rows["failed_non_recoverable_runs"] == []
+    db_session.refresh(parent)
+    db_session.refresh(parent_run)
+    db_session.refresh(parent_phase)
+    assert parent.status == "em_execucao"
+    assert parent_run.status == "em_execucao"
+    assert parent_phase.status == "running"
+    assert parent_phase.heartbeat_at is not None
+
+
+def test_reconcile_stale_reconciles_desynced_run_when_execucao_already_terminal(db_session: Session) -> None:
+    now = datetime.now(UTC)
+    execucao = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_fonte="fca",
+        ano=2024,
+        status="sucesso",
+        arquivo="fca_cia_aberta_2024.zip",
+        url="https://dados.cvm.gov.br/dados/fca.zip",
+        iniciada_em=now - timedelta(minutes=10),
+        finalizada_em=now - timedelta(minutes=1),
+    )
+    desynced_run = IngestionRun(
+        id=uuid.uuid4(),
+        execucao_sincronizacao_id=execucao.id,
+        tipo_fonte="fca",
+        ano=2024,
+        status="em_execucao",
+        phase="process_members",
+        started_at=now - timedelta(minutes=10),
+    )
+    db_session.add_all([execucao, desynced_run])
+    db_session.commit()
+
+    reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    db_session.refresh(desynced_run)
+    assert desynced_run.status == "sucesso"
+    assert desynced_run.phase == "complete"
+    assert desynced_run.finished_at is not None
+
+
+def test_pre_processar_sincronizacao_zip_idempotent_on_parent_rerun(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.writestr(
+            "itr_cia_aberta_2019.csv",
+            (
+                "CNPJ_CIA;CD_CVM;DT_REFER;VERSAO;DENOM_CIA;CATEG_DOC;ID_DOC;DT_RECEB;LINK_DOC\n"
+                "00000000000191;1023;2019-12-31;1;BANCO DO BRASIL;ITR;111;2020-03-31;http://exemplo\n"
+            ).encode("latin1"),
+        )
+        zip_file.writestr(
+            "itr_cia_aberta_DRE_ind_2019.csv",
+            (
+                "CNPJ_CIA;CD_CVM;DT_REFER;VERSAO;DENOM_CIA;GRUPO_DFP;MOEDA;ESCALA_MOEDA;ORDEM_EXERC;"
+                "DT_INI_EXERC;DT_FIM_EXERC;CD_CONTA;DS_CONTA;VL_CONTA;ST_CONTA_FIXA;COLUNA_DF\n"
+                "00000000000191;1023;2019-12-31;1;BANCO DO BRASIL;DF Consolidado;REAL;UNIDADE;ULTIMO;"
+                "2019-01-01;2019-12-31;3.01;Receita;100;S;Atual\n"
+            ).encode("latin1"),
+        )
+    payload = buffer.getvalue()
+
+    def _fake_download(url: str, dest_path: str, timeout: float = 300) -> str:
+        path = os.fspath(dest_path)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as file_obj:
+            file_obj.write(payload)
+        import hashlib
+
+        return hashlib.sha256(payload).hexdigest()
+
+    monkeypatch.setattr("app.services.ingestion.file_manager.download_file_to_disk", _fake_download)
+
+    res1 = pre_processar_sincronizacao_zip(tipo_fonte="itr", ano=2019, task_id="task-itr-1")
+    parent_id = uuid.UUID(res1["execucao_id"])
+
+    children_1 = list(
+        db_session.scalars(
+            select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.parent_execucao_id == parent_id)
+        ).all()
+    )
+    assert len(children_1) == 2
+    for ch in children_1:
+        if ch.arquivo == "itr_cia_aberta_2019.csv":
+            ch.status = "sucesso"
+        else:
+            ch.status = "falha"
+            ch.mensagem_erro = "Parent falhou"
+    db_session.commit()
+
+    parent_exec = db_session.get(ExecucaoSincronizacao, parent_id)
+    assert parent_exec is not None
+    parent_exec.status = "agendada"
+    parent_exec.id_tarefa = "task-itr-2"
+    db_session.commit()
+
+    # Rerun pre_processar adopting the same parent execucao_id
+    res2 = pre_processar_sincronizacao_zip(
+        tipo_fonte="itr",
+        ano=2019,
+        task_id="task-itr-2",
+        force_reimport=True,
+    )
+    assert res2["execucao_id"] == str(parent_id)
+
+    parent_runs = list(
+        db_session.scalars(
+            select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == parent_id)
+        ).all()
+    )
+    assert len(parent_runs) == 1
+
+    children_2 = list(
+        db_session.scalars(
+            select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.parent_execucao_id == parent_id)
+        ).all()
+    )
+    assert len(children_2) == 2
+    by_name = {c.arquivo: c for c in children_2}
+    assert by_name["itr_cia_aberta_2019.csv"].status == "sucesso"
+    assert by_name["itr_cia_aberta_DRE_ind_2019.csv"].status == "aguardando_ingestao"
+    assert by_name["itr_cia_aberta_DRE_ind_2019.csv"].mensagem_erro is None
+

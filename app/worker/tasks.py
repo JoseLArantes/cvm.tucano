@@ -969,7 +969,9 @@ def pre_processar_sincronizacao_zip(
     from datetime import UTC, datetime
     from pathlib import Path
 
-    from app.models.ingestion import IngestionRun
+    from sqlalchemy import select
+
+    from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.artifact_store import build_artifact_metadata, describe_member_artifact
     from app.services.ingestion.dedup import buscar_execucao_hash_existente
@@ -1016,14 +1018,26 @@ def pre_processar_sincronizacao_zip(
         db.close()
         return {"execucao_id": str(execucao.id), "status": "aguardando_ingestao"}
 
-    run = create_run(
-        db,
-        tipo_fonte=tipo_fonte,
-        ano=ano,
-        execucao_sincronizacao_id=execucao.id,
-        requested_by_task_id=task_id,
-        phase="acquire",
+    existing_run = db.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+        .order_by(IngestionRun.created_at.desc())
+        .limit(1)
     )
+    if existing_run is not None:
+        run = existing_run
+        run.requested_by_task_id = task_id or run.requested_by_task_id
+        run.finished_at = None
+        update_run_state(run, status="em_execucao", phase="acquire", message=None)
+    else:
+        run = create_run(
+            db,
+            tipo_fonte=tipo_fonte,
+            ano=ano,
+            execucao_sincronizacao_id=execucao.id,
+            requested_by_task_id=task_id,
+            phase="acquire",
+        )
     db.commit()
     db.refresh(run)
     if pending_update_id is not None:
@@ -1077,15 +1091,26 @@ def pre_processar_sincronizacao_zip(
 
             return {"execucao_id": str(execucao.id), "status": "skipped"}
 
-        ingestion_file = register_file(
-            db,
-            ingestion_run=run,
-            source_url=url,
-            source_filename=arquivo_zip,
-            content_sha256=hash_arquivo,
-            content_length_bytes=zip_path.stat().st_size,
-            is_zip=True,
+        existing_file = db.scalar(
+            select(IngestionFile)
+            .where(IngestionFile.ingestion_run_id == run.id)
+            .limit(1)
         )
+        if existing_file is not None:
+            existing_file.content_sha256 = hash_arquivo
+            existing_file.content_length_bytes = zip_path.stat().st_size
+            ingestion_file = existing_file
+            db.flush()
+        else:
+            ingestion_file = register_file(
+                db,
+                ingestion_run=run,
+                source_url=url,
+                source_filename=arquivo_zip,
+                content_sha256=hash_arquivo,
+                content_length_bytes=zip_path.stat().st_size,
+                is_zip=True,
+            )
         update_run_state(run, phase="stage")
         db.commit()
 
@@ -1126,6 +1151,15 @@ def pre_processar_sincronizacao_zip(
             if item.status_suporte == "suportado"
         }
 
+        existing_children_by_name = {
+            c.arquivo: c
+            for c in db.scalars(
+                select(ExecucaoSincronizacao).where(
+                    ExecucaoSincronizacao.parent_execucao_id == execucao.id
+                )
+            ).all()
+        }
+
         for member_name in ordered_members:
             # Extract to disk
             extracted_path = extract_zip_member(str(zip_path), member_name, str(extracted_dir))
@@ -1133,31 +1167,63 @@ def pre_processar_sincronizacao_zip(
             member_size = Path(extracted_path).stat().st_size
             member_payload = Path(extracted_path).read_bytes()
 
+            existing_child = existing_children_by_name.get(member_name)
+            if existing_child is not None and existing_child.status in {
+                "sucesso",
+                "sucesso_com_alerta",
+                "sem_alteracao",
+                "skipped",
+            }:
+                save_member_payload(db, existing_child.id, member_payload, member_name=member_name)
+                db.flush()
+                continue
+
             # Check if supported
             if member_name not in supported_member_names:
-                child_exec = ExecucaoSincronizacao(
-                    parent_execucao_id=execucao.id,
-                    tipo_execucao="arquivo_membro",
-                    tipo_fonte=tipo_fonte,
-                    ano=ano,
-                    arquivo=member_name,
-                    url=url,
-                    status="skipped",
-                    hash_arquivo=member_hash,
-                    finalizada_em=datetime.now(UTC),
-                )
-                db.add(child_exec)
+                if existing_child is not None:
+                    child_exec = existing_child
+                    child_exec.status = "skipped"
+                    child_exec.hash_arquivo = member_hash
+                    child_exec.finalizada_em = datetime.now(UTC)
+                    child_exec.mensagem_erro = None
+                else:
+                    child_exec = ExecucaoSincronizacao(
+                        parent_execucao_id=execucao.id,
+                        tipo_execucao="arquivo_membro",
+                        tipo_fonte=tipo_fonte,
+                        ano=ano,
+                        arquivo=member_name,
+                        url=url,
+                        status="skipped",
+                        hash_arquivo=member_hash,
+                        finalizada_em=datetime.now(UTC),
+                    )
+                    db.add(child_exec)
                 db.flush()
 
-                run_created = create_run(
-                    db,
-                    tipo_fonte=tipo_fonte,
-                    ano=ano,
-                    execucao_sincronizacao_id=child_exec.id,
-                    status="skipped",
-                    phase="complete",
+                existing_child_run = db.scalar(
+                    select(IngestionRun)
+                    .where(IngestionRun.execucao_sincronizacao_id == child_exec.id)
+                    .order_by(IngestionRun.created_at.desc())
+                    .limit(1)
                 )
-                run_created.finished_at = datetime.now(UTC)
+                if existing_child_run is not None:
+                    run_created = update_run_state(
+                        existing_child_run,
+                        status="skipped",
+                        phase="complete",
+                        finished_at=datetime.now(UTC),
+                    )
+                else:
+                    run_created = create_run(
+                        db,
+                        tipo_fonte=tipo_fonte,
+                        ano=ano,
+                        execucao_sincronizacao_id=child_exec.id,
+                        status="skipped",
+                        phase="complete",
+                    )
+                    run_created.finished_at = datetime.now(UTC)
                 register_member(
                     db,
                     ingestion_file=ingestion_file,
@@ -1193,35 +1259,59 @@ def pre_processar_sincronizacao_zip(
                 current_run_id=run.id,
             )
             if reusable_match is not None and not force_reimport:
-                child_exec = ExecucaoSincronizacao(
-                    parent_execucao_id=execucao.id,
-                    tipo_execucao="arquivo_membro",
-                    tipo_fonte=tipo_fonte,
-                    ano=ano,
-                    arquivo=member_name,
-                    url=url,
-                    status="skipped",
-                    hash_arquivo=member_hash,
-                    finalizada_em=datetime.now(UTC),
-                )
-                db.add(child_exec)
+                if existing_child is not None:
+                    child_exec = existing_child
+                    child_exec.status = "skipped"
+                    child_exec.hash_arquivo = member_hash
+                    child_exec.finalizada_em = datetime.now(UTC)
+                    child_exec.mensagem_erro = None
+                else:
+                    child_exec = ExecucaoSincronizacao(
+                        parent_execucao_id=execucao.id,
+                        tipo_execucao="arquivo_membro",
+                        tipo_fonte=tipo_fonte,
+                        ano=ano,
+                        arquivo=member_name,
+                        url=url,
+                        status="skipped",
+                        hash_arquivo=member_hash,
+                        finalizada_em=datetime.now(UTC),
+                    )
+                    db.add(child_exec)
                 db.flush()
 
-                run_created = create_run(
-                    db,
-                    tipo_fonte=tipo_fonte,
-                    ano=ano,
-                    execucao_sincronizacao_id=child_exec.id,
-                    status="skipped",
-                    phase="complete",
-                    message="member_sha256_reused",
-                    quality_summary={
-                        "skip_reason": "member_sha256_reused",
-                        "matched_via": reusable_match["matched_via"],
-                        "reused_from_failed_parent": reusable_match["reused_from_failed_parent"],
-                    },
+                skip_quality = {
+                    "skip_reason": "member_sha256_reused",
+                    "matched_via": reusable_match["matched_via"],
+                    "reused_from_failed_parent": reusable_match["reused_from_failed_parent"],
+                }
+                existing_child_run = db.scalar(
+                    select(IngestionRun)
+                    .where(IngestionRun.execucao_sincronizacao_id == child_exec.id)
+                    .order_by(IngestionRun.created_at.desc())
+                    .limit(1)
                 )
-                run_created.finished_at = datetime.now(UTC)
+                if existing_child_run is not None:
+                    run_created = update_run_state(
+                        existing_child_run,
+                        status="skipped",
+                        phase="complete",
+                        message="member_sha256_reused",
+                        quality_summary=skip_quality,
+                        finished_at=datetime.now(UTC),
+                    )
+                else:
+                    run_created = create_run(
+                        db,
+                        tipo_fonte=tipo_fonte,
+                        ano=ano,
+                        execucao_sincronizacao_id=child_exec.id,
+                        status="skipped",
+                        phase="complete",
+                        message="member_sha256_reused",
+                        quality_summary=skip_quality,
+                    )
+                    run_created.finished_at = datetime.now(UTC)
                 register_member(
                     db,
                     ingestion_file=ingestion_file,
@@ -1247,27 +1337,49 @@ def pre_processar_sincronizacao_zip(
                 db.flush()
                 continue
 
-            child_exec = ExecucaoSincronizacao(
-                parent_execucao_id=execucao.id,
-                tipo_execucao="arquivo_membro",
-                tipo_fonte=tipo_fonte,
-                ano=ano,
-                arquivo=member_name,
-                url=url,
-                status="aguardando_ingestao",
-                hash_arquivo=member_hash,
-            )
-            db.add(child_exec)
+            if existing_child is not None:
+                child_exec = existing_child
+                child_exec.status = "aguardando_ingestao"
+                child_exec.hash_arquivo = member_hash
+                child_exec.finalizada_em = None
+                child_exec.mensagem_erro = None
+            else:
+                child_exec = ExecucaoSincronizacao(
+                    parent_execucao_id=execucao.id,
+                    tipo_execucao="arquivo_membro",
+                    tipo_fonte=tipo_fonte,
+                    ano=ano,
+                    arquivo=member_name,
+                    url=url,
+                    status="aguardando_ingestao",
+                    hash_arquivo=member_hash,
+                )
+                db.add(child_exec)
             db.flush()
 
-            child_run = create_run(
-                db,
-                tipo_fonte=tipo_fonte,
-                ano=ano,
-                execucao_sincronizacao_id=child_exec.id,
-                status="aguardando_ingestao",
-                phase="stage",
+            existing_child_run = db.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id == child_exec.id)
+                .order_by(IngestionRun.created_at.desc())
+                .limit(1)
             )
+            if existing_child_run is not None:
+                child_run = update_run_state(
+                    existing_child_run,
+                    status="aguardando_ingestao",
+                    phase="stage",
+                    message=None,
+                )
+                child_run.finished_at = None
+            else:
+                child_run = create_run(
+                    db,
+                    tipo_fonte=tipo_fonte,
+                    ano=ano,
+                    execucao_sincronizacao_id=child_exec.id,
+                    status="aguardando_ingestao",
+                    phase="stage",
+                )
             db.flush()
 
             # Extract header, encoding, delimiter, row count
@@ -1380,11 +1492,16 @@ def ingerir_sincronizacao_zip(
         }
 
     execucao.status = "em_execucao"
-    run = db.scalar(
-        select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+    parent_runs = list(
+        db.scalars(
+            select(IngestionRun)
+            .where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+            .order_by(IngestionRun.created_at.desc())
+        ).all()
     )
-    if run is not None:
-        update_run_state(run, status="em_execucao", phase="stage")
+    run = parent_runs[0] if parent_runs else None
+    for parent_run in parent_runs:
+        update_run_state(parent_run, status="em_execucao", phase="stage")
     db.commit()
 
     try:
@@ -1397,13 +1514,16 @@ def ingerir_sincronizacao_zip(
         document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
 
         for c in children:
-            if c.status == "skipped":
+            if c.status in {"skipped", "sucesso", "sucesso_com_alerta", "sem_alteracao"}:
                 continue
 
             if c.arquivo == document_file:
                 c.status = "agendada"
                 child_run = db.scalar(
-                    select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
+                    select(IngestionRun)
+                    .where(IngestionRun.execucao_sincronizacao_id == c.id)
+                    .order_by(IngestionRun.created_at.desc())
+                    .limit(1)
                 )
                 if child_run is not None:
                     update_run_state(child_run, status="agendada", phase="stage")
@@ -1561,7 +1681,10 @@ def sincronizar_member_internal(
         download_file_to_disk,
         extract_zip_member,
     )
-    from app.services.ingestion.operational import record_phase_artifact
+    from app.services.ingestion.operational import (
+        record_phase_artifact,
+        touch_parent_execution_heartbeat,
+    )
     from app.services.ingestion.staging import (
         create_run,
         get_member_payload,
@@ -1601,6 +1724,7 @@ def sincronizar_member_internal(
     if task_id:
         execucao.id_tarefa = task_id
     execucao.status = "em_execucao"
+    touch_parent_execution_heartbeat(db, parent_execucao_id=parent_execucao.id)
     db.commit()
 
     run = db.scalar(
@@ -1886,6 +2010,7 @@ def sincronizar_member_internal(
         document_file = f"{tipo_fonte}_cia_aberta_{ano}.csv"
         if status_execucao in {"sucesso", "sucesso_com_alerta"} and member_name != document_file:
             purge_member_success_rows(db, ingestion_file_member_id=member.id)
+        touch_parent_execution_heartbeat(db, parent_execucao_id=parent_execucao.id)
         db.commit()
         db.expunge_all()
         gc.collect()
@@ -1955,6 +2080,7 @@ def disparar_dependentes_task(
     from app.db.session import SessionLocal
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.operational import touch_parent_execution_heartbeat
     from app.services.ingestion.staging import update_run_state
 
     db = SessionLocal()
@@ -1967,6 +2093,8 @@ def disparar_dependentes_task(
             return _resultado_cancelado(execucao.id, "Parent execution was cancelled before dependent dispatch.")
         if execucao.status == "falha":
             return {"status": "falha", "parent_execucao_id": parent_execucao_id, "error": "Parent execution already failed."}
+
+        touch_parent_execution_heartbeat(db, parent_execucao_id=parent_uuid)
 
         document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
         header_exec = db.scalar(
@@ -2138,17 +2266,23 @@ def finalizar_sincronizacao_zip_task(
             "members_reused_from_failed_parent": members_reused_from_failed_parent,
         }
 
-        run = db.scalar(
-            select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+        parent_runs = list(
+            db.scalars(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+                .order_by(IngestionRun.created_at.desc())
+            ).all()
         )
-        if run is not None:
+        run = parent_runs[0] if parent_runs else None
+        now_done = datetime.now(UTC)
+        for prun in parent_runs:
             update_run_state(
-                run,
+                prun,
                 status=parent_status,
                 phase="complete",
                 message=message,
                 quality_summary=quality_summary,
-                finished_at=datetime.now(UTC),
+                finished_at=now_done,
             )
 
         from app.updates.lifecycle import finalize_pending_update_by_run_id

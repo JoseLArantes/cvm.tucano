@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import uuid
 from collections.abc import Iterable, Sequence
@@ -82,6 +83,7 @@ from app.services.ingestion.normalizers import (
     normalizar_sigla_uf,
     normalizar_texto,
 )
+from app.services.ingestion.operational import touch_run_heartbeat
 from app.services.ingestion.quality import enforce_quality_gate
 from app.services.ingestion.quarantine import create_quarantine_item
 from app.services.ingestion.resolver import (
@@ -2396,6 +2398,18 @@ def _process_fre_member(
                 contadores=contadores,
             )
         update_run_state(run, phase="promote", quality_summary=build_contadores_quality_summary(contadores))
+        touch_run_heartbeat(
+            db,
+            run_id=run.id,
+            metrics={
+                "rows_read": contadores["lidas"],
+                "rows_promoted": (
+                    contadores.get("inseridos", 0)
+                    + contadores.get("atualizados", 0)
+                    + contadores.get("inalterados", 0)
+                ),
+            },
+        )
         execucao.total_linhas_lidas = contadores["lidas"]
         execucao.total_inseridos = contadores["inseridos"]
         execucao.total_atualizados = contadores["atualizados"]
@@ -2414,6 +2428,7 @@ def _process_fre_member(
                 ano_origem=ano,
                 row_kinds=row_kinds,
             )
+    gc.collect()
 
 
 def sincronizar_fre(

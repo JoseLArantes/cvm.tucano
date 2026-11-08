@@ -9,6 +9,6 @@ router = APIRouter()
     description="Verifica disponibilidade básica do serviço.",
     operation_id="healthcheckApi",
 )
-def healthcheck() -> dict[str, str]:
+async def healthcheck() -> dict[str, str]:
     """Retorna estado básico de disponibilidade da aplicação."""
     return {"status": "ok"}

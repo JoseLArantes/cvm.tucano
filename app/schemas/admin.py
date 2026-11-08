@@ -415,7 +415,10 @@ class IngestionOperationalLiveness(BaseModel):
 
 class IngestionOperationalBlocking(BaseModel):
     reason_code: str = Field(
-        description="Motivo compacto de espera ou bloqueio: `none`, `queued`, `awaiting_ingestion`, `stale` ou `manual_cancel`."
+        description=(
+            "Motivo compacto de espera ou bloqueio: `none`, `queued`, `awaiting_ingestion`, "
+            "`awaiting_parent_window`, `stale` ou `manual_cancel`."
+        )
     )
     detail: str | None = Field(default=None, description="Explicacao curta para UI operacional.")
 
@@ -536,10 +539,14 @@ class IngestionRecovery(BaseModel):
     eligible: bool = Field(description="Indica se o estado atual da run autoriza recovery e existe uma fonte executavel.")
     strategy: str | None = Field(
         default=None,
-        description="Estrategia executavel atual: `replay_staged_rows` ou `rerun_member_execution`.",
+        description="Estrategia executavel atual: `replay_staged_rows`, `rerun_member_execution` ou `rerun_parent_execution`.",
     )
     reason_code: str = Field(
-        description="Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, `RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`."
+        description=(
+            "Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, "
+            "`PARENT_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, "
+            "`RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`."
+        )
     )
 
 

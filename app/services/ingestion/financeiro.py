@@ -940,6 +940,14 @@ def _promote_financeiro_member_from_stage_postgresql(
         ).scalars()
     )
     for row_kind in row_kinds:
+        if run_id is not None:
+            touch_run_heartbeat(
+                db,
+                run_id=run_id,
+                metrics={
+                    "promote_row_kind": row_kind,
+                },
+            )
         stats = _promote_financeiro_stage_row_kind_postgresql(db, member_id=member_id, row_kind=row_kind)
         contadores["inseridos"] += stats["inserted"]
         contadores["atualizados"] += stats["updated"]
@@ -1139,6 +1147,8 @@ def _promote_financeiro_stage_row_kind_postgresql(
         FROM source_stats
         CROSS JOIN upsert_stats
     """
+    work_mem_mb = max(int(get_settings().ingestion_postgres_promote_work_mem_mb), 4)
+    db.execute(text(f"SET LOCAL work_mem = '{work_mem_mb}MB'"))
     row = db.execute(text(sql), {"member_id": member_id, "row_kind": row_kind}).mappings().one()
     db.flush()
     return {

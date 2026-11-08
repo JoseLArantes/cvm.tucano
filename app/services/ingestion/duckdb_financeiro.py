@@ -69,10 +69,11 @@ def process_demonstracao_member_duckdb(
     tipo_demonstracao, escopo_demonstracao = mapa_demonstracoes[member_name]
     resolved_row_kind = f"{prefixo}_demonstracao"
 
+    settings = get_settings()
     temp_spill = Path(tempfile.mkdtemp(prefix="duckdb_spill_"))
     con = duckdb.connect(database=":memory:")
     try:
-        con.execute("PRAGMA memory_limit='1500MB'")
+        con.execute(f"PRAGMA memory_limit='{settings.ingestion_duckdb_memory_limit_mb}MB'")
         con.execute("PRAGMA threads=1")
         con.execute("SET preserve_insertion_order=false")
         con.execute(f"PRAGMA temp_directory='{temp_spill}'")

@@ -9,6 +9,40 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-08 - Resiliencia, Liveness e Eficiencia Operacional em Ingestao com 1 Worker
+
+### Superficies afetadas
+
+- `GET /health`
+- `GET /ingestion/operations`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}`
+- `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `POST /ingestion/runs/{run_id}/recover`
+- Worker de ingestao e sweep de recuperacao (`reconcile_stale_ingestion_phase_executions`, `pre_processar_sincronizacao_zip`, `ingerir_sincronizacao_zip`)
+
+### Comportamento entregue
+
+- **Eliminacao de Falsos Positivos de `waiting_for_operator_count` para Membros Filhos (`awaiting_parent_window`)**:
+  - Quando uma execucao filha (`tipo_execucao == "arquivo_membro"`) encontra-se em `aguardando_ingestao` enquanto sua execucao pai (`arquivo_zip`) esta ativa (`agendada` ou `em_execucao`), ela aguarda apenas a conclusao do membro documento principal (`document_file`) ou vaga na janela de concorrencia (`MAX_CONCURRENT_MEMBERS`), e nao uma acao manual do operador.
+  - Nessa condicao, a API agora expoe `next_action: "wait"` (em vez de `"start_ingestion"`), `blocking.reason_code: "awaiting_parent_window"`, omite o link `start_ingestion` e nao contabiliza esses membros em `waiting_for_operator_count` nem em `oldest_action_required_at` no endpoint `GET /ingestion/operations`.
+  - Execucoes raiz em modo `two_step` (`parent_execucao_id == null` e `status == "aguardando_ingestao"`) continuam expondo `next_action: "start_ingestion"` e `blocking.reason_code: "awaiting_ingestion"`.
+- **Replay/Recovery Idempotente de Sincronizacao Pai e Retomada Automatica de Filhos**:
+  - Ao acionar `POST /ingestion/sincronizacoes/{id_execucao}/replay` em uma execucao pai, o sistema reverte automaticamente execucoes filhas em estado `falha`, `cancelada` ou `quality_fail` de volta para `aguardando_ingestao` (expondo `detalhe.reset_children_count`).
+  - O reprocessamento do pai reutiliza o `IngestionRun`, `IngestionFile` e as `ExecucaoSincronizacao` filhas existentes sem criar registros duplicados, preserva membros que ja concluiram com `sucesso` na mesma arvore e pula a reexecucao do `document_file` caso ele ja tenha sido concluido com sucesso, despachando diretamente `disparar_dependentes_task` para os membros pendentes.
+- **Propagacao de Heartbeat Filho -> Pai e Reconciliacao de Runs Desincronizadas**:
+  - Em cenarios de 1 worker onde o processamento dos membros filhos excede o limite de stale individual (15 minutos), o inicio/conclusao de cada membro e o sweep de reconciliacao (`reconcile_stale_ingestion_phase_executions`) renovam automaticamente o heartbeat da fase `process_members` do pai enquanto houver atividade recente nos filhos, evitando timeouts falsos (`stale_phase`) no pai e falhas em cascata nos filhos restantes.
+  - O sweep periodico tambem reconcilia automaticamente qualquer `IngestionRun` que tenha permanecido em estado nao-terminal (`em_execucao`, `aguardando_ingestao`, `agendada`) quando sua `ExecucaoSincronizacao` correlata ja atingiu estado terminal (`sucesso`, `skipped`, `falha`, `cancelada`).
+- **Otimizacao de Latencia e Memoria**:
+  - `GET /health` passa a executar diretamente no event loop assincrono sem competir pelo threadpool sincrono.
+  - Eliminacao de consultas N+1 e carregamento em lote nos endpoints `GET /ingestion/operations`, `GET /ingestion/runs` e `GET /ingestion/sincronizacoes`, alem de agregacao SQL (`GROUP BY`) para `delivery_snapshot_summary`.
+  - Controle explicito de memoria para DuckDB (`INGESTION_DUCKDB_MEMORY_LIMIT_MB`, padrao `768`), PostgreSQL stage promote (`INGESTION_POSTGRES_PROMOTE_WORK_MEM_MB`, padrao `64`) e coleta de lixo/heartbeat por chunk no processamento do FRE.
+
+### Migracao do frontend e consumidores
+
+- Clientes que exibem badges ou filtros por `blocking.reason_code` podem tratar o novo codigo `"awaiting_parent_window"` como espera automatica do pipeline (sem acao manual necessaria).
+- Nenhuma mudanca estrutural quebradora nos schemas de resposta.
+
 ## 2026-11-06 - Recuperacao Deterministica de Falhas de Ingestao e Replay de Sincronizacoes
 
 ### Superficies afetadas

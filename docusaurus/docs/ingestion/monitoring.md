@@ -275,8 +275,8 @@ vida do SSE nem durante operações externas como a inspeção Celery.
 
 | Valor | Significado |
 | --- | --- |
-| `wait` | run em andamento ou aguardando continuidade normal |
-| `start_ingestion` | pre-processamento concluido; use a execucao correlata para iniciar a fase 2 |
+| `wait` | run em andamento, na fila ou member filho aguardando janela de despacho do ZIP pai ativo (`blocking.reason_code=awaiting_parent_window`) |
+| `start_ingestion` | pre-processamento concluido em modo two-step; use a execucao correlata para iniciar a fase 2 |
 | `recover` | run stale, falha recuperavel ou member aguardando retomada apos falha do ZIP pai, desde que possua fonte executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |

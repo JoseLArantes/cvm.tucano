@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
 from typing import Annotated, Any
@@ -88,6 +89,7 @@ from app.services.ingestion.lifecycle import (
     build_artifact_snapshot_response,
     build_delivery_snapshot_summary,
     build_member_snapshot_summary,
+    bulk_build_snapshot_summaries,
 )
 from app.services.ingestion.operational import (
     build_liveness_snapshot,
@@ -283,10 +285,31 @@ def _state_from_execucao(*, execucao: ExecucaoSincronizacao, liveness: dict[str,
     return "succeeded"
 
 
-def _build_blocking_from_state(*, state: str, status: str) -> dict[str, Any]:
+def _is_awaiting_parent_window(
+    execucao: ExecucaoSincronizacao | None,
+    parent_execucao: ExecucaoSincronizacao | None,
+) -> bool:
+    if execucao is None or execucao.status != "aguardando_ingestao" or execucao.parent_execucao_id is None:
+        return False
+    if parent_execucao is None:
+        return False
+    return parent_execucao.status in {"agendada", "em_execucao"}
+
+
+def _build_blocking_from_state(
+    *,
+    state: str,
+    status: str,
+    awaiting_parent_window: bool = False,
+) -> dict[str, Any]:
     if state == "queued":
         return {"reason_code": "queued", "detail": "Execucao ainda nao iniciou processamento."}
     if status == "aguardando_ingestao":
+        if awaiting_parent_window:
+            return {
+                "reason_code": "awaiting_parent_window",
+                "detail": "Membro pre-processado aguardando janela automatica da execucao pai.",
+            }
         return {"reason_code": "awaiting_ingestion", "detail": "Pre-processamento concluido; aguardando etapa explicita de ingestao."}
     if state == "stale":
         return {"reason_code": "stale", "detail": "Heartbeat da fase ativa ficou velho demais para um processamento ainda marcado como em execucao."}
@@ -512,10 +535,13 @@ def _next_action(
     failure_acknowledged: bool = False,
     rejected_total: int | None = None,
     superseded: bool = False,
+    awaiting_parent_window: bool = False,
 ) -> str:
     if state in {"queued", "running"}:
         return "wait"
     if state == "waiting":
+        if awaiting_parent_window:
+            return "wait"
         if recovery is not None and recovery.get("strategy") == "rerun_member_execution":
             return "recover"
         return "start_ingestion"
@@ -545,20 +571,25 @@ def _failure_acknowledgement(
     *,
     run: IngestionRun,
     latest_phase: IngestionPhaseExecution | None,
+    preloaded_audit: IngestionOperationAudit | None = None,
+    use_preloaded_audit: bool = False,
 ) -> dict[str, Any] | None:
     if run.status != "falha":
         return None
     failure_key = _failure_key(run, latest_phase)
-    audit = db.scalar(
-        select(IngestionOperationAudit)
-        .where(
-            IngestionOperationAudit.scope_type == "run",
-            IngestionOperationAudit.scope_id == str(run.id),
-            IngestionOperationAudit.operation == "acknowledge_failure",
+    if use_preloaded_audit:
+        audit = preloaded_audit
+    else:
+        audit = db.scalar(
+            select(IngestionOperationAudit)
+            .where(
+                IngestionOperationAudit.scope_type == "run",
+                IngestionOperationAudit.scope_id == str(run.id),
+                IngestionOperationAudit.operation == "acknowledge_failure",
+            )
+            .order_by(IngestionOperationAudit.created_at.desc())
+            .limit(1)
         )
-        .order_by(IngestionOperationAudit.created_at.desc())
-        .limit(1)
-    )
     if audit is None or (audit.consequence or {}).get("failure_key") != failure_key:
         return None
     return {
@@ -569,33 +600,84 @@ def _failure_acknowledgement(
     }
 
 
-def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str, Any]:
-    latest_phase = get_latest_phase_execution(db, run_id=run.id)
-    liveness = build_liveness_snapshot(latest_phase)
+def _build_run_operational_fields(
+    db: DbSession,
+    run: IngestionRun,
+    *,
+    latest_phase: IngestionPhaseExecution | None = None,
+    use_preloaded_phase: bool = False,
+    cancellation_request: IngestionCancellationRequest | None = None,
+    use_preloaded_cancellation: bool = False,
+    execucao: ExecucaoSincronizacao | None = None,
+    use_preloaded_execucao: bool = False,
+    parent_execucao: ExecucaoSincronizacao | None = None,
+    use_preloaded_parent: bool = False,
+    has_staged_rows: bool | None = None,
+    preloaded_audit: IngestionOperationAudit | None = None,
+    use_preloaded_audit: bool = False,
+    superseding_info: dict[str, Any] | None = None,
+    use_preloaded_superseding: bool = False,
+) -> dict[str, Any]:
+    resolved_phase = latest_phase if use_preloaded_phase else get_latest_phase_execution(db, run_id=run.id)
+    liveness = build_liveness_snapshot(resolved_phase)
     state = _state_from_run(run=run, liveness=liveness)
-    cancellation = _serialize_cancellation(latest_cancellation_request_for_run(db, run_id=run.id))
-    last_error = _serialize_last_error(message=run.message, phase_execution=latest_phase, status=run.status)
+    resolved_cancellation = (
+        cancellation_request
+        if use_preloaded_cancellation
+        else latest_cancellation_request_for_run(db, run_id=run.id)
+    )
+    cancellation = _serialize_cancellation(resolved_cancellation)
+    last_error = _serialize_last_error(message=run.message, phase_execution=resolved_phase, status=run.status)
     quality_summary = run.quality_summary or {}
+
+    resolved_execucao = execucao
+    if not use_preloaded_execucao and run.execucao_sincronizacao_id is not None:
+        resolved_execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+
+    resolved_parent = parent_execucao
+    if (
+        not use_preloaded_parent
+        and resolved_execucao is not None
+        and resolved_execucao.parent_execucao_id is not None
+    ):
+        resolved_parent = db.get(ExecucaoSincronizacao, resolved_execucao.parent_execucao_id)
+
+    awaiting_parent_window = _is_awaiting_parent_window(resolved_execucao, resolved_parent)
     recovery = assess_ingestion_run_recovery_eligibility(
         db,
         run=run,
         state=state,
         error_retryable=bool(last_error and last_error.get("retryable")),
+        execucao=resolved_execucao,
+        parent_execucao=resolved_parent,
+        has_staged_rows=has_staged_rows,
     ).as_dict()
-    failure_acknowledgement = _failure_acknowledgement(db, run=run, latest_phase=latest_phase)
-    superseding_info = _find_superseding_execution(db, run)
-    is_superseded = superseding_info is not None
+    failure_acknowledgement = _failure_acknowledgement(
+        db,
+        run=run,
+        latest_phase=resolved_phase,
+        preloaded_audit=preloaded_audit,
+        use_preloaded_audit=use_preloaded_audit,
+    )
+    resolved_superseding = (
+        superseding_info if use_preloaded_superseding else _find_superseding_execution(db, run)
+    )
+    is_superseded = resolved_superseding is not None
     return {
         "state": state,
         "progress": _build_progress_for_run(run),
         "liveness": liveness,
-        "blocking": _build_blocking_from_state(state=state, status=run.status),
+        "blocking": _build_blocking_from_state(
+            state=state,
+            status=run.status,
+            awaiting_parent_window=awaiting_parent_window,
+        ),
         "cancellation": cancellation,
         "last_error": last_error,
         "recovery": recovery,
         "failure_acknowledgement": failure_acknowledgement,
         "superseded": is_superseded,
-        "superseded_by": superseding_info,
+        "superseded_by": resolved_superseding,
         "next_action": _next_action(
             state=state,
             last_error=last_error,
@@ -603,6 +685,7 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
             failure_acknowledged=failure_acknowledgement is not None,
             rejected_total=quality_summary.get("quarantine_total"),
             superseded=is_superseded,
+            awaiting_parent_window=awaiting_parent_window,
         ),
         "links": {
             "run_detail": f"/ingestion/runs/{run.id}",
@@ -613,17 +696,201 @@ def _build_run_operational_fields(db: DbSession, run: IngestionRun) -> dict[str,
     }
 
 
+def _bulk_build_runs_operational_fields(
+    db: DbSession,
+    runs: Sequence[IngestionRun],
+) -> dict[UUID, dict[str, Any]]:
+    if not runs:
+        return {}
+    run_ids = [r.id for r in runs]
+
+    latest_phase_by_run_id: dict[UUID, IngestionPhaseExecution] = {}
+    for phase in db.scalars(
+        select(IngestionPhaseExecution)
+        .where(IngestionPhaseExecution.ingestion_run_id.in_(run_ids))
+        .order_by(IngestionPhaseExecution.started_at.desc(), IngestionPhaseExecution.attempt.desc())
+    ).all():
+        if phase.ingestion_run_id not in latest_phase_by_run_id:
+            latest_phase_by_run_id[phase.ingestion_run_id] = phase
+
+    cancellation_by_run_id: dict[UUID, IngestionCancellationRequest] = {}
+    for req in db.scalars(
+        select(IngestionCancellationRequest)
+        .where(IngestionCancellationRequest.ingestion_run_id.in_(run_ids))
+        .order_by(IngestionCancellationRequest.created_at.desc())
+    ).all():
+        if req.ingestion_run_id is not None and req.ingestion_run_id not in cancellation_by_run_id:
+            cancellation_by_run_id[req.ingestion_run_id] = req
+
+    exec_ids = list({r.execucao_sincronizacao_id for r in runs if r.execucao_sincronizacao_id is not None})
+    execucao_by_id: dict[UUID, ExecucaoSincronizacao] = {}
+    if exec_ids:
+        for ex_item in db.scalars(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id.in_(exec_ids))).all():
+            execucao_by_id[ex_item.id] = ex_item
+
+    parent_ids = list(
+        {
+            ex_item.parent_execucao_id
+            for ex_item in execucao_by_id.values()
+            if ex_item.parent_execucao_id is not None and ex_item.parent_execucao_id not in execucao_by_id
+        }
+    )
+    if parent_ids:
+        for pex_item in db.scalars(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id.in_(parent_ids))).all():
+            execucao_by_id[pex_item.id] = pex_item
+
+    staged_check_run_ids: list[UUID] = []
+    for r in runs:
+        ex = execucao_by_id.get(r.execucao_sincronizacao_id) if r.execucao_sincronizacao_id else None
+        if ex is not None and ex.parent_execucao_id is not None:
+            continue
+        if r.status in {"aguardando_ingestao", "em_execucao", "falha"}:
+            staged_check_run_ids.append(r.id)
+
+    runs_with_staged_rows: set[UUID] = set()
+    if staged_check_run_ids:
+        runs_with_staged_rows = set(
+            db.scalars(
+                select(IngestionRow.ingestion_run_id)
+                .where(IngestionRow.ingestion_run_id.in_(staged_check_run_ids))
+                .distinct()
+            ).all()
+        )
+
+    failed_run_id_strs = [str(r.id) for r in runs if r.status == "falha"]
+    latest_ack_by_run_id_str: dict[str, IngestionOperationAudit] = {}
+    if failed_run_id_strs:
+        for audit in db.scalars(
+            select(IngestionOperationAudit)
+            .where(
+                IngestionOperationAudit.scope_type == "run",
+                IngestionOperationAudit.scope_id.in_(failed_run_id_strs),
+                IngestionOperationAudit.operation == "acknowledge_failure",
+            )
+            .order_by(IngestionOperationAudit.created_at.desc())
+        ).all():
+            if audit.scope_id not in latest_ack_by_run_id_str:
+                latest_ack_by_run_id_str[audit.scope_id] = audit
+
+    superseding_by_run_id: dict[UUID, dict[str, Any] | None] = {r.id: None for r in runs}
+    arquivos = list({ex.arquivo for ex in execucao_by_id.values() if ex.arquivo})
+    fontes = list({ex.tipo_fonte for ex in execucao_by_id.values() if ex.tipo_fonte})
+    if arquivos and fontes:
+        successful_execs = list(
+            db.scalars(
+                select(ExecucaoSincronizacao)
+                .where(
+                    ExecucaoSincronizacao.arquivo.in_(arquivos),
+                    ExecucaoSincronizacao.tipo_fonte.in_(fontes),
+                    ExecucaoSincronizacao.status.in_(["sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"]),
+                )
+                .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+            ).all()
+        )
+        succ_by_scope: dict[tuple[str, str | None, int | None], list[ExecucaoSincronizacao]] = {}
+        for sex in successful_execs:
+            key = (sex.tipo_fonte, sex.arquivo, sex.ano)
+            succ_by_scope.setdefault(key, []).append(sex)
+
+        matched_newer_exec_by_run_id: dict[UUID, ExecucaoSincronizacao] = {}
+        for r in runs:
+            if r.execucao_sincronizacao_id is None:
+                continue
+            ex = execucao_by_id.get(r.execucao_sincronizacao_id)
+            if ex is None:
+                continue
+            candidates_succ = succ_by_scope.get((ex.tipo_fonte, ex.arquivo, ex.ano), [])
+            for sex in candidates_succ:
+                if sex.id != ex.id and sex.iniciada_em >= ex.iniciada_em:
+                    matched_newer_exec_by_run_id[r.id] = sex
+                    break
+
+        if matched_newer_exec_by_run_id:
+            newer_exec_ids = list({sex.id for sex in matched_newer_exec_by_run_id.values()})
+            newer_run_id_by_exec_id: dict[UUID, UUID] = {}
+            for nr_exec_id, nr_id in db.execute(
+                select(IngestionRun.execucao_sincronizacao_id, IngestionRun.id)
+                .where(IngestionRun.execucao_sincronizacao_id.in_(newer_exec_ids))
+            ).all():
+                if nr_exec_id is not None and nr_exec_id not in newer_run_id_by_exec_id:
+                    newer_run_id_by_exec_id[nr_exec_id] = nr_id
+
+            for r_id, newer_exec in matched_newer_exec_by_run_id.items():
+                newer_r_id = newer_run_id_by_exec_id.get(newer_exec.id)
+                superseding_by_run_id[r_id] = {
+                    "execucao_id": str(newer_exec.id),
+                    "run_id": str(newer_r_id) if newer_r_id is not None else None,
+                    "status": newer_exec.status,
+                    "completed_at": newer_exec.finalizada_em.isoformat() if newer_exec.finalizada_em else None,
+                    "arquivo": newer_exec.arquivo,
+                }
+
+    result: dict[UUID, dict[str, Any]] = {}
+    for r in runs:
+        ex = execucao_by_id.get(r.execucao_sincronizacao_id) if r.execucao_sincronizacao_id else None
+        pex = execucao_by_id.get(ex.parent_execucao_id) if (ex is not None and ex.parent_execucao_id) else None
+        result[r.id] = _build_run_operational_fields(
+            db,
+            r,
+            latest_phase=latest_phase_by_run_id.get(r.id),
+            use_preloaded_phase=True,
+            cancellation_request=cancellation_by_run_id.get(r.id),
+            use_preloaded_cancellation=True,
+            execucao=ex,
+            use_preloaded_execucao=True,
+            parent_execucao=pex,
+            use_preloaded_parent=True,
+            has_staged_rows=(r.id in runs_with_staged_rows),
+            preloaded_audit=latest_ack_by_run_id_str.get(str(r.id)),
+            use_preloaded_audit=True,
+            superseding_info=superseding_by_run_id.get(r.id),
+            use_preloaded_superseding=True,
+        )
+    return result
+
+
 def _build_execucao_operational_fields(
     db: DbSession,
     *,
     execucao: ExecucaoSincronizacao,
     run: IngestionRun | None,
+    latest_phase: IngestionPhaseExecution | None = None,
+    use_preloaded_phase: bool = False,
+    cancellation_request: IngestionCancellationRequest | None = None,
+    use_preloaded_cancellation: bool = False,
+    parent_execucao: ExecucaoSincronizacao | None = None,
+    use_preloaded_parent: bool = False,
 ) -> dict[str, Any]:
-    latest_phase = get_latest_phase_execution(db, run_id=run.id) if run is not None else None
-    liveness = build_liveness_snapshot(latest_phase)
+    if use_preloaded_phase:
+        resolved_phase = latest_phase
+    else:
+        resolved_phase = get_latest_phase_execution(db, run_id=run.id) if run is not None else None
+    liveness = build_liveness_snapshot(resolved_phase)
     state = _state_from_execucao(execucao=execucao, liveness=liveness)
-    cancellation = _serialize_cancellation(latest_cancellation_request_for_execucao(db, execucao_id=execucao.id))
-    last_error = _serialize_last_error(message=execucao.mensagem_erro, phase_execution=latest_phase, status=execucao.status)
+    resolved_cancellation = (
+        cancellation_request
+        if use_preloaded_cancellation
+        else latest_cancellation_request_for_execucao(db, execucao_id=execucao.id)
+    )
+    cancellation = _serialize_cancellation(resolved_cancellation)
+    last_error = _serialize_last_error(
+        message=execucao.mensagem_erro,
+        phase_execution=resolved_phase,
+        status=execucao.status,
+    )
+    resolved_parent = parent_execucao
+    if not use_preloaded_parent and execucao.parent_execucao_id is not None:
+        resolved_parent = db.get(ExecucaoSincronizacao, execucao.parent_execucao_id)
+    awaiting_parent_window = _is_awaiting_parent_window(execucao, resolved_parent)
+    recovery_strategy = (
+        "rerun_member_execution"
+        if (
+            execucao.parent_execucao_id is not None
+            and resolved_parent is not None
+            and resolved_parent.status == "falha"
+        )
+        else None
+    )
     run_detail = f"/ingestion/runs/{run.id}" if run is not None else None
     links = {
         "execucao_detail": f"/ingestion/sincronizacoes/{execucao.id}",
@@ -635,20 +902,107 @@ def _build_execucao_operational_fields(
     return {
         "state": state,
         "liveness": liveness,
-        "blocking": _build_blocking_from_state(state=state, status=execucao.status),
+        "blocking": _build_blocking_from_state(
+            state=state,
+            status=execucao.status,
+            awaiting_parent_window=awaiting_parent_window,
+        ),
         "cancellation": cancellation,
         "last_error": last_error,
         "next_action": _next_action(
             state=state,
             last_error=last_error,
-            recovery={"eligible": True},
+            recovery={
+                "eligible": bool(last_error is None or last_error.get("retryable", True)),
+                "strategy": recovery_strategy,
+            },
             rejected_total=execucao.total_rejeitados,
+            awaiting_parent_window=awaiting_parent_window,
         ),
         "links": links,
     }
 
 
-def _serialize_run_resumo(db: DbSession, run: IngestionRun) -> IngestionRunResumo:
+def _bulk_build_execucoes_operational_fields(
+    db: DbSession,
+    *,
+    execucoes: Sequence[ExecucaoSincronizacao],
+    runs_by_execucao_id: dict[Any, IngestionRun],
+    parents_by_id: dict[Any, ExecucaoSincronizacao] | None = None,
+) -> dict[UUID, dict[str, Any]]:
+    if not execucoes:
+        return {}
+    exec_ids = [ex.id for ex in execucoes if ex.id is not None]
+    run_ids = [r.id for r in runs_by_execucao_id.values() if r is not None and r.id is not None]
+
+    latest_phase_by_run_id: dict[UUID, IngestionPhaseExecution] = {}
+    if run_ids:
+        for phase in db.scalars(
+            select(IngestionPhaseExecution)
+            .where(IngestionPhaseExecution.ingestion_run_id.in_(run_ids))
+            .order_by(IngestionPhaseExecution.started_at.desc(), IngestionPhaseExecution.attempt.desc())
+        ).all():
+            if phase.ingestion_run_id not in latest_phase_by_run_id:
+                latest_phase_by_run_id[phase.ingestion_run_id] = phase
+
+    cancellation_by_exec_id: dict[UUID, IngestionCancellationRequest] = {}
+    if exec_ids:
+        for req in db.scalars(
+            select(IngestionCancellationRequest)
+            .where(IngestionCancellationRequest.execucao_sincronizacao_id.in_(exec_ids))
+            .order_by(IngestionCancellationRequest.created_at.desc())
+        ).all():
+            if (
+                req.execucao_sincronizacao_id is not None
+                and req.execucao_sincronizacao_id not in cancellation_by_exec_id
+            ):
+                cancellation_by_exec_id[req.execucao_sincronizacao_id] = req
+
+    resolved_parents: dict[Any, ExecucaoSincronizacao] = dict(parents_by_id or {})
+    missing_parent_ids = [
+        ex.parent_execucao_id
+        for ex in execucoes
+        if ex.parent_execucao_id is not None and ex.parent_execucao_id not in resolved_parents
+    ]
+    if missing_parent_ids:
+        for pex in db.scalars(
+            select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id.in_(list(set(missing_parent_ids))))
+        ).all():
+            resolved_parents[pex.id] = pex
+
+    result: dict[UUID, dict[str, Any]] = {}
+    for ex in execucoes:
+        run = runs_by_execucao_id.get(ex.id)
+        result[ex.id] = _build_execucao_operational_fields(
+            db,
+            execucao=ex,
+            run=run,
+            latest_phase=latest_phase_by_run_id.get(run.id) if run is not None else None,
+            use_preloaded_phase=True,
+            cancellation_request=cancellation_by_exec_id.get(ex.id),
+            use_preloaded_cancellation=True,
+            parent_execucao=resolved_parents.get(ex.parent_execucao_id) if ex.parent_execucao_id else None,
+            use_preloaded_parent=True,
+        )
+    return result
+
+
+def _serialize_run_resumo(
+    db: DbSession,
+    run: IngestionRun,
+    *,
+    operational: dict[str, Any] | None = None,
+    snapshots: dict[str, Any] | None = None,
+) -> IngestionRunResumo:
+    resolved_operational = operational if operational is not None else _build_run_operational_fields(db, run)
+    if snapshots is not None:
+        artifact_snapshot = snapshots["artifact_snapshot"]
+        member_snapshot_summary = snapshots["member_snapshot_summary"]
+        delivery_snapshot_summary = snapshots["delivery_snapshot_summary"]
+    else:
+        artifact_snapshot = build_artifact_snapshot_response(db, run_id=run.id)
+        member_snapshot_summary = build_member_snapshot_summary(db, run_id=run.id)
+        delivery_snapshot_summary = build_delivery_snapshot_summary(db, run_id=run.id)
     return IngestionRunResumo(
         **{
             "id": str(run.id),
@@ -660,19 +1014,24 @@ def _serialize_run_resumo(db: DbSession, run: IngestionRun) -> IngestionRunResum
             "remote_probe": run.remote_probe,
             "change_summary": run.change_summary,
             "quality_summary": run.quality_summary,
-            "artifact_snapshot": build_artifact_snapshot_response(db, run_id=run.id),
-            "member_snapshot_summary": build_member_snapshot_summary(db, run_id=run.id),
-            "delivery_snapshot_summary": build_delivery_snapshot_summary(db, run_id=run.id),
+            "artifact_snapshot": artifact_snapshot,
+            "member_snapshot_summary": member_snapshot_summary,
+            "delivery_snapshot_summary": delivery_snapshot_summary,
             "reconcile_summary": _reconcile_summary_from_run(run),
             "rows_reconciled_deleted": (run.quality_summary or {}).get("reconciled_deleted"),
             "lifecycle_decision": _lifecycle_decision_from_run(run),
-            **_build_run_operational_fields(db, run),
+            **resolved_operational,
         }
     )
 
 
-def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperationRunPreview:
-    operational = _build_run_operational_fields(db, run)
+def _serialize_run_preview(
+    db: DbSession,
+    run: IngestionRun,
+    *,
+    operational: dict[str, Any] | None = None,
+) -> IngestionOperationRunPreview:
+    resolved_operational = operational if operational is not None else _build_run_operational_fields(db, run)
     return IngestionOperationRunPreview(
         id=str(run.id),
         execucao_sincronizacao_id=None if run.execucao_sincronizacao_id is None else str(run.execucao_sincronizacao_id),
@@ -680,14 +1039,14 @@ def _serialize_run_preview(db: DbSession, run: IngestionRun) -> IngestionOperati
         ano=run.ano,
         status=run.status,
         phase=run.phase,
-        state=operational["state"],
-        next_action=operational["next_action"],
-        recovery=IngestionRecovery(**operational["recovery"]),
-        failure_acknowledgement=operational["failure_acknowledgement"],
-        superseded=operational["superseded"],
-        superseded_by=operational["superseded_by"],
-        liveness=operational["liveness"],
-        blocking=operational["blocking"],
+        state=resolved_operational["state"],
+        next_action=resolved_operational["next_action"],
+        recovery=IngestionRecovery(**resolved_operational["recovery"]),
+        failure_acknowledgement=resolved_operational["failure_acknowledgement"],
+        superseded=resolved_operational["superseded"],
+        superseded_by=resolved_operational["superseded_by"],
+        liveness=resolved_operational["liveness"],
+        blocking=resolved_operational["blocking"],
     )
 
 
@@ -925,6 +1284,17 @@ def _allowed_actions_for_run(
                     "requires_confirmation": True,
                     "reason_code": recovery["reason_code"],
                     "constraints": {"strategy": recovery["strategy"]},
+                }
+            ]
+        if operational.get("blocking", {}).get("reason_code") == "awaiting_parent_window":
+            return [
+                {
+                    "code": "cancel",
+                    "operation": "POST",
+                    "resource": f"/ingestion/runs/{run.id}/cancel",
+                    "requires_confirmation": True,
+                    "reason_code": "AWAITING_PARENT_WINDOW",
+                    "constraints": {},
                 }
             ]
         execucao = (
@@ -2078,6 +2448,12 @@ def listar_execucoes(
         ).all()
         if run.execucao_sincronizacao_id is not None
     }
+    operational_by_exec_id = _bulk_build_execucoes_operational_fields(
+        db,
+        execucoes=execucoes,
+        runs_by_execucao_id=runs_by_execucao_id,
+        parents_by_id=parents_by_id,
+    )
 
     dados = []
     for item in execucoes:
@@ -2087,8 +2463,7 @@ def listar_execucoes(
             members_for_item = [m] if m else []
         else:
             members_for_item = list(members_by_parent.get(item.id, {}).values())
-        run = runs_by_execucao_id.get(item.id)
-        operational = _build_execucao_operational_fields(db, execucao=item, run=run)
+        operational = operational_by_exec_id[item.id]
 
         dados.append(
             ExecucaoSincronizacaoResumo(
@@ -2238,6 +2613,12 @@ def detalhar_execucao(
                 ).all()
                 child_members = {m.member_name: m for m in members_list}
         
+        child_operational_by_id = _bulk_build_execucoes_operational_fields(
+            db,
+            execucoes=children,
+            runs_by_execucao_id=child_runs_by_execucao_id,
+            parents_by_id={execucao.id: execucao},
+        )
         execucoes_filhas = []
         for c in children:
             if c.status in ("sucesso", "sem_alteracao", "skipped"):
@@ -2261,11 +2642,7 @@ def detalhar_execucao(
                         delimiter=m.delimiter,
                     )
                 ]
-            operational_child = _build_execucao_operational_fields(
-                db,
-                execucao=c,
-                run=child_runs_by_execucao_id.get(c.id),
-            )
+            operational_child = child_operational_by_id[c.id]
                 
             execucoes_filhas.append(
                 ExecucaoSincronizacaoResumo(
@@ -2449,6 +2826,32 @@ def replay_sincronizacao(
             run.requested_by_task_id = task_id
             run.message = "Replay de arquivo principal agendado."
             run.finished_at = None
+        failed_children = list(
+            db.scalars(
+                select(ExecucaoSincronizacao).where(
+                    ExecucaoSincronizacao.parent_execucao_id == execucao.id,
+                    ExecucaoSincronizacao.status.in_(("falha", "cancelada", "quality_fail")),
+                )
+            ).all()
+        )
+        for child in failed_children:
+            child.status = "aguardando_ingestao"
+            child.finalizada_em = None
+            child.mensagem_erro = None
+            child_run = db.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id == child.id)
+                .order_by(IngestionRun.created_at.desc())
+                .limit(1)
+            )
+            if child_run is not None:
+                update_run_state(
+                    child_run,
+                    status="aguardando_ingestao",
+                    phase="stage",
+                    message="Resetado automaticamente pelo replay da execucao pai.",
+                )
+                child_run.finished_at = None
         db.commit()
         try:
             kwargs: dict[str, Any] = {"force_reimport": True}
@@ -2743,23 +3146,47 @@ def listar_ingestion_runs(
     ):
         if condition is not None:
             stmt = stmt.where(condition)
-    candidates = list(db.scalars(stmt).all())
-    def include(run: IngestionRun) -> bool:
-        fields = _build_run_operational_fields(db, run)
-        quarantine = int(db.scalar(select(func.count(QuarantineItem.id)).where(QuarantineItem.ingestion_run_id == run.id)) or 0)
-        return (
-            (state is None or fields["state"] == state)
-            and (next_action is None or fields["next_action"] == next_action)
-            and (superseded is None or fields.get("superseded") == superseded)
-            and (has_quarantine is None or bool(quarantine) == has_quarantine)
-            and (has_error is None or bool(fields.get("last_error")) == has_error)
-        )
-    candidates = [run for run in candidates if include(run)]
-    candidates.sort(key=lambda run: run.started_at, reverse=not ordenar.endswith(":asc"))
-    total = len(candidates)
-    runs = candidates[offset : offset + tamanho_pagina]
+
+    if has_quarantine is True:
+        stmt = stmt.where(select(QuarantineItem.id).where(QuarantineItem.ingestion_run_id == IngestionRun.id).exists())
+    elif has_quarantine is False:
+        stmt = stmt.where(~select(QuarantineItem.id).where(QuarantineItem.ingestion_run_id == IngestionRun.id).exists())
+
+    order_clause = IngestionRun.started_at.asc() if ordenar.endswith(":asc") else IngestionRun.started_at.desc()
+    needs_post_filter = any(param is not None for param in (state, next_action, superseded, has_error))
+
+    if not needs_post_filter:
+        total = int(db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+        runs = list(db.scalars(stmt.order_by(order_clause).offset(offset).limit(tamanho_pagina)).all())
+        operational_by_run_id = _bulk_build_runs_operational_fields(db, runs)
+    else:
+        candidates = list(db.scalars(stmt.order_by(order_clause)).all())
+        operational_by_run_id = _bulk_build_runs_operational_fields(db, candidates)
+
+        def include(run: IngestionRun) -> bool:
+            fields = operational_by_run_id[run.id]
+            return (
+                (state is None or fields["state"] == state)
+                and (next_action is None or fields["next_action"] == next_action)
+                and (superseded is None or fields.get("superseded") == superseded)
+                and (has_error is None or bool(fields.get("last_error")) == has_error)
+            )
+
+        filtered = [run for run in candidates if include(run)]
+        total = len(filtered)
+        runs = filtered[offset : offset + tamanho_pagina]
+
+    snapshots_by_run_id = bulk_build_snapshot_summaries(db, run_ids=[run.id for run in runs])
     return ListaIngestionRuns(
-        dados=[_serialize_run_resumo(db, run) for run in runs],
+        dados=[
+            _serialize_run_resumo(
+                db,
+                run,
+                operational=operational_by_run_id.get(run.id),
+                snapshots=snapshots_by_run_id.get(run.id),
+            )
+            for run in runs
+        ],
         paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
     )
 
@@ -2995,16 +3422,31 @@ def obter_ingestion_operations(
             .order_by(IngestionRun.started_at.desc())
         ).all()
     )
+    operational_by_run_id = _bulk_build_runs_operational_fields(db, candidate_runs)
+    previews_with_runs = [
+        (run, _serialize_run_preview(db, run, operational=operational_by_run_id.get(run.id)))
+        for run in candidate_runs
+    ]
     run_counts: dict[str, int] = {}
     active_runs: list[IngestionOperationRunPreview] = []
     recoverable_runs: list[IngestionOperationRunPreview] = []
-    for run in candidate_runs:
-        preview = _serialize_run_preview(db, run)
+    action_counts: dict[str, int] = {}
+    aggregate_progress = {"members_total": 0, "members_processed": 0, "quarantine_total": 0}
+    oldest_waiting_candidates: list[datetime] = []
+
+    for run, preview in previews_with_runs:
         run_counts[preview.state] = run_counts.get(preview.state, 0) + 1
         if preview.state in {"queued", "waiting", "running", "stale"}:
             active_runs.append(preview)
+            if preview.state in {"waiting", "stale"} and preview.next_action != "wait":
+                oldest_waiting_candidates.append(run.started_at)
         if preview.next_action == "recover":
             recoverable_runs.append(preview)
+        action = preview.next_action or "none"
+        action_counts[action] = action_counts.get(action, 0) + 1
+        progress = _build_progress_for_run(run)
+        for key in aggregate_progress:
+            aggregate_progress[key] += int(progress.get(key) or 0)
 
     execution_rows = db.execute(
         select(ExecucaoSincronizacao.status, func.count(ExecucaoSincronizacao.id))
@@ -3055,16 +3497,7 @@ def obter_ingestion_operations(
 
     active_total = len(active_runs)
     recoverable_total = len(recoverable_runs)
-    action_counts: dict[str, int] = {}
-    aggregate_progress = {"members_total": 0, "members_processed": 0, "quarantine_total": 0}
-    for run in candidate_runs:
-        preview = _serialize_run_preview(db, run)
-        action = preview.next_action or "none"
-        action_counts[action] = action_counts.get(action, 0) + 1
-        progress = _build_progress_for_run(run)
-        for key in aggregate_progress:
-            aggregate_progress[key] += int(progress.get(key) or 0)
-    oldest_waiting = min((run.started_at for run in candidate_runs if _serialize_run_preview(db, run).state in {"waiting", "stale"}), default=None)
+    oldest_waiting = min(oldest_waiting_candidates, default=None)
     revision = int(max((int(run.updated_at.timestamp() * 1000) for run in candidate_runs), default=0))
     return IngestionOperationsResumo(
         generated_at=_agora(),
@@ -3084,7 +3517,7 @@ def obter_ingestion_operations(
         recoverable_runs=recoverable_runs[:10],
         revision=revision,
         action_counts=action_counts,
-        waiting_for_operator_count=sum(1 for item in active_runs if item.state in {"waiting", "stale"}),
+        waiting_for_operator_count=len(oldest_waiting_candidates),
         oldest_action_required_at=oldest_waiting,
         queue_health=queue_health,
         active_runs_total=active_total,

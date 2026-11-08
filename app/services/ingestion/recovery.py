@@ -26,40 +26,51 @@ class NoRecoverySourceError(ValueError):
     reason_code = "NO_RECOVERY_SOURCE"
 
 
-def assess_ingestion_run_recovery(db: Session, *, run: IngestionRun) -> IngestionRecoveryAssessment:
+def assess_ingestion_run_recovery(
+    db: Session,
+    *,
+    run: IngestionRun,
+    execucao: ExecucaoSincronizacao | None = None,
+    has_staged_rows: bool | None = None,
+) -> IngestionRecoveryAssessment:
     """Avalia somente fontes que o comando de replay consegue reaplicar.
 
     Um snapshot de artifact, isoladamente, ainda nao tem uma estrategia de replay no
     comando administrativo. Ele nao deve tornar a run recuperavel de forma enganosa.
     """
 
-    if run.execucao_sincronizacao_id is not None:
-        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
-        if execucao is not None and execucao.parent_execucao_id is not None:
-            return IngestionRecoveryAssessment(
-                eligible=True,
-                strategy="rerun_member_execution",
-                reason_code="MEMBER_EXECUTION_AVAILABLE",
-            )
+    resolved_execucao = execucao
+    if resolved_execucao is None and run.execucao_sincronizacao_id is not None:
+        resolved_execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
 
-    staged_row_id = db.scalar(
-        select(IngestionRow.id).where(IngestionRow.ingestion_run_id == run.id).limit(1)
-    )
-    if staged_row_id is not None:
+    if resolved_execucao is not None and resolved_execucao.parent_execucao_id is not None:
+        return IngestionRecoveryAssessment(
+            eligible=True,
+            strategy="rerun_member_execution",
+            reason_code="MEMBER_EXECUTION_AVAILABLE",
+        )
+
+    if has_staged_rows is None:
+        staged_row_id = db.scalar(
+            select(IngestionRow.id).where(IngestionRow.ingestion_run_id == run.id).limit(1)
+        )
+        has_staged = staged_row_id is not None
+    else:
+        has_staged = has_staged_rows
+
+    if has_staged:
         return IngestionRecoveryAssessment(
             eligible=True,
             strategy="replay_staged_rows",
             reason_code="STAGED_ROWS_AVAILABLE",
         )
 
-    if run.execucao_sincronizacao_id is not None:
-        execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
-        if execucao is not None and execucao.parent_execucao_id is None:
-            return IngestionRecoveryAssessment(
-                eligible=True,
-                strategy="rerun_parent_execution",
-                reason_code="PARENT_EXECUTION_AVAILABLE",
-            )
+    if resolved_execucao is not None and resolved_execucao.parent_execucao_id is None:
+        return IngestionRecoveryAssessment(
+            eligible=True,
+            strategy="rerun_parent_execution",
+            reason_code="PARENT_EXECUTION_AVAILABLE",
+        )
 
     return IngestionRecoveryAssessment(
         eligible=False,
@@ -74,33 +85,51 @@ def assess_ingestion_run_recovery_eligibility(
     run: IngestionRun,
     state: str,
     error_retryable: bool,
+    execucao: ExecucaoSincronizacao | None = None,
+    parent_execucao: ExecucaoSincronizacao | None = None,
+    has_staged_rows: bool | None = None,
 ) -> IngestionRecoveryAssessment:
     """Combina a fonte disponivel com o estado operacional atual da run."""
 
-    source = assess_ingestion_run_recovery(db, run=run)
-    if state == "waiting" and source.strategy in {"rerun_member_execution", "rerun_parent_execution"}:
-        if source.strategy == "rerun_parent_execution":
-            return source
-        execucao = (
-            db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
-            if run.execucao_sincronizacao_id is not None
-            else None
+    if state in {"succeeded", "skipped"}:
+        return IngestionRecoveryAssessment(
+            eligible=False,
+            strategy=None,
+            reason_code="RUN_ALREADY_COMPLETED",
         )
-        parent = (
-            db.get(ExecucaoSincronizacao, execucao.parent_execucao_id)
-            if execucao is not None and execucao.parent_execucao_id is not None
-            else None
-        )
-        if parent is not None and parent.status == "falha":
-            return source
-    if state == "stale":
-        return source
     if state == "failed" and error_retryable is False:
         return IngestionRecoveryAssessment(
             eligible=False,
             strategy=None,
             reason_code="NON_RETRYABLE_FAILURE",
         )
+    if state not in {"waiting", "stale", "failed"}:
+        return IngestionRecoveryAssessment(
+            eligible=False,
+            strategy=None,
+            reason_code="RUN_NOT_RECOVERABLE",
+        )
+
+    resolved_execucao = execucao
+    if resolved_execucao is None and run.execucao_sincronizacao_id is not None:
+        resolved_execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
+
+    source = assess_ingestion_run_recovery(
+        db,
+        run=run,
+        execucao=resolved_execucao,
+        has_staged_rows=has_staged_rows,
+    )
+    if state == "waiting" and source.strategy in {"rerun_member_execution", "rerun_parent_execution"}:
+        if source.strategy == "rerun_parent_execution":
+            return source
+        resolved_parent = parent_execucao
+        if resolved_parent is None and resolved_execucao is not None and resolved_execucao.parent_execucao_id is not None:
+            resolved_parent = db.get(ExecucaoSincronizacao, resolved_execucao.parent_execucao_id)
+        if resolved_parent is not None and resolved_parent.status == "falha":
+            return source
+    if state == "stale":
+        return source
     if state == "failed" and (error_retryable is True or source.eligible):
         return source
     if state == "failed":
@@ -108,12 +137,6 @@ def assess_ingestion_run_recovery_eligibility(
             eligible=False,
             strategy=None,
             reason_code="NON_RETRYABLE_FAILURE",
-        )
-    if state in {"succeeded", "skipped"}:
-        return IngestionRecoveryAssessment(
-            eligible=False,
-            strategy=None,
-            reason_code="RUN_ALREADY_COMPLETED",
         )
     return IngestionRecoveryAssessment(
         eligible=False,

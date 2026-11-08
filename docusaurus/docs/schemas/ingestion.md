@@ -135,6 +135,7 @@ Motivos esperados:
 - `none`
 - `queued`
 - `awaiting_ingestion`
+- `awaiting_parent_window`
 - `stale`
 - `manual_cancel`
 

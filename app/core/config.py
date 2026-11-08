@@ -218,6 +218,16 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT",
     )
+    ingestion_duckdb_memory_limit_mb: int = Field(
+        default=768,
+        ge=128,
+        alias="INGESTION_DUCKDB_MEMORY_LIMIT_MB",
+    )
+    ingestion_postgres_promote_work_mem_mb: int = Field(
+        default=64,
+        ge=4,
+        alias="INGESTION_POSTGRES_PROMOTE_WORK_MEM_MB",
+    )
     ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
     ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
     radar_cvm_enabled: bool = Field(default=False, alias="RADAR_CVM_ENABLED")

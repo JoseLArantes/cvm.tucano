@@ -105,13 +105,38 @@ def touch_run_heartbeat(
     phase_execution = get_latest_phase_execution(db, run_id=run_id)
     if phase_execution is None or phase_execution.finished_at is not None or phase_execution.status != "running":
         return None
-    phase_execution.heartbeat_at = _agora()
+    now = _agora()
+    phase_execution.heartbeat_at = now
+    run = db.get(IngestionRun, run_id)
+    if run is not None:
+        run.updated_at = now
     if metrics:
         merged_metrics = dict(phase_execution.metrics or {})
         merged_metrics.update(metrics)
         phase_execution.metrics = merged_metrics
     db.flush()
     return phase_execution
+
+
+def touch_parent_execution_heartbeat(
+    db: Session,
+    *,
+    parent_execucao_id: Any,
+) -> IngestionPhaseExecution | None:
+    if parent_execucao_id is None:
+        return None
+    parent_run = db.scalar(
+        select(IngestionRun)
+        .where(
+            IngestionRun.execucao_sincronizacao_id == parent_execucao_id,
+            IngestionRun.status.in_(("agendada", "aguardando_ingestao", "em_execucao")),
+        )
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
+    if parent_run is None:
+        return None
+    return touch_run_heartbeat(db, run_id=parent_run.id)
 
 
 def list_phase_executions(db: Session, *, run_id: Any) -> list[IngestionPhaseExecution]:
@@ -360,6 +385,52 @@ def _cascade_terminal_state_to_children(
                 latest_phase.finished_at = now
 
 
+def _parent_has_recent_child_activity(
+    db: Session,
+    *,
+    parent_execucao_id: Any,
+    stale_cutoff: datetime,
+) -> bool:
+    child_ids = list(
+        db.scalars(
+            select(ExecucaoSincronizacao.id).where(
+                ExecucaoSincronizacao.parent_execucao_id == parent_execucao_id
+            )
+        ).all()
+    )
+    if not child_ids:
+        return False
+    fresh_child_phase = db.scalar(
+        select(IngestionPhaseExecution.id)
+        .where(
+            IngestionPhaseExecution.execucao_sincronizacao_id.in_(child_ids),
+            IngestionPhaseExecution.status == "running",
+            IngestionPhaseExecution.finished_at.is_(None),
+            IngestionPhaseExecution.heartbeat_at.is_not(None),
+            IngestionPhaseExecution.heartbeat_at >= stale_cutoff,
+        )
+        .limit(1)
+    )
+    if fresh_child_phase is not None:
+        return True
+    recent_completed_child = db.scalar(
+        select(ExecucaoSincronizacao.id)
+        .where(
+            ExecucaoSincronizacao.parent_execucao_id == parent_execucao_id,
+            ExecucaoSincronizacao.finalizada_em.is_not(None),
+            ExecucaoSincronizacao.finalizada_em >= stale_cutoff,
+        )
+        .limit(1)
+    )
+    return recent_completed_child is not None
+
+
+def _failure_key_for_run(run: IngestionRun, latest_phase: IngestionPhaseExecution | None) -> str:
+    if latest_phase is not None and latest_phase.status == "failed_final":
+        return f"phase:{latest_phase.id}"
+    return f"run:{run.status}:{run.updated_at.isoformat()}:{run.message or ''}"
+
+
 def reconcile_stale_ingestion_phase_executions(
     db: Session,
     *,
@@ -393,12 +464,30 @@ def reconcile_stale_ingestion_phase_executions(
             if run.execucao_sincronizacao_id is not None
             else None
         )
+        has_pending_cancellation = bool(
+            cancellation_request is not None and cancellation_request.status in {"requested", "propagated"}
+        )
+        if (
+            not has_pending_cancellation
+            and execucao is not None
+            and execucao.parent_execucao_id is None
+            and _parent_has_recent_child_activity(
+                db,
+                parent_execucao_id=execucao.id,
+                stale_cutoff=stale_cutoff,
+            )
+        ):
+            now_refresh = _agora()
+            phase_execution.heartbeat_at = now_refresh
+            run.updated_at = now_refresh
+            continue
+
         message = (
             "Execucao cancelada pelo recovery sweep apos heartbeat stale e cancelamento pendente."
-            if cancellation_request is not None and cancellation_request.status in {"requested", "propagated"}
+            if has_pending_cancellation
             else "Recovery sweep marcou a run como falha recuperavel apos heartbeat stale."
         )
-        if cancellation_request is not None and cancellation_request.status in {"requested", "propagated"}:
+        if has_pending_cancellation and cancellation_request is not None:
             run.status = "cancelada"
             run.message = message
             run.finished_at = _agora()
@@ -480,6 +569,39 @@ def reconcile_stale_ingestion_phase_executions(
                 latest_phase.finished_at = now
             recovered_run_ids.append(str(child_run.id))
 
+    # Reconcile non-terminal IngestionRuns whose ExecucaoSincronizacao is already terminal
+    desynced_runs = list(
+        db.scalars(
+            select(IngestionRun)
+            .join(ExecucaoSincronizacao, ExecucaoSincronizacao.id == IngestionRun.execucao_sincronizacao_id)
+            .where(
+                IngestionRun.status.in_({"agendada", "aguardando_ingestao", "em_execucao"}),
+                ExecucaoSincronizacao.status.in_(terminal_statuses),
+            )
+            .limit(limit)
+        ).all()
+    )
+    for d_run in desynced_runs:
+        d_exec = db.get(ExecucaoSincronizacao, d_run.execucao_sincronizacao_id)
+        if d_exec is None:
+            continue
+        d_run.status = d_exec.status
+        if d_exec.status in {"sucesso", "sucesso_com_alerta", "sem_alteracao", "skipped"}:
+            d_run.phase = "complete"
+        d_run.finished_at = d_exec.finalizada_em or now
+        d_run.updated_at = now
+        d_run.message = (
+            d_run.message
+            or d_exec.mensagem_erro
+            or f"Run sincronizada pelo recovery sweep com estado terminal ({d_exec.status}) da execucao."
+        )
+        latest_d_phase = get_latest_phase_execution(db, run_id=d_run.id)
+        if latest_d_phase is not None and latest_d_phase.status not in _TERMINAL_PHASE_STATUSES:
+            latest_d_phase.status = _phase_status_for_run_status(d_exec.status)
+            latest_d_phase.finished_at = d_exec.finalizada_em or now
+            latest_d_phase.heartbeat_at = latest_d_phase.heartbeat_at or now
+        recovered_run_ids.append(str(d_run.id))
+
     # Auto-acknowledge failed/cancelled runs that have already been superseded by a successful execution
     superseded_candidates = list(
         db.scalars(
@@ -509,23 +631,29 @@ def reconcile_stale_ingestion_phase_executions(
             .limit(1)
         )
         if newer_success is not None:
-            has_ack = db.scalar(
-                select(IngestionOperationAudit.id)
+            latest_s_phase = get_latest_phase_execution(db, run_id=s_run.id)
+            failure_key = _failure_key_for_run(s_run, latest_s_phase)
+            latest_ack = db.scalar(
+                select(IngestionOperationAudit)
                 .where(
                     IngestionOperationAudit.scope_type == "run",
                     IngestionOperationAudit.scope_id == str(s_run.id),
                     IngestionOperationAudit.operation == "acknowledge_failure",
                 )
+                .order_by(IngestionOperationAudit.created_at.desc())
                 .limit(1)
             )
-            if has_ack is None:
+            if latest_ack is None or (latest_ack.consequence or {}).get("failure_key") != failure_key:
                 audit = IngestionOperationAudit(
                     scope_type="run",
                     scope_id=str(s_run.id),
                     operation="acknowledge_failure",
                     requested_by="system:recovery_sweep",
                     reason=f"Auto-reconhecido pelo recovery sweep: superado com sucesso pela execucao {newer_success}.",
-                    consequence={"superseded_by_execucao_id": str(newer_success)},
+                    consequence={
+                        "superseded_by_execucao_id": str(newer_success),
+                        "failure_key": failure_key,
+                    },
                 )
                 db.add(audit)
                 recovered_run_ids.append(str(s_run.id))

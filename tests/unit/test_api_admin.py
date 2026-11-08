@@ -2171,3 +2171,80 @@ def test_admin_run_acknowledge_failure_when_next_action_recover(
     assert res_run_after.status_code == 200
     assert res_run_after.json()["next_action"] == "none"
     assert res_run_after.json()["failure_acknowledgement"] is not None
+
+
+def test_admin_child_waiting_for_active_parent_reports_wait_not_operator_action(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_2022.zip",
+                url="http://exemplo/itr-2022.zip",
+                status="em_execucao",
+                tipo_execucao="arquivo_zip",
+                iniciada_em=now,
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="em_execucao",
+                phase="process_members",
+                started_at=now,
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_BPA_con_2022.csv",
+                url="http://exemplo/itr-2022/bpa",
+                status="aguardando_ingestao",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now,
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="aguardando_ingestao",
+                phase="stage",
+                started_at=now,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    res_child_run = client.get(f"/ingestion/runs/{child_run_id}")
+    assert res_child_run.status_code == 200
+    child_run_payload = res_child_run.json()
+    assert child_run_payload["next_action"] == "wait"
+    assert child_run_payload["blocking"]["reason_code"] == "awaiting_parent_window"
+    assert "start_ingestion" not in child_run_payload["links"]
+
+    res_child_exec = client.get(f"/ingestion/sincronizacoes/{child_id}")
+    assert res_child_exec.status_code == 200
+    child_exec_payload = res_child_exec.json()
+    assert child_exec_payload["next_action"] == "wait"
+    assert child_exec_payload["blocking"]["reason_code"] == "awaiting_parent_window"
+
+    res_ops = client.get("/ingestion/operations?ano=2022")
+    assert res_ops.status_code == 200
+    ops_payload = res_ops.json()
+    assert ops_payload["waiting_for_operator_count"] == 0
+    assert ops_payload["recoverable_runs"] == []
+    assert ops_payload["action_counts"].get("start_ingestion", 0) == 0
+
