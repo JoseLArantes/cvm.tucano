@@ -1428,6 +1428,8 @@ class IngestionLogicalMemberSummary(BaseModel):
     member_id: str = Field(description="Identificador estavel do membro (ex: dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv).")
     parent_file_id: str = Field(description="Identificador estavel do arquivo principal pai.")
     member_name: str = Field(description="Nome canonico do arquivo membro.")
+    tipo_fonte: str | None = Field(default=None, description="Tipo da fonte CVM associada (ex: fre, itr, dfp, fca).")
+    ano: int | None = Field(default=None, description="Ano de referencia do arquivo membro.")
     dataset_key: str | None = Field(default=None, description="Chave do dataset correspondente no catalogo de fontes.")
     descricao: str | None = Field(default=None, description="Descricao legivel do membro.")
     obrigatorio: bool = Field(default=False, description="Indica se o membro e obrigatorio segundo o catalogo da fonte.")
@@ -1439,6 +1441,15 @@ class IngestionLogicalMemberSummary(BaseModel):
     next_action: str | None = Field(default=None, description="Proxima acao recomendada para o membro.")
     resolucao_falha: str | None = Field(default=None, description="Resolucao da falha caso haja historico de erro.")
     falha: IngestionFailureDetail | None = Field(default=None, description="Detalhes da falha atual ou historica do membro.")
+
+
+class IngestionLogicalMemberListResponse(BaseModel):
+    total_membros: int = Field(description="Total de arquivos membro distintos correspondentes aos filtros.")
+    pagina: int = Field(description="Numero da pagina atual.")
+    tamanho_pagina: int = Field(description="Quantidade de itens por pagina.")
+    total_paginas: int = Field(description="Total de paginas disponiveis.")
+    filtros_aplicados: dict[str, Any] = Field(default_factory=dict, description="Filtros server-side aplicados na consulta.")
+    dados: list[IngestionLogicalMemberSummary] = Field(description="Lista paginada de arquivos membro.")
 
 
 class IngestionLogicalFileSummary(BaseModel):

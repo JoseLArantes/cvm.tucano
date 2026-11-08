@@ -33,6 +33,7 @@ from app.schemas.admin import (
 )
 from app.services.ingestion.source_registry import (
     DatasetFonte,
+    dataset_por_member_name,
     listar_fontes,
     obter_fonte,
 )
@@ -855,6 +856,8 @@ def obter_arquivo_logico(db: Session, file_id: str) -> IngestionLogicalFileDetal
                     member_id=m_id,
                     parent_file_id=file_id,
                     member_name=m_nome,
+                    tipo_fonte=tipo_fonte,
+                    ano=ano,
                     dataset_key=ds.dataset,
                     descricao=ds.descricao,
                     obrigatorio=ds.obrigatorio,
@@ -878,6 +881,8 @@ def obter_arquivo_logico(db: Session, file_id: str) -> IngestionLogicalFileDetal
                         member_id=m_id,
                         parent_file_id=file_id,
                         member_name=m_nome,
+                        tipo_fonte=tipo_fonte,
+                        ano=ano,
                         dataset_key=None,
                         descricao=None,
                         obrigatorio=False,
@@ -956,6 +961,9 @@ def listar_arquivos_logicos(
     tamanho_pagina: int = 50,
 ) -> tuple[int, list[IngestionLogicalFileSummary]]:
     """Lista arquivos logicos de forma paginada com contagem nao truncada e filtros server-side."""
+    concluido_apos_aware = _aware(concluido_apos)
+    concluido_antes_aware = _aware(concluido_antes)
+
     # 1. Coleta chaves unicas de arquivos conhecidos
     file_keys: set[tuple[str, int | None, str]] = set()
 
@@ -1030,9 +1038,9 @@ def listar_arquivos_logicos(
         if resolucao_falha:
             if not detalhe.falha_relevante or detalhe.falha_relevante.resolucao != resolucao_falha:
                 continue
-        if concluido_apos and (detalhe.concluido_em is None or detalhe.concluido_em < concluido_apos):
+        if concluido_apos_aware and (detalhe.concluido_em is None or detalhe.concluido_em < concluido_apos_aware):
             continue
-        if concluido_antes and (detalhe.concluido_em is None or detalhe.concluido_em > concluido_antes):
+        if concluido_antes_aware and (detalhe.concluido_em is None or detalhe.concluido_em > concluido_antes_aware):
             continue
 
         # Converte para Summary
@@ -1065,3 +1073,172 @@ def listar_arquivos_logicos(
     paged_items = computed_files[offset : offset + tamanho_pagina]
 
     return total_arquivos, paged_items
+
+
+def listar_arquivos_membros(
+    db: Session,
+    *,
+    ano: int | None = None,
+    fonte: str | None = None,
+    busca: str | None = None,
+    status: str | None = None,
+    obrigatorio: bool | None = None,
+    pagina: int = 1,
+    tamanho_pagina: int = 50,
+) -> tuple[int, list[IngestionLogicalMemberSummary]]:
+    """Lista arquivos membros de forma paginada com contagem total e filtros server-side."""
+    member_keys: dict[tuple[str, str, int | None], dict[str, Any]] = {}
+
+    # 1. ExecucaoSincronizacao de membros
+    exec_stmt = select(
+        ExecucaoSincronizacao.arquivo,
+        ExecucaoSincronizacao.tipo_fonte,
+        ExecucaoSincronizacao.ano,
+        ExecucaoSincronizacao.status,
+        ExecucaoSincronizacao.hash_arquivo,
+        ExecucaoSincronizacao.total_linhas_lidas,
+        ExecucaoSincronizacao.mensagem_erro,
+        ExecucaoSincronizacao.parent_execucao_id,
+    ).where(
+        (ExecucaoSincronizacao.tipo_execucao == "arquivo_membro") | (ExecucaoSincronizacao.parent_execucao_id.is_not(None))
+    )
+    if fonte:
+        exec_stmt = exec_stmt.where(ExecucaoSincronizacao.tipo_fonte == fonte)
+    if ano is not None:
+        exec_stmt = exec_stmt.where(ExecucaoSincronizacao.ano == ano)
+
+    for arq, f, a, st, h, tot, err, p_id in db.execute(exec_stmt.order_by(ExecucaoSincronizacao.iniciada_em.desc())).all():
+        if not arq:
+            continue
+        key = (arq, f, a)
+        if key not in member_keys:
+            member_keys[key] = {
+                "status": st,
+                "sha256": h,
+                "total_linhas": tot,
+                "mensagem_erro": err,
+                "parent_execucao_id": p_id,
+            }
+
+    # 2. SourceMemberSnapshot
+    snap_stmt = select(
+        SourceMemberSnapshot.member_name,
+        SourceArtifactSnapshot.tipo_fonte,
+        SourceArtifactSnapshot.ano,
+        SourceMemberSnapshot.schema_status,
+        SourceMemberSnapshot.member_sha256,
+        SourceMemberSnapshot.row_count,
+        SourceMemberSnapshot.schema_message,
+    ).join(
+        SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id
+    )
+    if fonte:
+        snap_stmt = snap_stmt.where(SourceArtifactSnapshot.tipo_fonte == fonte)
+    if ano is not None:
+        snap_stmt = snap_stmt.where(SourceArtifactSnapshot.ano == ano)
+
+    for m_name, f, a, s_st, s_sha, s_rows, s_msg in db.execute(snap_stmt.order_by(SourceMemberSnapshot.created_at.desc())).all():
+        key = (m_name, f, a)
+        if key not in member_keys:
+            member_keys[key] = {
+                "status": "sucesso" if s_st == "ok" else "falha",
+                "sha256": s_sha,
+                "total_linhas": s_rows,
+                "mensagem_erro": s_msg,
+                "parent_execucao_id": None,
+            }
+
+    # 3. Catalogo de fontes
+    for f_reg in listar_fontes():
+        if fonte and f_reg.fonte != fonte:
+            continue
+        if f_reg.tipo_distribuicao == "zip_anual":
+            anos_alvo = [ano] if ano is not None else [None]
+            for target_year in anos_alvo:
+                for ds in f_reg.datasets:
+                    try:
+                        m_name = ds.render_member_name(ano=target_year)
+                    except Exception:
+                        m_name = ds.member_name_template
+                    key = (m_name, f_reg.fonte, target_year)
+                    if key not in member_keys:
+                        member_keys[key] = {
+                            "status": "nao_iniciado",
+                            "sha256": None,
+                            "total_linhas": None,
+                            "mensagem_erro": None,
+                            "parent_execucao_id": None,
+                        }
+
+    # 4. Quarentena
+    quarantine_counts: dict[str, int] = dict(
+        db.execute(
+            select(QuarantineItem.arquivo_origem, func.count(QuarantineItem.id))
+            .group_by(QuarantineItem.arquivo_origem)
+        ).all()
+    )
+
+    # 5. Filtragem e construcao de itens
+    items: list[IngestionLogicalMemberSummary] = []
+    busca_lower = busca.lower().strip() if busca else None
+
+    for (m_name, f, a), info in member_keys.items():
+        if busca_lower and busca_lower not in m_name.lower():
+            continue
+
+        parent_arq = resolver_nome_arquivo_principal(f, a)
+        parent_fid = build_file_id(f, a, parent_arq)
+        m_id = build_member_id(parent_fid, m_name)
+
+        ds_info = dataset_por_member_name(f, m_name, a) if a is not None else None
+        obr = ds_info.obrigatorio if ds_info else False
+        if obrigatorio is not None and obr != obrigatorio:
+            continue
+
+        m_status = info["status"]
+        if status and m_status != status:
+            continue
+
+        q_count = quarantine_counts.get(m_name, 0)
+        m_integridade = "completo" if m_status == "sucesso" else "parcial" if m_status == "falha" else "nao_aplicado"
+
+        m_falha = None
+        if m_status in ("falha", "quality_fail"):
+            m_falha = IngestionFailureDetail(
+                target_type="member",
+                target_id=m_id,
+                target_name=m_name,
+                etapa="stage",
+                codigo_erro="MEMBER_FAILED",
+                mensagem_erro=info["mensagem_erro"] or "Falha no processamento do membro.",
+                resolucao="aberta",
+                reparavel=True,
+            )
+
+        items.append(
+            IngestionLogicalMemberSummary(
+                member_id=m_id,
+                parent_file_id=parent_fid,
+                member_name=m_name,
+                tipo_fonte=f,
+                ano=a,
+                dataset_key=ds_info.dataset if ds_info else None,
+                descricao=ds_info.descricao if ds_info else None,
+                obrigatorio=obr,
+                status=m_status,
+                integridade=m_integridade,
+                sha256=info["sha256"],
+                total_linhas=info["total_linhas"],
+                quarentena_total=q_count,
+                next_action="replay" if m_status == "falha" else None,
+                resolucao_falha="aberta" if m_status == "falha" else None,
+                falha=m_falha,
+            )
+        )
+
+    items.sort(key=lambda x: (x.ano is None, -(x.ano or 0), x.tipo_fonte or "", x.member_name))
+
+    total = len(items)
+    offset = (pagina - 1) * tamanho_pagina
+    paginated = items[offset : offset + tamanho_pagina]
+    return total, paginated

@@ -9,6 +9,24 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-08 - Arquivos Membro como Ancoras Operacionais de Primeira Classe
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/members`
+- novo endpoint `GET /ingestion/members/{member_name}`
+- novo endpoint `GET /ingestion/files/{file_id}/members/{member_name}`
+- esquema `IngestionLogicalMemberSummary` (campos opcionais `tipo_fonte` e `ano`)
+- esquema `IngestionLogicalMemberListResponse` (listagem paginada de membros)
+
+### Comportamento entregue
+
+- **Consulta e Navegacao Ancoradas pelo Arquivo Membro**:
+  - Arquivos membros (como `fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv`) agora operam diretamente como ancoras primarias de consulta, sem dependencia obrigatoria de navegar primeiro pelo arquivo ZIP pai.
+  - O endpoint `GET /ingestion/members` permite listar de forma paginada todos os arquivos membros do sistema, suportando filtros por `ano`, `fonte`, `status`, `obrigatorio` e busca textual (`busca`) por substring do nome do membro (ex: `busca=dividendos`).
+  - O endpoint `GET /ingestion/members/{member_name}` disponibiliza o detalhamento e ciclo de vida completo do membro diretamente (mesmo payload e fidelidade de `/timeline`), incluindo catalogo de dataset, arquivo pai, historico de execucoes de sincronizacao, runs tecnicas, timeline de fases (`IngestionPhaseExecution`), snapshots brutos/normalizados com SHAs e quarentena associada.
+  - O endpoint `GET /ingestion/files/{file_id}/members/{member_name}` espelha o detalhamento delimitado estritamente pelo pacote pai.
+
 ## 2026-11-08 - Superficie Operacional de Ingestao Centrada no Arquivo
 
 ### Superficies afetadas

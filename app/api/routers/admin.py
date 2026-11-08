@@ -62,6 +62,7 @@ from app.schemas.admin import (
     IngestionFailureAcknowledgementRequest,
     IngestionLogicalFileDetalhe,
     IngestionLogicalFileListResponse,
+    IngestionLogicalMemberListResponse,
     IngestionMemberExecutionTimelineItem,
     IngestionMemberQuarantineSummary,
     IngestionMemberSnapshotItem,
@@ -99,6 +100,7 @@ from app.services.ingestion.file_centric import (
     build_file_id,
     build_member_id,
     listar_arquivos_logicos,
+    listar_arquivos_membros,
     obter_arquivo_logico,
     parse_file_id,
     parse_member_id,
@@ -3419,6 +3421,61 @@ def listar_ingestion_run_members(
 
 
 @router.get(
+    "/members",
+    response_model=IngestionLogicalMemberListResponse,
+    summary="Listar arquivos membros operacionais de ingestao",
+    description=(
+        "Lista de forma paginada todos os arquivos membros como ancoras operacionais independentes.\n\n"
+        "Permite busca textual no nome do membro (ex: `distribuicao_dividendos`, `auditor_responsavel`), "
+        "e filtros por `ano`, `fonte`, `status` e `obrigatorio`."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="listarArquivosMembrosAdmin",
+)
+def listar_arquivos_membros_endpoint(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    ano: Annotated[int | None, Query(description="Filtrar membros por ano de referencia.")] = None,
+    fonte: Annotated[str | None, Query(description="Filtrar membros por tipo da fonte CVM.")] = None,
+    busca: Annotated[str | None, Query(description="Busca textual por substring no nome do arquivo membro.")] = None,
+    status: Annotated[str | None, Query(description="Filtrar por status operacional do membro.")] = None,
+    obrigatorio: Annotated[bool | None, Query(description="Filtrar por obrigatoriedade segundo o catalogo da CVM.")] = None,
+    pagina: Annotated[int, Query(ge=1, description="Numero da pagina.")] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=200, description="Quantidade de membros por pagina.")] = 50,
+) -> IngestionLogicalMemberListResponse:
+    total, items = listar_arquivos_membros(
+        db,
+        ano=ano,
+        fonte=fonte,
+        busca=busca,
+        status=status,
+        obrigatorio=obrigatorio,
+        pagina=pagina,
+        tamanho_pagina=tamanho_pagina,
+    )
+    total_paginas = max(1, (total + tamanho_pagina - 1) // tamanho_pagina)
+    filtros = {
+        k: v
+        for k, v in {
+            "ano": ano,
+            "fonte": fonte,
+            "busca": busca,
+            "status": status,
+            "obrigatorio": obrigatorio,
+        }.items()
+        if v is not None
+    }
+    return IngestionLogicalMemberListResponse(
+        total_membros=total,
+        pagina=pagina,
+        tamanho_pagina=tamanho_pagina,
+        total_paginas=total_paginas,
+        filtros_aplicados=filtros,
+        dados=items,
+    )
+
+
+@router.get(
     "/members/{member_name}/timeline",
     response_model=IngestionMemberTimelineResposta,
     summary="Linha do tempo e ciclo de vida completo de um arquivo member",
@@ -3779,6 +3836,33 @@ def obter_timeline_member(
 
 
 @router.get(
+    "/members/{member_name}",
+    response_model=IngestionMemberTimelineResposta,
+    summary="Detalhar arquivo membro operacional de ingestao",
+    description=(
+        "Disseca e consolida todo o ciclo de vida operacional de um arquivo member CSV especifico "
+        "(ex: `fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv`). "
+        "Retorna dataset, arquivo pai, runs, fases, snapshots brutos e normalizados, drifts, quarentena e alteracoes de dominio."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Membro nao encontrado."}},
+    operation_id="obterDetalheMemberAdmin",
+)
+def obter_detalhe_member(
+    member_name: Annotated[
+        str,
+        Path(
+            description="Nome canonico do arquivo member (ex: fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv) ou ID estavel delimitado.",
+            min_length=1,
+            examples=["fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv"],
+        ),
+    ],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionMemberTimelineResposta:
+    return obter_timeline_member(member_name=member_name, db=db, _=_)
+
+
+@router.get(
     "/files",
     response_model=IngestionLogicalFileListResponse,
     summary="Listar arquivos logicos operacionais de ingestao",
@@ -3865,6 +3949,26 @@ def obter_timeline_membro_no_arquivo(
 ) -> IngestionMemberTimelineResposta:
     member_identifier = build_member_id(file_id, member_name)
     return obter_timeline_member(member_name=member_identifier, db=db, _=_)
+
+
+@router.get(
+    "/files/{file_id:path}/members/{member_name:path}",
+    response_model=IngestionMemberTimelineResposta,
+    summary="Detalhar arquivo membro delimitado pelo arquivo principal",
+    description=(
+        "Consulta de detalhamento e timeline de membro com delimitacao estrita pelo arquivo principal pai, "
+        "garantindo isolamento total de historicos para membros com nomes iguais em pacotes diferentes."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Membro nao encontrado no arquivo principal."}},
+    operation_id="obterDetalheMembroNoArquivoAdmin",
+)
+def obter_detalhe_membro_no_arquivo(
+    file_id: Annotated[str, Path(description="Identificador estavel do arquivo principal pai.")],
+    member_name: Annotated[str, Path(description="Nome canonico do arquivo membro.")],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionMemberTimelineResposta:
+    return obter_timeline_membro_no_arquivo(file_id=file_id, member_name=member_name, db=db, _=_)
 
 
 @router.get(

@@ -623,3 +623,79 @@ def test_paginacao_e_filtros_server_side(client: TestClient, db_session: Session
     assert res_fonte.status_code == 200
     data_fonte = res_fonte.json()
     assert all(item["tipo_fonte"] == "dfp" for item in data_fonte["dados"])
+
+    # Filtro por intervalo de datas naive (concluido_antes e concluido_apos)
+    res_datas = client.get(
+        "/ingestion/files?concluido_antes=2026-11-08T23:59:59&concluido_apos=2026-10-10T00:00:00&pagina=1&tamanho_pagina=25"
+    )
+    assert res_datas.status_code == 200
+    data_datas = res_datas.json()
+    assert "total_arquivos" in data_datas
+
+
+def test_listar_arquivos_membros_e_detalhe_direto(client: TestClient, db_session: Session):
+    now = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=parent_id,
+            tipo_execucao="arquivo_zip",
+            tipo_fonte="fre",
+            ano=2021,
+            arquivo="fre_cia_aberta_2021.zip",
+            url="http://exemplo/fre_2021.zip",
+            status="sucesso",
+            iniciada_em=now - timedelta(minutes=15),
+            finalizada_em=now - timedelta(minutes=5),
+        )
+    )
+    db_session.add(
+        ExecucaoSincronizacao(
+            id=child_id,
+            parent_execucao_id=parent_id,
+            tipo_execucao="arquivo_membro",
+            tipo_fonte="fre",
+            ano=2021,
+            arquivo="fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv",
+            url="http://exemplo/fre_2021.zip",
+            status="sucesso",
+            hash_arquivo="sha-div-2021",
+            total_linhas_lidas=150,
+            total_inseridos=150,
+            iniciada_em=now - timedelta(minutes=10),
+            finalizada_em=now - timedelta(minutes=6),
+        )
+    )
+    db_session.commit()
+
+    # 1. Listar membros com busca por substring
+    res_list = client.get("/ingestion/members?busca=dividendos&ano=2021")
+    assert res_list.status_code == 200
+    data_list = res_list.json()
+    assert data_list["total_membros"] >= 1
+    assert any(m["member_name"] == "fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv" for m in data_list["dados"])
+    membro = next(m for m in data_list["dados"] if m["member_name"] == "fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv")
+    assert membro["tipo_fonte"] == "fre"
+    assert membro["ano"] == 2021
+    assert membro["status"] == "sucesso"
+    assert membro["total_linhas"] == 150
+
+    # 2. Consultar detalhes ancorado diretamente pelo nome do membro (sem /timeline)
+    res_detail = client.get("/ingestion/members/fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv")
+    assert res_detail.status_code == 200
+    data_detail = res_detail.json()
+    assert data_detail["member_name"] == "fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv"
+    assert data_detail["tipo_fonte"] == "fre"
+    assert data_detail["ano"] == 2021
+    assert data_detail["total_execucoes"] >= 1
+    assert data_detail["execucoes"][0]["status"] == "sucesso"
+
+    # 3. Consultar detalhes ancorado delimitado pelo pacote pai
+    parent_fid = "fre:2021:fre_cia_aberta_2021.zip"
+    res_parent_detail = client.get(
+        f"/ingestion/files/{parent_fid}/members/fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv"
+    )
+    assert res_parent_detail.status_code == 200
+    assert res_parent_detail.json()["member_name"] == "fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv"
