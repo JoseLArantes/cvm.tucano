@@ -59,6 +59,8 @@ from app.schemas.admin import (
     IngestionDispatchResponse,
     IngestionFailureAcknowledgement,
     IngestionFailureAcknowledgementRequest,
+    IngestionLogicalFileDetalhe,
+    IngestionLogicalFileListResponse,
     IngestionMemberExecutionTimelineItem,
     IngestionMemberQuarantineSummary,
     IngestionMemberSnapshotItem,
@@ -92,6 +94,14 @@ from app.schemas.comum import Paginacao
 from app.services.ingestion.audit import build_dataset_discovery_audit
 from app.services.ingestion.cadastro import sincronizar_cadastro_companhias
 from app.services.ingestion.events import list_operational_events
+from app.services.ingestion.file_centric import (
+    build_file_id,
+    build_member_id,
+    listar_arquivos_logicos,
+    obter_arquivo_logico,
+    parse_file_id,
+    parse_member_id,
+)
 from app.services.ingestion.lifecycle import (
     build_artifact_snapshot_response,
     build_delivery_snapshot_summary,
@@ -3425,24 +3435,31 @@ def obter_timeline_member(
     member_name: Annotated[
         str,
         Path(
-            description="Nome canonico do arquivo member (ex: fre_cia_aberta_auditor_responsavel_2021.csv).",
+            description="Nome canonico do arquivo member (ex: fre_cia_aberta_auditor_responsavel_2021.csv) ou ID estavel com delimitacao de pacote pai.",
             min_length=1,
-            examples=["fre_cia_aberta_auditor_responsavel_2021.csv"],
+            examples=["fre_cia_aberta_auditor_responsavel_2021.csv", "fre:2021:fre_cia_aberta_2021.zip:fre_cia_aberta_auditor_responsavel_2021.csv"],
         ),
     ],
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
 ) -> IngestionMemberTimelineResposta:
     clean_member_name = member_name.strip()
+    scoped_file_id: str | None = None
+    scoped_fonte: str | None = None
+    scoped_ano: int | None = None
+
+    if ":" in clean_member_name:
+        parsed_parent_fid, clean_member_name = parse_member_id(clean_member_name)
+        scoped_file_id = parsed_parent_fid
+        scoped_fonte, scoped_ano, _ignored_arq = parse_file_id(parsed_parent_fid)
 
     # 1. Execucoes de sincronizacao do member
-    execucoes = list(
-        db.scalars(
-            select(ExecucaoSincronizacao)
-            .where(ExecucaoSincronizacao.arquivo == clean_member_name)
-            .order_by(ExecucaoSincronizacao.iniciada_em.desc())
-        ).all()
-    )
+    exec_stmt = select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.arquivo == clean_member_name)
+    if scoped_fonte:
+        exec_stmt = exec_stmt.where(ExecucaoSincronizacao.tipo_fonte == scoped_fonte)
+    if scoped_ano is not None:
+        exec_stmt = exec_stmt.where(ExecucaoSincronizacao.ano == scoped_ano)
+    execucoes = list(db.scalars(exec_stmt.order_by(ExecucaoSincronizacao.iniciada_em.desc())).all())
 
     parent_ids = list({ex.parent_execucao_id for ex in execucoes if ex.parent_execucao_id is not None})
     parent_by_id: dict[UUID, ExecucaoSincronizacao] = {}
@@ -3533,12 +3550,16 @@ def obter_timeline_member(
         )
 
     # 2. Snapshots do member
-    snapshot_rows = db.execute(
+    snap_stmt = (
         select(SourceMemberSnapshot, SourceArtifactSnapshot.ingestion_run_id)
         .outerjoin(SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id)
         .where(SourceMemberSnapshot.member_name == clean_member_name)
-        .order_by(SourceMemberSnapshot.created_at.desc())
-    ).all()
+    )
+    if scoped_fonte:
+        snap_stmt = snap_stmt.where(SourceArtifactSnapshot.tipo_fonte == scoped_fonte)
+    if scoped_ano is not None:
+        snap_stmt = snap_stmt.where(SourceArtifactSnapshot.ano == scoped_ano)
+    snapshot_rows = db.execute(snap_stmt.order_by(SourceMemberSnapshot.created_at.desc())).all()
 
     snapshots_items: list[IngestionMemberSnapshotItem] = []
     seen_snapshot_shas: set[str] = set()
@@ -3588,12 +3609,16 @@ def obter_timeline_member(
             )
 
     # 3. Updates / Drifts
-    update_rows = db.execute(
+    up_stmt = (
         select(PendingUpdateMember, PendingUpdate.detection_timestamp)
         .outerjoin(PendingUpdate, PendingUpdate.id == PendingUpdateMember.pending_update_id)
         .where(PendingUpdateMember.member_name == clean_member_name)
-        .order_by(PendingUpdate.detection_timestamp.desc().nullslast())
-    ).all()
+    )
+    if scoped_fonte:
+        up_stmt = up_stmt.where(PendingUpdate.fonte == scoped_fonte)
+    if scoped_ano is not None:
+        up_stmt = up_stmt.where(PendingUpdate.ano == scoped_ano)
+    update_rows = db.execute(up_stmt.order_by(PendingUpdate.detection_timestamp.desc().nullslast())).all()
 
     updates_items: list[IngestionMemberUpdateItem] = [
         IngestionMemberUpdateItem(
@@ -3722,7 +3747,19 @@ def obter_timeline_member(
             detail=f"Member '{clean_member_name}' nao encontrado no catalogo ou historico de execucoes.",
         )
 
+    if scoped_file_id is None and tipo_fonte:
+        parent_arq = None
+        if execucoes and execucoes[0].parent_execucao_id and execucoes[0].parent_execucao_id in parent_by_id:
+            parent_arq = parent_by_id[execucoes[0].parent_execucao_id].arquivo
+        from app.services.ingestion.file_centric import resolver_nome_arquivo_principal
+        parent_arq = parent_arq or resolver_nome_arquivo_principal(tipo_fonte, ano)
+        scoped_file_id = build_file_id(tipo_fonte, ano, parent_arq)
+
+    final_member_id = build_member_id(scoped_file_id, clean_member_name) if scoped_file_id else clean_member_name
+
     return IngestionMemberTimelineResposta(
+        member_id=final_member_id,
+        parent_file_id=scoped_file_id,
         member_name=clean_member_name,
         tipo_fonte=tipo_fonte,
         ano=ano,
@@ -3734,6 +3771,129 @@ def obter_timeline_member(
         updates=updates_items,
         quarentena=quarentena_summary,
     )
+
+
+@router.get(
+    "/files",
+    response_model=IngestionLogicalFileListResponse,
+    summary="Listar arquivos logicos operacionais de ingestao",
+    description=(
+        "Consulta operacional de ingestao centrada no arquivo logico. "
+        "Hierarquia de dominio: ANO -> ARQUIVO PRINCIPAL -> MEMBRO -> TENTATIVAS E ETAPAS -> RESULTADO. "
+        "Arquivos simples (como o cadastro global) nao possuem ZIP, ano ficticio ou membro artificial. "
+        "Retorna totais nao truncados por arquivo distinto com paginacao e filtros server-side."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="listarArquivosLogicosIngestionAdmin",
+)
+def listar_arquivos_logicos_endpoint(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    ano: Annotated[int | None, Query(description="Filtrar por ano de referencia.")] = None,
+    fonte: Annotated[str | None, Query(description="Filtrar por tipo de fonte CVM (dfp, itr, fre, cadastro, etc.).")] = None,
+    arquivo: Annotated[str | None, Query(description="Filtrar por trecho do nome do arquivo principal.")] = None,
+    atividade: Annotated[str | None, Query(description="Filtrar por atividade: idle, em_processamento, aguardando_ingestao, aguardando_parent_window, bloqueada.")] = None,
+    integridade: Annotated[str | None, Query(description="Filtrar por grau de integridade em uso: completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente.")] = None,
+    necessidade_intervencao: Annotated[bool | None, Query(description="Filtrar se requer acao manual de operador.")] = None,
+    resolucao_falha: Annotated[str | None, Query(description="Filtrar por resolucao de falha: aberta, em_nova_tentativa, restaurada_com_evidencia, versao_substituida, encerrada_sem_restauracao.")] = None,
+    concluido_apos: Annotated[datetime | None, Query(description="Filtrar arquivos concluidos apos esta data/hora.")] = None,
+    concluido_antes: Annotated[datetime | None, Query(description="Filtrar arquivos concluidos antes desta data/hora.")] = None,
+    pagina: Annotated[int, Query(description="Numero da pagina.", ge=1)] = 1,
+    tamanho_pagina: Annotated[int, Query(description="Itens por pagina.", ge=1, le=200)] = 50,
+) -> IngestionLogicalFileListResponse:
+    total, items = listar_arquivos_logicos(
+        db,
+        ano=ano,
+        fonte=fonte,
+        arquivo=arquivo,
+        atividade=atividade,
+        integridade=integridade,
+        necessidade_intervencao=necessidade_intervencao,
+        resolucao_falha=resolucao_falha,
+        concluido_apos=concluido_apos,
+        concluido_antes=concluido_antes,
+        pagina=pagina,
+        tamanho_pagina=tamanho_pagina,
+    )
+    total_paginas = (total + tamanho_pagina - 1) // tamanho_pagina if total > 0 else 1
+    filtros = {
+        k: v
+        for k, v in {
+            "ano": ano,
+            "fonte": fonte,
+            "arquivo": arquivo,
+            "atividade": atividade,
+            "integridade": integridade,
+            "necessidade_intervencao": necessidade_intervencao,
+            "resolucao_falha": resolucao_falha,
+            "concluido_apos": concluido_apos.isoformat() if concluido_apos else None,
+            "concluido_antes": concluido_antes.isoformat() if concluido_antes else None,
+        }.items()
+        if v is not None
+    }
+    return IngestionLogicalFileListResponse(
+        total_arquivos=total,
+        pagina=pagina,
+        tamanho_pagina=tamanho_pagina,
+        total_paginas=total_paginas,
+        filtros_aplicados=filtros,
+        dados=items,
+    )
+
+
+@router.get(
+    "/files/{file_id:path}/members/{member_name:path}/timeline",
+    response_model=IngestionMemberTimelineResposta,
+    summary="Linha do tempo de um membro delimitado pelo arquivo principal",
+    description=(
+        "Consulta de timeline de membro com delimitacao estrita pelo arquivo principal pai, "
+        "garantindo isolamento total de historicos para membros com nomes iguais em pacotes diferentes."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Membro nao encontrado no arquivo principal."}},
+    operation_id="obterTimelineMembroNoArquivoAdmin",
+)
+def obter_timeline_membro_no_arquivo(
+    file_id: Annotated[str, Path(description="Identificador estavel do arquivo principal pai.")],
+    member_name: Annotated[str, Path(description="Nome canonico do arquivo membro.")],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionMemberTimelineResposta:
+    member_identifier = build_member_id(file_id, member_name)
+    return obter_timeline_member(member_name=member_identifier, db=db, _=_)
+
+
+@router.get(
+    "/files/{file_id:path}",
+    response_model=IngestionLogicalFileDetalhe,
+    summary="Detalhar arquivo logico operacional de ingestao",
+    description=(
+        "Exibe o detalhe completo de um arquivo logico identificado por seu ID estavel "
+        "(ex: `dfp:2022:dfp_cia_aberta_2022.zip` ou `cadastro:cad_cia_aberta.csv`). "
+        "Apresenta versoes observadas, membros, auditoria de integridade com evidencias, "
+        "historico de tentativas e acoes operacionais permitidas com alvos exatos."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Arquivo logico nao encontrado."}},
+    operation_id="obterArquivoLogicoIngestionAdmin",
+)
+def obter_arquivo_logico_endpoint(
+    file_id: Annotated[
+        str,
+        Path(
+            description="Identificador estavel do arquivo logico (ex: dfp:2022:dfp_cia_aberta_2022.zip ou cadastro:cad_cia_aberta.csv).",
+            min_length=1,
+            examples=["dfp:2022:dfp_cia_aberta_2022.zip", "cadastro:cad_cia_aberta.csv"],
+        ),
+    ],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionLogicalFileDetalhe:
+    detalhe = obter_arquivo_logico(db, file_id)
+    if detalhe is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Arquivo logico '{file_id}' nao encontrado no catalogo ou historico de execucoes.",
+        )
+    return detalhe
 
 
 @router.get(

@@ -1342,6 +1342,8 @@ class IngestionMemberQuarantineSummary(BaseModel):
 
 
 class IngestionMemberTimelineResposta(BaseModel):
+    member_id: str | None = Field(default=None, description="Identificador estavel e delimitado do member no pacote pai.")
+    parent_file_id: str | None = Field(default=None, description="Identificador estavel do arquivo principal pai.")
     member_name: str = Field(description="Nome canonico do arquivo member (ex: fre_cia_aberta_auditor_responsavel_2021.csv).")
     tipo_fonte: str | None = Field(default=None, description="Tipo da fonte CVM associada (ex: fre, itr, dfp, fca).")
     ano: int | None = Field(default=None, description="Ano de referencia do arquivo member.")
@@ -1352,3 +1354,127 @@ class IngestionMemberTimelineResposta(BaseModel):
     snapshots: list[IngestionMemberSnapshotItem] = Field(default_factory=list, description="Historico de snapshots e versoes do arquivo observadas nos pacotes baixados.")
     updates: list[IngestionMemberUpdateItem] = Field(default_factory=list, description="Historico de deteccao de atualizacoes e drifts CVM para este member.")
     quarentena: IngestionMemberQuarantineSummary = Field(default_factory=IngestionMemberQuarantineSummary, description="Resumo consolidado e itens recentes em quarentena originarios deste member.")
+
+
+class IngestionActionTarget(BaseModel):
+    target_type: str = Field(description="Tipo de alvo da acao (file, member, run, execution).")
+    target_id: str = Field(description="Identificador estavel ou UUID do alvo.")
+    target_name: str | None = Field(default=None, description="Nome legivel do alvo.")
+
+
+class IngestionAllowedAction(BaseModel):
+    action: str = Field(description="Identificador da acao permitida (replay, recover, start_ingestion, acknowledge_failure).")
+    target: IngestionActionTarget = Field(description="Alvo exato desta acao operacional.")
+    endpoint: str = Field(description="Endpoint da API para acionar a acao.")
+    method: str = Field(description="Metodo HTTP esperado.")
+    description: str = Field(description="Descricao da acao e seu impacto operacional.")
+    requires_operator: bool = Field(default=True, description="Indica se a acao requer intervencao manual de um operador.")
+
+
+class IngestionVersionSummary(BaseModel):
+    sha256: str | None = Field(default=None, description="Hash SHA-256 do arquivo nesta versao.")
+    detected_at: BrazilianDateTime | None = Field(default=None, description="Momento da primeira deteccao desta versao.")
+    processed_at: BrazilianDateTime | None = Field(default=None, description="Momento da conclusao do processamento desta versao.")
+    status: str = Field(description="Status do processamento desta versao (sucesso, falha, em_execucao, apenas_detectada, etc.).")
+    integridade: str = Field(description="Grau de integridade desta versao (completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente).")
+    role: str = Field(description="Papel desta versao no ciclo de vida (em_uso, alvo, apenas_detectada, historica).")
+    total_linhas: int | None = Field(default=None, description="Total de linhas contidas nesta versao.")
+    storage_uri: str | None = Field(default=None, description="URI ou caminho de armazenamento local do arquivo.")
+
+
+class IngestionIntegrityDetail(BaseModel):
+    status: str = Field(description="Status geral de integridade: completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente.")
+    motivos: list[str] = Field(default_factory=list, description="Lista explicativa dos motivos determinantes da integridade.")
+    membros_obrigatorios_esperados: int = Field(default=0, description="Total de membros obrigatorios esperados pelo catalogo para a fonte.")
+    membros_obrigatorios_presentes: int = Field(default=0, description="Total de membros obrigatorios identificados no pacote.")
+    membros_processados: int = Field(default=0, description="Total de membros com promocao concluida com sucesso ou reuso comprovado.")
+    membros_faltantes: list[str] = Field(default_factory=list, description="Lista de nomes de membros obrigatorios que nao foram encontrados.")
+    membros_com_falha: list[str] = Field(default_factory=list, description="Lista de nomes de membros que falharam durante a ingestao.")
+    quarentena_total: int = Field(default=0, description="Total de itens de quarentena gerados por este arquivo.")
+    quarentena_pendente: int = Field(default=0, description="Total de itens de quarentena com resolucao pendente.")
+    evidence_refs: list[str] = Field(default_factory=list, description="Referencias de auditoria e evidencias de escrita canonica confirmada.")
+
+
+class IngestionFailureDetail(BaseModel):
+    target_type: str = Field(description="Alvo da falha: file ou member.")
+    target_id: str = Field(description="ID estavel do arquivo ou membro afetado.")
+    target_name: str = Field(description="Nome do arquivo ou membro onde ocorreu a falha.")
+    etapa: str | None = Field(default=None, description="Etapa ou fase da pipeline onde ocorreu a falha (download, stage, promote, etc.).")
+    codigo_erro: str | None = Field(default=None, description="Codigo curto ou tipo da excecao.")
+    mensagem_erro: str | None = Field(default=None, description="Mensagem de erro registrada.")
+    resolucao: str = Field(description="Estado de resolucao da falha: aberta, em_nova_tentativa, restaurada_com_evidencia, versao_substituida, encerrada_sem_restauracao.")
+    reparavel: bool = Field(default=False, description="Indica se a falha admite replay ou recuperacao deterministica.")
+    attempt_number: int | None = Field(default=None, description="Numero da tentativa onde a falha foi observada.")
+    acknowledged_at: BrazilianDateTime | None = Field(default=None, description="Momento em que a falha foi reconhecida operacionalmente, se houver.")
+    acknowledged_by: str | None = Field(default=None, description="Operador ou processo que reconheceu a falha.")
+
+
+class IngestionAttemptSummary(BaseModel):
+    attempt_id: str = Field(description="Identificador da tentativa (ID da run, execucao ou registro de tentativa).")
+    attempt_number: int = Field(default=1, description="Numero sequencial da tentativa.")
+    correlacao: str = Field(description="Tipo de correlacao comprovada: original, retry, replay, recovery, desconhecida.")
+    origem_tentativa_id: str | None = Field(default=None, description="ID da tentativa anterior correlacionada, se comprovada.")
+    run_id: str | None = Field(default=None, description="ID da run tecnica associada.")
+    execucao_id: str | None = Field(default=None, description="ID da execucao administrativa associada.")
+    status: str = Field(description="Status registrado para esta tentativa.")
+    phase: str | None = Field(default=None, description="Fase final atingida.")
+    iniciada_em: BrazilianDateTime = Field(description="Data e hora de inicio da tentativa.")
+    finalizada_em: BrazilianDateTime | None = Field(default=None, description="Data e hora de termino da tentativa.")
+    mensagem_erro: str | None = Field(default=None, description="Mensagem de erro registrada nesta tentativa.")
+    etapas: list[IngestionRunPhaseExecutionResumo] = Field(default_factory=list, description="Linha do tempo das etapas/fases executadas.")
+
+
+class IngestionLogicalMemberSummary(BaseModel):
+    member_id: str = Field(description="Identificador estavel do membro (ex: dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv).")
+    parent_file_id: str = Field(description="Identificador estavel do arquivo principal pai.")
+    member_name: str = Field(description="Nome canonico do arquivo membro.")
+    dataset_key: str | None = Field(default=None, description="Chave do dataset correspondente no catalogo de fontes.")
+    descricao: str | None = Field(default=None, description="Descricao legivel do membro.")
+    obrigatorio: bool = Field(default=False, description="Indica se o membro e obrigatorio segundo o catalogo da fonte.")
+    status: str = Field(description="Status operacional atual do membro (sucesso, falha, aguardando_parent_window, aguardando_ingestao, skipped).")
+    integridade: str = Field(description="Integridade calculada para este membro: completo, parcial, nao_aplicado, etc.")
+    sha256: str | None = Field(default=None, description="Hash SHA-256 do conteudo do membro.")
+    total_linhas: int | None = Field(default=None, description="Total de linhas observadas.")
+    quarentena_total: int = Field(default=0, description="Total de itens de quarentena gerados por este membro.")
+    next_action: str | None = Field(default=None, description="Proxima acao recomendada para o membro.")
+    resolucao_falha: str | None = Field(default=None, description="Resolucao da falha caso haja historico de erro.")
+    falha: IngestionFailureDetail | None = Field(default=None, description="Detalhes da falha atual ou historica do membro.")
+
+
+class IngestionLogicalFileSummary(BaseModel):
+    file_id: str = Field(description="Identificador estavel do arquivo logico (ex: dfp:2022:dfp_cia_aberta_2022.zip ou cadastro:cad_cia_aberta.csv).")
+    tipo_fonte: str = Field(description="Tipo da fonte CVM associada (dfp, itr, fre, cadastro, etc.).")
+    ano: int | None = Field(default=None, description="Ano de referencia do arquivo (nulo para arquivos simples como cadastro).")
+    arquivo_principal: str = Field(description="Nome canonico do arquivo principal ou pacote.")
+    is_container: bool = Field(description="Verdadeiro se o arquivo e um pacote (ZIP) contendo membros; falso para arquivo simples.")
+    atividade_atual: str = Field(description="Atividade operacional atual: idle, em_processamento, aguardando_ingestao, aguardando_parent_window, bloqueada.")
+    integridade_em_uso: str = Field(description="Integridade da versao efetivamente em uso: completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente.")
+    resultado_alvo: str | None = Field(default=None, description="Resultado da versao alvo da ingestao mais recente: sucesso, falha, skipped, etc.")
+    versao_em_uso: IngestionVersionSummary | None = Field(default=None, description="Versao de dados efetivamente em uso no banco.")
+    versao_alvo: IngestionVersionSummary | None = Field(default=None, description="Versao alvo da ultima ou atual operacao de ingestao.")
+    etapa_relevante: str | None = Field(default=None, description="Etapa ou fase mais relevante da execucao atual ou recente.")
+    progresso_porcentagem: float | None = Field(default=None, description="Progresso percentual da etapa ativa (0.0 a 100.0).")
+    falha_relevante: IngestionFailureDetail | None = Field(default=None, description="Falha mais relevante aberta ou recente associada ao arquivo.")
+    next_action: str | None = Field(default=None, description="Proxima acao recomendada para o operador.")
+    requires_operator: bool = Field(default=False, description="Verdadeiro se ha necessidade de acao manual do operador.")
+    total_membros: int = Field(default=0, description="Total de membros descobertos ou configurados para o arquivo.")
+    membros_com_falha: int = Field(default=0, description="Quantidade de membros com falha ativa.")
+    ultima_atividade_em: BrazilianDateTime | None = Field(default=None, description="Timestamp da ultima atividade registrada.")
+    concluido_em: BrazilianDateTime | None = Field(default=None, description="Timestamp de conclusao da versao em uso ou ultima tentativa.")
+
+
+class IngestionLogicalFileDetalhe(IngestionLogicalFileSummary):
+    integridade_detalhe: IngestionIntegrityDetail = Field(description="Auditoria detalhada da integridade do arquivo e seus membros.")
+    membros: list[IngestionLogicalMemberSummary] = Field(default_factory=list, description="Lista de membros do pacote com seus estados e falhas.")
+    versoes: list[IngestionVersionSummary] = Field(default_factory=list, description="Historico de versoes detectadas e processadas para este arquivo.")
+    tentativas: list[IngestionAttemptSummary] = Field(default_factory=list, description="Historico de tentativas de ingestao e etapas executadas.")
+    allowed_actions: list[IngestionAllowedAction] = Field(default_factory=list, description="Lista de acoes permitidas com seus alvos exatos.")
+
+
+class IngestionLogicalFileListResponse(BaseModel):
+    total_arquivos: int = Field(description="Total nao truncado de arquivos logicos distintos correspondentes aos filtros.")
+    pagina: int = Field(description="Numero da pagina atual.")
+    tamanho_pagina: int = Field(description="Quantidade de itens por pagina.")
+    total_paginas: int = Field(description="Total de paginas disponiveis.")
+    filtros_aplicados: dict[str, Any] = Field(default_factory=dict, description="Filtros server-side aplicados na consulta.")
+    dados: list[IngestionLogicalFileSummary] = Field(description="Lista paginada de arquivos logicos.")

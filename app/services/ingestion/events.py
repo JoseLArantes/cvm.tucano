@@ -15,6 +15,11 @@ from sqlalchemy.orm import Session
 
 from app.models.analise import AnaliseMaterializacaoCampanha
 from app.models.ingestion import IngestionFile, IngestionFileMember, IngestionRun
+from app.services.ingestion.file_centric import (
+    build_file_id,
+    build_member_id,
+    resolver_nome_arquivo_principal,
+)
 
 
 def _aware(value: datetime) -> datetime:
@@ -84,8 +89,18 @@ def list_operational_events(
     events: list[dict[str, Any]] = []
     for run in runs:
         occurred_at = run.updated_at
-        payload = {"run_id": str(run.id), "source": run.tipo_fonte, "year": run.ano, "state": run.status, "phase": run.phase}
+        arquivo_principal = resolver_nome_arquivo_principal(run.tipo_fonte, run.ano)
+        file_id = build_file_id(run.tipo_fonte, run.ano, arquivo_principal)
+        payload = {
+            "run_id": str(run.id),
+            "file_id": file_id,
+            "source": run.tipo_fonte,
+            "year": run.ano,
+            "state": run.status,
+            "phase": run.phase,
+        }
         events.append(_event(event_type="ingestion.run.updated", entity_type="run", entity_id=str(run.id), occurred_at=occurred_at, reason_code="RUN_CHANGED", data=payload))
+        events.append(_event(event_type="ingestion.file.updated", entity_type="file", entity_id=file_id, occurred_at=occurred_at, reason_code="FILE_CHANGED", data=payload))
         events.append(_event(event_type="ingestion.work_item.updated", entity_type="work_item", entity_id=f"{run.tipo_fonte}:{'' if run.ano is None else run.ano}", occurred_at=occurred_at, reason_code="RUN_CHANGED", data=payload))
 
     member_stmt = (
@@ -100,7 +115,25 @@ def list_operational_events(
     if source is not None:
         member_stmt = member_stmt.where(IngestionRun.tipo_fonte == source, IngestionRun.ano == year)
     for member, run in db.execute(member_stmt).all():
-        events.append(_event(event_type="ingestion.member.updated", entity_type="member", entity_id=str(member.id), occurred_at=member.updated_at, reason_code="MEMBER_CHANGED", data={"run_id": str(run.id), "source": run.tipo_fonte, "year": run.ano, "member_name": member.member_name, "schema_status": member.schema_status}))
+        arquivo_principal = resolver_nome_arquivo_principal(run.tipo_fonte, run.ano)
+        file_id = build_file_id(run.tipo_fonte, run.ano, arquivo_principal)
+        member_id = build_member_id(file_id, member.member_name)
+        events.append(_event(
+            event_type="ingestion.member.updated",
+            entity_type="member",
+            entity_id=member_id,
+            occurred_at=member.updated_at,
+            reason_code="MEMBER_CHANGED",
+            data={
+                "run_id": str(run.id),
+                "file_id": file_id,
+                "member_id": member_id,
+                "source": run.tipo_fonte,
+                "year": run.ano,
+                "member_name": member.member_name,
+                "schema_status": member.schema_status,
+            },
+        ))
 
     materialization_stmt = select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.updated_at.asc()).limit(limit)
     if after is not None:

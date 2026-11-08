@@ -11,6 +11,9 @@ Para cada tipo de tela:
 
 | Tela | Endpoint principal |
 | --- | --- |
+| visao operacional centrada em arquivos | `GET /ingestion/files` |
+| detalhe e linhagem do arquivo logico | `GET /ingestion/files/{file_id}` |
+| linha do tempo de membro delimitada | `GET /ingestion/files/{file_id}/members/{member_name}/timeline` |
 | lista operacional de runs | `GET /ingestion/runs` |
 | detalhe de run | `GET /ingestion/runs/{run_id}` |
 | timeline de fases | `GET /ingestion/runs/{run_id}/phases` |
@@ -345,3 +348,83 @@ Depois do reconhecimento:
 - uma falha posterior na mesma run possui outra `failure_key` e exige novo reconhecimento.
 
 Use `acknowledge-failure` para limpar a fila de atencao sem perda de evidencia. `cleanup-transient-state` tem outra finalidade: remove estado transitorio quando uma reconstrução administrativa exigir essa limpeza.
+
+## Superficie Operacional Centrada no Arquivo
+
+A superficie de consulta centrada no arquivo organiza o ciclo de vida operacional na hierarquia do dominio:
+**ANO → ARQUIVO PRINCIPAL → MEMBRO → TENTATIVAS E ETAPAS → RESULTADO**.
+
+Arquivos simples (como o cadastro global `cadastro:cad_cia_aberta.csv`) nao possuem ZIP, ano ficticio ou membro artificial.
+Runs, work items e execucoes administrativas sao registros subordinados e nao definem a identidade do arquivo.
+
+### Identificadores Estaveis
+
+- **Arquivo Logico**: `file_id` estavel:
+  - Pacotes anuais: `{tipo_fonte}:{ano}:{arquivo_principal}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip`)
+  - Arquivos simples sem ano: `{tipo_fonte}:{arquivo_principal}` (ex: `cadastro:cad_cia_aberta.csv`)
+- **Membro**: `member_id` delimitado pelo arquivo pai e chave canonica:
+  - `{file_id}:{member_name}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv`)
+  - Membros homonimos em pacotes diferentes nunca misturam historicos ou estados.
+
+### Integridade, Atividade e Versoes
+
+A API retorna separadamente:
+1. `versao_em_uso`: versao de dados efetivamente em uso no banco, com sua integridade comprovada.
+2. `versao_alvo`: versao alvo da ingestao mais recente ou em processamento (mostrando se foi apenas detectada, se esta em processamento ou se falhou).
+   Uma falha no processamento de uma atualizacao CVM nao torna, por si so, a versao em uso anterior incompleta!
+3. `atividade_atual`: `idle`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window` (espera automatica) ou `bloqueada`.
+
+#### Estados de Integridade Calculados no Servidor
+
+- `completo`: todos os membros obrigatorios esperados pelo catalogo foram processados e promovidos com escrita confirmada, sem ressalvas.
+- `completo_com_ressalvas`: dados centrais promovidos, com ressalvas nao bloqueantes (ex: itens em quarentena ou membros opcionais ausentes).
+- `parcial`: promocao incompleta (membros obrigatorios faltantes no pacote, ou com falha/quarentena impeditiva).
+- `nao_aplicado`: arquivo apenas detectado, agendado ou falhou antes do download/promocao.
+- `evidencia_insuficiente`: registros incompletos ou legados sem confirmacao de escrita canonica.
+
+#### Resolucao de Falhas
+
+- `aberta`: falha ativa pendente de solucao.
+- `em_nova_tentativa`: nova tentativa em processamento.
+- `restaurada_com_evidencia`: recuperada ou reprocessada com sucesso comprovado na mesma versao.
+- `versao_substituida`: substituida por uma versao mais recente integra (sem provar que a antiga foi reparada).
+- `encerrada_sem_restauracao`: falha investigada e reconhecida via `acknowledge-failure` (encerra a investigacao sem reparar a integridade).
+
+### `GET /ingestion/files`
+
+Listagem paginada por arquivo logico com contagem nao truncada e filtros server-side:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files?ano=2022&fonte=dfp&pagina=1&tamanho_pagina=50" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+Parametros de consulta suportados:
+- `ano`: ano de referencia
+- `fonte`: tipo de fonte (`dfp`, `itr`, `fre`, `fca`, `ipe`, `cgvn`, `vlmo`, `cadastro`)
+- `arquivo`: filtro por trecho do nome do arquivo
+- `atividade`: filtrar por atividade corrente (`idle`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window`, `bloqueada`)
+- `integridade`: filtrar por integridade em uso (`completo`, `completo_com_ressalvas`, `parcial`, `nao_aplicado`, `evidencia_insuficiente`)
+- `necessidade_intervencao`: booleano indicando necessidade de intervencao manual de operador
+- `resolucao_falha`: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida`, `encerrada_sem_restauracao`
+- `concluido_apos` e `concluido_antes`: intervalo de data/hora de conclusao
+- `pagina` e `tamanho_pagina`
+
+### `GET /ingestion/files/{file_id}`
+
+Detalhe completo do arquivo logico com versoes, membros, auditoria de integridade com evidencias, historico de tentativas correlacionadas e acoes permitidas:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files/dfp:2022:dfp_cia_aberta_2022.zip" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+### `GET /ingestion/files/{file_id}/members/{member_name}/timeline`
+
+Linha do tempo e ciclo de vida completo do membro delimitado pelo arquivo principal:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files/dfp:2022:dfp_cia_aberta_2022.zip/members/dfp_cia_aberta_BPA_con_2022.csv/timeline" \
+  -H "Authorization: Bearer <token-admin>"
+```
+

@@ -9,6 +9,43 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-08 - Superficie Operacional de Ingestao Centrada no Arquivo
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/files`
+- novo endpoint `GET /ingestion/files/{file_id}`
+- novo endpoint `GET /ingestion/files/{file_id}/members/{member_name}/timeline`
+- `GET /ingestion/members/{member_name}/timeline` (campos `member_id` e `parent_file_id`, alem de suporte a busca direta por ID estavel)
+- stream SSE `GET /events/stream` (inclusao de `file_id` e `member_id` nos eventos operacionais)
+
+### Comportamento entregue
+
+- **Hierarquia de Dominio Centrada no Arquivo Logico**:
+  - A superficie operacional organiza o ciclo de vida na hierarquia estrita: **ANO → ARQUIVO PRINCIPAL → MEMBRO → TENTATIVAS E ETAPAS → RESULTADO**.
+  - Arquivos simples (como o cadastro global `cadastro:cad_cia_aberta.csv`) operam diretamente sem ZIP, sem ano ficticio e sem membros artificiais.
+  - Runs, work items e execucoes administrativas sao registros subordinados e nao definem a identidade do arquivo.
+- **Identificadores Estaveis e Delimitados**:
+  - `file_id`: `{tipo_fonte}:{ano}:{arquivo_principal}` para pacotes anuais (ex: `dfp:2022:dfp_cia_aberta_2022.zip`) e `{tipo_fonte}:{arquivo_principal}` para arquivos simples sem ano (`cadastro:cad_cia_aberta.csv`).
+  - `member_id`: delimitado estritamente pelo pacote pai `{file_id}:{member_name}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv`), garantindo que membros homonimos em pacotes ou anos distintos nunca misturem historicos.
+  - Identificacao do arquivo desde o despacho: quando uma falha ocorre antes do download ou da extracao de membros, ela e atribuida diretamente ao arquivo principal, sem inventar membros.
+- **Separacao entre Versao em Uso, Versao Alvo e Atividade Atual**:
+  - Exibe claramente qual versao foi apenas detectada (`apenas_detectada`), qual esta em processamento ou falhou (`alvo`) e qual esta efetivamente em uso no banco (`em_uso`).
+  - Uma falha na atualizacao mais recente nao invalida nem torna incompleta a versao anterior integra que ja estava promovida no dominio.
+- **Calculo Server-side de Integridade**:
+  - Avalia membros obrigatorios esperados pelo catalogo da fonte (`obrigatorios`), presenca no pacote, resultados por membro e escrita canonica confirmada.
+  - Estados retornados: `completo`, `completo_com_ressalvas`, `parcial`, `nao_aplicado` e `evidencia_insuficiente`, com exposicao detalhada dos motivos e referencias de evidencia.
+  - Reuso e contado apenas quando a equivalencia de conteudo (SHA) e a aplicacao anterior com escrita canonica estiverem comprovadas.
+- **Resolucao e Rastreabilidade de Falhas**:
+  - Classificacao determinista: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida` (quando uma versao posterior sadia substitui uma anterior que falhou) e `encerrada_sem_restauracao` (quando reconhecida via `acknowledge-failure`, sem reparar integridade).
+- **Acoes Permitidas e Alvos Exatos**:
+  - Retorna `next_action`, `requires_operator` e `allowed_actions[]` com `target_type` (`file`, `member`, `run`, `execution`) e `target_id`.
+  - Estados de espera automatica (`awaiting_parent_window`) expõem `next_action: "wait"` e `requires_operator: false`.
+  - Quando a acao de recuperacao do pai cobre a mesma falha do membro filho, preserva o vinculo sem anunciar duas intervencoes manuais independentes.
+- **Paginacao e Eficiencia de Consulta**:
+  - Listagem em `GET /ingestion/files` com filtros server-side (`ano`, `fonte`, `arquivo`, `atividade`, `integridade`, `necessidade_intervencao`, `resolucao_falha`, intervalo de conclusao) e total nao truncado (`total_arquivos`).
+  - Eliminacao de consultas N+1 via carregamento e agregacao em lote no backend.
+
 ## 2026-11-08 - Linha do Tempo e Rastreabilidade Completa de Arquivos Membro de Ingestao
 
 ### Superficies afetadas
