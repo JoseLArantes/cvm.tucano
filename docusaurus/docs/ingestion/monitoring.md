@@ -15,6 +15,7 @@ Para cada tipo de tela:
 | detalhe de run | `GET /ingestion/runs/{run_id}` |
 | timeline de fases | `GET /ingestion/runs/{run_id}/phases` |
 | inventario de members | `GET /ingestion/runs/{run_id}/members` |
+| linha do tempo e ciclo de vida do member | `GET /ingestion/members/{member_name}/timeline` |
 | auditoria do disparo | `GET /ingestion/sincronizacoes` |
 | detalhe da execucao administrativa | `GET /ingestion/sincronizacoes/{id_execucao}` |
 | snapshot global do cluster | `GET /ingestion/operations` |
@@ -153,6 +154,26 @@ Estados sinteticos hoje:
 - `member_skipped`
 - `schema_invalid`
 - `unknown`
+
+## `GET /ingestion/members/{member_name}/timeline`
+
+Linha do tempo e ciclo de vida completo de um arquivo member CSV especifico (ex: `fre_cia_aberta_auditor_responsavel_2021.csv`).
+
+Disseca em profundidade tudo o que ocorreu com o arquivo:
+
+- **Metadados do dataset**: chave do dataset, descricao funcional, entidade de destino promovido e se o membro e obrigatorio;
+- **Historico de execucoes de sincronizacao**: lista todas as execucoes do member (`ExecucaoSincronizacao`), o arquivo ZIP pai de origem, horarios de inicio/fim, contadores de linhas (lidas, inseridas, atualizadas, inalteradas, rejeitadas) e a timeline detalhada de todas as fases operacionais executadas (`profile`, `stage`, `load_typed_staging`, `promote`, `reconcile`, `complete`);
+- **Snapshots do artefato**: historico de versoes do payload observadas nos downloads (SHA-256, tamanho em bytes, contagem de linhas, schema status, lifecycle status e caminhos dos artefatos bruto e normalizado em disco);
+- **Historico de drifts CVM (`pending_updates`)**: deteccoes de alteracoes entre versoes de pacotes publicadas pela CVM (`change_category`: `new_member`, `modified`, `unchanged`, `removed`), comparando SHA anterior vs atual e contagem de linhas;
+- **Resumo e itens de quarentena**: total de rejeicoes, itens pendentes, distribuicao por codigo de erro e amostra dos itens mais recentes;
+- **Impacto no dominio**: total de alteracoes em campos de entidades de negocio promovidas a partir deste arquivo (`HistoricoAlteracaoCampo`).
+
+Exemplo:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/members/fre_cia_aberta_auditor_responsavel_2021.csv/timeline" \
+  -H "Authorization: Bearer <token-admin>"
+```
 
 ## `GET /ingestion/sincronizacoes`
 

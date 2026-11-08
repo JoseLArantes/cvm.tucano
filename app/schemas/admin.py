@@ -1279,3 +1279,76 @@ class AuditoriaFontesResposta(BaseModel):
 
 class ListaAuditoriasFontesResposta(BaseModel):
     dados: list[AuditoriaFontesResposta] = Field(description="Lista de auditorias executadas em memória.")
+
+
+class IngestionMemberSnapshotItem(BaseModel):
+    id: str = Field(description="ID do snapshot do member.")
+    artifact_snapshot_id: str | None = Field(default=None, description="ID do artifact snapshot pai associado.")
+    ingestion_run_id: str | None = Field(default=None, description="ID da run associada ao snapshot pai.")
+    member_sha256: str = Field(description="Hash SHA-256 do payload do member observado.")
+    member_size_bytes: int | None = Field(default=None, description="Tamanho em bytes do member.")
+    row_count: int = Field(default=0, description="Quantidade de linhas do member.")
+    schema_status: str | None = Field(default=None, description="Status de validacao do schema.")
+    schema_message: str | None = Field(default=None, description="Mensagem de validacao do schema.")
+    lifecycle_status: str | None = Field(default=None, description="Status de lifecycle do member (ex: processed, member_skipped).")
+    raw_artifact_uri: str | None = Field(default=None, description="URI local do artifact bruto.")
+    normalized_artifact_uri: str | None = Field(default=None, description="URI local do artifact normalizado.")
+    created_at: BrazilianDateTime = Field(description="Data e hora de registro do snapshot.")
+
+
+class IngestionMemberUpdateItem(BaseModel):
+    id: str = Field(description="ID do registro de membro da atualizacao pendente.")
+    pending_update_id: str = Field(description="ID da atualizacao pendente pai.")
+    status: str = Field(description="Status da analise do membro na atualizacao.")
+    change_category: str = Field(description="Categoria de mudanca detectada (new_member, modified, unchanged, removed).")
+    previous_member_sha256: str | None = Field(default=None, description="SHA-256 da versao anterior.")
+    current_member_sha256: str | None = Field(default=None, description="SHA-256 da versao atual detectada.")
+    previous_row_count: int | None = Field(default=None, description="Total de linhas da versao anterior.")
+    current_row_count: int | None = Field(default=None, description="Total de linhas da versao atual.")
+    detected_at: BrazilianDateTime | None = Field(default=None, description="Momento da deteccao da atualizacao.")
+
+
+class IngestionMemberExecutionTimelineItem(BaseModel):
+    id: str = Field(description="ID da execucao de sincronizacao do member.")
+    parent_execucao_id: str | None = Field(default=None, description="ID da execucao pai (ZIP).")
+    parent_arquivo: str | None = Field(default=None, description="Nome do arquivo ZIP pai.")
+    status: str = Field(description="Status persistido da execucao do member.")
+    tipo_execucao: str | None = Field(default=None, description="Tipo da execucao (ex: arquivo_membro).")
+    hash_arquivo: str | None = Field(default=None, description="Hash SHA-256 do arquivo processado.")
+    iniciada_em: BrazilianDateTime = Field(description="Data e hora de inicio da execucao.")
+    finalizada_em: BrazilianDateTime | None = Field(default=None, description="Data e hora de finalizacao da execucao.")
+    total_linhas_lidas: int = Field(default=0, description="Total de linhas lidas.")
+    total_inseridos: int = Field(default=0, description="Total de linhas que criaram registros novos.")
+    total_atualizados: int = Field(default=0, description="Total de linhas que atualizaram registros existentes.")
+    total_inalterados: int = Field(default=0, description="Total de linhas inalteradas.")
+    total_rejeitados: int = Field(default=0, description="Total de linhas rejeitadas para quarentena.")
+    mensagem_erro: str | None = Field(default=None, description="Mensagem de erro caso a execucao tenha falhado.")
+    run_id: str | None = Field(default=None, description="ID da run tecnica associada.")
+    run_status: str | None = Field(default=None, description="Status da run tecnica.")
+    run_phase: str | None = Field(default=None, description="Fase da run tecnica.")
+    run_state: str | None = Field(default=None, description="Estado operacional sintetico da run.")
+    next_action: str | None = Field(default=None, description="Proxima acao recomendada para o operador.")
+    quality_summary: dict[str, Any] | None = Field(default=None, description="Resumo de qualidade da run.")
+    phases: list[IngestionRunPhaseExecutionResumo] = Field(default_factory=list, description="Timeline das fases operacionais executadas.")
+
+
+class IngestionMemberQuarantineSummary(BaseModel):
+    total: int = Field(default=0, description="Total de itens de quarentena gerados por este arquivo.")
+    total_pendentes: int = Field(default=0, description="Total de itens de quarentena atualmente pendentes.")
+    total_resolvidos: int = Field(default=0, description="Total de itens de quarentena resolvidos.")
+    por_status: dict[str, int] = Field(default_factory=dict, description="Distribuicao quantitativa por status.")
+    por_motivo: dict[str, int] = Field(default_factory=dict, description="Distribuicao quantitativa por motivo de erro.")
+    recent_items: list[QuarantineItemResposta] = Field(default_factory=list, description="Amostra dos itens de quarentena mais recentes.")
+
+
+class IngestionMemberTimelineResposta(BaseModel):
+    member_name: str = Field(description="Nome canonico do arquivo member (ex: fre_cia_aberta_auditor_responsavel_2021.csv).")
+    tipo_fonte: str | None = Field(default=None, description="Tipo da fonte CVM associada (ex: fre, itr, dfp, fca).")
+    ano: int | None = Field(default=None, description="Ano de referencia do arquivo member.")
+    dataset: FonteDatasetResumoResposta | None = Field(default=None, description="Metadados do dataset no catalogo de fontes.")
+    total_execucoes: int = Field(default=0, description="Total de execucoes registradas para este member.")
+    total_alteracoes_campo: int = Field(default=0, description="Total de alteracoes de campos de negocio registradas no dominio a partir deste member.")
+    execucoes: list[IngestionMemberExecutionTimelineItem] = Field(default_factory=list, description="Linha do tempo de execucoes deste member, ordenadas por data de inicio decrescente.")
+    snapshots: list[IngestionMemberSnapshotItem] = Field(default_factory=list, description="Historico de snapshots e versoes do arquivo observadas nos pacotes baixados.")
+    updates: list[IngestionMemberUpdateItem] = Field(default_factory=list, description="Historico de deteccao de atualizacoes e drifts CVM para este member.")
+    quarentena: IngestionMemberQuarantineSummary = Field(default_factory=IngestionMemberQuarantineSummary, description="Resumo consolidado e itens recentes em quarentena originarios deste member.")

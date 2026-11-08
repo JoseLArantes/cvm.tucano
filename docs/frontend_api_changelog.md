@@ -9,6 +9,23 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-08 - Linha do Tempo e Rastreabilidade Completa de Arquivos Membro de Ingestao
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/members/{member_name}/timeline`
+
+### Comportamento entregue
+
+- **Auditoria e Rastreabilidade do Ciclo de Vida de Arquivo Membro (`member_name`)**:
+  - Disponibiliza visualizacao consolidada e cronologica de tudo o que ocorreu com um arquivo membro individual (ex.: `fre_cia_aberta_auditor_responsavel_2021.csv`).
+  - Identifica metadados de catalogo da fonte (`tipo_fonte`, `ano`, `dataset` com descricao, categoria e flag se e arquivo documento principal).
+  - Consolida historico de execucoes de sincronizacao (`ExecucaoSincronizacao` e `IngestionRun`), status operacional, contagem de linhas lidas/inseridas/rejeitadas e fases executadas (`stage`, `promote`, etc.) com timestamps, leases e tentativas.
+  - Exibe snapshots de artefatos (`SourceMemberSnapshot` e `SourceArtifactSnapshot`), com SHAs, tamanho, contagem de linhas e URIs locais/S3 (raw e normalizado).
+  - Exibe historico de deteccao de drifts/atualizacoes (`PendingUpdateMember`), apontando alteracoes de SHA e de volume entre versoes.
+  - Consolida itens em quarentena (`QuarantineItem`) associados ao arquivo membro, expondo metricas de pendencias e lista de ocorrencias recentes com codigo do erro e severidade.
+  - Informa total de alteracoes pontuais de campos de dominio auditadas (`HistoricoAlteracaoCampo`).
+
 ## 2026-11-08 - Resiliencia, Liveness e Eficiencia Operacional em Ingestao com 1 Worker
 
 ### Superficies afetadas

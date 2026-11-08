@@ -1,6 +1,8 @@
 import asyncio
 import hashlib
 import json
+import re
+from collections import defaultdict
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from secrets import token_urlsafe
@@ -57,6 +59,11 @@ from app.schemas.admin import (
     IngestionDispatchResponse,
     IngestionFailureAcknowledgement,
     IngestionFailureAcknowledgementRequest,
+    IngestionMemberExecutionTimelineItem,
+    IngestionMemberQuarantineSummary,
+    IngestionMemberSnapshotItem,
+    IngestionMemberTimelineResposta,
+    IngestionMemberUpdateItem,
     IngestionOperationRunPreview,
     IngestionOperationsResumo,
     IngestionRecovery,
@@ -113,7 +120,7 @@ from app.services.ingestion.scheduling import (
     marcar_agendamento_com_falha,
     novo_task_id,
 )
-from app.services.ingestion.source_registry import listar_datasets, listar_fontes, obter_fonte
+from app.services.ingestion.source_registry import dataset_por_member_name, listar_datasets, listar_fontes, obter_fonte
 from app.services.ingestion.staging import (
     create_cancellation_request,
     formatar_tamanho,
@@ -121,6 +128,7 @@ from app.services.ingestion.staging import (
     mark_cancellation_request_propagated,
     update_run_state,
 )
+from app.updates.models import PendingUpdate, PendingUpdateMember
 from app.worker.celery_app import celery_app
 from app.worker.tasks import (
     ingerir_sincronizacao_task,
@@ -3392,6 +3400,339 @@ def listar_ingestion_run_members(
     return ListaIngestionRunMembers(
         dados=dados,
         paginacao=Paginacao(pagina=pagina, tamanho_pagina=tamanho_pagina, total=total),
+    )
+
+
+@router.get(
+    "/members/{member_name}/timeline",
+    response_model=IngestionMemberTimelineResposta,
+    summary="Linha do tempo e ciclo de vida completo de um arquivo member",
+    description=(
+        "Disseca e consolida todo o ciclo de vida operacional de um arquivo member CSV especifico "
+        "(ex: `fre_cia_aberta_auditor_responsavel_2021.csv`). "
+        "A resposta unifica: "
+        "- Metadados e catalogo do dataset CVM associado; "
+        "- Historico completo de execucoes de sincronizacao e runs tecnicas (com status, contadores e timeline de fases); "
+        "- Snapshots de payload bruto e normalizado observados nos pacotes baixados (com SHAs e contagem de linhas); "
+        "- Historico de atualizacoes e drifts detectados entre versoes CVM (`pending_updates`); "
+        "- Resumo e amostra de itens de quarentena gerados a partir deste arquivo; "
+        "- Total de alteracoes em campos de dominio promovidos."
+    ),
+    responses={**_RESPOSTA_TOKEN_INVALIDO, 404: {"description": "Membro nao encontrado."}},
+    operation_id="obterTimelineMemberAdmin",
+)
+def obter_timeline_member(
+    member_name: Annotated[
+        str,
+        Path(
+            description="Nome canonico do arquivo member (ex: fre_cia_aberta_auditor_responsavel_2021.csv).",
+            min_length=1,
+            examples=["fre_cia_aberta_auditor_responsavel_2021.csv"],
+        ),
+    ],
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+) -> IngestionMemberTimelineResposta:
+    clean_member_name = member_name.strip()
+
+    # 1. Execucoes de sincronizacao do member
+    execucoes = list(
+        db.scalars(
+            select(ExecucaoSincronizacao)
+            .where(ExecucaoSincronizacao.arquivo == clean_member_name)
+            .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+        ).all()
+    )
+
+    parent_ids = list({ex.parent_execucao_id for ex in execucoes if ex.parent_execucao_id is not None})
+    parent_by_id: dict[UUID, ExecucaoSincronizacao] = {}
+    if parent_ids:
+        for p in db.scalars(select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id.in_(parent_ids))).all():
+            parent_by_id[p.id] = p
+
+    exec_ids = [ex.id for ex in execucoes]
+    run_by_exec_id: dict[UUID, IngestionRun] = {}
+    runs: list[IngestionRun] = []
+    if exec_ids:
+        runs = list(
+            db.scalars(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id.in_(exec_ids))
+                .order_by(IngestionRun.created_at.desc())
+            ).all()
+        )
+        for r in runs:
+            if r.execucao_sincronizacao_id and r.execucao_sincronizacao_id not in run_by_exec_id:
+                run_by_exec_id[r.execucao_sincronizacao_id] = r
+
+    phase_rows_by_run_id: dict[UUID, list[IngestionPhaseExecution]] = defaultdict(list)
+    if runs:
+        run_ids = [r.id for r in runs]
+        for ph in db.scalars(
+            select(IngestionPhaseExecution)
+            .where(IngestionPhaseExecution.ingestion_run_id.in_(run_ids))
+            .order_by(IngestionPhaseExecution.attempt.asc(), IngestionPhaseExecution.started_at.asc())
+        ).all():
+            phase_rows_by_run_id[ph.ingestion_run_id].append(ph)
+
+    operational_by_run_id = _bulk_build_runs_operational_fields(db, runs) if runs else {}
+
+    execucoes_items: list[IngestionMemberExecutionTimelineItem] = []
+    for ex in execucoes:
+        run = run_by_exec_id.get(ex.id)
+        op = operational_by_run_id.get(run.id, {}) if run else {}
+        parent_exec = parent_by_id.get(ex.parent_execucao_id) if ex.parent_execucao_id else None
+        phases = [
+            IngestionRunPhaseExecutionResumo(
+                id=str(item.id),
+                phase=item.phase,
+                status=item.status,
+                attempt=item.attempt,
+                task_id=item.task_id,
+                lease_owner=item.lease_owner,
+                started_at=item.started_at,
+                heartbeat_at=item.heartbeat_at,
+                finished_at=item.finished_at,
+                cancel_requested_at=item.cancel_requested_at,
+                cancelled_at=item.cancelled_at,
+                cancel_reason=item.cancel_reason,
+                error_type=item.error_type,
+                error_message=item.error_message,
+                error_retryable=item.error_retryable,
+                input_artifact_uri=item.input_artifact_uri,
+                output_artifact_uri=item.output_artifact_uri,
+                metrics=item.metrics,
+            )
+            for item in phase_rows_by_run_id.get(run.id, [])
+        ] if run else []
+
+        execucoes_items.append(
+            IngestionMemberExecutionTimelineItem(
+                id=str(ex.id),
+                parent_execucao_id=str(ex.parent_execucao_id) if ex.parent_execucao_id else None,
+                parent_arquivo=parent_exec.arquivo if parent_exec else None,
+                status=ex.status,
+                tipo_execucao=ex.tipo_execucao,
+                hash_arquivo=ex.hash_arquivo,
+                iniciada_em=ex.iniciada_em,
+                finalizada_em=ex.finalizada_em,
+                total_linhas_lidas=ex.total_linhas_lidas or 0,
+                total_inseridos=ex.total_inseridos or 0,
+                total_atualizados=ex.total_atualizados or 0,
+                total_inalterados=ex.total_inalterados or 0,
+                total_rejeitados=ex.total_rejeitados or 0,
+                mensagem_erro=ex.mensagem_erro,
+                run_id=str(run.id) if run else None,
+                run_status=run.status if run else None,
+                run_phase=run.phase if run else None,
+                run_state=op.get("state") if run else None,
+                next_action=op.get("next_action") if run else None,
+                quality_summary=run.quality_summary if run else None,
+                phases=phases,
+            )
+        )
+
+    # 2. Snapshots do member
+    snapshot_rows = db.execute(
+        select(SourceMemberSnapshot, SourceArtifactSnapshot.ingestion_run_id)
+        .outerjoin(SourceArtifactSnapshot, SourceArtifactSnapshot.id == SourceMemberSnapshot.artifact_snapshot_id)
+        .where(SourceMemberSnapshot.member_name == clean_member_name)
+        .order_by(SourceMemberSnapshot.created_at.desc())
+    ).all()
+
+    snapshots_items: list[IngestionMemberSnapshotItem] = []
+    seen_snapshot_shas: set[str] = set()
+    for snap, s_run_id in snapshot_rows:
+        seen_snapshot_shas.add(snap.member_sha256)
+        snapshots_items.append(
+            IngestionMemberSnapshotItem(
+                id=str(snap.id),
+                artifact_snapshot_id=str(snap.artifact_snapshot_id) if snap.artifact_snapshot_id else None,
+                ingestion_run_id=str(s_run_id) if s_run_id else None,
+                member_sha256=snap.member_sha256,
+                member_size_bytes=snap.raw_artifact_size_bytes,
+                row_count=snap.row_count,
+                schema_status=snap.schema_status,
+                schema_message=snap.schema_message,
+                lifecycle_status=snap.lifecycle_status,
+                raw_artifact_uri=snap.raw_artifact_uri,
+                normalized_artifact_uri=snap.normalized_artifact_uri,
+                created_at=snap.created_at,
+            )
+        )
+
+    file_members = db.execute(
+        select(IngestionFileMember, IngestionFile.ingestion_run_id)
+        .join(IngestionFile, IngestionFile.id == IngestionFileMember.ingestion_file_id)
+        .where(IngestionFileMember.member_name == clean_member_name)
+        .order_by(IngestionFileMember.created_at.desc())
+    ).all()
+
+    for f_mem, f_run_id in file_members:
+        if f_mem.member_sha256 not in seen_snapshot_shas:
+            snapshots_items.append(
+                IngestionMemberSnapshotItem(
+                    id=str(f_mem.id),
+                    artifact_snapshot_id=None,
+                    ingestion_run_id=str(f_run_id) if f_run_id else None,
+                    member_sha256=f_mem.member_sha256,
+                    member_size_bytes=f_mem.member_size_bytes,
+                    row_count=f_mem.row_count,
+                    schema_status=f_mem.schema_status,
+                    schema_message=f_mem.schema_message,
+                    lifecycle_status=None,
+                    raw_artifact_uri=None,
+                    normalized_artifact_uri=None,
+                    created_at=f_mem.created_at,
+                )
+            )
+
+    # 3. Updates / Drifts
+    update_rows = db.execute(
+        select(PendingUpdateMember, PendingUpdate.detection_timestamp)
+        .outerjoin(PendingUpdate, PendingUpdate.id == PendingUpdateMember.pending_update_id)
+        .where(PendingUpdateMember.member_name == clean_member_name)
+        .order_by(PendingUpdate.detection_timestamp.desc().nullslast())
+    ).all()
+
+    updates_items: list[IngestionMemberUpdateItem] = [
+        IngestionMemberUpdateItem(
+            id=str(up_mem.id),
+            pending_update_id=str(up_mem.pending_update_id),
+            status=up_mem.status,
+            change_category=up_mem.change_category,
+            previous_member_sha256=up_mem.previous_member_sha256,
+            current_member_sha256=up_mem.current_member_sha256,
+            previous_row_count=up_mem.previous_row_count,
+            current_row_count=up_mem.current_row_count,
+            detected_at=det_ts,
+        )
+        for up_mem, det_ts in update_rows
+    ]
+
+    # 4. Quarentena
+    quarantine_items = list(
+        db.scalars(
+            select(QuarantineItem)
+            .where(QuarantineItem.arquivo_origem == clean_member_name)
+            .order_by(QuarantineItem.created_at.desc())
+            .limit(10)
+        ).all()
+    )
+    quarantine_total = int(
+        db.scalar(
+            select(func.count(QuarantineItem.id))
+            .where(QuarantineItem.arquivo_origem == clean_member_name)
+        ) or 0
+    )
+    status_counts: dict[str, int] = dict(
+        db.execute(
+            select(QuarantineItem.status, func.count(QuarantineItem.id))
+            .where(QuarantineItem.arquivo_origem == clean_member_name)
+            .group_by(QuarantineItem.status)
+        ).all()
+    )
+    motivo_counts: dict[str, int] = dict(
+        db.execute(
+            select(QuarantineItem.motivo_codigo, func.count(QuarantineItem.id))
+            .where(QuarantineItem.arquivo_origem == clean_member_name)
+            .group_by(QuarantineItem.motivo_codigo)
+        ).all()
+    )
+
+    quarentena_summary = IngestionMemberQuarantineSummary(
+        total=quarantine_total,
+        total_pendentes=status_counts.get("pendente", 0),
+        total_resolvidos=(status_counts.get("resolvido_auto", 0) + status_counts.get("resolvido_manual", 0)),
+        por_status=status_counts,
+        por_motivo=motivo_counts,
+        recent_items=[
+            QuarantineItemResposta(
+                id=str(item.id),
+                ingestion_run_id=None if item.ingestion_run_id is None else str(item.ingestion_run_id),
+                ingestion_row_id=str(item.ingestion_row_id),
+                arquivo_origem=item.arquivo_origem,
+                ano_origem=item.ano_origem,
+                linha_origem=item.linha_origem,
+                row_kind=item.row_kind,
+                status=item.status,
+                motivo_codigo=item.motivo_codigo,
+                severidade=item.severidade,
+                reparavel=item.reparavel,
+                tentativas_reprocessamento=item.tentativas_reprocessamento,
+                diagnostico=item.diagnostico,
+            )
+            for item in quarantine_items
+        ],
+    )
+
+    # 5. Total alteracoes de campos promovidos
+    total_alteracoes = int(
+        db.scalar(
+            select(func.count(HistoricoAlteracaoCampo.id))
+            .where(HistoricoAlteracaoCampo.arquivo_origem == clean_member_name)
+        ) or 0
+    )
+
+    # 6. Resolucao de metadados do dataset
+    tipo_fonte = execucoes[0].tipo_fonte if execucoes else None
+    ano = execucoes[0].ano if execucoes else None
+
+    if ano is None:
+        m = re.search(r"_(\d{4})\.csv$", clean_member_name)
+        if m:
+            ano = int(m.group(1))
+
+    if tipo_fonte is None:
+        prefix = clean_member_name.split("_")[0].lower()
+        if prefix in {"dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"}:
+            tipo_fonte = prefix
+        elif clean_member_name.startswith("cad_"):
+            tipo_fonte = "cadastro"
+
+    dataset_resumo = None
+    if tipo_fonte and ano:
+        ds = dataset_por_member_name(tipo_fonte, clean_member_name, ano)
+        if ds is not None:
+            dataset_resumo = _resumo_dataset(ds)
+
+    if dataset_resumo is None:
+        for f in listar_fontes():
+            for ds in f.datasets:
+                matched = False
+                if ano is not None:
+                    try:
+                        if ds.render_member_name(ano=ano) == clean_member_name:
+                            matched = True
+                    except Exception:
+                        pass
+                if ds.member_name_template == clean_member_name:
+                    matched = True
+                if matched:
+                    if tipo_fonte is None:
+                        tipo_fonte = f.fonte
+                    dataset_resumo = _resumo_dataset(ds)
+                    break
+            if dataset_resumo is not None:
+                break
+
+    if not execucoes and not snapshots_items and not updates_items and quarantine_total == 0 and dataset_resumo is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Member '{clean_member_name}' nao encontrado no catalogo ou historico de execucoes.",
+        )
+
+    return IngestionMemberTimelineResposta(
+        member_name=clean_member_name,
+        tipo_fonte=tipo_fonte,
+        ano=ano,
+        dataset=dataset_resumo,
+        total_execucoes=len(execucoes_items),
+        total_alteracoes_campo=total_alteracoes,
+        execucoes=execucoes_items,
+        snapshots=snapshots_items,
+        updates=updates_items,
+        quarentena=quarentena_summary,
     )
 
 

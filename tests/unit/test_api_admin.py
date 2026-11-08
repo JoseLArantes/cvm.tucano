@@ -2248,3 +2248,238 @@ def test_admin_child_waiting_for_active_parent_reports_wait_not_operator_action(
     assert ops_payload["recoverable_runs"] == []
     assert ops_payload["action_counts"].get("start_ingestion", 0) == 0
 
+
+def test_obter_timeline_member_retorna_404_para_membro_desconhecido(client: TestClient) -> None:
+    res = client.get("/ingestion/members/arquivo_desconhecido_totalmente_inexistente.csv/timeline")
+    assert res.status_code == 404
+    assert "nao encontrado" in res.json()["detail"]
+
+
+def test_obter_timeline_member_sucesso(client: TestClient, db_session: Session) -> None:
+    from app.updates.models import PendingUpdate, PendingUpdateMember
+
+    now = datetime.now(UTC)
+    member_name = "fre_cia_aberta_auditor_responsavel_2021.csv"
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    parent_exec = ExecucaoSincronizacao(
+        id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        arquivo="fre_cia_aberta_2021.zip",
+        url="http://exemplo/fre-2021.zip",
+        status="sucesso",
+        tipo_execucao="arquivo_zip",
+        iniciada_em=now - timedelta(minutes=10),
+        finalizada_em=now - timedelta(minutes=5),
+    )
+    parent_run = IngestionRun(
+        id=parent_run_id,
+        execucao_sincronizacao_id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        status="sucesso",
+        phase="complete",
+        started_at=now - timedelta(minutes=10),
+        finished_at=now - timedelta(minutes=5),
+    )
+    child_exec = ExecucaoSincronizacao(
+        id=child_id,
+        parent_execucao_id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        arquivo=member_name,
+        url="http://exemplo/fre-2021/auditor",
+        status="sucesso",
+        tipo_execucao="arquivo_membro",
+        hash_arquivo="abc123sha256",
+        iniciada_em=now - timedelta(minutes=8),
+        finalizada_em=now - timedelta(minutes=6),
+        total_linhas_lidas=150,
+        total_inseridos=100,
+        total_atualizados=40,
+        total_inalterados=5,
+        total_rejeitados=5,
+    )
+    child_run = IngestionRun(
+        id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        tipo_fonte="fre",
+        ano=2021,
+        status="sucesso",
+        phase="complete",
+        started_at=now - timedelta(minutes=8),
+        finished_at=now - timedelta(minutes=6),
+        quality_summary={"rows_read": 150, "rows_promoted": 140},
+    )
+    phase1 = IngestionPhaseExecution(
+        ingestion_run_id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        phase="stage",
+        status="succeeded",
+        attempt=1,
+        task_id="celery-task-1",
+        lease_owner="worker-1",
+        started_at=now - timedelta(minutes=8),
+        finished_at=now - timedelta(minutes=7),
+    )
+    phase2 = IngestionPhaseExecution(
+        ingestion_run_id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        phase="promote",
+        status="succeeded",
+        attempt=1,
+        task_id="celery-task-1",
+        lease_owner="worker-1",
+        started_at=now - timedelta(minutes=7),
+        finished_at=now - timedelta(minutes=6),
+    )
+
+    art_snap = SourceArtifactSnapshot(
+        id=uuid.uuid4(),
+        ingestion_run_id=parent_run_id,
+        tipo_fonte="fre",
+        ano=2021,
+        resource_url="http://exemplo/fre-2021.zip",
+        source_filename="fre_cia_aberta_2021.zip",
+        storage_uri="/storage/fre_2021.zip",
+        content_sha256="zipsha256",
+        status="sucesso",
+    )
+    mem_snap = SourceMemberSnapshot(
+        id=uuid.uuid4(),
+        artifact_snapshot_id=art_snap.id,
+        member_name=member_name,
+        member_sha256="abc123sha256",
+        raw_artifact_size_bytes=10240,
+        row_count=150,
+        schema_status="ok",
+        lifecycle_status="processed",
+        raw_artifact_uri="/storage/raw/fre_auditor.csv",
+        normalized_artifact_uri="/storage/norm/fre_auditor.csv",
+    )
+
+    pending_update = PendingUpdate(
+        id=uuid.uuid4(),
+        fonte="fre",
+        ano=2021,
+        status="applied",
+        artifact_url="http://exemplo/fre-2021.zip",
+        detection_timestamp=now - timedelta(days=1),
+    )
+    pending_member = PendingUpdateMember(
+        id=uuid.uuid4(),
+        pending_update_id=pending_update.id,
+        member_name=member_name,
+        change_category="modified",
+        previous_member_sha256="oldsha123",
+        current_member_sha256="abc123sha256",
+        previous_row_count=145,
+        current_row_count=150,
+        status="applied",
+    )
+
+    ing_file = IngestionFile(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        source_url="http://exemplo/fre-2021.zip",
+        source_filename="fre_cia_aberta_2021.zip",
+        content_sha256="zipsha256",
+        content_length_bytes=10240,
+    )
+    file_member = IngestionFileMember(
+        id=uuid.uuid4(),
+        ingestion_file_id=ing_file.id,
+        member_name=member_name,
+        member_sha256="abc123sha256",
+        member_size_bytes=10240,
+        delimiter=";",
+        row_count=150,
+        schema_status="ok",
+    )
+
+    row = IngestionRow(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        ingestion_file_member_id=file_member.id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+        linha_origem=42,
+        row_kind="fre_auditor_responsavel",
+        raw_data={"NOME": "Auditor Teste"},
+        raw_hash="rawhash123",
+        validation_status="invalid",
+    )
+    quarantine_item = QuarantineItem(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        ingestion_row_id=row.id,
+        execucao_sincronizacao_id=child_id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+        linha_origem=42,
+        row_kind="fre_auditor_responsavel",
+        status="pendente",
+        motivo_codigo="companhia_nao_encontrada",
+        severidade="error",
+        reparavel=True,
+    )
+    hist_alteracao = HistoricoAlteracaoCampo(
+        id=uuid.uuid4(),
+        entidade="fre_auditor",
+        entidade_id=uuid.uuid4(),
+        campo="nome_auditor",
+        valor_anterior="Nome Antigo",
+        valor_novo="Nome Novo",
+        execucao_sincronizacao_id=child_id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+    )
+
+    db_session.add_all([
+        parent_exec, parent_run, child_exec, child_run, phase1, phase2,
+        art_snap, mem_snap, pending_update, pending_member,
+        ing_file, file_member, row, quarantine_item, hist_alteracao,
+    ])
+    db_session.commit()
+
+    res = client.get(f"/ingestion/members/{member_name}/timeline")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["member_name"] == member_name
+    assert data["tipo_fonte"] == "fre"
+    assert data["ano"] == 2021
+    assert data["dataset"] is not None
+    assert data["total_execucoes"] == 1
+    assert data["total_alteracoes_campo"] == 1
+
+    exec_item = data["execucoes"][0]
+    assert exec_item["id"] == str(child_id)
+    assert exec_item["parent_arquivo"] == "fre_cia_aberta_2021.zip"
+    assert exec_item["total_linhas_lidas"] == 150
+    assert exec_item["total_inseridos"] == 100
+    assert len(exec_item["phases"]) == 2
+    assert exec_item["phases"][0]["phase"] == "stage"
+
+    assert len(data["snapshots"]) >= 1
+    snap = data["snapshots"][0]
+    assert snap["member_sha256"] == "abc123sha256"
+    assert snap["lifecycle_status"] == "processed"
+    assert snap["raw_artifact_uri"] == "/storage/raw/fre_auditor.csv"
+
+    assert len(data["updates"]) == 1
+    up = data["updates"][0]
+    assert up["change_category"] == "modified"
+    assert up["previous_member_sha256"] == "oldsha123"
+
+    quar = data["quarentena"]
+    assert quar["total"] == 1
+    assert quar["total_pendentes"] == 1
+    assert len(quar["recent_items"]) == 1
+    assert quar["recent_items"][0]["motivo_codigo"] == "companhia_nao_encontrada"
+
+
