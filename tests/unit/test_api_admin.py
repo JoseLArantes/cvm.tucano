@@ -1097,6 +1097,20 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
     assert payload["materialization_gate"]["status"] in {"green", "red"}
 
 
+def test_admin_operations_resiliente_quando_broker_indisponivel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_inspect(timeout: float = 1.0) -> Any:
+        raise ConnectionError("Error -2 connecting to cvm_redis:6379. Name or service not known.")
+
+    monkeypatch.setattr("app.api.routers.admin.celery_app.control.inspect", _fail_inspect)
+
+    resposta = client.get("/ingestion/operations")
+    assert resposta.status_code == 200
+    payload = resposta.json()
+    assert payload["task_counts"]["active_total"] == 0
+    assert payload["task_counts"]["ingestion_active"] == 0
+    assert all(q["state"] == "without_worker" for q in payload["queue_health"])
+
+
 def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient, db_session: Session) -> None:
     agora = datetime.now(UTC)
     execucao_id = uuid.uuid4()

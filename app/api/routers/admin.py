@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections import defaultdict
 from collections.abc import Sequence
@@ -154,6 +155,7 @@ from app.worker.tasks import (
 )
 
 router = APIRouter(prefix="/ingestion")
+logger = logging.getLogger(__name__)
 
 
 def _format_sse(*, event_id: str, event_type: str, payload: dict[str, Any]) -> str:
@@ -1157,8 +1159,11 @@ def _cancelar_sincronizacao_por_seletor(
 
     revogacao_solicitada = False
     for task_id in task_ids_para_revogar:
-        celery_app.control.revoke(task_id, terminate=terminar_imediatamente, signal="SIGTERM")
-        revogacao_solicitada = True
+        try:
+            celery_app.control.revoke(task_id, terminate=terminar_imediatamente, signal="SIGTERM")
+            revogacao_solicitada = True
+        except Exception as exc:
+            logger.warning("Falha ao propagar revogacao da task %s no Celery broker: %s", task_id, exc)
     for request in cancellation_requests:
         if revogacao_solicitada:
             mark_cancellation_request_propagated(
@@ -3911,10 +3916,17 @@ def obter_ingestion_operations(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
 ) -> IngestionOperationsResumo:
-    inspect = celery_app.control.inspect(timeout=1.0)
-    active = inspect.active() or {}
-    reserved = inspect.reserved() or {}
-    scheduled = inspect.scheduled() or {}
+    active: dict[str, Any] = {}
+    reserved: dict[str, Any] = {}
+    scheduled: dict[str, Any] = {}
+    try:
+        inspect = celery_app.control.inspect(timeout=1.0)
+        if inspect is not None:
+            active = inspect.active() or {}
+            reserved = inspect.reserved() or {}
+            scheduled = inspect.scheduled() or {}
+    except Exception as exc:
+        logger.warning("Falha ao inspecionar workers Celery no broker: %s", exc)
 
     candidate_runs = list(
         db.scalars(
