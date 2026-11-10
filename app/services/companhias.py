@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 
-from sqlalchemy import Select, case, func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
@@ -79,7 +79,7 @@ def listar_companhias(
     situacao_registro: str | None = None,
     ordenar: str | None = "ativa_nome",
 ) -> ListaCompanhiasResposta:
-    query: Select[tuple[Companhia]] = select(Companhia)
+    query = select(Companhia)
     query_total = select(func.count()).select_from(Companhia)
 
     if cnpj_companhia:
@@ -115,7 +115,7 @@ def listar_companhias(
 
     total = db.scalar(query_total) or 0
     offset = (pagina - 1) * tamanho_pagina
-    itens = db.execute(query.offset(offset).limit(tamanho_pagina)).scalars().all()
+    itens = list(db.scalars(query.offset(offset).limit(tamanho_pagina)).all())
 
     logos_por_cnpj = obter_logo_urls_por_cnpj(db, [item.cnpj_companhia for item in itens if item.cnpj_companhia])
 

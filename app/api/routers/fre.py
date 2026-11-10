@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Any
 
@@ -328,7 +329,7 @@ def listar_documentos_fre(
         campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "codigo_cvm", "id_documento"},
     )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaFreDocumentosResposta(
         dados=[FreDocumentoResposta.model_validate(item) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
@@ -384,7 +385,7 @@ def _lista_fre_generica(
                 query_total = query_total.where(_col(modelo, campo) == valor)
     query = _aplicar_ordenacao(query, modelo=modelo, ordenar_por=ordenar_por, campos_permitidos=campos_permitidos)
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return [schema.model_validate(item) for item in itens], total
 
 

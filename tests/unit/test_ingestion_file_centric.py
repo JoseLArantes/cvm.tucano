@@ -18,7 +18,7 @@ from app.services.ingestion.file_centric import (
 )
 
 
-def test_build_and_parse_ids():
+def test_build_and_parse_ids() -> None:
     # Annual package file
     fid = build_file_id("dfp", 2022, "dfp_cia_aberta_2022.zip")
     assert fid == "dfp:2022:dfp_cia_aberta_2022.zip"
@@ -43,7 +43,7 @@ def test_build_and_parse_ids():
     assert mname == "dfp_cia_aberta_BPA_con_2022.csv"
 
 
-def test_cenario_1_zip_com_membro_obrigatorio_faltante(client: TestClient, db_session: Session):
+def test_cenario_1_zip_com_membro_obrigatorio_faltante(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     parent_id = uuid.uuid4()
     run_id = uuid.uuid4()
@@ -105,7 +105,7 @@ def test_cenario_1_zip_com_membro_obrigatorio_faltante(client: TestClient, db_se
     assert data["falha_relevante"]["codigo_erro"] == "REQUIRED_MEMBER_MISSING"
 
 
-def test_cenario_2_atualizacao_falha_com_versao_anterior_integra(client: TestClient, db_session: Session):
+def test_cenario_2_atualizacao_falha_com_versao_anterior_integra(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
 
     # Versao 1: sucesso completo
@@ -187,7 +187,7 @@ def test_cenario_2_atualizacao_falha_com_versao_anterior_integra(client: TestCli
     assert data["falha_relevante"]["mensagem_erro"] == "Erro durante promocao do novo lote CVM."
 
 
-def test_cenario_3_falha_antes_do_download(client: TestClient, db_session: Session):
+def test_cenario_3_falha_antes_do_download(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     exec_id = uuid.uuid4()
 
@@ -222,7 +222,7 @@ def test_cenario_3_falha_antes_do_download(client: TestClient, db_session: Sessi
     assert len(data["membros"]) == 0
 
 
-def test_cenario_4_espera_automatica_awaiting_parent_window(client: TestClient, db_session: Session):
+def test_cenario_4_espera_automatica_awaiting_parent_window(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
@@ -262,7 +262,7 @@ def test_cenario_4_espera_automatica_awaiting_parent_window(client: TestClient, 
     assert data["requires_operator"] is False
 
 
-def test_cenario_5_e_6_replay_que_restaura_e_que_nao_restaura(client: TestClient, db_session: Session):
+def test_cenario_5_e_6_replay_que_restaura_e_que_nao_restaura(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     # Caso 5: Replay que restaura com evidencia
     run1_id = uuid.uuid4()
@@ -349,7 +349,7 @@ def test_cenario_5_e_6_replay_que_restaura_e_que_nao_restaura(client: TestClient
     assert data2["falha_relevante"]["resolucao"] == "aberta"
 
 
-def test_cenario_7_falha_reconhecida_sem_reparo(client: TestClient, db_session: Session):
+def test_cenario_7_falha_reconhecida_sem_reparo(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     run_id = uuid.uuid4()
     exec_id = uuid.uuid4()
@@ -398,7 +398,7 @@ def test_cenario_7_falha_reconhecida_sem_reparo(client: TestClient, db_session: 
     assert data["integridade_em_uso"] in ("parcial", "nao_aplicado")
 
 
-def test_cenario_8_sucesso_posterior_em_outra_versao(client: TestClient, db_session: Session):
+def test_cenario_8_sucesso_posterior_em_outra_versao(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
 
     # Versao 1 falhou
@@ -469,7 +469,7 @@ def test_cenario_8_sucesso_posterior_em_outra_versao(client: TestClient, db_sess
     assert "sha_v2_sadia" in versoes_shas
 
 
-def test_cenario_9_membros_homonimos_em_pacotes_diferentes(client: TestClient, db_session: Session):
+def test_cenario_9_membros_homonimos_em_pacotes_diferentes(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
 
     # Pacote 2021
@@ -549,7 +549,7 @@ def test_cenario_9_membros_homonimos_em_pacotes_diferentes(client: TestClient, d
     assert data2022["execucoes"][0]["status"] == "falha"
 
 
-def test_cenario_10_cadastro_sem_ano(client: TestClient, db_session: Session):
+def test_cenario_10_cadastro_sem_ano(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
 
     # Cadastro global: sem ano ficticio, sem ZIP, sem membro artificial
@@ -582,7 +582,7 @@ def test_cenario_10_cadastro_sem_ano(client: TestClient, db_session: Session):
     assert data["integridade_em_uso"] == "completo"
 
 
-def test_paginacao_e_filtros_server_side(client: TestClient, db_session: Session):
+def test_paginacao_e_filtros_server_side(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
 
     # Cria múltiplos arquivos de diferentes fontes e anos
@@ -633,7 +633,7 @@ def test_paginacao_e_filtros_server_side(client: TestClient, db_session: Session
     assert "total_arquivos" in data_datas
 
 
-def test_listar_arquivos_membros_e_detalhe_direto(client: TestClient, db_session: Session):
+def test_listar_arquivos_membros_e_detalhe_direto(client: TestClient, db_session: Session) -> None:
     now = datetime.now(UTC)
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()

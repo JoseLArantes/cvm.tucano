@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -69,7 +70,7 @@ def _listar(
     coluna_ordem = getattr(modelo, ordem, None)
     if coluna_ordem is not None:
         query = query.order_by(coluna_ordem.desc())
-    itens = db.execute(query.limit(limite)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.limit(limite)).scalars().all()
     total = db.scalar(query_total) or 0
     return [schema.model_validate(item) for item in itens], total
 

@@ -477,6 +477,10 @@ def _preload_materialization_relations(
     return chunks, items, campaigns
 
 
+def _to_int(val: Any) -> int:
+    return int(val or 0)
+
+
 def _materializacao_task_count(
     payload: dict[str, Any] | None,
     *,
@@ -938,21 +942,21 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         )
     ).one()
     queued_chunks, running_chunks, stale_chunks = chunk_counts
-    pending_summaries = list(
+    pending_summaries: list[Any] = list(
         db.scalars(
             select(AnaliseMaterializacaoCampanha.summary).where(AnaliseMaterializacaoCampanha.status == "pending")
         ).all()
     )
-    waiting_for_gate_campaigns = sum(
-        1
+    waiting_for_gate_campaigns = len([
+        summary
         for summary in pending_summaries
         if isinstance(summary, dict) and summary.get("wait_reason") in {"INGESTION_ACTIVE", "MANUAL_PAUSE"}
-    )
-    recovering_campaigns = sum(
-        1
+    ])
+    recovering_campaigns = len([
+        summary
         for summary in pending_summaries
         if isinstance(summary, dict) and summary.get("wait_reason") in {"STALE_CHUNK_RECOVERED", "STALE_CHUNK_DETECTED"}
-    )
+    ])
     pending_campaign_rows = list(
         db.scalars(
             select(AnaliseMaterializacaoCampanha)
@@ -1078,10 +1082,10 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         running_full_executions=running_full_executions,
         running_incremental_executions=running_incremental_executions,
         lowest_running_invalidated_from=lowest_running_invalidated_from,
-        pending_campaigns=int(pending_campaigns or 0),
-        running_campaigns=int(running_campaigns or 0),
-        waiting_for_gate_campaigns=int(waiting_for_gate_campaigns or 0),
-        recovering_campaigns=int(recovering_campaigns or 0),
+        pending_campaigns=_to_int(pending_campaigns),
+        running_campaigns=_to_int(running_campaigns),
+        waiting_for_gate_campaigns=_to_int(waiting_for_gate_campaigns),
+        recovering_campaigns=_to_int(recovering_campaigns),
         recoverable_pending_campaigns=len(recoverable_campaign_ids),
         undispatched_stuck_campaigns=len(undispatched_campaigns),
         oldest_undispatched_campaign_created_at=oldest_undispatched_campaign.created_at if oldest_undispatched_campaign is not None else None,
@@ -1089,14 +1093,14 @@ def monitorar_materializacoes_analiticas(db: DbSession) -> AnaliseMaterializacao
         recoverable_campaign_ids=recoverable_campaign_ids[:10],
         last_pending_recovery_sweep_at=last_pending_recovery.get("triggered_at"),
         last_pending_recovery_sweep_summary=last_pending_recovery if isinstance(last_pending_recovery, dict) else {},
-        pending_items=int(pending_items or 0),
-        running_items=int(running_items or 0),
-        success_items=int(success_items or 0),
-        failed_items=int(failed_items or 0),
-        skipped_items=int(skipped_items or 0),
-        queued_chunks=int(queued_chunks or 0),
-        running_chunks=int(running_chunks or 0),
-        stale_chunks=int(stale_chunks or 0),
+        pending_items=_to_int(pending_items),
+        running_items=_to_int(running_items),
+        success_items=_to_int(success_items),
+        failed_items=_to_int(failed_items),
+        skipped_items=_to_int(skipped_items),
+        queued_chunks=_to_int(queued_chunks),
+        running_chunks=_to_int(running_chunks),
+        stale_chunks=_to_int(stale_chunks),
         stale_item_count=stale_item_count,
         oldest_running_started_at=oldest_started_at,
         longest_running_elapsed_seconds=longest_elapsed,
