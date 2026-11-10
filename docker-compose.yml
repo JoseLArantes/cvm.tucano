@@ -2,7 +2,7 @@ services:
   cvm_api:
     build:
       context: .
-      target: development    
+      target: development
     container_name: cvm_api
     command: uvicorn app.main:app --host 0.0.0.0 --port 8007 --workers ${API_WORKERS:-2}
     ports:
@@ -11,4 +11,4 @@ services:
       - .env
     volumes:
       - .:/app
-      - /Volumes/SSD-1T/TEMP_DATA_TUCANO:/Volumes/SSD-1T/TEMP_DATA_TUCANO
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data

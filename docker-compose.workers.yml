@@ -11,6 +11,7 @@ services:
     cpus: ${WORKER_CPUS:-2.0}
     volumes:
       - .:/app
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data
     deploy:
       replicas: ${WORKER_REPLICAS:-2}
     depends_on:
@@ -29,6 +30,7 @@ services:
     cpus: ${ANALISE_MATERIALIZACAO_WORKER_CPUS:-2.0}
     volumes:
       - .:/app
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data
     deploy:
       replicas: ${ANALISE_MATERIALIZACAO_WORKER_REPLICAS:-3}
     depends_on:
