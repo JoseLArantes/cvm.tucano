@@ -37,13 +37,107 @@ class SetorTaxonomiaResposta(BaseModel):
 class SetorVersaoResposta(BaseModel):
     model_config = ConfigDict(extra="forbid", from_attributes=True)
 
-    versao: int
-    checksum_fonte: str | None
-    checksum_semantico: str
-    referencia_fonte: str | None
-    observada_em: datetime | None
-    publicada_em: datetime
-    resumo: dict[str, object]
+    versao: int = Field(description="Número sequencial da publicação dentro da taxonomia.")
+    checksum_fonte: str | None = Field(
+        description="SHA-256 dos bytes do arquivo importado; pode mudar sem gerar nova versão semântica."
+    )
+    checksum_semantico: str = Field(
+        description="SHA-256 dos conceitos, nomes, níveis e relações hierárquicas publicados."
+    )
+    referencia_fonte: str | None = Field(description="URL ou referência informada para a origem da publicação.")
+    observada_em: datetime | None = Field(
+        description="Instante representado pela data da fonte, à meia-noite UTC; nulo se a data não foi informada."
+    )
+    publicada_em: datetime = Field(description="Instante UTC em que a versão foi publicada pelo sistema.")
+    resumo: dict[str, object] = Field(description="Contagens e metadados operacionais da publicação.")
+
+
+class SetorTaxonomiaImportacaoResumoResposta(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    referencia_fonte: str | None = Field(
+        default=None,
+        description="URL ou identificador da fonte preenchido no multipart; usa a página da B3 quando omitido.",
+    )
+    observacao: str | None = Field(default=None, description="Nota operacional registrada pelo responsável.")
+    setores: int | None = Field(default=None, ge=0, description="Quantidade de nós de nível setor reconhecidos.")
+    subsetores: int | None = Field(default=None, ge=0, description="Quantidade de nós de nível subsetor reconhecidos.")
+    segmentos: int | None = Field(default=None, ge=0, description="Quantidade de nós de nível segmento reconhecidos.")
+    classificacoes_de_emissores_importadas: int | None = Field(
+        default=None,
+        ge=0,
+        description="Classificações de emissores criadas pelo arquivo. Para esta operação, sempre zero.",
+    )
+    nos_publicados: int | None = Field(default=None, ge=0, description="Total de conceitos publicados na versão.")
+    mudancas: int | None = Field(default=None, ge=0, description="Mudanças auditadas na versão publicada.")
+
+
+class SetorTaxonomiaImportacaoResposta(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        from_attributes=True,
+        json_schema_extra={
+            "examples": [
+                {
+                    "id": "0c8df70a-33c6-4c1a-b690-8dd2a49c615b",
+                    "taxonomia": "b3",
+                    "nome_arquivo": "ClassifSetorial.xlsx",
+                    "checksum_sha256": "342a9966b1cafe0ee226de66b398a9288c5ad9ba93c40cbc2d2bc3354ba454aa",
+                    "tamanho_bytes": 16149,
+                    "data_atualizacao_fonte": "2026-11-10",
+                    "importado_por": "token_sistema",
+                    "status": "sucesso",
+                    "versao_taxonomia": 1,
+                    "resumo": {
+                        "referencia_fonte": (
+                            "https://www.b3.com.br/pt_br/produtos-e-servicos/negociacao/renda-variavel/"
+                            "acoes/consultas/classificacao-setorial/"
+                        ),
+                        "observacao": "Arquivo baixado e conferido manualmente",
+                        "setores": 11,
+                        "subsetores": 45,
+                        "segmentos": 86,
+                        "classificacoes_de_emissores_importadas": 0,
+                        "nos_publicados": 142,
+                        "mudancas": 142,
+                    },
+                    "erro": None,
+                    "importada_em": "2026-11-10T12:00:00Z",
+                    "concluida_em": "2026-11-10T12:00:01Z",
+                }
+            ]
+        },
+    )
+
+    id: uuid.UUID = Field(description="UUID opaco da tentativa de importação para rastreamento e suporte.")
+    taxonomia: str = Field(description="Identificador da taxonomia de destino; nesta operação, `b3`.")
+    nome_arquivo: str = Field(description="Nome original recebido no upload, sem diretórios do cliente.")
+    checksum_sha256: str = Field(
+        pattern="^[a-f0-9]{64}$",
+        description="SHA-256 hexadecimal dos bytes exatos do arquivo XLSX recebido.",
+    )
+    tamanho_bytes: int = Field(ge=0, description="Tamanho do arquivo original em bytes; limite da operação: 10 MiB.")
+    data_atualizacao_fonte: date | None = Field(
+        description="Data da atualização da classificação indicada manualmente; não é inferida pelo arquivo."
+    )
+    importado_por: str = Field(
+        description="Usuário administrativo autenticado ou `token_sistema` quando usada a credencial de sistema."
+    )
+    status: Literal["processando", "sucesso", "sem_alteracao", "rejeitada"] = Field(
+        description=(
+            "Resultado: `sucesso` publicou uma versão; `sem_alteracao` registrou a tentativa sem nova versão; "
+            "`rejeitada` indica XLSX/layout inválido; `processando` é reservado para execução assíncrona futura."
+        )
+    )
+    versao_taxonomia: int | None = Field(
+        description="Versão criada ou já vigente para esta importação; nulo quando o arquivo foi rejeitado."
+    )
+    resumo: SetorTaxonomiaImportacaoResumoResposta = Field(
+        description="Contagens da hierarquia e metadados informados na requisição."
+    )
+    erro: str | None = Field(description="Motivo legível da rejeição; nulo quando a planilha foi aceita.")
+    importada_em: datetime = Field(description="Instante UTC em que a tentativa foi registrada.")
+    concluida_em: datetime | None = Field(description="Instante UTC de conclusão; nulo enquanto não concluída.")
 
 
 class SetorResposta(BaseModel):

@@ -9,6 +9,32 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-10 - Importação Manual da Hierarquia Setorial B3
+
+### Superfícies afetadas
+
+- novo endpoint administrativo `POST /setores/taxonomias/b3/importacoes` para upload XLSX;
+- novo endpoint `GET /setores/taxonomias/b3/importacoes` para histórico;
+- nova resposta `SetorTaxonomiaImportacaoResposta` com nome/hash/tamanho do arquivo, data da fonte, responsável, status, versão e contagens.
+
+### Comportamento entregue
+
+- O upload publica apenas a hierarquia setor → subsetor → segmento. As colunas de emissores, tickers e segmento de listagem não são importadas e nenhuma associação com companhias CVM é criada.
+- O artefato original é guardado em `STORAGE_DIR`, endereçado pelo SHA-256. O histórico distingue data de atualização indicada pela B3 e data de recebimento, mantém reenvios sem alteração semântica e registra arquivos rejeitados.
+- A primeira importação válida publica a taxonomia `b3`; uma mudança semântica gera nova versão e trilha de mudanças. O endpoint recebe arquivos `.xlsx` até 10 MiB e exige autenticação administrativa.
+
+## 2026-11-10 - Monitoramento de Ingestão e Controle de Concorrência
+
+### Superfícies afetadas
+
+- `GET /ingestion/operations` e `GET /ingestion/files`
+- despacho de membros da ingestão e parâmetros Helm dos workers
+
+### Comportamento entregue
+
+- Snapshots repetidos de `/ingestion/operations` e `/ingestion/files` podem ser reutilizados pelo TTL `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache). O filtro `atividade=em_processamento` considera os escopos atualmente ativos antes de carregar detalhes históricos.
+- Todos os tipos de fonte liberam membros em janelas limitadas por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, retomando o despacho conforme os filhos terminam. Isso mantém o backlog controlado em recursos escassos e permite parametrizar o paralelismo com réplicas e `worker.concurrency` no Helm.
+
 ## 2026-11-09 - Dicionario Setorial e Agregacao de Margens por Grupo
 
 ### Superficies afetadas
@@ -22,7 +48,7 @@ Convencoes deste changelog:
 ### Comportamento entregue
 
 - Setores CVM têm UUID opaco, chave determinística com NFC, espaços e caixa baixa Unicode sem expansões de caracteres, histórico de atribuições, publicação versionada e texto de origem preservado. IDs não são fundidos por aproximação de grafia; aliases precisam de evidência, justificativa e revisão administrativa.
-- O catálogo publica a taxonomia `cvm_cadastro`. A taxonomia `b3` está registrada sem publicação até existir uma fonte autorizada; selecioná-la retorna `409 TAXONOMIA_SEM_PUBLICACAO`.
+- O catálogo publica a taxonomia `cvm_cadastro`. A taxonomia `b3` fica sem publicação até o primeiro upload manual válido; selecioná-la antes retorna `409 TAXONOMIA_SEM_PUBLICACAO`.
 - A ingestão v2 e a sincronização cadastral legada promovem as classificações setoriais na transação do cadastro. Migração inicial cria o dicionário e faz backfill dos setores já persistidos.
 - A agregação aceita universo por UUID/Código CVM, setor, categoria, tipo de emissor, situação ou `todas=true`; identificadores explícitos formam uma união e filtros distintos se intersectam. Calcula margens bruta, EBIT e líquida anuais com fatos canônicos em BRL, permitindo escolher média simples, mediana e razão das somas (as três por padrão), com elegibilidade e motivos de exclusão.
 - O resumo usa leitura financeira em lote e cache Redis curto com chave por corpo, publicação de taxonomia e geração financeira. O detalhamento, limitado a 500 companhias, não é cacheado. A resposta identifica a geração canônica e declara atualidade `indeterminada` enquanto não houver assinatura de entrada por companhia/escopo.

@@ -1,11 +1,11 @@
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, UploadFile
 from sqlalchemy import func, or_, select
 
-from app.api.auth import exigir_admin_api
+from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api
 from app.api.deps import DbSession
 from app.models.companhia import Companhia
 from app.models.setores import (
@@ -14,6 +14,7 @@ from app.models.setores import (
     SetorClassificacaoCompanhia,
     SetorCorrespondencia,
     SetorTaxonomia,
+    SetorTaxonomiaImportacao,
     SetorTaxonomiaMudanca,
     SetorTaxonomiaVersao,
 )
@@ -30,8 +31,17 @@ from app.schemas.setores import (
     SetorListaResposta,
     SetorPaginacao,
     SetorResposta,
+    SetorTaxonomiaImportacaoResposta,
     SetorTaxonomiaResposta,
     SetorVersaoResposta,
+)
+from app.services.ingestion.setores import (
+    MAX_ARQUIVO_B3_BYTES,
+    TAXONOMIA_B3,
+    URL_CLASSIFICACAO_B3,
+)
+from app.services.ingestion.setores import (
+    importar_taxonomia_b3 as importar_taxonomia_b3_service,
 )
 from app.services.setores import (
     FatoCanonicoInconsistente,
@@ -44,6 +54,15 @@ from app.services.setores import (
 )
 
 router = APIRouter()
+
+
+def _obter_admin_importador(
+    autenticacao: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+) -> str:
+    exigir_admin_api(autenticacao)
+    if autenticacao.usuario is not None:
+        return autenticacao.usuario.username
+    return "token_sistema"
 
 
 def _taxonomia_ou_409(db: DbSession, codigo: str) -> SetorTaxonomia:
@@ -64,8 +83,11 @@ def _taxonomia_ou_409(db: DbSession, codigo: str) -> SetorTaxonomia:
     response_model=list[SetorTaxonomiaResposta],
     summary="Listar taxonomias setoriais",
     description=(
-        "Lista as taxonomias setoriais conhecidas, sua fonte, status e versão publicada. "
-        "A taxonomia B3 fica indisponível para consulta até que uma fonte autorizada seja publicada."
+        "Lista cada dicionário setorial conhecido com código, nome, fonte declarada, estado, versão e checksum atuais. "
+        "`cvm_cadastro` é publicado pelo cadastro de companhias da CVM e sustenta os vínculos cadastrais. "
+        "`b3` só fica disponível depois de um XLSX válido ser enviado ao endpoint administrativo de importação. "
+        "A publicação B3 contém apenas conceitos e níveis hierárquicos; não cria nem altera vínculos entre emissores B3 e companhias CVM. "
+        "Use o código e a versão retornados nas consultas seguintes para identificar qual dicionário compôs a resposta."
     ),
     operation_id="listarTaxonomiasSetoriais",
 )
@@ -78,7 +100,12 @@ def listar_taxonomias_setoriais(db: DbSession) -> list[SetorTaxonomiaResposta]:
     "/setores/taxonomias/{taxonomia}/versoes",
     response_model=list[SetorVersaoResposta],
     summary="Listar versões de uma taxonomia setorial",
-    description="Retorna o histórico de publicações semânticas da taxonomia, com checksum e resumo de cobertura.",
+    description=(
+        "Retorna publicações em ordem decrescente de versão, com checksums, referência da fonte, data observada, "
+        "instante de publicação e resumo. Uma nova tentativa de importação com o mesmo checksum semântico não cria "
+        "uma versão. O checksum do arquivo de origem pode mudar por metadados XLSX mesmo quando a hierarquia continua igual. "
+        "Taxonomia inexistente retorna `404`; uma taxonomia conhecida sem publicação ainda pode responder uma lista vazia."
+    ),
     operation_id="listarVersoesTaxonomiaSetorial",
 )
 def listar_versoes_taxonomia(
@@ -93,6 +120,154 @@ def listar_versoes_taxonomia(
         .order_by(SetorTaxonomiaVersao.versao.desc())
     ).all()
     return [SetorVersaoResposta.model_validate(item) for item in itens]
+
+
+@router.get(
+    "/setores/taxonomias/b3/importacoes",
+    response_model=list[SetorTaxonomiaImportacaoResposta],
+    summary="Consultar histórico de importações manuais B3",
+    description=(
+        "Lista as tentativas mais recentes de upload da classificação B3, incluindo o nome e SHA-256 do arquivo, "
+        "tamanho, data de atualização informada pelo operador, responsável autenticado, estado, versão resultante, "
+        "contagens, erro de validação e instantes de recebimento/conclusão. Inclui reenvios sem alteração semântica "
+        "e planilhas XLSX rejeitadas depois da validação do layout. Ordena da tentativa mais recente para a mais antiga; "
+        "não retorna o caminho local de armazenamento nem o conteúdo do arquivo."
+    ),
+    operation_id="listarImportacoesTaxonomiaB3",
+)
+def listar_importacoes_taxonomia_b3(
+    db: DbSession,
+    limite: Annotated[
+        int,
+        Query(ge=1, le=500, description="Quantidade máxima de registros retornados, entre 1 e 500."),
+    ] = 100,
+) -> list[SetorTaxonomiaImportacaoResposta]:
+    importacoes = db.scalars(
+        select(SetorTaxonomiaImportacao)
+        .where(SetorTaxonomiaImportacao.taxonomia == TAXONOMIA_B3)
+        .order_by(SetorTaxonomiaImportacao.importada_em.desc(), SetorTaxonomiaImportacao.id.desc())
+        .limit(limite)
+    ).all()
+    return [SetorTaxonomiaImportacaoResposta.model_validate(item) for item in importacoes]
+
+
+@router.post(
+    "/setores/taxonomias/b3/importacoes",
+    response_model=SetorTaxonomiaImportacaoResposta,
+    summary="Importar arquivo manual da classificação B3",
+    description=(
+        "Recebe um arquivo XLSX da classificação setorial B3 via `multipart/form-data`. A validação procura em uma única aba "
+        "as colunas B-D com cabeçalho `SETOR` (ou `SETOR ECONÔMICO`), `SUBSETOR` e `SEGMENTO`; linhas de setor e subsetor "
+        "podem continuar com as células correspondentes vazias para indicar preenchimento hierárquico. O parser lê apenas "
+        "essas três colunas, deduplica caminhos repetidos e ignora as colunas de emissores, tickers/códigos e segmentos de listagem. "
+        "Publica somente nós de nível setor, subsetor e segmento: não importa emissores, não cria vínculos B3 de companhias e "
+        "não substitui as atribuições originadas na CVM.\n\n"
+        "O arquivo original é preservado em `STORAGE_DIR/setores/b3/` pelo SHA-256 dos bytes recebidos. Cada tentativa é "
+        "registrada com tamanho, nome, data da fonte informada, responsável e resultado. Um checksum semântico igual à "
+        "versão atual registra `sem_alteracao` sem criar versão; uma mudança em nome, identidade ou hierarquia publica a "
+        "próxima versão e registra inclusões, alterações e desativações. O mesmo caminho hierárquico normalizado conserva "
+        "o UUID; um caminho diferente não é unido automaticamente a um ID antigo.\n\n"
+        "Exige token bearer com permissão administrativa (ou credencial de sistema). Arquivos são limitados a 10 MiB e "
+        "10.000 linhas por aba. Uma planilha XLSX inválida ou sem exatamente uma aba com o layout esperado é registrada "
+        "como rejeitada e retorna `422` com `importacao_id`; erros de extensão, tamanho ou validação do formulário ocorrem "
+        "antes do registro da tentativa."
+    ),
+    operation_id="importarTaxonomiaB3Manual",
+    responses={
+        200: {"description": "Tentativa processada; consulte `status` para distinguir publicação e reenvio sem alteração."},
+        401: {"description": "Bearer token ausente, inválido ou expirado."},
+        403: {"description": "Token de usuário válido sem permissão administrativa."},
+        413: {"description": "Arquivo XLSX excede o limite de tamanho de 10 MiB; tentativa não registrada."},
+        422: {
+            "description": (
+                "Extensão, campos ou data inválidos; ou planilha XLSX sem o layout esperado. "
+                "Rejeições de conteúdo retornam código `ARQUIVO_CLASSIFICACAO_B3_REJEITADO` e `importacao_id` "
+                "e ficam disponíveis no histórico."
+            ),
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "planilha_rejeitada": {
+                            "summary": "Conteúdo XLSX inválido, registrado para auditoria",
+                            "value": {
+                                "detail": {
+                                    "codigo": "ARQUIVO_CLASSIFICACAO_B3_REJEITADO",
+                                    "importacao_id": "0c8df70a-33c6-4c1a-b690-8dd2a49c615b",
+                                    "mensagem": "A planilha não contém segmentos B3 com setor e subsetor.",
+                                }
+                            },
+                        },
+                        "extensao_invalida": {
+                            "summary": "Erro de extensão detectado antes de registrar a tentativa",
+                            "value": {"detail": "Envie um arquivo com extensão .xlsx."},
+                        },
+                    }
+                }
+            },
+        },
+    },
+)
+async def importar_taxonomia_b3_manual(
+    db: DbSession,
+    importado_por: Annotated[str, Depends(_obter_admin_importador)],
+    arquivo: Annotated[
+        UploadFile,
+        File(
+            description=(
+                "Arquivo .xlsx original da classificação B3, no máximo 10 MiB. A planilha deve conter uma aba com "
+                "cabeçalhos SETOR/SETOR ECONÔMICO, SUBSETOR e SEGMENTO nas colunas B-D."
+            ),
+        ),
+    ],
+    data_atualizacao_fonte: Annotated[
+        date | None,
+        Form(
+            description="Data de atualização informada pelo operador; não é extraída automaticamente do XLSX.",
+            examples=["2026-11-10"],
+        ),
+    ] = None,
+    referencia_fonte: Annotated[
+        str,
+        Form(
+            max_length=255,
+            description="URL ou identificador da origem do arquivo; padrão aponta para a página pública da classificação B3.",
+        ),
+    ] = URL_CLASSIFICACAO_B3,
+    observacao: Annotated[
+        str | None,
+        Form(max_length=1000, description="Nota de auditoria opcional sobre download, conferência ou contexto da importação."),
+    ] = None,
+) -> SetorTaxonomiaImportacaoResposta:
+    nome_arquivo = arquivo.filename or "ClassifSetorial.xlsx"
+    if not nome_arquivo.lower().endswith(".xlsx"):
+        raise HTTPException(status_code=422, detail="Envie um arquivo com extensão .xlsx.")
+    conteudo = await arquivo.read(MAX_ARQUIVO_B3_BYTES + 1)
+    await arquivo.close()
+    if len(conteudo) > MAX_ARQUIVO_B3_BYTES:
+        raise HTTPException(status_code=413, detail="O arquivo excede o limite de 10 MiB.")
+    try:
+        importacao = importar_taxonomia_b3_service(
+            db,
+            conteudo=conteudo,
+            nome_arquivo=nome_arquivo,
+            data_atualizacao_fonte=data_atualizacao_fonte,
+            importado_por=importado_por,
+            referencia_fonte=referencia_fonte,
+            observacao=observacao,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    if importacao.status == "rejeitada":
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "codigo": "ARQUIVO_CLASSIFICACAO_B3_REJEITADO",
+                "importacao_id": str(importacao.id),
+                "mensagem": importacao.erro,
+            },
+        )
+    return SetorTaxonomiaImportacaoResposta.model_validate(importacao)
 
 
 @router.get(

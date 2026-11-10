@@ -1,13 +1,17 @@
 from datetime import date, datetime
 from decimal import Decimal
+from io import BytesIO
+from pathlib import Path
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.cache import cache as redis_cache
+from app.core.config import get_settings
 from app.models.analise import AnaliseFatoRevision, AnaliseMaterializacaoExecucao
 from app.models.companhia import Companhia
 from app.models.setores import (
@@ -16,12 +20,14 @@ from app.models.setores import (
     SetorClassificacaoCompanhia,
     SetorCorrespondencia,
     SetorTaxonomia,
+    SetorTaxonomiaImportacao,
     SetorTaxonomiaMudanca,
     SetorTaxonomiaVersao,
 )
 from app.schemas.setores import AgregacaoSetorialRequest, AgregacaoSetorialResposta
 from app.services import setores as setores_service
 from app.services.analise import CALCULATION_VERSION
+from app.services.ingestion.setores import extrair_hierarquia_b3
 from app.services.setores import agregar_margens, normalizar_chave_setor, publicar_taxonomia_cvm
 
 
@@ -79,12 +85,148 @@ def _publicar_companhias_teste(db_session: Session) -> tuple[Setor, Setor, list[
     return setor_energia, setor_bancos, companhias
 
 
+def _arquivo_classificacao_b3(*, segmento_extra: str | None = None) -> bytes:
+    workbook = Workbook()
+    worksheet = workbook.active
+    assert worksheet is not None
+    worksheet.title = "Planilha"
+    worksheet.append([None, "SETOR", "SUBSETOR", "SEGMENTO", "EMISSOR", "CÓDIGO", "SEGMENTO DE NEGOCIAÇÃO"])
+    worksheet.append([None, "Utilidade Pública", "Energia Elétrica", "Geração", "GERADORA A", "GRAA", "Novo Mercado"])
+    worksheet.append([None, None, None, None, "GERADORA B", "GRBB", "Nível 2"])
+    if segmento_extra is not None:
+        worksheet.append([None, None, None, segmento_extra, "EMISSOR EXTRA", "EXTA", "Nível 2"])
+    worksheet.append([None, "SETOR ECONÔMICO", "SUBSETOR", "SEGMENTO", "NOME DE PREGÃO", "CÓDIGO", "LISTAGEM"])
+    worksheet.append([None, "Bens Industriais", "Construção e Engenharia", "Construção Pesada", "EMISSOR C", "EMSC", "Novo Mercado"])
+    stream = BytesIO()
+    workbook.save(stream)
+    workbook.close()
+    return stream.getvalue()
+
+
 def test_normalizar_chave_setor_preserva_distincoes_semanticas() -> None:
     assert normalizar_chave_setor("  ENERGIA   ELÉTRICA ") == normalizar_chave_setor("Energia Elétrica")
     assert normalizar_chave_setor("Energia Ele\u0301trica") == normalizar_chave_setor("Energia Elétrica")
     assert normalizar_chave_setor("Energia Elétrica") != normalizar_chave_setor("Energia Eletrica")
     assert normalizar_chave_setor("A/B") != normalizar_chave_setor("A-B")
     assert normalizar_chave_setor("Straße") != normalizar_chave_setor("Strasse")
+
+
+def test_extrair_hierarquia_b3_ignora_emissores_e_tickers() -> None:
+    nos = extrair_hierarquia_b3(_arquivo_classificacao_b3())
+
+    assert sum(no.nivel == "setor" for no in nos) == 2
+    assert sum(no.nivel == "subsetor" for no in nos) == 2
+    assert sum(no.nivel == "segmento" for no in nos) == 2
+    assert {no.nome for no in nos} >= {"Utilidade Pública", "Energia Elétrica", "Geração", "Bens Industriais"}
+    assert not any("GERADORA" in no.nome or "GRAA" in no.nome or "Novo Mercado" in no.nome for no in nos)
+
+
+def test_openapi_expoe_importacao_multipart_e_historico_b3(client: TestClient) -> None:
+    openapi = client.get("/openapi.json").json()
+    path = "/setores/taxonomias/b3/importacoes"
+
+    assert "post" in openapi["paths"][path]
+    assert "get" in openapi["paths"][path]
+    content = openapi["paths"][path]["post"]["requestBody"]["content"]
+    assert "multipart/form-data" in content
+    assert "/setores/taxonomias/{taxonomia}/versoes" in openapi["paths"]
+    post = openapi["paths"][path]["post"]
+    assert "401" in post["responses"]
+    assert "403" in post["responses"]
+    assert "413" in post["responses"]
+    assert "planilha_rejeitada" in post["responses"]["422"]["content"]["application/json"]["examples"]
+    response_schema = openapi["components"]["schemas"]["SetorTaxonomiaImportacaoResposta"]
+    assert "SHA-256" in response_schema["properties"]["checksum_sha256"]["description"]
+    assert "SetorTaxonomiaImportacaoResumoResposta" in response_schema["properties"]["resumo"]["$ref"]
+    assert response_schema["examples"][0]["resumo"]["classificacoes_de_emissores_importadas"] == 0
+
+
+def test_importar_hierarquia_b3_persiste_arquivo_e_nao_classifica_companhias(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _publicar_companhias_teste(db_session)
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path))
+    arquivo = _arquivo_classificacao_b3()
+    form = {"data_atualizacao_fonte": "2026-11-09", "observacao": "Conferido manualmente"}
+    files = {"arquivo": ("ClassifSetorial.xlsx", arquivo, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+
+    primeira = client.post("/setores/taxonomias/b3/importacoes", data=form, files=files)
+    repetida = client.post("/setores/taxonomias/b3/importacoes", data=form, files=files)
+    historico = client.get("/setores/taxonomias/b3/importacoes")
+
+    assert primeira.status_code == 200
+    assert primeira.json()["status"] == "sucesso"
+    assert primeira.json()["versao_taxonomia"] == 1
+    assert primeira.json()["data_atualizacao_fonte"] == "2026-11-09"
+    assert primeira.json()["resumo"]["setores"] == 2
+    assert primeira.json()["resumo"]["subsetores"] == 2
+    assert primeira.json()["resumo"]["segmentos"] == 2
+    assert primeira.json()["resumo"]["classificacoes_de_emissores_importadas"] == 0
+    assert repetida.status_code == 200
+    assert repetida.json()["status"] == "sem_alteracao"
+    assert repetida.json()["versao_taxonomia"] == 1
+    assert historico.status_code == 200
+    assert len(historico.json()) == 2
+    assert db_session.query(Setor).filter_by(taxonomia="b3").count() == 6
+    assert db_session.query(SetorClassificacaoCompanhia).filter_by(taxonomia="b3").count() == 0
+    assert db_session.query(SetorClassificacaoCompanhia).filter_by(taxonomia="cvm_cadastro").count() == 2
+    assert db_session.query(SetorTaxonomiaVersao).filter_by(taxonomia="b3").count() == 1
+    artifact = tmp_path / "setores" / "b3" / f"{primeira.json()['checksum_sha256']}.xlsx"
+    assert artifact.read_bytes() == arquivo
+
+
+def test_importacao_b3_invalida_e_registrada_sem_publicar_taxonomia(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path))
+
+    response = client.post(
+        "/setores/taxonomias/b3/importacoes",
+        files={"arquivo": ("ClassifSetorial.xlsx", b"nao e um xlsx", "application/octet-stream")},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["codigo"] == "ARQUIVO_CLASSIFICACAO_B3_REJEITADO"
+    importacao = db_session.query(SetorTaxonomiaImportacao).one()
+    taxonomia = db_session.get(SetorTaxonomia, "b3")
+    assert importacao.status == "rejeitada"
+    assert importacao.erro is not None
+    assert taxonomia is not None
+    assert taxonomia.versao_atual is None
+
+
+def test_importacao_b3_publica_nova_versao_e_audita_segmento_novo(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(get_settings(), "storage_dir", str(tmp_path))
+    primeira = _arquivo_classificacao_b3()
+    segunda = _arquivo_classificacao_b3(segmento_extra="Distribuição")
+
+    resposta_inicial = client.post(
+        "/setores/taxonomias/b3/importacoes",
+        files={"arquivo": ("ClassifSetorial.xlsx", primeira)},
+    )
+    resposta_alterada = client.post(
+        "/setores/taxonomias/b3/importacoes",
+        files={"arquivo": ("ClassifSetorial.xlsx", segunda)},
+    )
+
+    assert resposta_inicial.status_code == 200
+    assert resposta_alterada.status_code == 200
+    assert resposta_alterada.json()["status"] == "sucesso"
+    assert resposta_alterada.json()["versao_taxonomia"] == 2
+    assert resposta_alterada.json()["resumo"]["segmentos"] == 3
+    assert db_session.query(SetorTaxonomiaVersao).filter_by(taxonomia="b3").count() == 2
+    assert db_session.query(SetorTaxonomiaMudanca).filter_by(tipo="setor_novo").count() == 7
 
 
 def test_publicar_taxonomia_registra_atribuicoes_e_reclassificacao(db_session: Session) -> None:

@@ -86,7 +86,7 @@ def _garantir_taxonomias(db: Session) -> None:
             SetorTaxonomia(
                 codigo=TAXONOMIA_B3,
                 nome="Classificação setorial B3",
-                fonte="Fonte oficial autorizada pendente",
+                fonte="ClassifSetorial.xlsx (importação manual pendente)",
                 ativa=False,
             )
         )

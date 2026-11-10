@@ -95,6 +95,7 @@ from app.models.setores import (
     SetorClassificacaoCompanhia,
     SetorCorrespondencia,
     SetorTaxonomia,
+    SetorTaxonomiaImportacao,
     SetorTaxonomiaMudanca,
     SetorTaxonomiaVersao,
 )
@@ -203,6 +204,7 @@ __all__ = [
     "SetorAlias",
     "SetorClassificacaoCompanhia",
     "SetorCorrespondencia",
+    "SetorTaxonomiaImportacao",
     "SetorTaxonomia",
     "SetorTaxonomiaMudanca",
     "SetorTaxonomiaVersao",

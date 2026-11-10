@@ -5,20 +5,113 @@ sidebar_position: 6
 
 # Setores e análise de grupos
 
-Todas as rotas desta página exigem o bearer token da API. Os endpoints do dicionário usam a taxonomia publicada e retornam sua versão para que o cliente saiba qual classificação compôs a resposta.
+Todas as rotas desta página exigem `Authorization: Bearer <token>`. As operações de curadoria e o upload manual B3 exigem, além do token, uma credencial administrativa: usuário com permissão `is_admin` ou token de sistema. As consultas do dicionário usam uma publicação específica e retornam sua versão quando a resposta representa um catálogo ou conjunto de companhias.
 
 ## Taxonomias publicadas
 
 ### `GET /setores/taxonomias`
 
-Lista os dicionários conhecidos, sua fonte, estado e publicação atual.
+Lista os dicionários conhecidos, sua fonte, estado e publicação atual. Use `codigo` como valor de `taxonomia` nas demais rotas. `versao_atual` identifica a última publicação semântica, não a data em que o arquivo foi baixado.
 
-- `cvm_cadastro`: rótulo de setor informado no cadastro de companhias da CVM.
-- `b3`: reservada para classificação oficial da B3. Permanece sem publicação até que haja uma fonte autorizada disponível para ingestão.
+- `cvm_cadastro`: rótulo cadastral informado pela CVM. A ingestão do cadastro publica os conceitos e atribui as companhias com base em `setor_atividade`.
+- `b3`: hierarquia de setor, subsetor e segmento publicada pelo upload manual de uma planilha. A importação não associa emissores B3 às companhias CVM. Antes da primeira publicação, consultas que dependam dessa taxonomia respondem `409 TAXONOMIA_SEM_PUBLICACAO`.
 
 ### `GET /setores/taxonomias/{taxonomia}/versoes`
 
-Lista publicações em ordem decrescente. Cada item informa o checksum semântico, a referência da fonte, os instantes observados/publicados e o resumo da publicação. Reingestões sem mudança semântica não criam uma nova versão.
+Lista publicações em ordem decrescente de `versao`. Cada item inclui `checksum_fonte` (SHA-256 dos bytes da fonte, quando disponível), `checksum_semantico` (conteúdo dos conceitos e relações), `referencia_fonte`, `observada_em`, `publicada_em` e um resumo. Reenvios podem ter checksum de arquivo diferente sem gerar outra versão se a hierarquia semântica não mudou. Taxonomia inexistente retorna `404`; uma taxonomia cadastrada ainda sem versão pode retornar uma lista vazia.
+
+## Importação manual da hierarquia B3
+
+O fluxo publica exclusivamente o vocabulário setorial B3. A CVM continua sendo a fonte de verdade para a identidade e os dados cadastrais das companhias. Não use as colunas de emissores do arquivo para resolver companhias: uma futura atribuição B3 precisa de regra explícita, correspondência curada e trilha de proveniência.
+
+### Planilha aceita
+
+O arquivo precisa ser um `.xlsx` de até 10 MiB. O parser procura exatamente uma aba com a hierarquia e cabeçalho nas colunas B-D:
+
+| Coluna | Cabeçalho reconhecido | Conteúdo importado |
+| --- | --- | --- |
+| B | `SETOR` ou `SETOR ECONÔMICO` | Nome do setor. |
+| C | `SUBSETOR` | Nome do subsetor do setor corrente. |
+| D | `SEGMENTO` | Nome do segmento do subsetor corrente. |
+
+O cabeçalho é comparado sem diferenciar caixa e após compactar espaços. Linhas sem nome de setor ou subsetor reutilizam o último valor não vazio daquele nível, conforme o formato tabular hierárquico. Toda linha que contém segmento precisa resultar em setor e subsetor. Cabeçalhos repetidos reiniciam o preenchimento hierárquico. Caminhos duplicados são publicados uma vez. O parser limita cada aba a 10.000 linhas.
+
+As colunas E em diante não são lidas. Isso inclui razão social/nome de pregão do emissor, código de negociação/ticker e segmento de listagem. Planilhas com mais de uma aba que contenha o cabeçalho esperado, sem nenhuma aba válida, sem segmentos ou com caminho incompleto são rejeitadas.
+
+### `POST /setores/taxonomias/b3/importacoes`
+
+Recebe `multipart/form-data`. O campo `arquivo` é obrigatório; os demais são opcionais:
+
+| Campo | Tipo | Limite | Descrição |
+| --- | --- | --- | --- |
+| `arquivo` | arquivo `.xlsx` | 10 MiB | Arquivo original recebido. A extensão e o conteúdo XLSX são validados. |
+| `data_atualizacao_fonte` | data `AAAA-MM-DD` | — | Data de atualização indicada pela B3/operador. Não é inferida dos metadados do XLSX. |
+| `referencia_fonte` | texto | 255 caracteres | URL ou referência do download; padrão é a [página de classificação setorial B3](https://www.b3.com.br/pt_br/produtos-e-servicos/negociacao/renda-variavel/acoes/consultas/classificacao-setorial/). |
+| `observacao` | texto | 1.000 caracteres | Nota operacional opcional, por exemplo, quem conferiu o arquivo ou de onde foi baixado. |
+
+Exemplo enviando o arquivo local:
+
+```bash
+curl --fail-with-body -X POST http://localhost:8007/setores/taxonomias/b3/importacoes \
+  -H "Authorization: Bearer $TUCANO_CVM_TOKEN" \
+  -F "arquivo=@data/ClassifSetorial.xlsx;type=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" \
+  -F "data_atualizacao_fonte=2026-11-10" \
+  -F "referencia_fonte=https://www.b3.com.br/pt_br/produtos-e-servicos/negociacao/renda-variavel/acoes/consultas/classificacao-setorial/" \
+  -F "observacao=Arquivo baixado e conferido manualmente"
+```
+
+O serviço lê somente B-D, preserva o original em `STORAGE_DIR/setores/b3/<sha256>.xlsx` e registra uma tentativa com o hash, o tamanho, o nome original, o responsável autenticado e as datas. O valor `importado_por` é o nome do usuário administrador ou `token_sistema` quando se usa a credencial de sistema. `importada_em` e `concluida_em` são instantes do servidor em UTC; `data_atualizacao_fonte` é a data informada pelo operador. Se o dado for enviado, a versão também preenche `observada_em` à meia-noite UTC dessa data.
+
+Cada nó recebe identidade dentro da taxonomia B3 baseada no nível e no caminho hierárquico normalizado. O mesmo caminho conserva o UUID em reimportações. O checksum semântico considera nomes, níveis e pais; sua mudança cria a próxima versão e registra nós novos, renomeados, rehierarquizados e desativados. Um caminho diferente não é unido automaticamente a um ID existente, ainda que a grafia pareça semelhante. Use a curadoria de alias/correspondência com evidência para registrar equivalências explicitamente.
+
+| `status` | Significado | Publicação |
+| --- | --- | --- |
+| `sucesso` | Planilha válida com mudança semântica. | Cria uma versão e informa `versao_taxonomia`. |
+| `sem_alteracao` | Planilha válida equivalente à versão vigente, mesmo que os bytes do XLSX mudem. | Registra a tentativa e aponta para a versão atual; não cria versão. |
+| `rejeitada` | Arquivo XLSX inválido ou layout/hierarquia incompatível. | Registra o motivo e a tentativa no histórico, sem publicar conceitos. Retorna HTTP `422`. |
+| `processando` | Estado reservado para futura execução assíncrona. | Não é retornado pelo processamento síncrono atual. |
+
+Exemplo de resposta em uma primeira publicação (UUID e contagens variam conforme a planilha):
+
+```json
+{
+  "id": "0c8df70a-33c6-4c1a-b690-8dd2a49c615b",
+  "taxonomia": "b3",
+  "nome_arquivo": "ClassifSetorial.xlsx",
+  "checksum_sha256": "342a9966b1cafe0ee226de66b398a9288c5ad9ba93c40cbc2d2bc3354ba454aa",
+  "tamanho_bytes": 16149,
+  "data_atualizacao_fonte": "2026-11-10",
+  "importado_por": "token_sistema",
+  "status": "sucesso",
+  "versao_taxonomia": 1,
+  "resumo": {
+    "referencia_fonte": "https://www.b3.com.br/pt_br/produtos-e-servicos/negociacao/renda-variavel/acoes/consultas/classificacao-setorial/",
+    "observacao": "Arquivo baixado e conferido manualmente",
+    "setores": 11,
+    "subsetores": 45,
+    "segmentos": 86,
+    "classificacoes_de_emissores_importadas": 0,
+    "nos_publicados": 142,
+    "mudancas": 142
+  },
+  "erro": null,
+  "importada_em": "2026-11-10T12:00:00Z",
+  "concluida_em": "2026-11-10T12:00:01Z"
+}
+```
+
+O campo `classificacoes_de_emissores_importadas` é sempre `0`: não são criadas linhas em `companhia_classificacoes_setoriais` para a taxonomia B3. A importação também não altera os vínculos `cvm_cadastro` existentes. Uma resposta `422` por conteúdo inclui `detail.codigo=ARQUIVO_CLASSIFICACAO_B3_REJEITADO`, `detail.importacao_id` e `detail.mensagem`; use o ID para consultar o histórico. Erros de extensão, excesso de tamanho ou validação do formulário são detectados antes do parser e não geram registro de importação.
+
+### `GET /setores/taxonomias/b3/importacoes`
+
+Lista as importações da mais recente para a mais antiga. `limite` aceita 1 a 500 e tem padrão 100. A resposta usa o mesmo formato do POST e omite o caminho absoluto no armazenamento e os bytes do arquivo.
+
+```bash
+curl -H "Authorization: Bearer $TUCANO_CVM_TOKEN" \
+  "http://localhost:8007/setores/taxonomias/b3/importacoes?limite=50"
+```
+
+Use `GET /setores/taxonomias/b3/versoes` para verificar versões publicadas e `GET /setores/taxonomias` para obter o estado atual da taxonomia. O histórico de uploads é operacional; o histórico de versões é semântico. Uma importação rejeitada aparece no primeiro, mas não cria item no segundo.
 
 ## Catálogo e vínculos
 
@@ -62,7 +155,7 @@ Cria um alias explícito na mesma taxonomia. O corpo recebe `taxonomia`, `setor_
 
 Cria uma relação direcional entre conceitos publicados. `tipo` aceita `equivalente`, `mais_amplo`, `mais_estreito` e `relacionado`. O registro inclui evidência, justificativa, revisão e versão do mapeamento; relações muitos-para-muitos são permitidas.
 
-Até a publicação de uma fonte B3 autorizada, consultas e curadoria envolvendo `b3` retornam `409 TAXONOMIA_SEM_PUBLICACAO`.
+Até uma importação válida da hierarquia B3, consultas e curadoria envolvendo `b3` retornam `409 TAXONOMIA_SEM_PUBLICACAO`. A importação da hierarquia, sozinha, não cria vínculos de companhias com a B3; filtros e agregações por esse catálogo dependem de classificações ou correspondências curadas separadamente.
 
 ## Agregar margens
 

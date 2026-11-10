@@ -1,10 +1,11 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     JSON,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -61,6 +62,34 @@ class SetorTaxonomiaVersao(Base):
     observada_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     publicada_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     resumo: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class SetorTaxonomiaImportacao(Base):
+    __tablename__ = "setor_taxonomia_importacoes"
+    __table_args__ = (
+        Index("ix_setor_taxonomia_importacoes_taxonomia_importada", "taxonomia", "importada_em"),
+        Index("ix_setor_taxonomia_importacoes_checksum", "checksum_sha256"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    taxonomia: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("setor_taxonomias.codigo", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    nome_arquivo: Mapped[str] = mapped_column(String(255), nullable=False)
+    caminho_artefato: Mapped[str] = mapped_column(String(1000), nullable=False)
+    checksum_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    tamanho_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    data_atualizacao_fonte: Mapped[date | None] = mapped_column(Date)
+    importado_por: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    versao_taxonomia: Mapped[int | None] = mapped_column(Integer)
+    resumo: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    erro: Mapped[str | None] = mapped_column(Text)
+    importada_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    concluida_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Setor(Base):
