@@ -156,3 +156,11 @@ curl -X POST "http://localhost:8007/ingestion/sincronizacoes/6a31c7f8-1c89-4f3d-
   ]
 }
 ```
+
+## Paralelismo e controle de fila
+
+O chart Helm configura os workers de ingestao por `worker.replicaCount` e `worker.concurrency`. O total de slots disponiveis e aproximadamente `replicaCount x concurrency`. O padrao do chart e uma replica com concorrencia 1. `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` limita quantos members de cada pacote sao publicados por janela; ao concluir a janela corrente, a task de controle libera a proxima. Esse limite se aplica a todas as fontes que despacham members. O default da configuracao da aplicacao e `2`, enquanto o chart usa `1` como padrao conservador.
+
+O Celery usa `worker_prefetch_multiplier=1` e a opcao `-Ofair`, mantendo uma task reservada por slot e reduzindo o acumulo local. Para recursos escassos, use replica, concorrencia e janela pequenos. Para ampliar o processamento, aumente esses parametros juntos e acompanhe a capacidade do PostgreSQL, pois cada processo de worker mantem seu proprio pool de conexoes.
+
+Ingestao consome `ingestion` e `ingestion_control`; materializacao consome somente `analise_materializacao` em workers separados, configurados por `materializationWorker.replicaCount` e `materializationWorker.concurrency`. O admission gate impede o inicio de novos chunks de materializacao durante ingestao ativa ou pausa manual.

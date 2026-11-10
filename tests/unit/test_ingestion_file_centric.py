@@ -13,6 +13,7 @@ from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.file_centric import (
     build_file_id,
     build_member_id,
+    listar_arquivos_logicos,
     parse_file_id,
     parse_member_id,
 )
@@ -631,6 +632,71 @@ def test_paginacao_e_filtros_server_side(client: TestClient, db_session: Session
     assert res_datas.status_code == 200
     data_datas = res_datas.json()
     assert "total_arquivos" in data_datas
+
+
+def test_filtro_em_processamento_ignora_execucao_antiga_ativa_e_busca_filho_atual(
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    root_old = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_execucao="arquivo_zip",
+        tipo_fonte="dfp",
+        ano=2021,
+        arquivo="dfp_cia_aberta_2021.zip",
+        url="http://exemplo/dfp_2021.zip",
+        status="em_execucao",
+        iniciada_em=now - timedelta(hours=2),
+    )
+    root_latest = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_execucao="arquivo_zip",
+        tipo_fonte="dfp",
+        ano=2021,
+        arquivo="dfp_cia_aberta_2021.zip",
+        url="http://exemplo/dfp_2021.zip",
+        status="sucesso",
+        iniciada_em=now - timedelta(hours=1),
+    )
+    stale_child = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        parent_execucao_id=root_old.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="dfp",
+        ano=2021,
+        arquivo="dfp_cia_aberta_BPA_con_2021.csv",
+        url="http://exemplo/dfp_2021.zip",
+        status="em_execucao",
+        iniciada_em=now - timedelta(hours=2),
+    )
+    root_current = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        tipo_execucao="arquivo_zip",
+        tipo_fonte="dfp",
+        ano=2022,
+        arquivo="dfp_cia_aberta_2022.zip",
+        url="http://exemplo/dfp_2022.zip",
+        status="sucesso",
+        iniciada_em=now - timedelta(minutes=10),
+    )
+    active_child = ExecucaoSincronizacao(
+        id=uuid.uuid4(),
+        parent_execucao_id=root_current.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="dfp",
+        ano=2022,
+        arquivo="dfp_cia_aberta_BPA_con_2022.csv",
+        url="http://exemplo/dfp_2022.zip",
+        status="em_execucao",
+        iniciada_em=now - timedelta(minutes=5),
+    )
+    db_session.add_all([root_old, root_latest, stale_child, root_current, active_child])
+    db_session.commit()
+
+    total, files = listar_arquivos_logicos(db_session, atividade="em_processamento")
+
+    assert total == 1
+    assert [item.file_id for item in files] == ["dfp:2022:dfp_cia_aberta_2022.zip"]
 
 
 def test_listar_arquivos_membros_e_detalhe_direto(client: TestClient, db_session: Session) -> None:

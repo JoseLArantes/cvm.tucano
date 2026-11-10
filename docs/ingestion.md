@@ -39,9 +39,17 @@ de arquivos CSV organizados em pacotes anuais (ZIP) ou arquivos unicos (cadastro
 | Processo | Descricao |
 |---|---|
 | `cvm_api` | Servidor HTTP (uvicorn) que expoe endpoints REST, incluindo admin de ingestion |
-| `cvm_worker` | Celery worker (concurrency=1, 4 replicas por padrao) que consome as tarefas de ingestion |
+| `cvm_worker` | Celery worker que consome as tarefas de ingestion; replicas e concorrencia sao configuraveis no chart Helm |
 | `cvm_scheduler` | Celery beat + bootstrap que dispara sincronizacoes periodicas (diarias) e backfill inicial |
 | `cvm_redis` | Redis 7 como broker de mensagens e result backend do Celery |
+
+### Paralelismo e pressao de fila
+
+O chart Helm expoe `worker.replicaCount` e `worker.concurrency`. O total aproximado de slots de execucao e o produto desses valores. `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` limita quantos members de cada pacote sao publicados por janela; quando a janela termina, a task de controle publica a proxima. A janela vale para todas as fontes com members. O default da configuracao da aplicacao e `2`; o chart Helm define `1` como valor operacional conservador.
+
+O worker usa `worker_prefetch_multiplier=1` e `-Ofair`, portanto cada slot reserva uma task por vez. Em clusters pequenos, mantenha replicas, concorrencia e janela baixos. Em clusters maiores, aumente os tres de forma coordenada e revise os pools de conexao do PostgreSQL, pois cada processo Celery cria seu proprio pool.
+
+Ingestao e materializacao usam workers e filas separados. Materializacao permanece na fila `analise_materializacao` e tem seus proprios parametros `materializationWorker.replicaCount` e `materializationWorker.concurrency`. O gate impede que novos chunks de materializacao comecem durante ingestao ativa ou pausa manual.
 
 ### Visao da Arquitetura
 

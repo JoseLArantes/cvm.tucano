@@ -15,10 +15,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
+from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.auth import AutenticacaoApi, autenticar_requisicao, exigir_admin_api, validar_token_api
 from app.api.deps import DbSession
 from app.core.config import get_settings
+from app.core.snapshot_cache import SnapshotCache
 from app.db.session import SessionLocal
 from app.models.ingestion import (
     IngestionCancellationRequest,
@@ -158,6 +161,7 @@ from app.worker.tasks import (
 
 router = APIRouter(prefix="/ingestion")
 logger = logging.getLogger(__name__)
+_ingestion_monitor_snapshot_cache = SnapshotCache(max_entries=128)
 
 
 def _format_sse(*, event_id: str, event_type: str, payload: dict[str, Any]) -> str:
@@ -3870,12 +3874,15 @@ def obter_detalhe_member(
         "Consulta operacional de ingestao centrada no arquivo logico. "
         "Hierarquia de dominio: ANO -> ARQUIVO PRINCIPAL -> MEMBRO -> TENTATIVAS E ETAPAS -> RESULTADO. "
         "Arquivos simples (como o cadastro global) nao possuem ZIP, ano ficticio ou membro artificial. "
-        "Retorna totais nao truncados por arquivo distinto com paginacao e filtros server-side."
+        "Retorna totais nao truncados por arquivo distinto com paginacao e filtros server-side. "
+        "O filtro atividade=em_processamento reduz candidatos pelo estado das execucoes antes de carregar detalhes. "
+        "Snapshots repetidos podem ser reutilizados em memoria pelo TTL configurado em "
+        "INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS (3 segundos no chart padrao; 0 desativa)."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="listarArquivosLogicosIngestionAdmin",
 )
-def listar_arquivos_logicos_endpoint(
+async def listar_arquivos_logicos_endpoint(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
     ano: Annotated[int | None, Query(description="Filtrar por ano de referencia.")] = None,
@@ -3890,43 +3897,64 @@ def listar_arquivos_logicos_endpoint(
     pagina: Annotated[int, Query(description="Numero da pagina.", ge=1)] = 1,
     tamanho_pagina: Annotated[int, Query(description="Itens por pagina.", ge=1, le=200)] = 50,
 ) -> IngestionLogicalFileListResponse:
-    total, items = listar_arquivos_logicos(
-        db,
-        ano=ano,
-        fonte=fonte,
-        arquivo=arquivo,
-        atividade=atividade,
-        integridade=integridade,
-        necessidade_intervencao=necessidade_intervencao,
-        resolucao_falha=resolucao_falha,
-        concluido_apos=concluido_apos,
-        concluido_antes=concluido_antes,
-        pagina=pagina,
-        tamanho_pagina=tamanho_pagina,
+    def build_response() -> IngestionLogicalFileListResponse:
+        total, items = listar_arquivos_logicos(
+            db,
+            ano=ano,
+            fonte=fonte,
+            arquivo=arquivo,
+            atividade=atividade,
+            integridade=integridade,
+            necessidade_intervencao=necessidade_intervencao,
+            resolucao_falha=resolucao_falha,
+            concluido_apos=concluido_apos,
+            concluido_antes=concluido_antes,
+            pagina=pagina,
+            tamanho_pagina=tamanho_pagina,
+        )
+        total_paginas = (total + tamanho_pagina - 1) // tamanho_pagina if total > 0 else 1
+        filtros = {
+            k: v
+            for k, v in {
+                "ano": ano,
+                "fonte": fonte,
+                "arquivo": arquivo,
+                "atividade": atividade,
+                "integridade": integridade,
+                "necessidade_intervencao": necessidade_intervencao,
+                "resolucao_falha": resolucao_falha,
+                "concluido_apos": concluido_apos.isoformat() if concluido_apos else None,
+                "concluido_antes": concluido_antes.isoformat() if concluido_antes else None,
+            }.items()
+            if v is not None
+        }
+        return IngestionLogicalFileListResponse(
+            total_arquivos=total,
+            pagina=pagina,
+            tamanho_pagina=tamanho_pagina,
+            total_paginas=total_paginas,
+            filtros_aplicados=filtros,
+            dados=items,
+        )
+
+    cache_key = (
+        "files",
+        ano,
+        fonte,
+        arquivo,
+        atividade,
+        integridade,
+        necessidade_intervencao,
+        resolucao_falha,
+        concluido_apos,
+        concluido_antes,
+        pagina,
+        tamanho_pagina,
     )
-    total_paginas = (total + tamanho_pagina - 1) // tamanho_pagina if total > 0 else 1
-    filtros = {
-        k: v
-        for k, v in {
-            "ano": ano,
-            "fonte": fonte,
-            "arquivo": arquivo,
-            "atividade": atividade,
-            "integridade": integridade,
-            "necessidade_intervencao": necessidade_intervencao,
-            "resolucao_falha": resolucao_falha,
-            "concluido_apos": concluido_apos.isoformat() if concluido_apos else None,
-            "concluido_antes": concluido_antes.isoformat() if concluido_antes else None,
-        }.items()
-        if v is not None
-    }
-    return IngestionLogicalFileListResponse(
-        total_arquivos=total,
-        pagina=pagina,
-        tamanho_pagina=tamanho_pagina,
-        total_paginas=total_paginas,
-        filtros_aplicados=filtros,
-        dados=items,
+    return await _ingestion_monitor_snapshot_cache.get_or_compute(
+        cache_key,
+        get_settings().ingestion_monitor_snapshot_cache_ttl_seconds,
+        lambda: run_in_threadpool(build_response),
     )
 
 
@@ -4011,15 +4039,25 @@ def obter_arquivo_logico_endpoint(
     summary="Snapshot operacional consolidado da ingestion",
     description=(
         "Retorna um snapshot consolidado para consumidores desacoplados, agregando runs, execucoes, "
-        "cancelamentos, sinais de fila Celery e o estado atual do gate de materializacao visto pela ingestao."
+        "cancelamentos, sinais de fila Celery e o estado atual do gate de materializacao visto pela ingestao. "
+        "Requisicoes repetidas podem receber o mesmo snapshot por ate "
+        "INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS (3 segundos no chart padrao; 0 desativa)."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="obterIngestionOperationsAdmin",
 )
-def obter_ingestion_operations(
+async def obter_ingestion_operations(
     db: DbSession,
     _: Annotated[None, Depends(validar_token_api)],
 ) -> IngestionOperationsResumo:
+    return await _ingestion_monitor_snapshot_cache.get_or_compute(
+        "operations",
+        get_settings().ingestion_monitor_snapshot_cache_ttl_seconds,
+        lambda: run_in_threadpool(_build_ingestion_operations, db),
+    )
+
+
+def _build_ingestion_operations(db: Session) -> IngestionOperationsResumo:
     active: dict[str, Any] = {}
     reserved: dict[str, Any] = {}
     scheduled: dict[str, Any] = {}

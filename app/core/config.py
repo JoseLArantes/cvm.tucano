@@ -234,6 +234,11 @@ class Settings(BaseSettings):
     )
     ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
     ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
+    ingestion_monitor_snapshot_cache_ttl_seconds: int = Field(
+        default=0,
+        ge=0,
+        alias="INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS",
+    )
     radar_cvm_enabled: bool = Field(default=False, alias="RADAR_CVM_ENABLED")
     radar_cvm_queue_name: str = Field(default="celery", alias="RADAR_CVM_QUEUE_NAME")
     radar_cvm_storage_backend: Literal["r2", "local"] = Field(default="r2", alias="RADAR_CVM_STORAGE_BACKEND")

@@ -97,7 +97,7 @@ Garantias operacionais:
 - linhas rejeitadas ainda entram em quarentena com contexto minimo;
 - artifacts normalizados preservam replay e auditoria;
 - staging tipado e purgado ao final do member;
-- o ZIP financeiro despacha members em janela ativa limitada por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, default `2`.
+- ZIPs com members de todas as fontes liberam trabalho em janelas limitadas por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`. O default da configuração da aplicação é `2`; o chart Helm usa `1` para limitar a pressão sobre os recursos do cluster.
 
 ## Reuso por member
 

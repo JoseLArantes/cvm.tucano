@@ -293,7 +293,7 @@ vida do SSE nem durante operações externas como a inspeção Celery.
 
 `POST /ingestion/dispatch/plan` valida escopos e devolve `plan_token` de validade curta, conflitos, possibilidade de reuso por SHA-256 e impacto no gate de materialização. `POST /ingestion/dispatch` confirma o mesmo conjunto com `plan_token` e o header obrigatório `Idempotency-Key`. A resposta é persistida por ator/operação/chave durante 24h; chave repetida com payload diferente retorna `409`. `force_reimport=true` exige `reason` e gera auditoria persistida.
 
-`GET /ingestion/operations` também informa `revision`, `poll_after_ms`, `action_counts`, `waiting_for_operator_count`, progresso agregado, totais reais, truncamento de preview e `queue_health[]`. Cada fila inclui workers observados, slots ocupados, tasks ativas/reservadas/agendadas, backlog e estado `ready`, `paused` ou `without_worker`.
+`GET /ingestion/operations` também informa `revision`, `poll_after_ms`, `action_counts`, `waiting_for_operator_count`, progresso agregado, totais reais, truncamento de preview e `queue_health[]`. Cada fila inclui workers observados, slots ocupados, tasks ativas/reservadas/agendadas, backlog e estado `ready`, `paused` ou `without_worker`. Respostas de monitoramento podem reutilizar o mesmo snapshot por até `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache), mantendo baixa latência em polling frequente.
 
 ## Interpretacao de `next_action`
 
@@ -409,6 +409,8 @@ Parametros de consulta suportados:
 - `resolucao_falha`: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida`, `encerrada_sem_restauracao`
 - `concluido_apos` e `concluido_antes`: intervalo de data/hora de conclusao
 - `pagina` e `tamanho_pagina`
+
+Quando `atividade=em_processamento`, o serviço identifica primeiro os escopos atualmente ativos e só então monta os detalhes dos arquivos correspondentes. A listagem reutiliza snapshots idênticos pelo TTL configurado em `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache).
 
 ### `GET /ingestion/files/{file_id}`
 

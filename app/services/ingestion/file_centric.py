@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import (
@@ -287,6 +287,115 @@ def calcular_atividade_atual(
     if root_status == "aguardando_ingestao":
         return "aguardando_ingestao"
     return "idle"
+
+
+FileKey = tuple[str, int | None, str]
+FileScope = tuple[str, int | None]
+
+
+def _em_processamento_scopes(
+    db: Session,
+    file_keys: set[FileKey],
+    latest_root_by_scope: dict[FileScope, tuple[uuid.UUID, str]],
+) -> tuple[set[FileScope], set[FileKey]]:
+    """Localiza escopos ativos sem montar o detalhe completo de cada arquivo."""
+    if not file_keys:
+        return set(), set()
+
+    active_statuses = {"em_execucao", "agendada"}
+    scopes = {key[:2] for key in file_keys}
+    active_scopes = {
+        scope for scope, (_, status) in latest_root_by_scope.items() if scope in scopes and status in active_statuses
+    }
+    active_file_keys: set[FileKey] = set()
+
+    root_scope_by_id = {
+        execution_id: scope
+        for scope, (execution_id, _) in latest_root_by_scope.items()
+        if scope in scopes
+    }
+    latest_roots = list(root_scope_by_id)
+    for offset in range(0, len(latest_roots), 500):
+        root_ids = latest_roots[offset : offset + 500]
+        for parent_id, status in db.execute(
+            select(ExecucaoSincronizacao.parent_execucao_id, ExecucaoSincronizacao.status).where(
+                ExecucaoSincronizacao.parent_execucao_id.in_(root_ids)
+            )
+        ).all():
+            if status in active_statuses and parent_id in root_scope_by_id:
+                active_scopes.add(root_scope_by_id[parent_id])
+
+    keys_without_root = [key for key in file_keys if key[:2] not in latest_root_by_scope]
+    fallback_roots: dict[FileKey, tuple[uuid.UUID, str]] = {}
+    for offset in range(0, len(keys_without_root), 100):
+        batch = keys_without_root[offset : offset + 100]
+        predicates = [
+            and_(
+                ExecucaoSincronizacao.tipo_fonte == tipo_fonte,
+                ExecucaoSincronizacao.ano.is_(None)
+                if ano is None
+                else ExecucaoSincronizacao.ano == ano,
+                ExecucaoSincronizacao.arquivo == arquivo,
+            )
+            for tipo_fonte, ano, arquivo in batch
+        ]
+        for execution_id, tipo_fonte, ano, arquivo, status in db.execute(
+            select(
+                ExecucaoSincronizacao.id,
+                ExecucaoSincronizacao.tipo_fonte,
+                ExecucaoSincronizacao.ano,
+                ExecucaoSincronizacao.arquivo,
+                ExecucaoSincronizacao.status,
+            )
+            .where(or_(*predicates))
+            .order_by(ExecucaoSincronizacao.iniciada_em.desc())
+        ).all():
+            fallback_roots.setdefault((tipo_fonte, ano, arquivo), (execution_id, status))
+
+    fallback_key_by_id = {execution_id: key for key, (execution_id, _) in fallback_roots.items()}
+    fallback_root_ids = list(fallback_key_by_id)
+    for key, (_, status) in fallback_roots.items():
+        if status in active_statuses:
+            active_file_keys.add(key)
+    for offset in range(0, len(fallback_root_ids), 500):
+        root_ids = fallback_root_ids[offset : offset + 500]
+        for parent_id, status in db.execute(
+            select(ExecucaoSincronizacao.parent_execucao_id, ExecucaoSincronizacao.status).where(
+                ExecucaoSincronizacao.parent_execucao_id.in_(root_ids)
+            )
+        ).all():
+            if status in active_statuses and parent_id in fallback_key_by_id:
+                active_file_keys.add(fallback_key_by_id[parent_id])
+
+    fallback_scopes = {
+        key[:2]
+        for key in keys_without_root
+        if key not in fallback_roots and key[1] is not None
+    }
+    fallback_scope_list = list(fallback_scopes)
+    for offset in range(0, len(fallback_scope_list), 100):
+        scope_batch = fallback_scope_list[offset : offset + 100]
+        predicates = [
+            and_(
+                ExecucaoSincronizacao.tipo_fonte == tipo_fonte,
+                ExecucaoSincronizacao.ano == ano,
+            )
+            for tipo_fonte, ano in scope_batch
+        ]
+        for tipo_fonte, ano, status in db.execute(
+            select(
+                ExecucaoSincronizacao.tipo_fonte,
+                ExecucaoSincronizacao.ano,
+                ExecucaoSincronizacao.status,
+            ).where(
+                ExecucaoSincronizacao.tipo_execucao == "arquivo_membro",
+                or_(*predicates),
+            )
+        ).all():
+            if status in active_statuses:
+                active_scopes.add((tipo_fonte, ano))
+
+    return active_scopes, active_file_keys
 
 
 def obter_arquivo_logico(db: Session, file_id: str) -> IngestionLogicalFileDetalhe | None:
@@ -965,18 +1074,25 @@ def listar_arquivos_logicos(
     concluido_antes_aware = _aware(concluido_antes)
 
     # 1. Coleta chaves unicas de arquivos conhecidos
-    file_keys: set[tuple[str, int | None, str]] = set()
+    file_keys: set[FileKey] = set()
+    latest_root_by_scope: dict[FileScope, tuple[uuid.UUID, str]] = {}
 
     # De ExecucaoSincronizacao (raiz: parent_execucao_id IS NULL)
-    exec_query = select(ExecucaoSincronizacao.tipo_fonte, ExecucaoSincronizacao.ano, ExecucaoSincronizacao.arquivo).where(
-        ExecucaoSincronizacao.parent_execucao_id.is_(None)
-    )
+    exec_query = select(
+        ExecucaoSincronizacao.id,
+        ExecucaoSincronizacao.tipo_fonte,
+        ExecucaoSincronizacao.ano,
+        ExecucaoSincronizacao.arquivo,
+        ExecucaoSincronizacao.status,
+    ).where(ExecucaoSincronizacao.parent_execucao_id.is_(None))
     if fonte:
         exec_query = exec_query.where(ExecucaoSincronizacao.tipo_fonte == fonte)
     if ano is not None:
         exec_query = exec_query.where(ExecucaoSincronizacao.ano == ano)
-    for f, a, arq in db.execute(exec_query).all():
+    exec_query = exec_query.order_by(ExecucaoSincronizacao.iniciada_em.desc())
+    for execution_id, f, a, arq, status in db.execute(exec_query).all():
         file_keys.add((f, a, arq))
+        latest_root_by_scope.setdefault((f, a), (execution_id, status))
 
     # De IngestionRun
     run_query = select(IngestionRun.tipo_fonte, IngestionRun.ano).distinct()
@@ -1009,6 +1125,10 @@ def listar_arquivos_logicos(
             else:
                 if ano is None:
                     file_keys.add((f_reg.fonte, None, f_reg.arquivo_principal_template))
+
+    if atividade == "em_processamento":
+        active_scopes, active_file_keys = _em_processamento_scopes(db, file_keys, latest_root_by_scope)
+        file_keys = {key for key in file_keys if key[:2] in active_scopes or key in active_file_keys}
 
     # Filtragem preliminar de string de arquivo
     filtered_keys = []

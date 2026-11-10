@@ -485,36 +485,36 @@ def test_sincronizar_member_internal_semeia_header_map_canonico_no_worker_split(
     assert resolution.codigo_cvm == 1234
 
 
+@pytest.mark.parametrize("tipo_fonte", ["itr", "fca"])
 def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
+    tipo_fonte: str,
 ) -> None:
     import celery
 
     agora = datetime.now(UTC)
     execucao_pai = ExecucaoSincronizacao(
-        tipo_fonte="itr",
+        tipo_fonte=tipo_fonte,
         ano=2022,
-        arquivo="itr_cia_aberta_2022.zip",
-        url="http://exemplo/itr",
+        arquivo=f"{tipo_fonte}_cia_aberta_2022.zip",
+        url=f"http://exemplo/{tipo_fonte}",
         status="em_execucao",
         iniciada_em=agora,
     )
     db_session.add(execucao_pai)
     db_session.flush()
     child_names = [
-        "itr_cia_aberta_BPA_con_2022.csv",
-        "itr_cia_aberta_BPA_ind_2022.csv",
-        "itr_cia_aberta_BPP_con_2022.csv",
+        f"{tipo_fonte}_member_{index}.csv" for index in range(1, 4)
     ]
     children = []
     for child_name in child_names:
         child = ExecucaoSincronizacao(
             parent_execucao_id=execucao_pai.id,
-            tipo_fonte="itr",
+            tipo_fonte=tipo_fonte,
             ano=2022,
             arquivo=child_name,
-            url=f"http://exemplo/itr/{child_name}",
+            url=f"http://exemplo/{tipo_fonte}/{child_name}",
             status="aguardando_ingestao",
             iniciada_em=agora,
         )
@@ -523,7 +523,7 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
         children.append(child)
         create_run(
             db_session,
-            tipo_fonte="itr",
+            tipo_fonte=tipo_fonte,
             ano=2022,
             execucao_sincronizacao_id=child.id,
             status="aguardando_ingestao",

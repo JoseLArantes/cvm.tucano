@@ -2126,11 +2126,7 @@ def disparar_dependentes_task(
                 "active_members": str(len(active_children)),
             }
 
-        window_size = (
-            _settings.ingestion_max_active_members_per_parent
-            if execucao.tipo_fonte in {"dfp", "itr"}
-            else max(len(pending_children), 1)
-        )
+        window_size = _settings.ingestion_max_active_members_per_parent
         selected_children = pending_children[:window_size]
         dep_signatures = []
         for c in selected_children:
