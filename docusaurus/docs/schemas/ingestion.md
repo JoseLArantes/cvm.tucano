@@ -44,6 +44,8 @@ Campos principais:
 
 ### Status persistido da run
 
+- `agendada`
+- `aguardando_ingestao` (inclui espera por vaga global de member)
 - `em_execucao`
 - `sucesso`
 - `sucesso_com_alerta`
@@ -168,6 +170,10 @@ Campos:
 - `retryable`
 - `phase`
 
+Durante backoff de uma retentativa Celery de member, `retryable=true` acompanha a execucao em `agendada` e a fase em
+`failed_retryable`. Quando o limite automatico de tentativas termina, o erro final pode continuar recuperavel e oferecer
+a acao administrativa correspondente, desde que exista fonte executavel.
+
 ## `IngestionRunPhaseExecutionResumo`
 
 Representa uma tentativa persistida de fase da run.
@@ -191,6 +197,10 @@ Campos:
 - `input_artifact_uri`
 - `output_artifact_uri`
 - `metrics`
+
+Fases encerradas por erro transitorio usam `status=failed_retryable`, preservam `error_type`, `error_message` e
+`error_retryable=true`, e nao sao tratadas como fase stale enquanto aguardam o Celery. A nova tentativa cria outro
+registro de fase com o proximo valor de `attempt`.
 
 ## `IngestionRunMemberResumo`
 

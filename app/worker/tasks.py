@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -1461,7 +1462,6 @@ def ingerir_sincronizacao_zip(
 ) -> dict[str, Any]:
     from datetime import UTC, datetime
 
-    from celery import chain
     from sqlalchemy import select
 
     from app.models.ingestion import IngestionRun
@@ -1491,7 +1491,6 @@ def ingerir_sincronizacao_zip(
             "message": f"Execution is in state '{execucao.status}', not 'aguardando_ingestao'."
         }
 
-    execucao.status = "em_execucao"
     parent_runs = list(
         db.scalars(
             select(IngestionRun)
@@ -1501,66 +1500,20 @@ def ingerir_sincronizacao_zip(
     )
     run = parent_runs[0] if parent_runs else None
     for parent_run in parent_runs:
-        update_run_state(parent_run, status="em_execucao", phase="stage")
+        update_run_state(parent_run, status="aguardando_ingestao", phase="stage")
     db.commit()
 
     try:
-        children = db.scalars(
-            select(ExecucaoSincronizacao)
-            .where(ExecucaoSincronizacao.parent_execucao_id == execucao.id)
-        ).all()
-
-        doc_tasks_to_dispatch = []
-        document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
-
-        for c in children:
-            if c.status in {"skipped", "sucesso", "sucesso_com_alerta", "sem_alteracao"}:
-                continue
-
-            if c.arquivo == document_file:
-                c.status = "agendada"
-                child_run = db.scalar(
-                    select(IngestionRun)
-                    .where(IngestionRun.execucao_sincronizacao_id == c.id)
-                    .order_by(IngestionRun.created_at.desc())
-                    .limit(1)
-                )
-                if child_run is not None:
-                    update_run_state(child_run, status="agendada", phase="stage")
-                doc_tasks_to_dispatch.append({
-                    "child_execucao_id": str(c.id),
-                    "member_name": c.arquivo,
-                })
-
-        db.commit()
-
-        if doc_tasks_to_dispatch:
-            header_task = sincronizar_member_task.si(
-                tipo_fonte=execucao.tipo_fonte,
-                ano=execucao.ano,
-                member_name=doc_tasks_to_dispatch[0]["member_name"],
-                parent_execucao_id=str(execucao.id),
-                child_execucao_id=doc_tasks_to_dispatch[0]["child_execucao_id"],
-                force_reimport=force_reimport,
-            )
-            dispatch_dependents = disparar_dependentes_task.si(
-                parent_execucao_id=str(execucao.id),
-                force_reimport=force_reimport,
-                pending_update_id=pending_update_id,
-            )
-            workflow = chain(header_task, dispatch_dependents)
-            workflow.delay()
-        else:
-            disparar_dependentes_task.delay(
-                parent_execucao_id=str(execucao.id),
-                force_reimport=force_reimport,
-                pending_update_id=pending_update_id,
-            )
+        disparar_dependentes_task.delay(
+            parent_execucao_id=str(execucao.id),
+            force_reimport=force_reimport,
+            pending_update_id=pending_update_id,
+        )
 
         return {
             "execucao_id": str(execucao.id),
-            "status": "em_execucao",
-            "message": "Celery workflow started asynchronously.",
+            "status": "aguardando_ingestao",
+            "message": "Ingestion work is waiting for a global member slot.",
         }
 
     except Exception as exc:
@@ -1663,6 +1616,8 @@ def sincronizar_member_internal(
     child_execucao_id: str,
     force_reimport: bool = False,
     task_id: str | None = None,
+    task_retry_count: int = 0,
+    max_retries: int = 0,
 ) -> dict[str, str]:
     import gc
     import uuid
@@ -1672,7 +1627,7 @@ def sincronizar_member_internal(
 
     from sqlalchemy import select
 
-    from app.models.ingestion import IngestionFile, IngestionRun
+    from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.artifact_store import build_artifact_metadata, describe_member_artifact
     from app.services.ingestion.file_manager import (
@@ -1682,9 +1637,11 @@ def sincronizar_member_internal(
         extract_zip_member,
     )
     from app.services.ingestion.operational import (
+        get_latest_phase_execution,
         record_phase_artifact,
         touch_parent_execution_heartbeat,
     )
+    from app.services.ingestion.recovery import resolve_parent_ingestion_file
     from app.services.ingestion.staging import (
         create_run,
         get_member_payload,
@@ -1697,7 +1654,10 @@ def sincronizar_member_internal(
     if execucao is None:
         raise ValueError(f"Execution not found: {child_execucao_id}")
 
-    if execucao.status in _STATUS_FINAL_EXECUCAO and not force_reimport:
+    is_automatic_retry = task_retry_count > 0 and task_id is not None and execucao.id_tarefa == task_id
+    if execucao.status in _STATUS_FINAL_EXECUCAO and not force_reimport and not (
+        execucao.status == "falha" and is_automatic_retry
+    ):
         if execucao.status == "cancelada":
             return _resultado_cancelado(execucao.id, "Execution was cancelled before member processing started.")
         _logger.warning(
@@ -1723,9 +1683,16 @@ def sincronizar_member_internal(
 
     if task_id:
         execucao.id_tarefa = task_id
+    if is_automatic_retry:
+        execucao.finalizada_em = None
+        execucao.mensagem_erro = None
+        execucao.total_linhas_lidas = 0
+        execucao.total_inseridos = 0
+        execucao.total_atualizados = 0
+        execucao.total_inalterados = 0
+        execucao.total_rejeitados = 0
     execucao.status = "em_execucao"
-    touch_parent_execution_heartbeat(db, parent_execucao_id=parent_execucao.id)
-    db.commit()
+    execucao.finalizada_em = None
 
     run = db.scalar(
         select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == execucao.id)
@@ -1741,28 +1708,34 @@ def sincronizar_member_internal(
         )
         db.commit()
         db.refresh(run)
+    else:
+        run.requested_by_task_id = task_id or run.requested_by_task_id
+        if is_automatic_retry:
+            run.message = None
+            run.quality_summary = None
+            run.finished_at = None
+        update_run_state(run, status="em_execucao", phase="stage")
+
+    parent_run = db.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
+        .order_by(IngestionRun.created_at.desc())
+        .limit(1)
+    )
+    parent_execucao.status = "em_execucao"
+    parent_execucao.finalizada_em = None
+    if parent_run is not None:
+        update_run_state(parent_run, status="em_execucao", phase="stage")
+    touch_parent_execution_heartbeat(db, parent_execucao_id=parent_execucao.id)
+    db.commit()
 
     try:
-        ingestion_file = db.scalar(
-            select(IngestionFile)
-            .join(IngestionRun)
-            .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
-        )
+        ingestion_file = resolve_parent_ingestion_file(db, parent_execucao=parent_execucao)
         if ingestion_file is None:
-            ingestion_file = db.scalar(
-                select(IngestionFile)
-                .join(IngestionRun)
-                .join(ExecucaoSincronizacao, IngestionRun.execucao_sincronizacao_id == ExecucaoSincronizacao.id)
-                .where(
-                    ExecucaoSincronizacao.arquivo == parent_execucao.arquivo,
-                    ExecucaoSincronizacao.tipo_fonte == parent_execucao.tipo_fonte,
-                    ExecucaoSincronizacao.ano == parent_execucao.ano,
-                )
-                .order_by(IngestionRun.created_at.desc())
-                .limit(1)
+            raise ValueError(
+                f"IngestionFile not found for parent execution: {parent_execucao_id}. "
+                "O arquivo principal precisa ser reprocessado primeiro."
             )
-        if ingestion_file is None:
-            raise ValueError(f"IngestionFile not found for parent execution: {parent_execucao_id}. O arquivo principal precisa ser reprocessado primeiro.")
 
         # Check if member file exists locally, otherwise self-heal
         zip_dir = Path(_settings.storage_dir) / str(parent_execucao.id)
@@ -2018,22 +1991,59 @@ def sincronizar_member_internal(
 
     except Exception as exc:
         db.rollback()
+        erro_retentavel = isinstance(exc, _AUTORETRY_FOR)
+        retentativa_pendente = erro_retentavel and task_retry_count < max_retries
         execucao_erro = db.get(ExecucaoSincronizacao, execucao.id)
         if execucao_erro is not None:
-            execucao_erro.status = "falha"
+            execucao_erro.status = "agendada" if retentativa_pendente else "falha"
             execucao_erro.mensagem_erro = str(exc)
-            execucao_erro.finalizada_em = datetime.now(UTC)
+            execucao_erro.finalizada_em = None if retentativa_pendente else datetime.now(UTC)
         run_erro = db.get(IngestionRun, run.id)
         if run_erro is not None:
-            update_run_state(
-                run_erro,
-                status="falha",
-                phase="complete",
-                message=str(exc),
-                finished_at=datetime.now(UTC)
-            )
+            if retentativa_pendente:
+                run_erro.finished_at = None
+                update_run_state(run_erro, status="agendada", message=str(exc))
+                phase_execution = get_latest_phase_execution(db, run_id=run_erro.id)
+                if phase_execution is not None:
+                    retry_at = datetime.now(UTC)
+                    phase_execution.status = "failed_retryable"
+                    phase_execution.finished_at = retry_at
+                    phase_execution.heartbeat_at = retry_at
+                    phase_execution.error_type = type(exc).__name__
+                    phase_execution.error_message = str(exc)
+                    phase_execution.error_retryable = True
+                parent_erro = db.get(ExecucaoSincronizacao, parent_execucao.id)
+                parent_run_erro = db.scalar(
+                    select(IngestionRun)
+                    .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
+                    .order_by(IngestionRun.created_at.desc())
+                    .limit(1)
+                )
+                if parent_erro is not None:
+                    parent_erro.status = "aguardando_ingestao"
+                    parent_erro.finalizada_em = None
+                if parent_run_erro is not None:
+                    update_run_state(
+                        parent_run_erro,
+                        status="aguardando_ingestao",
+                        phase="stage",
+                    )
+            else:
+                update_run_state(
+                    run_erro,
+                    status="falha",
+                    phase="complete",
+                    message=str(exc),
+                    finished_at=datetime.now(UTC),
+                )
+                phase_execution = get_latest_phase_execution(db, run_id=run_erro.id)
+                if phase_execution is not None:
+                    phase_execution.error_type = type(exc).__name__
+                    phase_execution.error_message = str(exc)
+                    phase_execution.error_retryable = erro_retentavel
+                touch_parent_execution_heartbeat(db, parent_execucao_id=parent_execucao.id)
         db.commit()
-        if isinstance(exc, _AUTORETRY_FOR):
+        if erro_retentavel:
             raise
         _logger.error("Member task %s failed permanently: %s", member_name, exc)
         return {"status": "falha", "execucao_id": str(execucao.id), "error": str(exc)}
@@ -2060,6 +2070,8 @@ def sincronizar_member_task(
             child_execucao_id=child_execucao_id,
             force_reimport=force_reimport,
             task_id=str(self.request.id),
+            task_retry_count=int(self.request.retries),
+            max_retries=_settings.ingestion_max_retries,
         )
     finally:
         db.close()
@@ -2080,7 +2092,7 @@ def disparar_dependentes_task(
     from app.db.session import SessionLocal
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
-    from app.services.ingestion.operational import touch_parent_execution_heartbeat
+    from app.services.ingestion.operational import get_latest_phase_execution
     from app.services.ingestion.staging import update_run_state
 
     db = SessionLocal()
@@ -2091,10 +2103,11 @@ def disparar_dependentes_task(
             raise ValueError(f"Parent execution not found: {parent_execucao_id}")
         if execucao.status == "cancelada":
             return _resultado_cancelado(execucao.id, "Parent execution was cancelled before dependent dispatch.")
-        if execucao.status == "falha":
-            return {"status": "falha", "parent_execucao_id": parent_execucao_id, "error": "Parent execution already failed."}
-
-        touch_parent_execution_heartbeat(db, parent_execucao_id=parent_uuid)
+        if execucao.status in _STATUS_FINAL_EXECUCAO:
+            result = {"status": execucao.status, "parent_execucao_id": parent_execucao_id}
+            if execucao.status == "falha":
+                result["error"] = "Parent execution already failed."
+            return result
 
         document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
         header_exec = db.scalar(
@@ -2109,15 +2122,12 @@ def disparar_dependentes_task(
 
         children = db.scalars(
             select(ExecucaoSincronizacao)
-            .where(
-                ExecucaoSincronizacao.parent_execucao_id == parent_uuid,
-                ExecucaoSincronizacao.arquivo != document_file,
-            )
+            .where(ExecucaoSincronizacao.parent_execucao_id == parent_uuid)
+            .order_by(ExecucaoSincronizacao.arquivo.asc())
         ).all()
 
         final_statuses = _STATUS_FINAL_EXECUCAO | {"skipped", "sem_alteracao", "sucesso_com_alerta", "quality_fail"}
         active_statuses = {"agendada", "em_execucao"}
-        pending_children = [c for c in children if c.status not in final_statuses and c.status not in active_statuses]
         active_children = [c for c in children if c.status in active_statuses]
         if active_children:
             return {
@@ -2126,7 +2136,76 @@ def disparar_dependentes_task(
                 "active_members": str(len(active_children)),
             }
 
-        window_size = _settings.ingestion_max_active_members_per_parent
+        header_pending = header_exec is not None and header_exec.status not in final_statuses
+        pending_children = (
+            [header_exec]
+            if header_pending and header_exec is not None
+            else [
+                child
+                for child in children
+                if child.arquivo != document_file
+                and child.status not in final_statuses
+                and child.status not in active_statuses
+            ]
+        )
+
+        if not pending_children:
+            finalizar_sincronizacao_zip_task.delay(
+                parent_execucao_id=parent_execucao_id,
+                pending_update_id=pending_update_id,
+            )
+            return {"status": "finalization_dispatched", "parent_execucao_id": parent_execucao_id}
+
+        admitted_members = list(
+            db.scalars(
+                select(ExecucaoSincronizacao).where(
+                    ExecucaoSincronizacao.tipo_execucao == "arquivo_membro",
+                    ExecucaoSincronizacao.status.in_(active_statuses),
+                )
+            ).all()
+        )
+        active_member_count = 0
+        for admitted_member in admitted_members:
+            member_run = db.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id == admitted_member.id)
+                .order_by(IngestionRun.created_at.desc())
+                .limit(1)
+            )
+            latest_phase = get_latest_phase_execution(db, run_id=member_run.id) if member_run is not None else None
+            if latest_phase is None or latest_phase.status != "failed_retryable":
+                active_member_count += 1
+
+        global_capacity = _settings.ingestion_max_active_members_global - active_member_count
+        if global_capacity <= 0:
+            execucao.status = "aguardando_ingestao"
+            execucao.finalizada_em = None
+            parent_run = db.scalar(
+                select(IngestionRun)
+                .where(IngestionRun.execucao_sincronizacao_id == parent_uuid)
+                .order_by(IngestionRun.created_at.desc())
+                .limit(1)
+            )
+            if parent_run is not None:
+                parent_run.finished_at = None
+                update_run_state(parent_run, status="aguardando_ingestao", phase="stage")
+            db.commit()
+            self.apply_async(
+                args=(parent_execucao_id,),
+                kwargs={
+                    "force_reimport": force_reimport,
+                    "pending_update_id": pending_update_id,
+                },
+                countdown=_settings.ingestion_queue_dispatch_poll_seconds,
+                queue=_settings.ingestion_control_queue_name,
+            )
+            return {
+                "status": "waiting_global_capacity",
+                "parent_execucao_id": parent_execucao_id,
+                "active_members": str(active_member_count),
+            }
+
+        window_size = min(_settings.ingestion_max_active_members_per_parent, global_capacity)
         selected_children = pending_children[:window_size]
         dep_signatures = []
         for c in selected_children:
@@ -2147,6 +2226,17 @@ def disparar_dependentes_task(
             )
             dep_signatures.append(sig)
 
+        execucao.status = "aguardando_ingestao"
+        execucao.finalizada_em = None
+        parent_run = db.scalar(
+            select(IngestionRun)
+            .where(IngestionRun.execucao_sincronizacao_id == parent_uuid)
+            .order_by(IngestionRun.created_at.desc())
+            .limit(1)
+        )
+        if parent_run is not None:
+            parent_run.finished_at = None
+            update_run_state(parent_run, status="aguardando_ingestao", phase="stage")
         db.commit()
 
         if dep_signatures:
@@ -2159,15 +2249,30 @@ def disparar_dependentes_task(
                 ),
             )
             workflow.delay()
-        else:
-            finalizar_sincronizacao_zip_task.delay(
-                parent_execucao_id=parent_execucao_id,
-                pending_update_id=pending_update_id,
-            )
-
         return {"status": "dispatched", "parent_execucao_id": parent_execucao_id}
     finally:
         db.close()
+
+
+def _resumir_falhas_membros(
+    children: Sequence[Any],
+    *,
+    statuses: tuple[str, ...],
+    label: str,
+) -> str:
+    selected = [child for child in children if child.status in statuses]
+    details: list[str] = []
+    for child in selected[:5]:
+        first_line = (child.mensagem_erro or "erro sem detalhes").splitlines()[0].strip()
+        if len(first_line) > 180:
+            first_line = f"{first_line[:177]}..."
+        details.append(f"{child.arquivo}: {first_line}")
+    remaining = len(selected) - len(details)
+    suffix = f"; mais {remaining} membro(s)" if remaining > 0 else ""
+    return (
+        f"{label} ({len(selected)} membro(s)): {'; '.join(details)}{suffix}. "
+        "Consulte as execucoes filhas para obter os detalhes completos."
+    )
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.finalizar_sincronizacao_zip_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2212,10 +2317,18 @@ def finalizar_sincronizacao_zip_task(
             message = execucao.mensagem_erro or "Sincronizacao cancelada manualmente."
         elif "falha" in child_statuses or "quality_fail" in child_statuses:
             parent_status = "falha"
-            message = "Um ou mais arquivos membros falharam."
+            message = _resumir_falhas_membros(
+                children,
+                statuses=("falha", "quality_fail"),
+                label="Membros com falha",
+            )
         elif "em_execucao" in child_statuses or "agendada" in child_statuses:
             parent_status = "falha"
-            message = "Tempo limite atingido para alguns arquivos membros."
+            message = _resumir_falhas_membros(
+                children,
+                statuses=("em_execucao", "agendada"),
+                label="Tempo limite; membros sem conclusao",
+            )
         else:
             parent_status = "sucesso"
             message = "Todos os arquivos membros foram processados com sucesso."
@@ -2226,6 +2339,8 @@ def finalizar_sincronizacao_zip_task(
         execucao.total_inalterados = total_inalterados
         execucao.total_rejeitados = total_rejeitados
         execucao.status = parent_status
+        if parent_status == "falha":
+            execucao.mensagem_erro = message
         execucao.finalizada_em = datetime.now(UTC)
 
         child_run_map = {

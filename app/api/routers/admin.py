@@ -125,6 +125,7 @@ from app.services.ingestion.recovery import (
     NoRecoverySourceError,
     assess_ingestion_run_recovery,
     assess_ingestion_run_recovery_eligibility,
+    resolve_parent_ingestion_file,
 )
 from app.services.ingestion.replay import (
     auto_repair_and_replay_quarantine,
@@ -2809,11 +2810,43 @@ def detalhar_execucao(
         "Executa o replay ou reprocessamento de uma execucao de sincronizacao (pai ou membro filho). "
         "Para execucoes pai (arquivo principal), reagenda a tarefa principal com force_reimport=True. "
         "Para execucoes membro (filho), reagenda a sincronizacao do member correspondente mantendo a linhagem "
-        "e reaproveitando a extracao pai. Se houver IngestionRun associada, seus estados operacionais sao sincronizados."
+        "e reaproveitando a extracao pai. O replay isolado do filho so e agendado quando existe um `IngestionFile` "
+        "persistido para a fonte; sem essa fonte, retorna `409` `NO_RECOVERY_SOURCE` "
+        "com `next_action=replay_parent_execution`, sem alterar a execucao filha. Se houver IngestionRun associada, "
+        "seus estados operacionais sao sincronizados."
     ),
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Execucao nao encontrada."},
+        409: {
+            "description": "Replay isolado de member indisponivel sem `IngestionFile`; o arquivo pai precisa ser reprocessado (`NO_RECOVERY_SOURCE`).",
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "detail": {
+                                "type": "object",
+                                "properties": {
+                                    "reason_code": {"type": "string", "enum": ["NO_RECOVERY_SOURCE"]},
+                                    "next_action": {"type": "string", "enum": ["replay_parent_execution"]},
+                                    "parent_execucao_id": {"type": "string", "format": "uuid"},
+                                },
+                                "required": ["reason_code", "next_action", "parent_execucao_id"],
+                            }
+                        },
+                        "required": ["detail"],
+                    },
+                    "example": {
+                        "detail": {
+                            "reason_code": "NO_RECOVERY_SOURCE",
+                            "next_action": "replay_parent_execution",
+                            "parent_execucao_id": "6f6b0e48-1cb1-47c7-aab4-fcab2dcd6ef8",
+                        }
+                    },
+                }
+            },
+        },
         422: {"description": "Fonte ou arquivo nao suportado para replay."},
         503: {"description": "Falha ao despachar tarefa no Celery ou pool esgotado."},
     },
@@ -2926,6 +2959,19 @@ def replay_sincronizacao(
         from app.worker.tasks import sincronizar_member_task
 
         parent_id = execucao.parent_execucao_id
+        parent_execucao = db.get(ExecucaoSincronizacao, parent_id)
+        if (
+            parent_execucao is None
+            or resolve_parent_ingestion_file(db, parent_execucao=parent_execucao) is None
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason_code": "NO_RECOVERY_SOURCE",
+                    "next_action": "replay_parent_execution",
+                    "parent_execucao_id": str(parent_id),
+                },
+            )
         task_id = novo_task_id()
         execucao.id_tarefa = task_id
         execucao.status = "agendada"
@@ -3139,6 +3185,8 @@ def dashboard_execucoes(
         "`quality_summary` e snapshots de artifacts, nao por volume em `ingestion_rows`. "
         "Para explicar members reaproveitados ou reprocessados, use `member_snapshot_summary` e `lifecycle_decision`. "
         "Para diagnostico operacional, use `state`, `liveness`, `blocking`, `cancellation`, `last_error` e `next_action`."
+        " Em ingestao de ZIP, `aguardando_ingestao` tambem indica espera normal pela vaga global de processamento de members; "
+        "`INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` limita o total de members admitidos entre pais simultaneos."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="listarIngestionRunsAdmin",
@@ -4508,7 +4556,8 @@ def cancelar_ingestion_run_member(
     summary="Recuperar administrativamente uma run de ingestion",
     description=(
         "Executa recuperacao administrativa controlada de uma run marcada como stale ou falhada com erro recuperavel. "
-        "A operacao so e aceita quando a run possui staging reaplicavel ou uma execucao de member correlata. "
+        "A operacao so e aceita quando a run possui staging reaplicavel ou uma execucao de member correlata com "
+        "`IngestionFile` persistido para reabrir o pacote pai. "
         "Quando nao houver fonte executavel, responde `409` com `reason_code=NO_RECOVERY_SOURCE`. "
         "Runs concluidas ou com falha nao retentavel tambem respondem `409`, respectivamente com "
         "`RUN_ALREADY_COMPLETED` ou `NON_RETRYABLE_FAILURE`, e podem ser sucedidas por novo dispatch equivalente."
@@ -4516,7 +4565,7 @@ def cancelar_ingestion_run_member(
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Run nao encontrado."},
-        409: {"description": "Run nao esta em estado recuperavel (`RUN_ALREADY_COMPLETED`, `NON_RETRYABLE_FAILURE` ou `RUN_NOT_RECOVERABLE`) ou nao possui fonte executavel (`NO_RECOVERY_SOURCE`)."},
+        409: {"description": "Run nao esta em estado recuperavel (`RUN_ALREADY_COMPLETED`, `NON_RETRYABLE_FAILURE` ou `RUN_NOT_RECOVERABLE`) ou o member nao possui `IngestionFile` pai executavel (`NO_RECOVERY_SOURCE`)."},
         503: {
             "description": "Falha temporaria de banco ou falha terminal ao publicar a task de recovery no Celery.",
             "content": {

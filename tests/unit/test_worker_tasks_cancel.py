@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -227,6 +228,56 @@ def test_reconciliar_ingestion_stale_task_marca_falha_recuperavel(db_session: Se
     assert phase.status == "failed_final"
     assert phase.error_type == "stale_phase"
     assert phase.error_retryable is True
+
+
+def test_reconcile_stale_preserva_pai_com_member_aguardando_slot_global(db_session: Session) -> None:
+    agora = datetime.now(UTC)
+    parent = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr",
+        status="em_execucao",
+        iniciada_em=agora - timedelta(hours=1),
+    )
+    db_session.add(parent)
+    db_session.flush()
+    parent_run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=parent.id,
+        status="em_execucao",
+        phase="stage",
+    )
+    parent_phase = db_session.scalar(
+        select(IngestionPhaseExecution).where(IngestionPhaseExecution.ingestion_run_id == parent_run.id)
+    )
+    assert parent_phase is not None
+    parent_phase.heartbeat_at = agora - timedelta(hours=1)
+    child = ExecucaoSincronizacao(
+        parent_execucao_id=parent.id,
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_BPA_ind_2025.csv",
+        url="http://exemplo/itr",
+        status="aguardando_ingestao",
+    )
+    db_session.add(child)
+    db_session.commit()
+
+    resultado = reconcile_stale_ingestion_phase_executions(db_session)
+    db_session.commit()
+
+    db_session.refresh(parent)
+    db_session.refresh(parent_run)
+    db_session.refresh(parent_phase)
+    assert resultado["failed_retryable_runs"] == []
+    assert resultado["failed_non_recoverable_runs"] == []
+    assert parent.status == "em_execucao"
+    assert parent_run.status == "em_execucao"
+    assert parent_phase.status == "running"
+    assert parent_phase.heartbeat_at is not None
 
 
 def test_reconciliar_ingestion_stale_task_conclui_cancelamento_propagado(db_session: Session) -> None:
@@ -557,6 +608,7 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_per_parent", 2)
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_global", 2)
     monkeypatch.setattr(celery, "group", _fake_group)
     monkeypatch.setattr(celery, "chord", _fake_chord)
 
@@ -586,12 +638,126 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
     assert set(phase_statuses.values()) == {"pending"}
 
 
-def test_ingerir_sincronizacao_zip_agenda_apenas_member_principal(
+def test_disparar_dependentes_aguarda_slot_global_sem_enfileirar_member(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import celery
+    agora = datetime.now(UTC)
+    parent_ativo = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2024,
+        arquivo="dfp_cia_aberta_2024.zip",
+        url="http://exemplo/dfp/2024",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    parent_pendente = ExecucaoSincronizacao(
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_2025.zip",
+        url="http://exemplo/itr/2025",
+        status="aguardando_ingestao",
+        iniciada_em=agora,
+    )
+    db_session.add_all([parent_ativo, parent_pendente])
+    db_session.flush()
+    member_ativo = ExecucaoSincronizacao(
+        parent_execucao_id=parent_ativo.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="dfp",
+        ano=2024,
+        arquivo="dfp_cia_aberta_BPA_ind_2024.csv",
+        url=parent_ativo.url,
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    member_pendente = ExecucaoSincronizacao(
+        parent_execucao_id=parent_pendente.id,
+        tipo_execucao="arquivo_membro",
+        tipo_fonte="itr",
+        ano=2025,
+        arquivo="itr_cia_aberta_BPA_ind_2025.csv",
+        url=parent_pendente.url,
+        status="aguardando_ingestao",
+        iniciada_em=agora,
+    )
+    db_session.add_all([member_ativo, member_pendente])
+    db_session.flush()
+    create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2024,
+        execucao_sincronizacao_id=member_ativo.id,
+        status="em_execucao",
+        phase="stage",
+    )
+    parent_run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=parent_pendente.id,
+        status="aguardando_ingestao",
+        phase="stage",
+    )
+    member_run = create_run(
+        db_session,
+        tipo_fonte="itr",
+        ano=2025,
+        execucao_sincronizacao_id=member_pendente.id,
+        status="aguardando_ingestao",
+        phase="stage",
+    )
+    db_session.commit()
 
+    class _SessionProxy:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(db_session, name)
+
+        def close(self) -> None:
+            pass
+
+    scheduled: list[dict[str, Any]] = []
+    monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_global", 1)
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_queue_dispatch_poll_seconds", 7)
+    monkeypatch.setattr(
+        worker_tasks.disparar_dependentes_task,
+        "apply_async",
+        lambda **kwargs: scheduled.append(kwargs),
+    )
+
+    resultado = worker_tasks.disparar_dependentes_task.run(str(parent_pendente.id))
+
+    db_session.expire_all()
+    pending_parent_actual = db_session.get(ExecucaoSincronizacao, parent_pendente.id)
+    pending_member_actual = db_session.get(ExecucaoSincronizacao, member_pendente.id)
+    pending_parent_run_actual = db_session.get(IngestionRun, parent_run.id)
+    pending_member_run_actual = db_session.get(IngestionRun, member_run.id)
+    assert pending_parent_actual is not None
+    assert pending_member_actual is not None
+    assert pending_parent_run_actual is not None
+    assert pending_member_run_actual is not None
+    assert resultado["status"] == "waiting_global_capacity"
+    assert resultado["active_members"] == "1"
+    assert pending_parent_actual.status == "aguardando_ingestao"
+    assert pending_member_actual.status == "aguardando_ingestao"
+    assert pending_parent_run_actual.status == "aguardando_ingestao"
+    assert pending_member_run_actual.status == "aguardando_ingestao"
+    assert scheduled == [
+        {
+            "args": (str(parent_pendente.id),),
+            "kwargs": {"force_reimport": False, "pending_update_id": None},
+            "countdown": 7,
+            "queue": worker_tasks._settings.ingestion_control_queue_name,
+        }
+    ]
+
+
+def test_ingerir_sincronizacao_zip_aguarda_slot_global_antes_de_enfileirar_members(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     agora = datetime.now(UTC)
     execucao_pai = ExecucaoSincronizacao(
         tipo_fonte="itr",
@@ -647,14 +813,15 @@ def test_ingerir_sincronizacao_zip_agenda_apenas_member_principal(
         def close(self) -> None:
             pass
 
-    class _Workflow:
-        def delay(self) -> None:
-            pass
-
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.services.ingestion.dependencies.ensure_identity_graph_ready", lambda db: None)
-    monkeypatch.setattr(celery, "chain", lambda *args: _Workflow())
+    dispatched: dict[str, Any] = {}
+    monkeypatch.setattr(
+        worker_tasks.disparar_dependentes_task,
+        "delay",
+        lambda **kwargs: dispatched.update(kwargs),
+    )
 
     resultado = worker_tasks.ingerir_sincronizacao_zip(execucao_pai.id)
 
@@ -666,10 +833,11 @@ def test_ingerir_sincronizacao_zip_agenda_apenas_member_principal(
         statuses[child.arquivo] = child_atual.status
     parent_run = db_session.get(IngestionRun, run_pai.id)
 
-    assert resultado["status"] == "em_execucao"
+    assert resultado["status"] == "aguardando_ingestao"
+    assert dispatched["parent_execucao_id"] == str(execucao_pai.id)
     assert parent_run is not None
-    assert parent_run.status == "em_execucao"
-    assert statuses["itr_cia_aberta_2022.csv"] == "agendada"
+    assert parent_run.status == "aguardando_ingestao"
+    assert statuses["itr_cia_aberta_2022.csv"] == "aguardando_ingestao"
     assert statuses["itr_cia_aberta_BPA_con_2022.csv"] == "aguardando_ingestao"
     assert statuses["itr_cia_aberta_BPA_ind_2022.csv"] == "aguardando_ingestao"
 
@@ -941,4 +1109,148 @@ def test_sincronizar_member_internal_repassa_excecao_autoretry(
 
     db_session.refresh(execucao_filha)
     assert execucao_filha.status == "falha"
+
+
+def test_sincronizar_member_internal_reabre_execucao_em_retry_automatico(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    agora = datetime.now(UTC)
+    execucao_pai = ExecucaoSincronizacao(
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_2025.zip",
+        url="http://exemplo/dfp",
+        status="em_execucao",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_pai)
+    db_session.flush()
+    execucao_filha = ExecucaoSincronizacao(
+        parent_execucao_id=execucao_pai.id,
+        tipo_fonte="dfp",
+        ano=2025,
+        arquivo="dfp_cia_aberta_BPA_ind_2025.csv",
+        url="http://exemplo/dfp/bpa",
+        status="agendada",
+        iniciada_em=agora,
+    )
+    db_session.add(execucao_filha)
+    db_session.flush()
+
+    run_filha = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_filha.id,
+        status="agendada",
+        phase="stage",
+    )
+    run_pai = create_run(
+        db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        execucao_sincronizacao_id=execucao_pai.id,
+        status="em_execucao",
+        phase="stage",
+    )
+    register_file(
+        db_session,
+        ingestion_run=run_pai,
+        source_url=execucao_pai.url,
+        source_filename=execucao_pai.arquivo,
+        content_sha256="zip-sha",
+        content_length_bytes=1,
+        is_zip=True,
+    )
+    db_session.commit()
+
+    extracted_dir = tmp_path / str(execucao_pai.id) / "extracted"
+    extracted_dir.mkdir(parents=True, exist_ok=True)
+    member_path = extracted_dir / execucao_filha.arquivo
+    member_path.write_text("dummy-content\n", encoding="latin1")
+    monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(tmp_path))
+    monkeypatch.setattr("app.worker.tasks._settings.ingestion_financeiro_direct_path_enabled", False)
+
+    attempts = 0
+
+    def _fail_once(*args: Any, **kwargs: Any) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RetryableIngestionError("Temporary database connection loss")
+
+    monkeypatch.setattr("app.services.ingestion.financeiro._process_financeiro_member", _fail_once)
+
+    with pytest.raises(RetryableIngestionError):
+        sincronizar_member_internal(
+            db=db_session,
+            tipo_fonte="dfp",
+            ano=2025,
+            member_name=execucao_filha.arquivo,
+            parent_execucao_id=str(execucao_pai.id),
+            child_execucao_id=str(execucao_filha.id),
+            task_id="task-auto-retry",
+            task_retry_count=0,
+            max_retries=2,
+        )
+
+    db_session.refresh(execucao_filha)
+    assert execucao_filha.status == "agendada"
+    assert execucao_filha.finalizada_em is None
+    db_session.refresh(run_filha)
+    assert run_filha.status == "agendada"
+    phase = db_session.query(IngestionPhaseExecution).filter_by(ingestion_run_id=run_filha.id).order_by(
+        IngestionPhaseExecution.created_at.desc()
+    ).first()
+    assert phase is not None
+    assert phase.status == "failed_retryable"
+    assert phase.error_retryable is True
+
+    resultado = sincronizar_member_internal(
+        db=db_session,
+        tipo_fonte="dfp",
+        ano=2025,
+        member_name=execucao_filha.arquivo,
+        parent_execucao_id=str(execucao_pai.id),
+        child_execucao_id=str(execucao_filha.id),
+        task_id="task-auto-retry",
+        task_retry_count=1,
+        max_retries=2,
+    )
+
+    assert resultado["status"] == "sucesso"
+    execucao_final = db_session.get(ExecucaoSincronizacao, execucao_filha.id)
+    run_final = db_session.query(IngestionRun).filter_by(execucao_sincronizacao_id=execucao_filha.id).one()
+    assert execucao_final is not None
+    assert execucao_final.status == "sucesso"
+    assert run_final.status == "sucesso"
+    stage_attempts = (
+        db_session.query(IngestionPhaseExecution)
+        .filter_by(ingestion_run_id=run_filha.id, phase="stage")
+        .order_by(IngestionPhaseExecution.attempt.asc())
+        .all()
+    )
+    assert [attempt.attempt for attempt in stage_attempts] == [1, 2]
+    assert stage_attempts[0].status == "failed_retryable"
+
+
+def test_resumo_falha_de_zip_identifica_member_e_causa_sem_stack_trace() -> None:
+    child = SimpleNamespace(
+        status="falha",
+        arquivo="dfp_cia_aberta_DMPL_con_2019.csv",
+        mensagem_erro=(
+            "(psycopg.OperationalError) the connection is closed\n"
+            "[SQL: SELECT ingestion_phase_executions.id FROM ingestion_phase_executions]"
+        ),
+    )
+
+    message = worker_tasks._resumir_falhas_membros(
+        [child], statuses=("falha", "quality_fail"), label="Membros com falha"
+    )
+
+    assert "dfp_cia_aberta_DMPL_con_2019.csv" in message
+    assert "psycopg.OperationalError" in message
+    assert "[SQL:" not in message
 

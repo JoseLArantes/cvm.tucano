@@ -9,6 +9,30 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-10 - Retry de Members e Recovery com Fonte Pai
+
+### Superficies afetadas
+
+- `GET /ingestion/runs`, `GET /ingestion/runs/{run_id}`, `GET /ingestion/operations` e detalhe de `ExecucaoSincronizacao`
+- `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Comportamento entregue
+
+- Durante o backoff de uma falha transitoria, a execucao filha e a run passam para `agendada`; a fase fica em
+  `failed_retryable` com `error_retryable=true`. O cliente deve mostrar espera por nova tentativa. Cada tentativa fica
+  registrada separadamente. Depois que os retries automaticos se esgotam, a run pode terminar como falha recuperavel e
+  oferecer `recover` quando ainda houver fonte executavel.
+- O resumo de falha no ZIP pai passa a identificar os members com erro e a primeira linha de cada causa; o detalhe da
+  execucao filha continua sendo a fonte para a mensagem completa.
+- Replay isolado sem `IngestionFile` persistido para o pacote pai retorna `409` com
+  `detail.reason_code=NO_RECOVERY_SOURCE`, `detail.next_action=replay_parent_execution` e `parent_execucao_id`. A
+  execucao filha permanece intacta; o consumidor deve reprocessar o arquivo pai primeiro.
+- O despacho de members respeita `INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` entre os pacotes e
+  `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` dentro de cada pacote. Enquanto aguarda uma vaga global, o pai e os filhos
+  nao admitidos permanecem em `aguardando_ingestao`; os detalhes da fila continuam disponiveis em
+  `GET /ingestion/operations`.
+
 ## 2026-11-10 - Importação Manual da Hierarquia Setorial B3
 
 ### Superfícies afetadas

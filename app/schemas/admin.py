@@ -539,13 +539,17 @@ class IngestionRecovery(BaseModel):
     eligible: bool = Field(description="Indica se o estado atual da run autoriza recovery e existe uma fonte executavel.")
     strategy: str | None = Field(
         default=None,
-        description="Estrategia executavel atual: `replay_staged_rows`, `rerun_member_execution` ou `rerun_parent_execution`.",
+        description=(
+            "Estrategia executavel atual: `replay_staged_rows`, `rerun_member_execution` ou `rerun_parent_execution`. "
+            "`rerun_member_execution` exige uma execucao pai resolvida e um `IngestionFile` persistido que permita reabrir o ZIP."
+        ),
     )
     reason_code: str = Field(
         description=(
             "Codigo estavel da avaliacao: `STAGED_ROWS_AVAILABLE`, `MEMBER_EXECUTION_AVAILABLE`, "
             "`PARENT_EXECUTION_AVAILABLE`, `NO_RECOVERY_SOURCE`, `NON_RETRYABLE_FAILURE`, "
-            "`RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`."
+            "`RUN_ALREADY_COMPLETED` ou `RUN_NOT_RECOVERABLE`. Para `rerun_member_execution`, "
+            "`MEMBER_EXECUTION_AVAILABLE` exige `IngestionFile` persistido para o pacote pai."
         )
     )
 
@@ -783,6 +787,7 @@ class IngestionRunResumo(BaseModel):
         description=(
             "Status consolidado da run. "
             "`em_execucao` indica run ativa; "
+            "`aguardando_ingestao` indica espera pela admissao global de member em uma ingestao de ZIP ou inicio manual da fase 2; "
             "`sucesso` indica processamento completo sem alerta de qualidade; "
             "`sucesso_com_alerta` indica ingestao concluida com drift estrutural ou outro alerta operacional; "
             "`falha` indica erro impeditivo; "

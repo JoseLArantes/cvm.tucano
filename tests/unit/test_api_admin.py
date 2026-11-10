@@ -691,6 +691,12 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
 
     assert rota_replay_sincronizacao["operationId"] == "replaySincronizacaoAdmin"
     assert rota_replay_sincronizacao["summary"] == "Executar replay de execucao de sincronizacao"
+    resposta_sem_fonte = rota_replay_sincronizacao["responses"]["409"]
+    assert "IngestionFile" in resposta_sem_fonte["description"]
+    assert (
+        resposta_sem_fonte["content"]["application/json"]["example"]["detail"]["next_action"]
+        == "replay_parent_execution"
+    )
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
@@ -735,6 +741,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     esquema_resumo_quarentena = payload["components"]["schemas"]["QuarentenaResumoResposta"]
 
     assert "quality_summary" in esquema_run["properties"]
+    assert "admissao global" in esquema_run["properties"]["status"]["description"]
     assert "artifact_snapshot" in esquema_run["properties"]
     assert "member_snapshot_summary" in esquema_run["properties"]
     assert "delivery_snapshot_summary" in esquema_run["properties"]
@@ -1113,21 +1120,50 @@ def test_admin_operations_resiliente_quando_broker_indisponivel(client: TestClie
 
 def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient, db_session: Session) -> None:
     agora = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     execucao_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    db_session.add(
-        ExecucaoSincronizacao(
-            id=execucao_id,
-            parent_execucao_id=uuid.uuid4(),
-            tipo_fonte="itr",
-            ano=2026,
-            arquivo="itr_cia_aberta_2026.zip",
-            url="http://exemplo/itr-2026",
-            status="falha",
-            tipo_execucao="arquivo_zip",
-            mensagem_erro="falha recuperavel",
-            finalizada_em=agora,
-        )
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                arquivo="itr_cia_aberta_2026.zip",
+                url="http://exemplo/itr-2026",
+                status="sucesso",
+                tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2026",
+                source_filename="itr_cia_aberta_2026.zip",
+                content_sha256="a" * 64,
+                content_length_bytes=1,
+                is_zip=True,
+            ),
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                arquivo="itr_cia_aberta_DRE_ind_2026.csv",
+                url="http://exemplo/itr-2026",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                mensagem_erro="falha recuperavel",
+                finalizada_em=agora,
+            ),
+        ]
     )
     db_session.add(
         IngestionRun(
@@ -1508,6 +1544,7 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
 ) -> None:
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     run_id = uuid.uuid4()
     db_session.add_all(
         [
@@ -1519,6 +1556,22 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
                 url="http://exemplo/itr-2022",
                 status="falha",
                 tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2022",
+                source_filename="itr_cia_aberta_2022.zip",
+                content_sha256="b" * 64,
+                content_length_bytes=1,
+                is_zip=True,
             ),
             ExecucaoSincronizacao(
                 id=child_id,
@@ -1563,6 +1616,7 @@ def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
 ) -> None:
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     run_id = uuid.uuid4()
     db_session.add_all(
         [
@@ -1574,6 +1628,22 @@ def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
                 url="http://exemplo/itr-2021",
                 status="falha",
                 tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2021",
+                source_filename="itr_cia_aberta_2021.zip",
+                content_sha256="c" * 64,
+                content_length_bytes=1,
+                is_zip=True,
             ),
             ExecucaoSincronizacao(
                 id=child_id,
@@ -2107,6 +2177,16 @@ def test_admin_sincronizacao_replay_endpoint_parent_and_member(
             ),
         ]
     )
+    db_session.add(
+        IngestionFile(
+            ingestion_run_id=parent_run_id,
+            source_url="http://exemplo/itr-2021",
+            source_filename="itr_cia_aberta_2021.zip",
+            content_sha256="d" * 64,
+            content_length_bytes=1,
+            is_zip=True,
+        )
+    )
     db_session.commit()
 
     # Verify links in GET /ingestion/sincronizacoes/{id}
@@ -2129,6 +2209,65 @@ def test_admin_sincronizacao_replay_endpoint_parent_and_member(
     assert res_replay_child.status_code == 200
     assert res_replay_child.json()["status"] == "agendada"
     assert res_replay_child.json()["detalhe"]["strategy"] == "rerun_member_execution"
+
+
+def test_admin_sincronizacao_member_replay_requer_arquivo_pai_persistido(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_2023.zip",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_DMPL_ind_2023.csv",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2023,
+                status="falha",
+                phase="complete",
+            ),
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.worker.tasks.sincronizar_member_task.apply_async",
+        lambda **kwargs: pytest.fail("nao deve agendar replay sem arquivo pai"),
+    )
+
+    response = client.post(f"/ingestion/sincronizacoes/{child_id}/replay")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "reason_code": "NO_RECOVERY_SOURCE",
+        "next_action": "replay_parent_execution",
+        "parent_execucao_id": str(parent_id),
+    }
+    child = db_session.get(ExecucaoSincronizacao, child_id)
+    assert child is not None
+    db_session.refresh(child)
+    assert child.status == "falha"
 
 
 def test_admin_run_acknowledge_failure_when_next_action_recover(

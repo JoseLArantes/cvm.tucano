@@ -238,6 +238,14 @@ Ingestao e materializacao usam filas separadas:
 | `ingestion_control` | coordenacao, finalizacao e recovery de ingestao |
 | `analise_materializacao` | chunks e campanhas de materializacao |
 
+O worker de ingestion pesado consome somente `ingestion`. Um worker de controle separado consome `ingestion_control` e
+`celery`, preservando capacidade para coordenacao e recovery enquanto um member usa CPU ou banco. A admissao observa
+`INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` entre todos os ZIPs e tambem respeita
+`INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`; ambos usam valor `1` no chart Helm. Quando nao ha vaga, o pai e os members
+ainda nao admitidos permanecem em `aguardando_ingestao`, e o controle tenta novamente apos
+`INGESTION_QUEUE_DISPATCH_POLL_SECONDS` (15 segundos no chart). Mantenha o worker de controle com uma replica: ele
+serializa a leitura da vaga e a publicacao da proxima janela.
+
 O gate de materializacao bloqueia a execucao de novos chunks de materializacao quando ha ingestao ativa ou pausa manual. Ele nao bloqueia workers de ingestao.
 
 ## Limpeza transitoria
@@ -299,7 +307,7 @@ vida do SSE nem durante operações externas como a inspeção Celery.
 
 | Valor | Significado |
 | --- | --- |
-| `wait` | run em andamento, na fila ou member filho aguardando janela de despacho do ZIP pai ativo (`blocking.reason_code=awaiting_parent_window`) |
+| `wait` | run em andamento, na fila ou member filho aguardando vaga global ou janela de despacho do ZIP pai ativo (`blocking.reason_code=awaiting_parent_window`) |
 | `start_ingestion` | pre-processamento concluido em modo two-step; use a execucao correlata para iniciar a fase 2 |
 | `recover` | run stale, falha recuperavel ou member aguardando retomada apos falha do ZIP pai, desde que possua fonte executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
@@ -319,6 +327,18 @@ Efeitos esperados:
 - processamento de member que nao le nenhuma linha termina como `falha` com mensagem `NO_ROWS_PROCESSED`, em vez de sucesso vazio;
 - runs terminais nao bloqueiam novo dispatch do mesmo escopo, e o work item oferece `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, sem exigir limpeza de filas ou staging para liberar a nova execucao;
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
+
+Durante uma retentativa automatica de member, a execucao filha e a run ficam em `agendada`, a fase fica
+`failed_retryable` e `last_error.retryable=true`. A UI deve apresentar o member como aguardando nova tentativa, sem
+marcar a run como falha terminal. Cada tentativa e registrada separadamente; se o limite de tentativas for esgotado, a
+run termina em `state=failed`, com a fase `failed_final` e `last_error.retryable=true` quando o erro continuar
+recuperavel.
+
+Uma run com `recovery.strategy=rerun_member_execution` so e recuperavel quando existe `IngestionFile` persistido para o
+pacote pai. O replay direto do member sem essa fonte responde `409` com `detail.reason_code=NO_RECOVERY_SOURCE`,
+`detail.next_action=replay_parent_execution` e `parent_execucao_id`; a execucao filha nao e alterada nem publicada.
+Nesse caso, reprocesse o ZIP pai primeiro. Ao fechar um ZIP com falhas, `ExecucaoSincronizacao.mensagem_erro` resume
+nomes dos members e a primeira linha de seus erros; use o detalhe da execucao filha para o erro completo.
 
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
 

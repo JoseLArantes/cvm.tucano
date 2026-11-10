@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.ingestion import IngestionRow, IngestionRun
+from app.models.ingestion import IngestionFile, IngestionRow, IngestionRun
 from app.models.sincronizacao import ExecucaoSincronizacao
 
 
@@ -24,6 +24,44 @@ class IngestionRecoveryAssessment:
 
 class NoRecoverySourceError(ValueError):
     reason_code = "NO_RECOVERY_SOURCE"
+
+
+def resolve_parent_ingestion_file(
+    db: Session,
+    *,
+    parent_execucao: ExecucaoSincronizacao,
+) -> IngestionFile | None:
+    """Resolve o ZIP persistido que permite reprocessar um member isoladamente."""
+    ingestion_file = db.scalar(
+        select(IngestionFile)
+        .join(IngestionRun, IngestionRun.id == IngestionFile.ingestion_run_id)
+        .where(IngestionRun.execucao_sincronizacao_id == parent_execucao.id)
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
+    if ingestion_file is not None:
+        return ingestion_file
+
+    parent_year_filter = (
+        ExecucaoSincronizacao.ano.is_(None)
+        if parent_execucao.ano is None
+        else ExecucaoSincronizacao.ano == parent_execucao.ano
+    )
+    return db.scalar(
+        select(IngestionFile)
+        .join(IngestionRun, IngestionRun.id == IngestionFile.ingestion_run_id)
+        .join(
+            ExecucaoSincronizacao,
+            IngestionRun.execucao_sincronizacao_id == ExecucaoSincronizacao.id,
+        )
+        .where(
+            ExecucaoSincronizacao.arquivo == parent_execucao.arquivo,
+            ExecucaoSincronizacao.tipo_fonte == parent_execucao.tipo_fonte,
+            parent_year_filter,
+        )
+        .order_by(IngestionRun.started_at.desc())
+        .limit(1)
+    )
 
 
 def assess_ingestion_run_recovery(
@@ -44,6 +82,16 @@ def assess_ingestion_run_recovery(
         resolved_execucao = db.get(ExecucaoSincronizacao, run.execucao_sincronizacao_id)
 
     if resolved_execucao is not None and resolved_execucao.parent_execucao_id is not None:
+        parent_execucao = db.get(ExecucaoSincronizacao, resolved_execucao.parent_execucao_id)
+        if (
+            parent_execucao is None
+            or resolve_parent_ingestion_file(db, parent_execucao=parent_execucao) is None
+        ):
+            return IngestionRecoveryAssessment(
+                eligible=False,
+                strategy=None,
+                reason_code="NO_RECOVERY_SOURCE",
+            )
         return IngestionRecoveryAssessment(
             eligible=True,
             strategy="rerun_member_execution",

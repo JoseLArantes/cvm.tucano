@@ -39,15 +39,16 @@ de arquivos CSV organizados em pacotes anuais (ZIP) ou arquivos unicos (cadastro
 | Processo | Descricao |
 |---|---|
 | `cvm_api` | Servidor HTTP (uvicorn) que expoe endpoints REST, incluindo admin de ingestion |
-| `cvm_worker` | Celery worker que consome as tarefas de ingestion; replicas e concorrencia sao configuraveis no chart Helm |
+| `cvm_worker` | Celery worker que consome o processamento pesado da fila `ingestion`; replicas e concorrencia sao configuraveis no chart Helm |
+| `cvm_control_worker` | Celery worker dedicado a coordenacao, finalizacao e recovery nas filas `ingestion_control` e `celery`; mantenha uma replica para serializar a admissao global |
 | `cvm_scheduler` | Celery beat + bootstrap que dispara sincronizacoes periodicas (diarias) e backfill inicial |
 | `cvm_redis` | Redis 7 como broker de mensagens e result backend do Celery |
 
 ### Paralelismo e pressao de fila
 
-O chart Helm expoe `worker.replicaCount` e `worker.concurrency`. O total aproximado de slots de execucao e o produto desses valores. `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` limita quantos members de cada pacote sao publicados por janela; quando a janela termina, a task de controle publica a proxima. A janela vale para todas as fontes com members. O default da configuracao da aplicacao e `2`; o chart Helm define `1` como valor operacional conservador.
+O chart Helm expoe `worker.replicaCount` e `worker.concurrency`. O total aproximado de slots de execucao e o produto desses valores. `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` limita quantos members de cada pacote sao publicados por janela (default da aplicacao `2`, chart `1`), e `INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` limita o total publicado por todos os pacotes (default `1`). A task de controle libera a proxima janela quando os members terminam; pais e filhos ainda nao admitidos permanecem em `aguardando_ingestao`.
 
-O worker usa `worker_prefetch_multiplier=1` e `-Ofair`, portanto cada slot reserva uma task por vez. Em clusters pequenos, mantenha replicas, concorrencia e janela baixos. Em clusters maiores, aumente os tres de forma coordenada e revise os pools de conexao do PostgreSQL, pois cada processo Celery cria seu proprio pool.
+O worker pesado consome apenas `ingestion`; um deployment separado de controle consome `ingestion_control` e `celery`. O controle deve permanecer com uma replica para serializar a admissao global. O worker usa `worker_prefetch_multiplier=1` e `-Ofair`, portanto cada slot reserva uma task por vez. Em clusters pequenos, mantenha replicas, concorrencia e janelas baixos. Em clusters maiores, aumente o limite global e a capacidade do worker de forma coordenada, mantendo o controle em uma replica, e revise os pools de conexao do PostgreSQL, pois cada processo Celery cria seu proprio pool.
 
 Ingestao e materializacao usam workers e filas separados. Materializacao permanece na fila `analise_materializacao` e tem seus proprios parametros `materializationWorker.replicaCount` e `materializationWorker.concurrency`. O gate impede que novos chunks de materializacao comecem durante ingestao ativa ou pausa manual.
 
@@ -510,7 +511,7 @@ O endpoint de reprocessamento seletivo continua existindo para recuperacao cirur
 3. Separa membros em duas categorias:
    - **Document headers**: arquivo principal `{fonte}_cia_aberta_{ano}.csv` (processado primeiro)
    - **Dependentes**: demais arquivos (processados apos os headers)
-4. Orquestracao via Celery: o member de cabecalho e processado antes dos dependentes; os dependentes sao despachados respeitando `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`
+4. Orquestracao via Celery: o member de cabecalho e processado antes dos dependentes; o dispatcher respeita os limites `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` e `INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL`
 5. Dispara `sincronizar_member_task` para cada membro:
    - **Self-heal**: se arquivo CSV ausente do disco, reconstroi de `IngestionFileMemberPayload` ou re-extrai do ZIP
    - Determinacao do `row_kind` via `get_row_kind`
@@ -918,6 +919,22 @@ Todas as tarefas usam `autoretry_for` com backoff exponencial + jitter. Excecoes
 - `sqlalchemy.exc.InterfaceError`
 
 Configuracao: maximo de `INGESTION_MAX_RETRIES` tentativas (padrao 5), backoff maximo de `INGESTION_RETRY_BACKOFF_MAX_SECONDS` (padrao 600s).
+
+Em uma falha transitoria de `sincronizar_member_task`, enquanto ainda houver tentativas, a execucao e a run ficam em
+`agendada`; a fase da tentativa fica `failed_retryable` com `error_retryable=true`, e a task e reenfileirada pelo Celery.
+Na tentativa seguinte, o member reabre a mesma execucao, zera seus contadores parciais e reinicia a partir do payload do
+member; cada tentativa e registrada separadamente no ledger. Quando o limite de retries termina, a execucao fica
+`falha`, a fase fica `failed_final` e `error_retryable=true` para permitir recovery administrativo quando existir fonte
+executavel. Falhas permanentes continuam terminando sem retry.
+
+Ao concluir um ZIP com members falhos ou sem conclusao, a mensagem da execucao pai identifica os nomes dos members e
+o primeiro resumo do erro de cada um. A mensagem completa continua no detalhe da execucao filha. Avisos de membros
+ausentes no ZIP nao substituem mais esse resumo de falha.
+
+O replay isolado de um member exige `IngestionFile` persistido para o pacote pai. Se esse artefato nao existir,
+`POST /ingestion/sincronizacoes/{id_execucao}/replay` retorna `409` com `reason_code=NO_RECOVERY_SOURCE` e
+`next_action=replay_parent_execution`, sem agendar a execucao filha. Reprocesse primeiro a execucao pai para adquirir e
+persistir novamente o ZIP.
 
 | Nome da Task | Funcao | Gatilho |
 |---|---|---|

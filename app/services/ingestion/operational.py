@@ -29,7 +29,7 @@ _RUN_STATUS_TO_PHASE_STATUS = {
     "falha": "failed_final",
     "cancelada": "cancelled",
 }
-_TERMINAL_PHASE_STATUSES = {"succeeded", "skipped", "failed_final", "cancelled"}
+_TERMINAL_PHASE_STATUSES = {"succeeded", "skipped", "failed_retryable", "failed_final", "cancelled"}
 
 
 def _agora() -> datetime:
@@ -400,6 +400,16 @@ def _parent_has_recent_child_activity(
     )
     if not child_ids:
         return False
+    pending_child = db.scalar(
+        select(ExecucaoSincronizacao.id)
+        .where(
+            ExecucaoSincronizacao.parent_execucao_id == parent_execucao_id,
+            ExecucaoSincronizacao.status.in_({"agendada", "aguardando_ingestao"}),
+        )
+        .limit(1)
+    )
+    if pending_child is not None:
+        return True
     fresh_child_phase = db.scalar(
         select(IngestionPhaseExecution.id)
         .where(

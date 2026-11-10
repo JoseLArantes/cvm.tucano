@@ -222,6 +222,16 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT",
     )
+    ingestion_max_active_members_global: int = Field(
+        default=1,
+        ge=1,
+        alias="INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL",
+    )
+    ingestion_queue_dispatch_poll_seconds: int = Field(
+        default=15,
+        ge=1,
+        alias="INGESTION_QUEUE_DISPATCH_POLL_SECONDS",
+    )
     ingestion_duckdb_memory_limit_mb: int = Field(
         default=768,
         ge=128,
