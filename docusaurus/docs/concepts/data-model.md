@@ -56,6 +56,22 @@ erDiagram
 
 **Importante:** `sincronizado_em` ≠ `alterado_em`. Reapresentação regulatória não é igual a alteração econômica.
 
+### Dicionário de setores
+
+`companhias.setor_atividade` continua preservando o texto compatível com o cadastro legado. O dicionário separa o conceito (`setores`) da atribuição da companhia (`setor_classificacoes_companhia`), permitindo manter UUIDs estáveis e histórico de classificação sem recalcular fatos financeiros.
+
+| Tabela | Grão e responsabilidade |
+| --- | --- |
+| `setor_taxonomias` | Uma linha por vocabulário, como `cvm_cadastro` ou `b3`, com versão e checksum publicados. |
+| `setor_taxonomia_versoes` | Uma linha por publicação semântica ou de curadoria, com referência de fonte, checksum e resumo. |
+| `setores` | Um conceito por taxonomia e chave normalizada, com nome, nível, pai e estado. A chave NFC normaliza espaços e caixa, preservando acentos e pontuação. |
+| `setor_aliases` | Rótulos alternativos explicitamente revisados; cada alias referencia um conceito sem fundir IDs. |
+| `setor_classificacoes_companhia` | Uma atribuição por companhia e taxonomia vigente, com rótulo de origem, arquivo/linha e intervalo de versões; o índice parcial único impede duas classificações atuais. |
+| `setor_correspondencias` | Relações versionadas e direcionais entre conceitos de taxonomias diferentes, com evidência, justificativa e tipo de granularidade. |
+| `setor_taxonomia_mudancas` | Eventos auditáveis de publicação, rótulos novos, aliases, correspondências e mudanças nas atribuições. |
+
+O backfill cria a primeira publicação CVM usando os valores já promovidos de `companhias`. A ingestão publica novas versões na mesma transação do cadastro. `b3` é reconhecida, porém sem classificação publicada enquanto não houver fonte autorizada. A consulta de margens combina essas atribuições atuais com fatos anuais canônicos sem duplicar os emissores.
+
 ### Tabelas Financeiras (DFP/ITR)
 
 #### `documentos_financeiros`

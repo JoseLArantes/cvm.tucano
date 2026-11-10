@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -176,7 +177,7 @@ def normalizar_linha_cadastro_aberta(
 
     endereco = _normalizar_endereco(row)
     responsavel = _normalizar_responsavel(row)
-    data = {
+    data: dict[str, Any] = {
         "fonte_cadastro": FONTE_CADASTRO_ABERTA,
         "arquivo_origem": arquivo_origem,
         "linha_origem": linha_origem,
@@ -194,6 +195,7 @@ def normalizar_linha_cadastro_aberta(
         "motivo_cancelamento": normalizar_texto(row.get("MOTIVO_CANCEL")),
         "data_inicio_situacao": normalizar_data(row.get("DT_INI_SIT")),
         "setor_atividade": normalizar_texto(row.get("SETOR_ATIV")),
+        "setor_atividade_origem": row.get("SETOR_ATIV"),
         "tipo_mercado": normalizar_tipo_mercado(row.get("TP_MERC")),
         "categoria_registro": normalizar_texto(row.get("CATEG_REG")),
         "data_inicio_categoria": normalizar_data(row.get("DT_INI_CATEG")),
@@ -236,7 +238,7 @@ def normalizar_linha_cadastro_estrangeira(
             details={"linha_origem": linha_origem},
         )
 
-    data = {
+    data: dict[str, Any] = {
         "fonte_cadastro": FONTE_CADASTRO_ESTRANGEIRA,
         "arquivo_origem": arquivo_origem,
         "linha_origem": linha_origem,
@@ -254,6 +256,7 @@ def normalizar_linha_cadastro_estrangeira(
         "motivo_cancelamento": normalizar_texto(row.get("MOTIVO_CANCEL")),
         "data_inicio_situacao": normalizar_data(row.get("DT_INI_SIT")),
         "setor_atividade": normalizar_texto(row.get("SETOR_ATIV")),
+        "setor_atividade_origem": row.get("SETOR_ATIV"),
         "tipo_mercado": None,
         "categoria_registro": normalizar_texto(row.get("CATEG_REG")),
         "data_inicio_categoria": normalizar_data(row.get("DT_INI_CATEG")),
@@ -674,7 +677,13 @@ def gerar_identificadores_companhia(
             )
 
 
-def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]) -> dict[str, int]:
+def promover_registros_cadastro(
+    db: Session,
+    registros: Iterable[dict[str, Any]],
+    *,
+    referencia_fonte: str = "cadastro-companhias-cvm",
+    checksum_fonte: str | None = None,
+) -> dict[str, int]:
     ctx = CadastroBatchContext(db)
     grupos: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for registro in registros:
@@ -693,11 +702,14 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
     # Fase 1: Upsert companhias e registros CVM
     registros_cvm_por_grupo: dict[tuple[str, str], list[tuple[CompanhiaRegistroCvm, dict[str, Any], str]]] = {}
     companhias_por_grupo: dict[tuple[str, str], Companhia] = {}
+    rotulos_originais_por_companhia: dict[uuid.UUID, str | None] = {}
 
     for chave_grupo, registros_companhia in grupos.items():
         registro_canonico = selecionar_registro_canonico(registros_companhia)
         companhia = _upsert_companhia(db, registro_canonico, ctx=ctx)
         companhias_por_grupo[chave_grupo] = companhia
+        if "setor_atividade_origem" in registro_canonico:
+            rotulos_originais_por_companhia[companhia.id] = registro_canonico.get("setor_atividade_origem")
         contadores["companhias"] += 1
         regs: list[tuple[CompanhiaRegistroCvm, dict[str, Any], str]] = []
         for registro in registros_companhia:
@@ -736,6 +748,17 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
 
     # Flush final para persistir mercados e identificadores
     db.flush()
+    # A classificação CVM acompanha a publicação do cadastro na mesma transação.
+    from app.services.setores import publicar_taxonomia_cvm
+
+    publicacao_setorial = publicar_taxonomia_cvm(
+        db,
+        referencia_fonte=referencia_fonte,
+        checksum_fonte=checksum_fonte,
+        rotulos_originais=rotulos_originais_por_companhia,
+    )
+    contadores["setores_publicados"] = int(bool(publicacao_setorial["publicada"]))
+    contadores["classificacoes_setoriais"] = int(publicacao_setorial["classificacoes_alteradas"])
     return contadores
 
 
@@ -750,6 +773,14 @@ def _download(url: str, *, timeout: float) -> bytes:
     response = httpx.get(url, timeout=timeout)
     response.raise_for_status()
     return response.content
+
+
+def _sha256_arquivo(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
+            digest.update(bloco)
+    return digest.hexdigest()
 
 
 def _registrar_lifecycle_snapshots_cadastro(
@@ -807,8 +838,6 @@ def pre_processar_cadastro(
     downloader: Any | None = None,
     pending_update_id: str | None = None,
 ) -> dict[str, Any]:
-    from pathlib import Path
-
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.file_manager import (
@@ -1084,7 +1113,17 @@ def ingerir_cadastro(
                 continue
             normalizados.append(resultado.data)
 
-        contadores = promover_registros_cadastro(db, normalizados)
+        hash_abertas = _sha256_arquivo(dest_abertas)
+        hash_estrangeiras = _sha256_arquivo(dest_estrangeiras)
+        checksum_cadastro = hashlib.sha256(
+            f"{ARQUIVO_CADASTRO_ABERTA}:{hash_abertas}:{ARQUIVO_CADASTRO_ESTRANGEIRA}:{hash_estrangeiras}".encode()
+        ).hexdigest()
+        contadores = promover_registros_cadastro(
+            db,
+            normalizados,
+            referencia_fonte=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
+            checksum_fonte=checksum_cadastro,
+        )
 
         execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
         execucao.total_inseridos = contadores["inseridos"]
@@ -1115,6 +1154,8 @@ def ingerir_cadastro(
             "total_rejeitados": rejeitados,
             "total_companhias_promovidas": contadores["companhias"],
             "total_registros_promovidos": contadores["registros"],
+            "taxonomia_setorial_publicada": contadores["setores_publicados"],
+            "classificacoes_setoriais_alteradas": contadores["classificacoes_setoriais"],
         }
 
     except Exception as exc:

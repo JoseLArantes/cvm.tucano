@@ -203,6 +203,19 @@ Verificar que o número de consultas SQL por requisição se mantém limitado co
 
 Ao implementar, documentar o comportamento publicado no OpenAPI e no Docusaurus e registrar endpoints, filtros, campos e semântica no changelog do frontend com a data da sessão de implementação. Executar as validações do repositório.
 
+## Estado da implementação · 9 de novembro de 2026
+
+A primeira entrega está implementada no backend:
+
+- Dicionário relacional versionado para CVM e B3, backfill da coluna cadastral existente, UUIDs estáveis, chave NFC/espaços/caixa baixa Unicode sem expansões de caracteres, histórico de atribuições, eventos de mudança, aliases e correspondências com curadoria administrativa auditável.
+- A promoção v2 do cadastro CVM e a sincronização cadastral legada publicam as atribuições na mesma transação de ingestão. O checksum do arquivo, referência, linha e rótulo de origem são preservados. Uma execução repetida sem mudança semântica não cria outra versão.
+- Catálogo, detalhe, lista de companhias por setor e filtros setoriais em `/companhias`; as respostas mantêm `setor_atividade` e acrescentam a identidade da taxonomia escolhida.
+- Agregação anual FY de margens bruta, EBIT e líquida por UUID/Código CVM, setor, categoria de registro, tipo de emissor ou situação. O endpoint calcula média simples, mediana e razão das somas sobre os mesmos emissores elegíveis, informa cobertura e permite detalhamento limitado com proveniência documental.
+- Consulta em lote projeta valor e unidade dos fatos JSON para evitar transferir as listas completas de proveniência no resumo. Cache Redis curto, namespace próprio, single-flight por lock e invalidação por corpo, versão setorial e geração financeira. O caminho continua funcional sem Redis.
+- `b3` está cadastrada, mas não publicada até a fonte autorizada ser configurada. A atualidade financeira é declarada como `indeterminada` porque as execuções atuais não guardam assinatura de entradas DFP/ITR por companhia/escopo.
+
+Esta entrega não adiciona uma projeção financeira tipada nem uma nova campanha de materialização: o teste operacional/benchmark deve demonstrar que a leitura em lote dos fatos JSON não atende às metas antes de ampliar o pipeline. Classificações históricas observadas por exercício, métricas de segmento operacional e publicação B3 continuam como evoluções separadas descritas neste plano.
+
 ```bash
 docker compose run --rm cvm_api mypy .
 docker compose run --rm cvm_api ruff check . --ignore E501

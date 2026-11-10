@@ -9,6 +9,24 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-09 - Dicionario Setorial e Agregacao de Margens por Grupo
+
+### Superficies afetadas
+
+- novos endpoints `GET /setores/taxonomias`, `GET /setores/taxonomias/{taxonomia}/versoes`, `GET /setores`, `GET /setores/{setor_id}` e `GET /setores/{setor_id}/companhias`
+- novos endpoints administrativos `POST /setores/aliases` e `POST /setores/correspondencias`
+- novo endpoint `POST /analise/companhias/agregacoes`
+- `GET /companhias` agora aceita `setor_id`, `taxonomia`, `categoria_registro` e `tipo_emissor`
+- schemas de companhia incluem `setor_id`, `taxonomia_setorial` e `tipo_emissor`
+
+### Comportamento entregue
+
+- Setores CVM têm UUID opaco, chave determinística com NFC, espaços e caixa baixa Unicode sem expansões de caracteres, histórico de atribuições, publicação versionada e texto de origem preservado. IDs não são fundidos por aproximação de grafia; aliases precisam de evidência, justificativa e revisão administrativa.
+- O catálogo publica a taxonomia `cvm_cadastro`. A taxonomia `b3` está registrada sem publicação até existir uma fonte autorizada; selecioná-la retorna `409 TAXONOMIA_SEM_PUBLICACAO`.
+- A ingestão v2 e a sincronização cadastral legada promovem as classificações setoriais na transação do cadastro. Migração inicial cria o dicionário e faz backfill dos setores já persistidos.
+- A agregação aceita universo por UUID/Código CVM, setor, categoria, tipo de emissor, situação ou `todas=true`; identificadores explícitos formam uma união e filtros distintos se intersectam. Calcula margens bruta, EBIT e líquida anuais com fatos canônicos em BRL, permitindo escolher média simples, mediana e razão das somas (as três por padrão), com elegibilidade e motivos de exclusão.
+- O resumo usa leitura financeira em lote e cache Redis curto com chave por corpo, publicação de taxonomia e geração financeira. O detalhamento, limitado a 500 companhias, não é cacheado. A resposta identifica a geração canônica e declara atualidade `indeterminada` enquanto não houver assinatura de entrada por companhia/escopo.
+
 ## 2026-11-08 - Arquivos Membro como Ancoras Operacionais de Primeira Classe
 
 ### Superficies afetadas

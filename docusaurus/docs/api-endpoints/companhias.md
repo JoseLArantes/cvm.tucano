@@ -26,6 +26,8 @@ Lista paginada de companhias abertas normalizadas.
 
 Cada companhia também pode incluir `logo_url`, montada em tempo de consulta a partir do ticker mais recente encontrado em `FCA > Valor mobiliário`. Esse campo não é persistido no banco.
 
+As respostas preservam `setor_atividade` como o texto do cadastro CVM e também podem expor `setor_id` (UUID estável) e `taxonomia_setorial`. A classificação é selecionada pela taxonomia indicada; sem uma taxonomia explícita, `setor_id` usa a classificação CVM quando disponível. Uma taxonomia reconhecida sem publicação retorna `409` quando selecionada explicitamente.
+
 ### Query Parameters
 
 | Parâmetro | Tipo | Padrão | Descrição |
@@ -34,6 +36,10 @@ Cada companhia também pode incluir `logo_url`, montada em tempo de consulta a p
 | `codigo_cvm` | integer | - | Código CVM da companhia |
 | `nome` | string | - | Busca por nome (razão social ou comercial) |
 | `situacao_registro` | string | - | Filtrar por situação (ex: `ATIVO`, `SUSPENSO(A) - DECISAO ADM`) |
+| `categoria_registro` | string | - | Filtrar pela categoria cadastrada na CVM |
+| `tipo_emissor` | string | - | Filtrar pelo tipo de emissor do cadastro |
+| `setor_id` | UUID | - | Filtrar pelo conceito setorial vigente |
+| `taxonomia` | string | `cvm_cadastro` | Taxonomia usada com `setor_id` e para preencher os campos setoriais da resposta |
 | `ordenar` | string | `ativa_nome` | Ordenação: `ativa_nome`, `nome`, `codigo_cvm` |
 | `pagina` | integer | `1` | Número da página (inicia em 1) |
 | `tamanho_pagina` | integer | `100` | Itens por página (máx: 500) |

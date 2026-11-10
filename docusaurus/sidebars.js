@@ -49,6 +49,7 @@ const sidebars = {
         'api-endpoints/health',
         'api-endpoints/common-patterns',
         'api-endpoints/companhias',
+        'api-endpoints/setores',
         'api-endpoints/fontes',
         {
           type: 'category',

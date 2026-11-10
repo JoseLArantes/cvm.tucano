@@ -7,6 +7,7 @@ from app.models import companhia, financeiro, fre, identidade, ingestion, sincro
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.models.ingestion import SourceArtifactSnapshot, SourceMemberSnapshot
+from app.models.setores import SetorClassificacaoCompanhia
 from app.services.ingestion.cadastro import (
     ARQUIVO_CADASTRO_ABERTA,
     ARQUIVO_CADASTRO_ESTRANGEIRA,
@@ -236,6 +237,32 @@ def test_promover_registros_cadastro_classifies_business_change_as_updated() -> 
         assert segunda["inalterados"] == 0
         registro = session.query(CompanhiaRegistroCvm).one()
         assert registro.categoria_registro == "Categoria B"
+    finally:
+        session.close()
+
+
+def test_promover_cadastro_publica_setor_e_preserva_rotulo_de_origem() -> None:
+    session = _session()
+    try:
+        linha = _row_aberta()
+        linha["SETOR_ATIV"] = "  Energia   Elétrica "
+        resultado = normalizar_linha_cadastro_aberta(linha, linha_origem=42)
+        assert resultado.data is not None
+
+        contadores = promover_registros_cadastro(
+            session,
+            [resultado.data],
+            referencia_fonte="cadastro-de-teste",
+            checksum_fonte="a" * 64,
+        )
+        classificacao = session.query(SetorClassificacaoCompanhia).one()
+
+        assert contadores["setores_publicados"] == 1
+        assert contadores["classificacoes_setoriais"] == 1
+        assert classificacao.rotulo_origem == "  Energia   Elétrica "
+        assert classificacao.referencia_fonte == "cadastro-de-teste"
+        assert classificacao.arquivo_origem == ARQUIVO_CADASTRO_ABERTA
+        assert classificacao.linha_origem == 42
     finally:
         session.close()
 

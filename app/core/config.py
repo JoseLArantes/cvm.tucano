@@ -187,6 +187,10 @@ class Settings(BaseSettings):
         ge=0,
         alias="ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS",
     )
+    setores_cache_enabled: bool = Field(default=True, alias="SETORES_CACHE_ENABLED")
+    setores_cache_ttl_seconds: int = Field(default=120, ge=1, alias="SETORES_CACHE_TTL_SECONDS")
+    setores_cache_lock_seconds: int = Field(default=90, ge=1, alias="SETORES_CACHE_LOCK_SECONDS")
+    setores_cache_wait_seconds: float = Field(default=3.0, ge=0, alias="SETORES_CACHE_WAIT_SECONDS")
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
     ingestion_phase_stale_after_seconds: int = Field(

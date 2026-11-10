@@ -89,6 +89,15 @@ from app.models.ingestion import (
     SourceMemberSnapshot,
 )
 from app.models.ipe import IpeDocumento
+from app.models.setores import (
+    Setor,
+    SetorAlias,
+    SetorClassificacaoCompanhia,
+    SetorCorrespondencia,
+    SetorTaxonomia,
+    SetorTaxonomiaMudanca,
+    SetorTaxonomiaVersao,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
 from app.models.vlmo import VlmoConsolidado, VlmoDocumento
@@ -190,6 +199,13 @@ __all__ = [
     "ParecerFinanceiro",
     "QuarantineItem",
     "RegistroQuarentena",
+    "Setor",
+    "SetorAlias",
+    "SetorClassificacaoCompanhia",
+    "SetorCorrespondencia",
+    "SetorTaxonomia",
+    "SetorTaxonomiaMudanca",
+    "SetorTaxonomiaVersao",
     "RepairRule",
     "SourceArtifactSnapshot",
     "SourceDeliverySnapshot",

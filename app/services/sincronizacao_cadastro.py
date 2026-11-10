@@ -123,6 +123,7 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
         leitor = csv.DictReader(io.StringIO(csv_texto), delimiter=";")
 
         vistos: set[str] = set()
+        rotulos_setor_origem_por_cnpj: dict[str, str | None] = {}
         inseridos = 0
         atualizados = 0
         inalterados = 0
@@ -161,6 +162,7 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
                 rejeitados += 1
                 continue
             vistos.add(cnpj)
+            rotulos_setor_origem_por_cnpj[cnpj] = linha.get("SETOR_ATIV")
 
             existente = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
             agora = _agora()
@@ -220,6 +222,22 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
         execucao.total_atualizados = atualizados
         execucao.total_inalterados = inalterados
         execucao.total_rejeitados = rejeitados
+        companhias_origem = db.scalars(
+            select(Companhia).where(Companhia.cnpj_companhia.in_(list(rotulos_setor_origem_por_cnpj)))
+        ).all()
+        rotulos_originais_por_companhia = {
+            companhia.id: rotulos_setor_origem_por_cnpj[companhia.cnpj_companhia]
+            for companhia in companhias_origem
+        }
+        from app.services.setores import publicar_taxonomia_cvm
+
+        publicacao_setorial = publicar_taxonomia_cvm(
+            db,
+            referencia_fonte=ARQUIVO_CADASTRO,
+            checksum_fonte=hash_arquivo,
+            observada_em=_agora(),
+            rotulos_originais=rotulos_originais_por_companhia,
+        )
         execucao.status = "sucesso"
         execucao.finalizada_em = _agora()
         db.commit()
@@ -231,6 +249,8 @@ def sincronizar_cadastro_companhias(db: Session, task_id: str | None = None) -> 
             "total_atualizados": atualizados,
             "total_inalterados": inalterados,
             "total_rejeitados": rejeitados,
+            "taxonomia_setorial_publicada": publicacao_setorial["publicada"],
+            "setor_taxonomia_versao": publicacao_setorial["versao"],
         }
     except Exception as exc:
         db.rollback()

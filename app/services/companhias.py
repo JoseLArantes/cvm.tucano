@@ -1,11 +1,13 @@
 import re
+import uuid
 from datetime import datetime
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.companhia import Companhia
 from app.models.fca import FcaValorMobiliario
+from app.models.setores import SetorClassificacaoCompanhia
 from app.schemas.companhia import CompanhiaResposta, ListaCompanhiasResposta
 from app.schemas.comum import Paginacao
 from app.services.normalizacao import normalizar_cnpj
@@ -64,8 +66,33 @@ def obter_logo_urls_por_cnpj(db: Session, cnpjs: list[str]) -> dict[str, str | N
     return logo_por_cnpj
 
 
-def serializar_companhia(companhia: Companhia, logo_url: str | None) -> CompanhiaResposta:
-    return CompanhiaResposta.model_validate(companhia).model_copy(update={"logo_url": logo_url})
+def serializar_companhia(
+    companhia: Companhia,
+    logo_url: str | None,
+    *,
+    setor_id: uuid.UUID | None = None,
+    taxonomia: str | None = None,
+) -> CompanhiaResposta:
+    return CompanhiaResposta.model_validate(companhia).model_copy(
+        update={"logo_url": logo_url, "setor_id": setor_id, "taxonomia_setorial": taxonomia}
+    )
+
+
+def _classificacoes_atuais(
+    db: Session,
+    companhia_ids: list[uuid.UUID],
+    taxonomia: str,
+) -> dict[uuid.UUID, uuid.UUID]:
+    if not companhia_ids:
+        return {}
+    rows = db.execute(
+        select(SetorClassificacaoCompanhia.companhia_id, SetorClassificacaoCompanhia.setor_id).where(
+            SetorClassificacaoCompanhia.companhia_id.in_(companhia_ids),
+            SetorClassificacaoCompanhia.taxonomia == taxonomia,
+            SetorClassificacaoCompanhia.versao_fim.is_(None),
+        )
+    ).all()
+    return {companhia_id: setor_id for companhia_id, setor_id in rows}
 
 
 def listar_companhias(
@@ -77,6 +104,10 @@ def listar_companhias(
     codigo_cvm: int | None = None,
     nome: str | None = None,
     situacao_registro: str | None = None,
+    categoria_registro: str | None = None,
+    tipo_emissor: str | None = None,
+    setor_id: uuid.UUID | None = None,
+    taxonomia: str = "cvm_cadastro",
     ordenar: str | None = "ativa_nome",
 ) -> ListaCompanhiasResposta:
     query = select(Companhia)
@@ -101,6 +132,26 @@ def listar_companhias(
         query = query.where(Companhia.situacao_registro == situacao_registro)
         query_total = query_total.where(Companhia.situacao_registro == situacao_registro)
 
+    if categoria_registro:
+        query = query.where(Companhia.categoria_registro == categoria_registro)
+        query_total = query_total.where(Companhia.categoria_registro == categoria_registro)
+
+    if tipo_emissor:
+        query = query.where(Companhia.tipo_emissor == tipo_emissor)
+        query_total = query_total.where(Companhia.tipo_emissor == tipo_emissor)
+
+    if setor_id is not None:
+        filtro_setor = exists(
+            select(SetorClassificacaoCompanhia.id).where(
+                SetorClassificacaoCompanhia.companhia_id == Companhia.id,
+                SetorClassificacaoCompanhia.taxonomia == taxonomia,
+                SetorClassificacaoCompanhia.setor_id == setor_id,
+                SetorClassificacaoCompanhia.versao_fim.is_(None),
+            )
+        )
+        query = query.where(filtro_setor)
+        query_total = query_total.where(filtro_setor)
+
     if ordenar == "ativa_nome":
         query = query.order_by(
             case((Companhia.situacao_registro == "ATIVO", 0), else_=1),
@@ -118,9 +169,18 @@ def listar_companhias(
     itens = list(db.scalars(query.offset(offset).limit(tamanho_pagina)).all())
 
     logos_por_cnpj = obter_logo_urls_por_cnpj(db, [item.cnpj_companhia for item in itens if item.cnpj_companhia])
+    setores_por_companhia = _classificacoes_atuais(db, [item.id for item in itens], taxonomia)
 
     return ListaCompanhiasResposta(
-        dados=[serializar_companhia(item, logos_por_cnpj.get(item.cnpj_companhia)) for item in itens],
+        dados=[
+            serializar_companhia(
+                item,
+                logos_por_cnpj.get(item.cnpj_companhia),
+                setor_id=setores_por_companhia.get(item.id),
+                taxonomia=taxonomia,
+            )
+            for item in itens
+        ],
         paginacao=Paginacao(
             pagina=pagina,
             tamanho_pagina=tamanho_pagina,
@@ -129,25 +189,37 @@ def listar_companhias(
     )
 
 
-def obter_companhia_por_codigo_cvm(db: Session, codigo_cvm: int) -> CompanhiaResposta | None:
+def obter_companhia_por_codigo_cvm(
+    db: Session,
+    codigo_cvm: int,
+    *,
+    taxonomia: str = "cvm_cadastro",
+) -> CompanhiaResposta | None:
     companhia = db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
     if companhia is None:
         return None
     logo_url = obter_logo_urls_por_cnpj(db, [companhia.cnpj_companhia]).get(companhia.cnpj_companhia)
-    return serializar_companhia(companhia, logo_url)
+    setor_id = _classificacoes_atuais(db, [companhia.id], taxonomia).get(companhia.id)
+    return serializar_companhia(companhia, logo_url, setor_id=setor_id, taxonomia=taxonomia)
 
 
 def obter_companhia_modelo_por_codigo_cvm(db: Session, codigo_cvm: int) -> Companhia | None:
     return db.scalar(select(Companhia).where(Companhia.codigo_cvm == codigo_cvm))
 
 
-def obter_companhia_por_cnpj(db: Session, cnpj_companhia: str) -> CompanhiaResposta | None:
+def obter_companhia_por_cnpj(
+    db: Session,
+    cnpj_companhia: str,
+    *,
+    taxonomia: str = "cvm_cadastro",
+) -> CompanhiaResposta | None:
     cnpj = normalizar_cnpj(cnpj_companhia)
     companhia = db.scalar(select(Companhia).where(Companhia.cnpj_companhia == cnpj))
     if companhia is None:
         return None
     logo_url = obter_logo_urls_por_cnpj(db, [companhia.cnpj_companhia]).get(companhia.cnpj_companhia)
-    return serializar_companhia(companhia, logo_url)
+    setor_id = _classificacoes_atuais(db, [companhia.id], taxonomia).get(companhia.id)
+    return serializar_companhia(companhia, logo_url, setor_id=setor_id, taxonomia=taxonomia)
 
 
 __all__: tuple[str, ...] = (
