@@ -32,8 +32,10 @@ uma preparação de ZIP pode estar reservada ou em execução no cluster.
 
 Quando uma vaga fica livre, a seleção prioriza CSVs prontos. O CSV de cabeçalho precede os membros dependentes. A
 conclusão de uma etapa aplica a transição e registra novos CSVs elegíveis antes de liberar sua reserva. Se nenhum CSV
-estiver pronto, o ZIP elegível mais antigo pode ocupar a próxima vaga. Antes de iniciar um ZIP, o worker verifica a
-fila novamente sob o mesmo bloqueio; se um CSV tiver sido liberado nesse intervalo, a tentativa volta à fila.
+estiver pronto, o ZIP elegível mais antigo pode ocupar a próxima vaga. Etapas filhas recebem posições únicas após as
+etapas já registradas no mesmo lote, inclusive quando vários ZIPs liberam members no mesmo lote anual. Antes de iniciar
+um ZIP, o worker verifica a fila novamente sob o mesmo bloqueio; se um CSV tiver sido liberado nesse intervalo, a
+tentativa volta à fila.
 
 `GET /ingestion/files?atividade=na_fila` mostra execução sem worker iniciado. `atividade=em_processamento` passa a
 representar somente trabalho que um worker assumiu. Os status `reserved` e `transition_pending` permanecem visíveis

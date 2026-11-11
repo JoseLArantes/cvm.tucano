@@ -94,6 +94,14 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert {item.status for item in queue_items} == {"queued"}
     assert [item.kind for item in queue_items] == ["cadastro", *(["zip_prepare"] * 7)]
 
+    resposta_fila = client.get("/ingestion/queue")
+    assert resposta_fila.status_code == 200
+    lote = resposta_fila.json()["dados"][0]
+    assert lote["lote_id"] == payload["lote_id"]
+    assert lote["solicitado_em"]
+    assert len(lote["itens"]) == 8
+    assert all("solicitado_em" not in item for item in lote["itens"])
+
 
 def test_admin_fontes_endpoints_expoem_registry(client: TestClient) -> None:
     resposta_lista = client.get("/ingestion/fontes")

@@ -29,6 +29,8 @@ Convencoes deste changelog:
   sobre novos ZIPs.
 - O início de ZIP revalida a prioridade sob o bloqueio global. Publicações sem token vigente e duplicatas não executam
   trabalho. Transições e publicações interrompidas são retomadas pelo dispatcher periódico.
+- Members liberados pelos ZIPs recebem posições únicas após as etapas já registradas no lote. Disparos anuais com várias
+  fontes podem avançar pelas transições sem colisão de posição; o progresso continua visível em `GET /ingestion/queue`.
 - `POST /ingestion/sincronizacoes/tudo/{ano}` registra cadastro e fontes anuais em um mesmo lote e devolve o mesmo
   `lote_id` em cada tarefa. `POST /ingestion/dispatch` devolve `lote_id` na resposta e nos itens.
 - Bootstrap, tarefas periodicas de beat e gatilhos de atualizacao automatica gravam pedidos na mesma fila persistida;

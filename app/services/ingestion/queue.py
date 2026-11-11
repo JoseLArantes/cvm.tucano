@@ -271,8 +271,12 @@ def _ensure_child_items(db: Session, parent: ExecucaoSincronizacao, batch_id: uu
     batch = db.get(IngestionQueueBatch, batch_id)
     if batch is None:
         return 0
+    max_sequence = db.scalar(
+        select(func.max(IngestionQueueItem.sequence)).where(IngestionQueueItem.batch_id == batch_id)
+    )
+    next_sequence = 0 if max_sequence is None else int(max_sequence) + 1
     count = 0
-    for sequence, child in enumerate(eligible, start=1):
+    for child in eligible:
         if db_item_for_execution(db, child.id) is not None:
             continue
         child.id_tarefa = child.id_tarefa or novo_task_id()
@@ -283,8 +287,9 @@ def _ensure_child_items(db: Session, parent: ExecucaoSincronizacao, batch_id: uu
             task_name=_CSV_TASK,
             kwargs=_member_kwargs(db, parent, child),
             kind="csv",
-            sequence=sequence,
+            sequence=next_sequence,
         )
+        next_sequence += 1
         child.status = "agendada"
         count += 1
     return count
@@ -735,7 +740,6 @@ def snapshot_fila(db: Session, *, page: int = 1, page_size: int = 25) -> dict[st
                 "etapa": item.kind,
                 "status": item.status,
                 "motivo_espera": item.reason_code,
-                "solicitado_em": batch.requested_at,
                 "reservado_em": item.reserved_at,
                 "iniciado_em": item.started_at,
                 "tentativa": item.attempt,

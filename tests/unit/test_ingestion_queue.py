@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.queue import (
+    _ensure_child_items,
     adicionar_execucao_a_fila,
     cancelar_execucoes_na_fila,
     concluir_item,
@@ -83,6 +84,34 @@ def _queued_item(
         sequence=sequence,
     )
     return execution, item
+
+
+def test_child_sequences_are_unique_across_parents_in_same_batch(db_session: Session) -> None:
+    batch = criar_lote(db_session, source="admin_annual")
+    parents: list[ExecucaoSincronizacao] = []
+    for sequence, (source, year) in enumerate((("dfp", 2024), ("itr", 2024))):
+        parent = _execution(db_session, source=source, year=year, status="aguardando_ingestao")
+        adicionar_execucao_a_fila(
+            db_session,
+            batch=batch,
+            execucao=parent,
+            task_name=f"app.worker.tasks.sincronizar_{source}_task",
+            args=[year],
+            sequence=sequence,
+        )
+        _execution(
+            db_session,
+            source=source,
+            year=year,
+            status="aguardando_ingestao",
+            parent_id=parent.id,
+            kind="arquivo_membro",
+            filename=f"{source}_cia_aberta_{year}.csv",
+        )
+        parents.append(parent)
+
+    assert [_ensure_child_items(db_session, parent, batch.id) for parent in parents] == [1, 1]
+    assert sorted(item.sequence for item in db_session.query(IngestionQueueItem).filter_by(batch_id=batch.id)) == [0, 1, 2, 3]
 
 
 def test_scheduler_reserves_ready_csv_before_zip_and_only_one_zip(
