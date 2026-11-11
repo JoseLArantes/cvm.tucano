@@ -5,7 +5,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import (
@@ -18,6 +18,7 @@ from app.models.ingestion import (
     SourceArtifactSnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.schemas.admin import (
     IngestionActionTarget,
@@ -274,18 +275,27 @@ def calcular_atividade_atual(
     root_status: str | None,
     children_statuses: list[str],
     is_paused: bool = False,
+    queue_status: str | None = None,
 ) -> str:
     """Calcula o estado de atividade operacional corrente do arquivo."""
     if is_paused:
         return "bloqueada"
-    if root_status in ("em_execucao", "agendada"):
+    if queue_status == "running":
         return "em_processamento"
-    if any(s in ("em_execucao", "agendada") for s in children_statuses):
+    if queue_status in ("queued", "reserved", "transition_pending"):
+        return "na_fila"
+    if any(s == "em_execucao" for s in children_statuses):
         return "em_processamento"
-    if any(s == "aguardando_ingestao" for s in children_statuses) and root_status in ("em_execucao", "agendada"):
+    if any(s == "aguardando_ingestao" for s in children_statuses) and root_status == "em_execucao":
         return "aguardando_parent_window"
+    if root_status == "em_execucao":
+        return "em_processamento"
     if root_status == "aguardando_ingestao":
         return "aguardando_ingestao"
+    if queue_status == "waiting_manual":
+        return "aguardando_ingestao"
+    if root_status == "agendada" or any(s == "agendada" for s in children_statuses):
+        return "na_fila"
     return "idle"
 
 
@@ -302,7 +312,7 @@ def _em_processamento_scopes(
     if not file_keys:
         return set(), set()
 
-    active_statuses = {"em_execucao", "agendada"}
+    active_statuses = {"em_execucao"}
     scopes = {key[:2] for key in file_keys}
     active_scopes = {
         scope for scope, (_, status) in latest_root_by_scope.items() if scope in scopes and status in active_statuses
@@ -396,6 +406,22 @@ def _em_processamento_scopes(
                 active_scopes.add((tipo_fonte, ano))
 
     return active_scopes, active_file_keys
+
+
+def _na_fila_scopes(db: Session, file_keys: set[FileKey]) -> set[FileScope]:
+    scopes = {key[:2] for key in file_keys}
+    if not scopes:
+        return set()
+    queued = db.execute(
+        select(ExecucaoSincronizacao.tipo_fonte, ExecucaoSincronizacao.ano).join(
+            IngestionQueueItem,
+            IngestionQueueItem.execucao_sincronizacao_id == ExecucaoSincronizacao.id,
+        ).where(
+            IngestionQueueItem.status.in_(("queued", "reserved", "transition_pending")),
+            tuple_(ExecucaoSincronizacao.tipo_fonte, ExecucaoSincronizacao.ano).in_(scopes),
+        )
+    ).all()
+    return {(fonte, year) for fonte, year in queued if (fonte, year) in scopes}
 
 
 def obter_arquivo_logico(db: Session, file_id: str) -> IngestionLogicalFileDetalhe | None:
@@ -704,9 +730,28 @@ def obter_arquivo_logico(db: Session, file_id: str) -> IngestionLogicalFileDetal
 
     # 11. Atividade operacional
     child_statuses = [c.status for c in child_executions]
+    queue_execution_ids = [execution.id for execution in child_executions]
+    if latest_root_exec is not None:
+        queue_execution_ids.append(latest_root_exec.id)
+    queue_statuses = list(
+        db.scalars(
+            select(IngestionQueueItem.status).where(
+                IngestionQueueItem.execucao_sincronizacao_id.in_(queue_execution_ids)
+            )
+        ).all()
+    ) if queue_execution_ids else []
+    queue_status = (
+        "running" if "running" in queue_statuses
+        else "transition_pending" if "transition_pending" in queue_statuses
+        else "reserved" if "reserved" in queue_statuses
+        else "queued" if "queued" in queue_statuses
+        else "waiting_manual" if "waiting_manual" in queue_statuses
+        else None
+    )
     atividade_atual = calcular_atividade_atual(
         root_status=latest_root_exec.status if latest_root_exec else None,
         children_statuses=child_statuses,
+        queue_status=queue_status,
     )
 
     # 12. Falha relevante e resolucao
@@ -1129,6 +1174,9 @@ def listar_arquivos_logicos(
     if atividade == "em_processamento":
         active_scopes, active_file_keys = _em_processamento_scopes(db, file_keys, latest_root_by_scope)
         file_keys = {key for key in file_keys if key[:2] in active_scopes or key in active_file_keys}
+    elif atividade == "na_fila":
+        queued_scopes = _na_fila_scopes(db, file_keys)
+        file_keys = {key for key in file_keys if key[:2] in queued_scopes}
 
     # Filtragem preliminar de string de arquivo
     filtered_keys = []

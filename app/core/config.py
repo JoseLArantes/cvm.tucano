@@ -232,6 +232,11 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_QUEUE_DISPATCH_POLL_SECONDS",
     )
+    ingestion_execution_slots: int = Field(
+        default=1,
+        ge=1,
+        alias="INGESTION_EXECUTION_SLOTS",
+    )
     ingestion_duckdb_memory_limit_mb: int = Field(
         default=768,
         ge=128,

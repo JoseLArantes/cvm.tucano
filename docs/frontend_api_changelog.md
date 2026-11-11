@@ -9,6 +9,31 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-11 - Fila Persistida com Admissao de Etapas
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/queue` com paginação de lotes e etapas
+- `GET /ingestion/operations` com `ingestion_queue`
+- `GET /ingestion/files` com `atividade=na_fila` e sem classificar mera espera como `em_processamento`
+- respostas de disparo simples, em lote, `/ingestion/dispatch` e replay de execucao com `lote_id`
+
+### Comportamento entregue
+
+- Cada pedido é persistido no PostgreSQL com sua ordem de chegada; etapas só são publicadas no Celery após reservar
+  capacidade. O acompanhamento por lote informa posição, fontes/anos, progresso, etapa e motivo de espera.
+- `queued` e `reserved` ainda não representam trabalho iniciado. `em_processamento` passa a exigir início confirmado
+  por worker. `waiting_manual` aguarda o operador sem ocupar vaga.
+- Cadastro, preparação de ZIP e CSV compartilham o orçamento de vagas configurado a partir das réplicas e concorrência
+  do worker. Uma preparação ZIP ativa por vez é permitida; CSVs prontos e dependências de cabeçalho têm precedência
+  sobre novos ZIPs.
+- O início de ZIP revalida a prioridade sob o bloqueio global. Publicações sem token vigente e duplicatas não executam
+  trabalho. Transições e publicações interrompidas são retomadas pelo dispatcher periódico.
+- `POST /ingestion/sincronizacoes/tudo/{ano}` registra cadastro e fontes anuais em um mesmo lote e devolve o mesmo
+  `lote_id` em cada tarefa. `POST /ingestion/dispatch` devolve `lote_id` na resposta e nos itens.
+- Bootstrap, tarefas periodicas de beat e gatilhos de atualizacao automatica gravam pedidos na mesma fila persistida;
+  a falha de publicacao Celery deixa o item no outbox para nova tentativa, sem converter a run em falha terminal.
+
 ## 2026-11-10 - Retry de Members e Recovery com Fonte Pai
 
 ### Superficies afetadas

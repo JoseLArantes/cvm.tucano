@@ -10,12 +10,30 @@ from sqlalchemy.orm import Session
 
 from app.models.financeiro import DocumentoFinanceiro
 from app.models.ingestion import IngestionCancellationRequest, IngestionFile, IngestionPhaseExecution, IngestionRun
+from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.operational import reconcile_stale_ingestion_phase_executions
+from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
 from app.services.ingestion.retry import RetryableIngestionError
 from app.services.ingestion.staging import create_run, register_file
 from app.worker import tasks as worker_tasks
 from app.worker.tasks import sincronizar_member_internal
+
+
+def _admit_finalizer_for_test(db_session: Session, execution: ExecucaoSincronizacao) -> tuple[str, str]:
+    batch = criar_lote(db_session, source="test_finalizer")
+    item = adicionar_execucao_a_fila(
+        db_session,
+        batch=batch,
+        execucao=execution,
+        task_name=worker_tasks.finalizar_sincronizacao_zip_task.name,
+        args=[str(execution.id)],
+        kind="continuation",
+    )
+    item.status = "reserved"
+    item.reservation_token = "test-reservation"
+    db_session.commit()
+    return str(item.id), "test-reservation"
 
 
 def test_sincronizar_member_internal_ignora_execucao_cancelada(db_session: Session) -> None:
@@ -542,8 +560,6 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
     monkeypatch: pytest.MonkeyPatch,
     tipo_fonte: str,
 ) -> None:
-    import celery
-
     agora = datetime.now(UTC)
     execucao_pai = ExecucaoSincronizacao(
         tipo_fonte=tipo_fonte,
@@ -589,28 +605,9 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
         def close(self) -> None:
             pass
 
-    dispatched: dict[str, Any] = {}
-
-    class _Workflow:
-        def delay(self) -> None:
-            dispatched["delayed"] = True
-
-    def _fake_group(signatures: Any) -> list[Any]:
-        grouped = list(signatures)
-        dispatched["group_size"] = len(grouped)
-        return grouped
-
-    def _fake_chord(grouped: Any, callback: Any) -> _Workflow:
-        dispatched["callback"] = callback
-        dispatched["grouped"] = grouped
-        return _Workflow()
-
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
-    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_per_parent", 2)
-    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_global", 2)
-    monkeypatch.setattr(celery, "group", _fake_group)
-    monkeypatch.setattr(celery, "chord", _fake_chord)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
 
     resultado = worker_tasks.disparar_dependentes_task.run(str(execucao_pai.id))
 
@@ -631,10 +628,12 @@ def test_disparar_dependentes_respeita_janela_sem_bloquear_pendentes(
         for child in children
     }
 
-    assert resultado["status"] == "dispatched"
-    assert dispatched["group_size"] == 2
-    assert list(statuses.values()).count("agendada") == 2
-    assert list(statuses.values()).count("aguardando_ingestao") == 1
+    queue_items = db_session.query(IngestionQueueItem).filter_by(kind="csv").all()
+    assert resultado["status"] == "queued"
+    assert resultado["members_admitted"] == "3"
+    assert len(queue_items) == 3
+    assert {item.status for item in queue_items} == {"queued"}
+    assert set(statuses.values()) == {"agendada"}
     assert set(phase_statuses.values()) == {"pending"}
 
 
@@ -716,16 +715,9 @@ def test_disparar_dependentes_aguarda_slot_global_sem_enfileirar_member(
         def close(self) -> None:
             pass
 
-    scheduled: list[dict[str, Any]] = []
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: _SessionProxy())
     monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: _SessionProxy())
-    monkeypatch.setattr("app.worker.tasks._settings.ingestion_max_active_members_global", 1)
-    monkeypatch.setattr("app.worker.tasks._settings.ingestion_queue_dispatch_poll_seconds", 7)
-    monkeypatch.setattr(
-        worker_tasks.disparar_dependentes_task,
-        "apply_async",
-        lambda **kwargs: scheduled.append(kwargs),
-    )
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
 
     resultado = worker_tasks.disparar_dependentes_task.run(str(parent_pendente.id))
 
@@ -738,20 +730,16 @@ def test_disparar_dependentes_aguarda_slot_global_sem_enfileirar_member(
     assert pending_member_actual is not None
     assert pending_parent_run_actual is not None
     assert pending_member_run_actual is not None
-    assert resultado["status"] == "waiting_global_capacity"
-    assert resultado["active_members"] == "1"
+    assert resultado["status"] == "queued"
+    assert resultado["members_admitted"] == "1"
     assert pending_parent_actual.status == "aguardando_ingestao"
-    assert pending_member_actual.status == "aguardando_ingestao"
+    assert pending_member_actual.status == "agendada"
     assert pending_parent_run_actual.status == "aguardando_ingestao"
     assert pending_member_run_actual.status == "aguardando_ingestao"
-    assert scheduled == [
-        {
-            "args": (str(parent_pendente.id),),
-            "kwargs": {"force_reimport": False, "pending_update_id": None},
-            "countdown": 7,
-            "queue": worker_tasks._settings.ingestion_control_queue_name,
-        }
-    ]
+    pending_item = db_session.query(IngestionQueueItem).filter_by(
+        execucao_sincronizacao_id=member_pendente.id
+    ).one()
+    assert pending_item.status == "queued"
 
 
 def test_ingerir_sincronizacao_zip_aguarda_slot_global_antes_de_enfileirar_members(
@@ -930,10 +918,15 @@ def test_finalizar_sincronizacao_zip_resume_quality_summary_explicit_reuse(
     db_session.commit()
 
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: db_session)
     monkeypatch.setattr(worker_tasks.despachar_materializacao_pendente_task, "apply_async", lambda **kwargs: None)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
     monkeypatch.setattr("app.worker.tasks._settings.storage_dir", str(Path.cwd() / "tmp-tests-storage"))
 
-    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao_pai.id))
+    queue_item_id, token = _admit_finalizer_for_test(db_session, execucao_pai)
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(
+        str(execucao_pai.id), _queue_item_id=queue_item_id, _queue_reservation_token=token
+    )
 
     run_pai_atual = db_session.get(IngestionRun, run_pai.id)
     execucao_pai_atual = db_session.get(ExecucaoSincronizacao, execucao_pai.id)

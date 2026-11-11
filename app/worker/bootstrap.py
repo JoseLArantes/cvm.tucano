@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -6,6 +7,8 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models.sincronizacao import ExecucaoSincronizacao, StatusExecucao
+from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
+from app.services.ingestion.scheduling import criar_execucao_sincronizacao_agendada, novo_task_id
 from app.worker.tasks import (
     sincronizar_cadastro_companhias_task,
     sincronizar_cgvn_task,
@@ -20,6 +23,8 @@ from app.worker.tasks import (
 logger = logging.getLogger(__name__)
 
 _STATUS_EXISTENTE_VALIDO = (
+    StatusExecucao.agendada.value,
+    StatusExecucao.aguardando_ingestao.value,
     StatusExecucao.em_execucao.value,
     StatusExecucao.sucesso.value,
     StatusExecucao.sem_alteracao.value,
@@ -44,25 +49,51 @@ def agendar_sincronizacoes_iniciais() -> list[tuple[str, int | None]]:
     db = SessionLocal()
     agendadas: list[tuple[str, int | None]] = []
     try:
-        if not _possui_execucao_valida(db, tipo_fonte="cadastro", ano=None):
-            sincronizar_cadastro_companhias_task.delay()
-            agendadas.append(("cadastro", None))
-
         tarefas_anuais = (
-            ("dfp", settings.anos_iniciais_dfp, sincronizar_dfp_task.delay),
-            ("itr", settings.anos_iniciais_itr, sincronizar_itr_task.delay),
-            ("fre", settings.anos_iniciais_fre, sincronizar_fre_task.delay),
-            ("fca", settings.anos_iniciais_fca, sincronizar_fca_task.delay),
-            ("ipe", settings.anos_iniciais_ipe, sincronizar_ipe_task.delay),
-            ("vlmo", settings.anos_iniciais_vlmo, sincronizar_vlmo_task.delay),
-            ("cgvn", settings.anos_iniciais_cgvn, sincronizar_cgvn_task.delay),
+            ("dfp", settings.anos_iniciais_dfp, sincronizar_dfp_task),
+            ("itr", settings.anos_iniciais_itr, sincronizar_itr_task),
+            ("fre", settings.anos_iniciais_fre, sincronizar_fre_task),
+            ("fca", settings.anos_iniciais_fca, sincronizar_fca_task),
+            ("ipe", settings.anos_iniciais_ipe, sincronizar_ipe_task),
+            ("vlmo", settings.anos_iniciais_vlmo, sincronizar_vlmo_task),
+            ("cgvn", settings.anos_iniciais_cgvn, sincronizar_cgvn_task),
         )
-        for tipo_fonte, anos_configurados, delay in tarefas_anuais:
+        pendentes: list[tuple[str, int | None, Any, list[Any]]] = []
+        if not _possui_execucao_valida(db, tipo_fonte="cadastro", ano=None):
+            pendentes.append(("cadastro", None, sincronizar_cadastro_companhias_task, []))
+
+        for tipo_fonte, anos_configurados, task in tarefas_anuais:
             for ano in settings.parse_anos(anos_configurados):
                 if _possui_execucao_valida(db, tipo_fonte=tipo_fonte, ano=ano):
                     continue
-                delay(ano)
-                agendadas.append((tipo_fonte, ano))
+                pendentes.append((tipo_fonte, ano, task, [ano]))
+        if not pendentes:
+            return agendadas
+
+        batch = criar_lote(db, source="bootstrap", metadata={"requested_scopes": len(pendentes)})
+        for sequence, (tipo_fonte, ano_agendado, task, args) in enumerate(pendentes):
+            execution = criar_execucao_sincronizacao_agendada(
+                db,
+                tipo_fonte=tipo_fonte,
+                ano=ano_agendado,
+                task_id=novo_task_id(),
+            )
+            adicionar_execucao_a_fila(
+                db,
+                batch=batch,
+                execucao=execution,
+                task_name=task.name,
+                args=args,
+                sequence=sequence,
+            )
+            agendadas.append((tipo_fonte, ano_agendado))
+        db.commit()
+        try:
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar a fila persistida durante o bootstrap")
         return agendadas
     finally:
         db.close()

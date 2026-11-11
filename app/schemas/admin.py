@@ -15,6 +15,7 @@ class RespostaAgendamentoSincronizacao(BaseModel):
 
     id_tarefa: str = Field(description="Identificador da task assíncrona (Celery).")
     status: str = Field(description='Estado inicial do disparo da tarefa. Valor esperado: "agendada".')
+    lote_id: str | None = Field(default=None, description="Identificador do lote persistido na fila de admissao.")
 
 
 class AnaliseArquivo(BaseModel):
@@ -230,18 +231,20 @@ class TarefaAgendadaResumo(BaseModel):
     id_tarefa: str = Field(
         description=(
             "Identificador operacional da execucao assíncrona. "
-            "O valor e persistido em `execucoes_sincronizacao.id_tarefa` antes da publicacao Celery; "
-            "em lotes anuais, algumas execucoes podem ficar registradas como `agendada` ate o worker de cadastro publicar a fonte anual correspondente."
+            "O valor e persistido em `execucoes_sincronizacao.id_tarefa` antes da reserva e publicacao Celery; "
+            "a etapa só recebe mensagem Celery depois de obter uma vaga da fila persistida."
         )
     )
+    lote_id: str | None = Field(default=None, description="Identificador do lote que preserva a ordem de chegada.")
 
 
 class RespostaAgendamentoEmLote(BaseModel):
     status: str = Field(description='Status do disparo em lote. Valor esperado: "agendada".')
+    lote_id: str | None = Field(default=None, description="Identificador do lote na fila persistida.")
     tarefas: list[TarefaAgendadaResumo] = Field(
         description=(
-            "Lista das execucoes registradas para o lote. "
-            "No lote anual, `cadastro` e publicado imediatamente; `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` ficam persistidos como `agendada` e sao publicados pelo worker apos o cadastro terminar com sucesso, `sem_alteracao` ou `skipped`."
+            "Lista das execucoes registradas no lote e mantidas na fila persistida pela ordem de chegada. "
+            "O cadastro tem precedencia temporal na admissao do lote; as fontes ZIP avançam uma por vez, e os CSVs liberados entram antes de novos ZIPs."
         )
     )
 
@@ -619,6 +622,61 @@ class IngestionOperationsResumo(BaseModel):
     recoverable_runs_total: int = Field(default=0, description="Total real de runs recuperaveis, antes do preview.")
     previews_truncated: bool = Field(default=False, description="Indica que algum preview foi truncado.")
     aggregate_progress: dict[str, int] = Field(default_factory=dict, description="Contadores agregados de progresso das runs.")
+    ingestion_queue: dict[str, Any] = Field(default_factory=dict, description="Profundidade, idade e vagas da fila persistida de ingestao.")
+
+
+class IngestionQueueSourceResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tipo_fonte: str
+    ano: int | None
+
+
+class IngestionQueueItemResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    execucao_id: str
+    tipo_fonte: str
+    ano: int | None
+    arquivo: str
+    etapa: str
+    status: str
+    motivo_espera: str | None
+    reservado_em: BrazilianDateTime | None
+    iniciado_em: BrazilianDateTime | None
+    tentativa: int
+
+
+class IngestionQueueProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total: int
+    concluidos: int
+    em_execucao: int
+    aguardando: int
+
+
+class IngestionQueueBatchResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    lote_id: str
+    posicao: int
+    fontes: list[IngestionQueueSourceResponse]
+    itens: list[IngestionQueueItemResponse]
+    status: str
+    solicitado_em: BrazilianDateTime
+    motivo_espera: str | None
+    progresso: IngestionQueueProgress
+
+
+class IngestionQueueListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(description="Quantidade total de lotes ativos ou aguardando operador.")
+    pagina: int = Field(description="Pagina atual.")
+    tamanho_pagina: int = Field(description="Tamanho da pagina.")
+    dados: list[IngestionQueueBatchResponse] = Field(description="Lotes em ordem de chegada, com progresso e motivo de espera.")
 
 
 class IngestionScopeRequest(BaseModel):
@@ -650,6 +708,7 @@ class IngestionDispatchRequest(IngestionDispatchPlanRequest):
 
 class IngestionDispatchResponse(BaseModel):
     status: str
+    lote_id: str | None = None
     work_items: list[dict[str, Any]]
     idempotent_replay: bool = False
 
@@ -1161,8 +1220,12 @@ class ReplayResposta(BaseModel):
     )
 
     status: str = Field(
-        description='Status da chamada administrativa. Valor esperado quando a requisicao e aceita: `"sucesso"`.'
+        description=(
+            "Status da chamada administrativa. Replays de execucao aceitos entram como `agendada`; "
+            "reaplicacoes sincrona de staging e operacoes de rebuild concluem como `sucesso`."
+        )
     )
+    lote_id: str | None = Field(default=None, description="Identificador do lote de admissao criado para o replay.")
     detalhe: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -1463,7 +1526,7 @@ class IngestionLogicalFileSummary(BaseModel):
     ano: int | None = Field(default=None, description="Ano de referencia do arquivo (nulo para arquivos simples como cadastro).")
     arquivo_principal: str = Field(description="Nome canonico do arquivo principal ou pacote.")
     is_container: bool = Field(description="Verdadeiro se o arquivo e um pacote (ZIP) contendo membros; falso para arquivo simples.")
-    atividade_atual: str = Field(description="Atividade operacional atual: idle, em_processamento, aguardando_ingestao, aguardando_parent_window, bloqueada.")
+    atividade_atual: str = Field(description="Atividade operacional atual: idle, na_fila, em_processamento, aguardando_ingestao, aguardando_parent_window ou bloqueada.")
     integridade_em_uso: str = Field(description="Integridade da versao efetivamente em uso: completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente.")
     resultado_alvo: str | None = Field(default=None, description="Resultado da versao alvo da ingestao mais recente: sucesso, falha, skipped, etc.")
     versao_em_uso: IngestionVersionSummary | None = Field(default=None, description="Versao de dados efetivamente em uso no banco.")

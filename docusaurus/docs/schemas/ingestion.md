@@ -257,6 +257,22 @@ Os previews em `active_runs` e `recoverable_runs` incluem `recovery` com:
 `recoverable_runs` inclui somente runs com `next_action=recover` e `recovery.eligible=true`.
 Runs concluidas ou com falha nao retentavel permanecem terminais, nao entram nessa lista e nao bloqueiam um novo dispatch equivalente. Para falhas terminais, `allowed_actions[]` inclui `start_ingestion` com `reason_code=TERMINAL_RUN_REDISPATCH_ALLOWED`.
 
+O campo `ingestion_queue` resume a fila persistida e inclui profundidade, idade do pedido mais antigo, lotes ativos,
+vagas reservadas/em execução, capacidade configurada, preparações ZIP ativas e contagens por status.
+
+## `IngestionQueueListResponse`
+
+Resposta paginada de `GET /ingestion/queue`, ordenada por chegada do lote.
+
+- `total`, `pagina`, `tamanho_pagina`
+- `dados[]`: `lote_id`, `posicao`, `fontes[]` (`tipo_fonte`, `ano`), `status`, `solicitado_em`, `motivo_espera`
+- `progresso`: contagens `total`, `concluidos`, `em_execucao`, `aguardando`
+- `itens[]`: `item_id`, `execucao_id`, fonte/ano/arquivo, `etapa`, `status`, `motivo_espera`, `reservado_em`, `iniciado_em` e `tentativa`
+
+Os status `queued`, `reserved`, `running`, `transition_pending` e `waiting_manual` distinguem espera por vaga,
+publicação pendente, trabalho iniciado, aplicação de transição e confirmação de operador. `waiting_manual` não consome
+vaga. `completed`, `failed` e `cancelled` encerram uma etapa.
+
 Runs falhadas podem incluir `failure_acknowledgement`:
 
 - `acknowledged_at`: momento do reconhecimento;
@@ -268,7 +284,7 @@ Antes do reconhecimento, uma falha não retentável expõe as ações `inspect_e
 
 ## Controle de despacho e trabalho
 
-`IngestionDispatchPlanRequest` recebe `scopes[]`, `strategy` (`direct` ou `two_step`), `force_reimport` e motivo opcional. A resposta inclui `plan_token`, expiração, escopos válidos/inválidos, conflitos e impacto no gate. `IngestionDispatchRequest` deve repetir o plano e usar `Idempotency-Key`.
+`IngestionDispatchPlanRequest` recebe `scopes[]`, `strategy` (`direct` ou `two_step`), `force_reimport` e motivo opcional. A resposta inclui `plan_token`, expiração, escopos válidos/inválidos, conflitos e impacto no gate. `IngestionDispatchRequest` deve repetir o plano e usar `Idempotency-Key`. A confirmação persiste todas as execuções no mesmo lote e retorna `lote_id` em cada `work_item`; só etapas admitidas são publicadas ao Celery.
 
 O work item contém `id`, `fonte`, `ano`, correlação de atualização, execução e run, `state`, `next_action` e `allowed_actions[]`. Cada ação é orientada a máquina: `code`, `operation`, `resource`, `requires_confirmation`, `reason_code` e `constraints`.
 

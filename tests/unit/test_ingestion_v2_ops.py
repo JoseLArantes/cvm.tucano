@@ -417,32 +417,30 @@ def test_admin_v2_replay_and_identity_rebuild_endpoints(client: TestClient, monk
     assert resposta_identity.status_code == 200
 
 
-def test_worker_tasks_use_single_ingestion_path_and_retry_options(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_tasks_route_legacy_calls_into_persistent_queue(
+    db_session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
     pytest.importorskip("celery")
+    from app.models.ingestion_queue import IngestionQueueItem
     from app.worker import tasks as worker_tasks
 
     settings = get_settings()
-    class DummyDb:
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: DummyDb())
+    monkeypatch.setattr("app.worker.tasks.SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
     monkeypatch.setattr(
         "app.worker.tasks._coordenar_sincronizacao_zip",
-        lambda tipo_fonte, ano, task_id=None, force_reimport=False, *args, **kwargs: {
-            "status": "sucesso",
-            "execucao_id": "v2" if tipo_fonte == "dfp" else f"{tipo_fonte}-v2",
-        },
+        lambda *args, **kwargs: pytest.fail("A chamada sem reserva nao deve acessar a CVM."),
     )
     resultado = worker_tasks.sincronizar_dfp_task.run(2025)
     resultado_fca = worker_tasks.sincronizar_fca_task.run(2025)
     resultado_ipe = worker_tasks.sincronizar_ipe_task.run(2025)
     resultado_vlmo = worker_tasks.sincronizar_vlmo_task.run(2025)
 
-    assert resultado["execucao_id"] == "v2"
-    assert resultado_fca["execucao_id"] == "fca-v2"
-    assert resultado_ipe["execucao_id"] == "ipe-v2"
-    assert resultado_vlmo["execucao_id"] == "vlmo-v2"
+    assert [result["status"] for result in (resultado, resultado_fca, resultado_ipe, resultado_vlmo)] == ["queued"] * 4
+    queued = db_session.query(IngestionQueueItem).order_by(IngestionQueueItem.queued_at).all()
+    assert len(queued) == 4
+    assert {item.kind for item in queued} == {"zip_prepare"}
+    assert {item.status for item in queued} == {"queued"}
     assert worker_tasks.sincronizar_dfp_task.max_retries == settings.ingestion_max_retries
     assert worker_tasks.sincronizar_ipe_task.max_retries == settings.ingestion_max_retries
     assert worker_tasks.sincronizar_vlmo_task.max_retries == settings.ingestion_max_retries

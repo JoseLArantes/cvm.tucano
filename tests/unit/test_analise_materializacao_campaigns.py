@@ -28,7 +28,24 @@ from app.services.analise import (
     recuperar_chunks_materializacao_stale,
     recuperar_materializacao_pendente,
 )
+from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
 from app.worker import tasks as worker_tasks
+
+
+def _admit_finalizer(db_session: Session, execution: ExecucaoSincronizacao) -> tuple[str, str]:
+    batch = criar_lote(db_session, source="test_finalizer")
+    item = adicionar_execucao_a_fila(
+        db_session,
+        batch=batch,
+        execucao=execution,
+        task_name=worker_tasks.finalizar_sincronizacao_zip_task.name,
+        args=[str(execution.id)],
+        kind="continuation",
+    )
+    item.status = "reserved"
+    item.reservation_token = "test-reservation"
+    db_session.commit()
+    return str(item.id), "test-reservation"
 
 
 def _companhia(db_session: Session, codigo_cvm: int = 9512, situacao_registro: str = "ATIVO") -> Companhia:
@@ -292,7 +309,11 @@ def test_finalizar_sincronizacao_zip_cria_campanha_e_dispara_dispatcher(
     monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
-    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    queue_item_id, token = _admit_finalizer(db_session, execucao)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(
+        str(execucao.id), _queue_item_id=queue_item_id, _queue_reservation_token=token
+    )
 
     campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
     assert resultado["status"] == "sucesso"
@@ -753,7 +774,11 @@ def test_finalizar_sincronizacao_zip_nao_enfileira_dispatcher_quando_gate_vermel
     monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
-    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    queue_item_id, token = _admit_finalizer(db_session, execucao)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(
+        str(execucao.id), _queue_item_id=queue_item_id, _queue_reservation_token=token
+    )
     campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
 
     assert resultado["status"] == "sucesso"

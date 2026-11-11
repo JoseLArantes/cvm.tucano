@@ -40,6 +40,7 @@ from app.models.ingestion import (
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.schemas.admin import (
     AnaliseArquivo,
@@ -73,6 +74,7 @@ from app.schemas.admin import (
     IngestionMemberUpdateItem,
     IngestionOperationRunPreview,
     IngestionOperationsResumo,
+    IngestionQueueListResponse,
     IngestionRecovery,
     IngestionRunMemberResumo,
     IngestionRunPhaseExecutionResumo,
@@ -121,6 +123,12 @@ from app.services.ingestion.operational import (
     latest_cancellation_request_for_run,
     list_phase_executions,
 )
+from app.services.ingestion.queue import (
+    adicionar_execucao_a_fila,
+    criar_lote,
+    estatisticas_fila,
+    snapshot_fila,
+)
 from app.services.ingestion.recovery import (
     NoRecoverySourceError,
     assess_ingestion_run_recovery,
@@ -134,7 +142,6 @@ from app.services.ingestion.replay import (
 from app.services.ingestion.replay import replay_ingestion_run as replay_ingestion_run_service
 from app.services.ingestion.scheduling import (
     criar_execucao_sincronizacao_agendada,
-    marcar_agendamento_com_falha,
     novo_task_id,
 )
 from app.services.ingestion.source_registry import dataset_por_member_name, listar_datasets, listar_fontes, obter_fonte
@@ -1194,6 +1201,12 @@ def _cancelar_sincronizacao_por_seletor(
                     affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
                 )
         db.commit()
+        try:
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao reavaliar a fila apos cancelamento de execucao")
         return RespostaCancelamentoSincronizacao(
             id_execucao=str(execucao.id),
             id_tarefa=id_tarefa_efetivo,
@@ -1216,6 +1229,12 @@ def _cancelar_sincronizacao_por_seletor(
                 affected_execution_ids=[str(rel.id) for rel in execucoes_relacionadas],
             )
         db.commit()
+        try:
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao reavaliar a fila apos cancelamento sem execucao correlata")
 
     return RespostaCancelamentoSincronizacao(
         id_execucao=None,
@@ -1229,7 +1248,8 @@ def _cancelar_sincronizacao_por_seletor(
 
 _DESC_SYNC_ANUAL = (
     "Agenda uma sincronizacao administrativa de uma fonte anual CVM. "
-    "Antes de publicar a task Celery, o backend persiste uma `ExecucaoSincronizacao` com `status=agendada` e `id_tarefa` igual ao ID que sera usado pelo Celery. "
+    "O backend persiste a execucao e a intencao de publicacao no lote duravel antes de admitir qualquer etapa. "
+    "A resposta inclui `lote_id`; somente uma etapa com vaga reservada e publicada ao Celery. "
     "Esse estado ja fecha o gate de materializacao, entao novas campanhas/chunks de analise deixam de iniciar enquanto a ingestao estiver em `agendada`, `em_execucao` ou `aguardando_ingestao`. "
     "A task resultante executa um ciclo em quatro momentos operacionais: "
     "`acquire` com preflight remoto (`CKAN`/`HEAD`) para decidir se o recurso parece alterado; "
@@ -1517,15 +1537,36 @@ def _agendar_task_sincronizacao(
     kwargs: dict[str, Any] | None = None,
 ) -> str:
     task_id = novo_task_id()
-    criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=task_id)
+    execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=task_id)
+    batch = criar_lote(db, source="admin", metadata={"requested_scope": _scope_key(tipo_fonte, ano)})
+    adicionar_execucao_a_fila(
+        db,
+        batch=batch,
+        execucao=execution,
+        task_name=task.name,
+        args=list(args),
+        kwargs=kwargs or {},
+    )
     db.commit()
     try:
-        task.apply_async(args=args, kwargs=kwargs or {}, task_id=task_id)
-    except Exception as exc:
-        marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-        db.commit()
-        raise
+        from app.worker.tasks import despachar_fila_ingestao_task
+
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logger.exception("Falha ao sinalizar o escalonador persistido da ingestao")
     return task_id
+
+
+def _lote_id_por_task(db: Session, task_id: str) -> str:
+    row = db.execute(
+        select(IngestionQueueBatch.id)
+        .join(IngestionQueueItem, IngestionQueueItem.batch_id == IngestionQueueBatch.id)
+        .where(IngestionQueueItem.task_id == task_id)
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise RuntimeError(f"Lote de fila nao encontrado para a task {task_id}.")
+    return str(row)
 
 
 def _mensagem_cancelamento_administrativo(*, motivo: str | None, id_tarefa: str | None) -> str:
@@ -1604,6 +1645,10 @@ def _cancelar_execucoes_relacionadas(
             finished_at=agora,
         )
 
+    from app.services.ingestion.queue import cancelar_execucoes_na_fila
+
+    cancelar_execucoes_na_fila(db, [execucao.id for execucao in execucoes])
+
     return list(dict.fromkeys(task_ids))
 
 
@@ -1659,7 +1704,7 @@ def _agendar_por_arquivo(
             ano=None,
             kwargs={"force_reimport": force_reimport},
         )
-        return TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=task_id)
+        return TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=task_id, lote_id=_lote_id_por_task(db, task_id))
 
     tipo_fonte = None
     arquivo_canonico = None
@@ -1697,7 +1742,7 @@ def _agendar_por_arquivo(
             args=(ano_efetivo,),
             kwargs={"force_reimport": force_reimport},
         )
-        return TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano_efetivo, id_tarefa=task_id)
+        return TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano_efetivo, id_tarefa=task_id, lote_id=_lote_id_por_task(db, task_id))
     else:
         from app.models.sincronizacao import ExecucaoSincronizacao
         from app.worker.tasks import sincronizar_member_task
@@ -1730,29 +1775,39 @@ def _agendar_por_arquivo(
             status="agendada",
         )
         db.add(child_exec)
+        batch = criar_lote(
+            db,
+            source="admin_selective_member",
+            metadata={"tipo_fonte": tipo_fonte, "ano": ano_efetivo, "arquivo": arquivo_canonico},
+        )
+        adicionar_execucao_a_fila(
+            db,
+            batch=batch,
+            execucao=child_exec,
+            task_name=sincronizar_member_task.name,
+            kwargs={
+                "tipo_fonte": tipo_fonte,
+                "ano": ano_efetivo,
+                "member_name": arquivo_canonico,
+                "parent_execucao_id": str(exec_pai.id),
+                "child_execucao_id": str(child_exec.id),
+                "force_reimport": force_reimport,
+            },
+            kind="csv",
+        )
         db.commit()
         db.refresh(child_exec)
-
         try:
-            sincronizar_member_task.apply_async(
-                kwargs={
-                    "tipo_fonte": tipo_fonte,
-                    "ano": ano_efetivo,
-                    "member_name": arquivo_canonico,
-                    "parent_execucao_id": str(exec_pai.id),
-                    "child_execucao_id": str(child_exec.id),
-                    "force_reimport": force_reimport,
-                },
-                task_id=task_id,
-            )
-        except Exception as exc:
-            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-            db.commit()
-            raise
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar o escalonador para reprocessamento seletivo")
         return TarefaAgendadaResumo(
             tipo_fonte=f"{tipo_fonte}_membro",
             ano=ano_efetivo,
             id_tarefa=task_id,
+            lote_id=str(batch.id),
         )
 
 
@@ -1809,7 +1864,7 @@ def disparar_sincronizacao_cadastro(
         ano=None,
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1836,7 +1891,7 @@ def disparar_sincronizacao_dfp(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1863,7 +1918,7 @@ def disparar_sincronizacao_itr(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1890,7 +1945,7 @@ def disparar_sincronizacao_fre(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1917,7 +1972,7 @@ def disparar_sincronizacao_fca(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1944,7 +1999,7 @@ def disparar_sincronizacao_ipe(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1971,7 +2026,7 @@ def disparar_sincronizacao_vlmo(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -1998,7 +2053,7 @@ def disparar_sincronizacao_cgvn(
         args=(ano,),
         kwargs={"force_reimport": force_reimport},
     )
-    return {"id_tarefa": task_id, "status": "agendada"}
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
 
 
 @router.post(
@@ -2007,14 +2062,15 @@ def disparar_sincronizacao_cgvn(
     summary="Disparar Sincronizacao Completa por Ano",
     description=(
         "Agenda um lote administrativo para um ano especifico. "
-        "O backend registra `cadastro`, `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` como `agendada` e publica primeiro a task de `cadastro`. "
-        "Quando `cadastro` termina com sucesso, skip ou sem alteracao, o worker publica as fontes anuais ja registradas para o mesmo ano. "
+        "O backend registra `cadastro`, `dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo` e `cgvn` no mesmo lote persistido e preserva a ordem de chegada. "
+        "O escalonador admite uma etapa por vaga; cadastro e preparacao de ZIP compartilham o pool, com no maximo uma preparacao ZIP ativa. "
+        "Os CSVs liberados apos a preparacao entram na fila antes de qualquer novo ZIP, respeitando o cabecalho e a ordem dos lotes. "
         "Este endpoint nao usa `ANOS_INICIAIS_*` do ambiente: o ano processado eh exclusivamente o argumento recebido em `/{ano}`. "
-        "Todas as execucoes do lote sao persistidas como `agendada` antes da primeira publicacao Celery, e esses registros ja fecham o gate de materializacao. "
+        "Todas as execucoes e intencoes de publicacao do lote sao persistidas antes de qualquer envio ao Celery; `lote_id` permite acompanhar ordem e progresso em `GET /ingestion/queue`. "
         "Cada fonte anual executa o mesmo mecanismo: preflight remoto em `acquire`, possivel skip sem download quando os metadados remotos permanecem inalterados, "
         "download apenas quando necessario, `stage` orientado a headers/row counts/member hashes, promocao apenas dos members alterados e `reconcile` para exclusao de linhas promovidas obsoletas do mesmo member. "
         "Se uma execucao anual anterior tiver terminado em `falha`, members que ja haviam sido concluidos com sucesso continuam elegiveis para reaproveitamento por `member_sha256` no rerun do mesmo ano, salvo quando `force_reimport=true`. "
-        "A resposta lista todas as tasks Celery criadas para acompanhamento posterior por `id_tarefa`."
+        "A resposta lista as execucoes para acompanhamento por `id_tarefa` e `lote_id`; o Celery recebe apenas etapas admitidas."
     ),
     responses=_RESPOSTA_TOKEN_INVALIDO,
     operation_id="dispararSincronizacaoTudoAdmin",
@@ -2028,32 +2084,47 @@ def disparar_sincronizacao_tudo(
     ] = False,
 ) -> RespostaAgendamentoEmLote:
     tarefas: list[TarefaAgendadaResumo] = []
+    task_mapper = {
+        "dfp": sincronizar_dfp_task,
+        "itr": sincronizar_itr_task,
+        "fre": sincronizar_fre_task,
+        "fca": sincronizar_fca_task,
+        "ipe": sincronizar_ipe_task,
+        "vlmo": sincronizar_vlmo_task,
+        "cgvn": sincronizar_cgvn_task,
+    }
+    batch = criar_lote(db, source="admin_annual", metadata={"ano": ano, "force_reimport": force_reimport})
 
     cadastro_id = novo_task_id()
-    criar_execucao_sincronizacao_agendada(db, tipo_fonte="cadastro", ano=None, task_id=cadastro_id)
-    tarefas.append(TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=cadastro_id))
+    cadastro_execution = criar_execucao_sincronizacao_agendada(
+        db, tipo_fonte="cadastro", ano=None, task_id=cadastro_id
+    )
+    adicionar_execucao_a_fila(
+        db, batch=batch, execucao=cadastro_execution,
+        task_name=sincronizar_cadastro_companhias_task.name,
+        kwargs={"force_reimport": force_reimport}, sequence=0,
+    )
+    tarefas.append(TarefaAgendadaResumo(tipo_fonte="cadastro", ano=None, id_tarefa=cadastro_id, lote_id=str(batch.id)))
 
-    for tipo_fonte in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
+    for sequence, tipo_fonte in enumerate(("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"), start=1):
         tid = novo_task_id()
-        criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=tid)
-        tarefas.append(TarefaAgendadaResumo(tipo_fonte=tipo_fonte, ano=ano, id_tarefa=tid))
-
-    task_ids = [tarefa.id_tarefa for tarefa in tarefas]
+        execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte=tipo_fonte, ano=ano, task_id=tid)
+        adicionar_execucao_a_fila(
+            db, batch=batch, execucao=execution, task_name=task_mapper[tipo_fonte].name,
+            args=[ano], kwargs={"force_reimport": force_reimport}, sequence=sequence,
+        )
+        tarefas.append(TarefaAgendadaResumo(
+            tipo_fonte=tipo_fonte, ano=ano, id_tarefa=tid, lote_id=str(batch.id)
+        ))
     db.commit()
     try:
-        sincronizar_cadastro_companhias_task.apply_async(
-            kwargs={
-                "force_reimport": force_reimport,
-                "dispatch_year_after_success": ano,
-            },
-            task_id=cadastro_id,
-        )
-    except Exception as exc:
-        marcar_agendamento_com_falha(db, task_ids=task_ids, erro=str(exc))
-        db.commit()
-        raise
+        from app.worker.tasks import despachar_fila_ingestao_task
 
-    return RespostaAgendamentoEmLote(status="agendada", tarefas=tarefas)
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logger.exception("Falha ao sinalizar o escalonador persistido do lote anual")
+
+    return RespostaAgendamentoEmLote(status="agendada", lote_id=str(batch.id), tarefas=tarefas)
 
 
 @router.post(
@@ -2066,12 +2137,26 @@ def disparar_sincronizacao_tudo(
 )
 def pre_processar_cadastro_route(
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do arquivo ja existir.", examples=[False])
     ] = False,
 ) -> dict[str, str]:
-    tarefa = pre_processar_sincronizacao_task.delay(tipo_fonte="cadastro", force_reimport=force_reimport)
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    task_id = novo_task_id()
+    execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte="cadastro", ano=None, task_id=task_id)
+    batch = criar_lote(db, source="admin_pre_process", metadata={"tipo_fonte": "cadastro"})
+    adicionar_execucao_a_fila(
+        db, batch=batch, execucao=execution, task_name=pre_processar_sincronizacao_task.name,
+        kwargs={"tipo_fonte": "cadastro", "force_reimport": force_reimport}, kind="cadastro",
+    )
+    db.commit()
+    try:
+        from app.worker.tasks import despachar_fila_ingestao_task
+
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logger.exception("Falha ao sinalizar o escalonador para pre-processamento do cadastro")
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": str(batch.id)}
 
 
 @router.post(
@@ -2086,6 +2171,7 @@ def pre_processar_fonte_anual_route(
     tipo_fonte: Annotated[str, Path(description="Tipo de fonte (ex.: dfp, ITR, FCA).")],
     ano: Annotated[int, Path(description="Ano de referência.")],
     _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
     force_reimport: Annotated[
         bool, Query(description="Quando `true`, reprocessa mesmo se o hash do arquivo ja existir.", examples=[False])
     ] = False,
@@ -2094,12 +2180,21 @@ def pre_processar_fonte_anual_route(
     if fonte_lower not in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
         raise HTTPException(status_code=422, detail=f"Fonte '{tipo_fonte}' nao suportada ou nao necessita de ano.")
     
-    tarefa = pre_processar_sincronizacao_task.delay(
-        tipo_fonte=fonte_lower,
-        ano=ano,
-        force_reimport=force_reimport,
+    task_id = novo_task_id()
+    execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte=fonte_lower, ano=ano, task_id=task_id)
+    batch = criar_lote(db, source="admin_pre_process", metadata={"tipo_fonte": fonte_lower, "ano": ano})
+    adicionar_execucao_a_fila(
+        db, batch=batch, execucao=execution, task_name=pre_processar_sincronizacao_task.name,
+        kwargs={"tipo_fonte": fonte_lower, "ano": ano, "force_reimport": force_reimport}, kind="zip_prepare",
     )
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    db.commit()
+    try:
+        from app.worker.tasks import despachar_fila_ingestao_task
+
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logger.exception("Falha ao sinalizar o escalonador para pre-processamento anual")
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": str(batch.id)}
 
 
 @router.post(
@@ -2135,11 +2230,56 @@ def ingerir_fonte_pre_processada(
             detail=f"Execucao {id_execucao} esta com status '{execucao.status}', mas deve estar em 'aguardando_ingestao' para iniciar a ingestao."
         )
     
-    tarefa = ingerir_sincronizacao_task.delay(
-        execucao_id=str(execucao.id),
-        force_reimport=force_reimport,
+    queue_item = db.scalar(
+        select(IngestionQueueItem).where(
+            IngestionQueueItem.execucao_sincronizacao_id == execucao.id
+        )
     )
-    return {"id_tarefa": str(tarefa.id), "status": "agendada"}
+    if queue_item is None:
+        execution_task_id = novo_task_id()
+        execucao.id_tarefa = execution_task_id
+        batch = criar_lote(
+            db,
+            source="admin_manual_confirmation",
+            metadata={"execucao_id": str(execucao.id)},
+        )
+        queue_item = adicionar_execucao_a_fila(
+            db,
+            batch=batch,
+            execucao=execucao,
+            task_name=ingerir_sincronizacao_task.name,
+            kwargs={"execucao_id": str(execucao.id), "force_reimport": force_reimport},
+            kind="continuation",
+        )
+        db.commit()
+        try:
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar o escalonador para confirmacao manual")
+        return {"id_tarefa": queue_item.task_id, "status": "agendada", "lote_id": str(batch.id)}
+    if queue_item.status == "waiting_manual":
+        from app.services.ingestion.queue import retomar_item_manual
+
+        retomar_item_manual(
+            db,
+            item=queue_item,
+            task_name=ingerir_sincronizacao_task.name,
+            kwargs={"execucao_id": str(execucao.id), "force_reimport": force_reimport},
+        )
+        db.commit()
+        try:
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar o escalonador para confirmacao manual")
+    return {
+        "id_tarefa": queue_item.task_id,
+        "status": "agendada" if queue_item.status == "queued" else queue_item.status,
+        "lote_id": str(queue_item.batch_id),
+    }
 
 
 @router.post(
@@ -2150,7 +2290,7 @@ def ingerir_fonte_pre_processada(
         "Dispara reprocessamento seletivo por nome de arquivo CVM. "
         "Aceita arquivos `cad_cia_aberta.csv`, `dfp_cia_aberta_*`, `itr_cia_aberta_*`, "
         "`fre_cia_aberta_*`, `fca_cia_aberta_*`, `ipe_cia_aberta_*`, `vlmo_cia_aberta_*` e `cgvn_cia_aberta_*`. "
-        "O backend persiste a execucao seletiva em `agendada` antes de publicar a task Celery, usando o mesmo `id_tarefa` retornado na resposta. "
+        "O backend persiste a execucao seletiva em `agendada` e na fila do lote antes de admitir a etapa. A resposta inclui `lote_id`; `id_tarefa` identifica a publicacao futura no Celery. "
         "Para members CSV, a validacao do nome e case-insensitive, mas o nome canonico do arquivo e preservado na execucao e no despacho da task. "
         "Use `force_reimport=true` no payload para ignorar o skip por hash repetido. "
         "Este endpoint permanece util para recuperacao cirurgica por member/arquivo, mas o fluxo normal de rerun anual agora tenta reaproveitar automaticamente members ja bem-sucedidos por `member_sha256`, inclusive quando a execucao anual anterior terminou em `falha`."
@@ -2186,7 +2326,7 @@ def reprocessar_arquivo(
         raise HTTPException(status_code=422, detail="Campo 'force_reimport' deve ser booleano quando informado.")
 
     tarefa = _agendar_por_arquivo(db, arquivo, ano, force_reimport)
-    return RespostaAgendamentoEmLote(status="agendada", tarefas=[tarefa])
+    return RespostaAgendamentoEmLote(status="agendada", lote_id=tarefa.lote_id, tarefas=[tarefa])
 
 
 @router.get(
@@ -2808,11 +2948,12 @@ def detalhar_execucao(
     summary="Executar replay de execucao de sincronizacao",
     description=(
         "Executa o replay ou reprocessamento de uma execucao de sincronizacao (pai ou membro filho). "
-        "Para execucoes pai (arquivo principal), reagenda a tarefa principal com force_reimport=True. "
-        "Para execucoes membro (filho), reagenda a sincronizacao do member correspondente mantendo a linhagem "
+        "Para execucoes pai (arquivo principal), registra a tarefa principal com force_reimport=True em um novo lote. "
+        "Para execucoes membro (filho), registra a sincronizacao do member correspondente mantendo a linhagem "
         "e reaproveitando a extracao pai. O replay isolado do filho so e agendado quando existe um `IngestionFile` "
         "persistido para a fonte; sem essa fonte, retorna `409` `NO_RECOVERY_SOURCE` "
-        "com `next_action=replay_parent_execution`, sem alterar a execucao filha. Se houver IngestionRun associada, "
+        "com `next_action=replay_parent_execution`, sem alterar a execucao filha. Respostas aceitas incluem `lote_id`; "
+        "a etapa aguarda admissao persistida e nao executa dentro da requisicao HTTP. Se houver IngestionRun associada, "
         "seus estados operacionais sao sincronizados."
     ),
     responses={
@@ -2848,7 +2989,6 @@ def detalhar_execucao(
             },
         },
         422: {"description": "Fonte ou arquivo nao suportado para replay."},
-        503: {"description": "Falha ao despachar tarefa no Celery ou pool esgotado."},
     },
     operation_id="replaySincronizacaoAdmin",
 )
@@ -2914,36 +3054,23 @@ def replay_sincronizacao(
                     message="Resetado automaticamente pelo replay da execucao pai.",
                 )
                 child_run.finished_at = None
+        from app.services.ingestion.queue import enfileirar_replay
+
+        batch = enfileirar_replay(
+            db,
+            execution=execucao,
+            task_name=task_func.name,
+            args=[execucao.ano] if execucao.ano is not None else [],
+            kwargs={"force_reimport": True},
+            kind="cadastro" if execucao.tipo_fonte == "cadastro" else "zip_prepare",
+        )
         db.commit()
         try:
-            kwargs: dict[str, Any] = {"force_reimport": True}
-            args: tuple[Any, ...] = ()
-            if execucao.ano is not None:
-                args = (execucao.ano,)
-            task_func.apply_async(args=args, kwargs=kwargs, task_id=task_id)
-        except Exception as exc:
-            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-            if run is not None:
-                update_run_state(
-                    run,
-                    status="falha",
-                    phase="complete",
-                    message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
-                    finished_at=_agora(),
-                )
-            db.commit()
-            detail = {
-                "reason_code": "RECOVERY_DISPATCH_FAILED",
-                "retryable": False,
-            }
-            if run is not None:
-                detail["run_id"] = str(run.id)
-            else:
-                detail["execucao_id"] = str(execucao.id)
-            raise HTTPException(
-                status_code=503,
-                detail=detail,
-            ) from exc
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar o escalonador para replay de execucao pai")
         return ReplayResposta(
             status="agendada",
             detalhe={
@@ -2953,7 +3080,9 @@ def replay_sincronizacao(
                 "tipo_fonte": execucao.tipo_fonte,
                 "ano": execucao.ano,
                 "arquivo": execucao.arquivo,
+                "lote_id": str(batch.id),
             },
+            lote_id=str(batch.id),
         )
     else:
         from app.worker.tasks import sincronizar_member_task
@@ -2982,42 +3111,29 @@ def replay_sincronizacao(
             run.requested_by_task_id = task_id
             run.message = "Replay de member agendado."
             run.finished_at = None
+        from app.services.ingestion.queue import enfileirar_replay
+
+        batch = enfileirar_replay(
+            db,
+            execution=execucao,
+            task_name=sincronizar_member_task.name,
+            kwargs={
+                "tipo_fonte": execucao.tipo_fonte,
+                "ano": execucao.ano or 0,
+                "member_name": execucao.arquivo,
+                "parent_execucao_id": str(parent_id),
+                "child_execucao_id": str(execucao.id),
+                "force_reimport": True,
+            },
+            kind="csv",
+        )
         db.commit()
         try:
-            sincronizar_member_task.apply_async(
-                kwargs={
-                    "tipo_fonte": execucao.tipo_fonte,
-                    "ano": execucao.ano or 0,
-                    "member_name": execucao.arquivo,
-                    "parent_execucao_id": str(parent_id),
-                    "child_execucao_id": str(execucao.id),
-                    "force_reimport": True,
-                },
-                task_id=task_id,
-            )
-        except Exception as exc:
-            marcar_agendamento_com_falha(db, task_ids=[task_id], erro=str(exc))
-            if run is not None:
-                update_run_state(
-                    run,
-                    status="falha",
-                    phase="complete",
-                    message=f"{_RECOVERY_DISPATCH_FAILURE_PREFIX} {exc}",
-                    finished_at=_agora(),
-                )
-            db.commit()
-            detail = {
-                "reason_code": "RECOVERY_DISPATCH_FAILED",
-                "retryable": False,
-            }
-            if run is not None:
-                detail["run_id"] = str(run.id)
-            else:
-                detail["execucao_id"] = str(execucao.id)
-            raise HTTPException(
-                status_code=503,
-                detail=detail,
-            ) from exc
+            from app.worker.tasks import despachar_fila_ingestao_task
+
+            despachar_fila_ingestao_task.delay()
+        except Exception:
+            logger.exception("Falha ao sinalizar o escalonador para replay de member")
         return ReplayResposta(
             status="agendada",
             detalhe={
@@ -3028,7 +3144,9 @@ def replay_sincronizacao(
                 "ano": execucao.ano,
                 "arquivo": execucao.arquivo,
                 "parent_execucao_id": str(parent_id),
+                "lote_id": str(batch.id),
             },
+            lote_id=str(batch.id),
         )
 
 
@@ -3923,7 +4041,7 @@ def obter_detalhe_member(
         "Hierarquia de dominio: ANO -> ARQUIVO PRINCIPAL -> MEMBRO -> TENTATIVAS E ETAPAS -> RESULTADO. "
         "Arquivos simples (como o cadastro global) nao possuem ZIP, ano ficticio ou membro artificial. "
         "Retorna totais nao truncados por arquivo distinto com paginacao e filtros server-side. "
-        "O filtro atividade=em_processamento reduz candidatos pelo estado das execucoes antes de carregar detalhes. "
+        "O filtro atividade=na_fila identifica execucoes ainda sem worker; atividade=em_processamento reflete etapas assumidas por worker. "
         "Snapshots repetidos podem ser reutilizados em memoria pelo TTL configurado em "
         "INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS (3 segundos no chart padrao; 0 desativa)."
     ),
@@ -3936,7 +4054,7 @@ async def listar_arquivos_logicos_endpoint(
     ano: Annotated[int | None, Query(description="Filtrar por ano de referencia.")] = None,
     fonte: Annotated[str | None, Query(description="Filtrar por tipo de fonte CVM (dfp, itr, fre, cadastro, etc.).")] = None,
     arquivo: Annotated[str | None, Query(description="Filtrar por trecho do nome do arquivo principal.")] = None,
-    atividade: Annotated[str | None, Query(description="Filtrar por atividade: idle, em_processamento, aguardando_ingestao, aguardando_parent_window, bloqueada.")] = None,
+    atividade: Annotated[str | None, Query(description="Filtrar por atividade: idle, na_fila, em_processamento, aguardando_ingestao, aguardando_parent_window, bloqueada.")] = None,
     integridade: Annotated[str | None, Query(description="Filtrar por grau de integridade em uso: completo, completo_com_ressalvas, parcial, nao_aplicado, evidencia_insuficiente.")] = None,
     necessidade_intervencao: Annotated[bool | None, Query(description="Filtrar se requer acao manual de operador.")] = None,
     resolucao_falha: Annotated[str | None, Query(description="Filtrar por resolucao de falha: aberta, em_nova_tentativa, restaurada_com_evidencia, versao_substituida, encerrada_sem_restauracao.")] = None,
@@ -4105,6 +4223,32 @@ async def obter_ingestion_operations(
     )
 
 
+@router.get(
+    "/queue",
+    response_model=IngestionQueueListResponse,
+    summary="Consultar lotes da fila persistida de ingestao",
+    description=(
+        "Lista lotes pela ordem de chegada, com escopos, etapa atual, progresso e motivo de espera. "
+        "Itens reservados ainda aguardam o worker assumir a etapa; somente status `running` representa trabalho iniciado."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="listarFilaIngestionAdmin",
+)
+def listar_fila_ingestion(
+    db: DbSession,
+    _: Annotated[None, Depends(validar_token_api)],
+    pagina: Annotated[int, Query(ge=1, description="Numero da pagina.")] = 1,
+    tamanho_pagina: Annotated[int, Query(ge=1, le=100, description="Lotes por pagina.")] = 25,
+) -> IngestionQueueListResponse:
+    snapshot = snapshot_fila(db, page=pagina, page_size=tamanho_pagina)
+    return IngestionQueueListResponse(
+        total=int(snapshot["total"]),
+        pagina=pagina,
+        tamanho_pagina=tamanho_pagina,
+        dados=snapshot["dados"],
+    )
+
+
 def _build_ingestion_operations(db: Session) -> IngestionOperationsResumo:
     active: dict[str, Any] = {}
     reserved: dict[str, Any] = {}
@@ -4227,6 +4371,7 @@ def _build_ingestion_operations(db: Session) -> IngestionOperationsResumo:
         recoverable_runs_total=recoverable_total,
         previews_truncated=active_total > 10 or recoverable_total > 10,
         aggregate_progress=aggregate_progress,
+        ingestion_queue=estatisticas_fila(db),
     )
 
 
@@ -4350,22 +4495,47 @@ def despachar_ingestao(
     work_items: list[dict[str, Any]] = []
     tasks = {"cadastro": sincronizar_cadastro_companhias_task, "dfp": sincronizar_dfp_task, "itr": sincronizar_itr_task, "fre": sincronizar_fre_task, "fca": sincronizar_fca_task, "ipe": sincronizar_ipe_task, "vlmo": sincronizar_vlmo_task, "cgvn": sincronizar_cgvn_task}
     staged: list[tuple[dict[str, Any], str, ExecucaoSincronizacao]] = []
+    batch = criar_lote(
+        db,
+        source="dispatch",
+        requested_by=actor,
+        metadata={"strategy": request.strategy, "force_reimport": request.force_reimport},
+    )
     for scope in normalized_scopes:
         task_id = novo_task_id()
         execution = criar_execucao_sincronizacao_agendada(db, tipo_fonte=scope["fonte"], ano=scope["ano"], task_id=task_id)
         staged.append((scope, task_id, execution))
     plan.consumed_at = _agora()
     db.flush()
-    for scope, task_id, execution in staged:
+    for sequence, (scope, task_id, execution) in enumerate(staged):
         db.add(IngestionOperationAudit(scope_type="scope", scope_id=_scope_key(scope["fonte"], scope["ano"]), operation="force_reimport" if request.force_reimport else "dispatch", requested_by=actor, reason=request.reason, consequence={"execution_id": str(execution.id), "task_id": task_id}))
         task = tasks[scope["fonte"]]
         kwargs = {"force_reimport": request.force_reimport}
-        if scope["fonte"] == "cadastro":
-            task.apply_async(kwargs=kwargs, task_id=task_id)
+        if request.strategy == "two_step":
+            target_task = pre_processar_sincronizacao_task
+            kwargs.update({"tipo_fonte": scope["fonte"], "ano": scope["ano"]})
+            args: list[Any] = []
+            kind = "cadastro" if scope["fonte"] == "cadastro" else "zip_prepare"
+        elif scope["fonte"] == "cadastro":
+            target_task = task
+            args = []
+            kind = "cadastro"
         else:
-            task.apply_async(args=(scope["ano"],), kwargs=kwargs, task_id=task_id)
-        work_items.append({"id": _scope_key(scope["fonte"], scope["ano"]), "execution_id": str(execution.id), "run_id": None, "task_id": task_id, "state": "queued"})
-    response_payload: dict[str, Any] = {"status": "accepted", "work_items": work_items}
+            target_task = task
+            args = [scope["ano"]]
+            kind = "zip_prepare"
+        adicionar_execucao_a_fila(
+            db,
+            batch=batch,
+            execucao=execution,
+            task_name=target_task.name,
+            args=args,
+            kwargs=kwargs,
+            kind=kind,
+            sequence=sequence,
+        )
+        work_items.append({"id": _scope_key(scope["fonte"], scope["ano"]), "execution_id": str(execution.id), "run_id": None, "task_id": task_id, "lote_id": str(batch.id), "state": "queued"})
+    response_payload: dict[str, Any] = {"status": "accepted", "lote_id": str(batch.id), "work_items": work_items}
     db.add(IngestionIdempotencyRecord(requested_by=actor, operation="dispatch", idempotency_key=idempotency_key, request_fingerprint=fingerprint, response_payload=response_payload, expires_at=_agora() + timedelta(hours=24)))
     try:
         db.commit()
@@ -4375,6 +4545,12 @@ def despachar_ingestao(
         if concurrent is not None and concurrent.request_fingerprint == fingerprint:
             return IngestionDispatchResponse(**concurrent.response_payload, idempotent_replay=True)
         raise
+    try:
+        from app.worker.tasks import despachar_fila_ingestao_task
+
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logger.exception("Falha ao sinalizar o escalonador persistido do dispatch")
     return IngestionDispatchResponse(**response_payload)
 
 
@@ -4560,33 +4736,15 @@ def cancelar_ingestion_run_member(
         "`IngestionFile` persistido para reabrir o pacote pai. "
         "Quando nao houver fonte executavel, responde `409` com `reason_code=NO_RECOVERY_SOURCE`. "
         "Runs concluidas ou com falha nao retentavel tambem respondem `409`, respectivamente com "
-        "`RUN_ALREADY_COMPLETED` ou `NON_RETRYABLE_FAILURE`, e podem ser sucedidas por novo dispatch equivalente."
+        "`RUN_ALREADY_COMPLETED` ou `NON_RETRYABLE_FAILURE`, e podem ser sucedidas por novo dispatch equivalente. "
+        "Quando a estrategia reabre uma execucao pai ou member, cria um lote persistido e retorna `lote_id`; falha temporaria "
+        "de publicacao Celery nao descarta o pedido, que permanece no outbox para reconciliacao periodica. "
+        "A reaplicacao de staging retido que nao depende de uma nova etapa continua sendo executada no banco."
     ),
     responses={
         **_RESPOSTA_TOKEN_INVALIDO,
         404: {"description": "Run nao encontrado."},
         409: {"description": "Run nao esta em estado recuperavel (`RUN_ALREADY_COMPLETED`, `NON_RETRYABLE_FAILURE` ou `RUN_NOT_RECOVERABLE`) ou o member nao possui `IngestionFile` pai executavel (`NO_RECOVERY_SOURCE`)."},
-        503: {
-            "description": "Falha temporaria de banco ou falha terminal ao publicar a task de recovery no Celery.",
-            "content": {
-                "application/json": {
-                    "examples": {
-                        "database_pool_exhausted": {
-                            "value": {"detail": {"reason_code": "DATABASE_POOL_EXHAUSTED", "retryable": True}}
-                        },
-                        "recovery_dispatch_failed": {
-                            "value": {
-                                "detail": {
-                                    "reason_code": "RECOVERY_DISPATCH_FAILED",
-                                    "retryable": False,
-                                    "run_id": "6a31c7f8-1c89-4f3d-87db-7e6a8e196999",
-                                }
-                            }
-                        },
-                    }
-                }
-            },
-        },
     },
     operation_id="recoverIngestionRunAdmin",
 )

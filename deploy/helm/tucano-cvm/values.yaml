@@ -48,6 +48,10 @@ worker:
   resources: {}
   podAnnotations: {}
 
+ingestion:
+  # 0 derives the admission budget from worker replicas x concurrency.
+  executionSlots: 0
+
 controlWorker:
   enabled: true
   replicaCount: 1

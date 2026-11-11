@@ -88,6 +88,7 @@ from app.models.ingestion import (
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueControl, IngestionQueueItem
 from app.models.ipe import IpeDocumento
 from app.models.setores import (
     Setor,
@@ -197,6 +198,9 @@ __all__ = [
     "IngestionRow",
     "IngestionRowEvent",
     "IngestionRun",
+    "IngestionQueueBatch",
+    "IngestionQueueControl",
+    "IngestionQueueItem",
     "ParecerFinanceiro",
     "QuarantineItem",
     "RegistroQuarentena",

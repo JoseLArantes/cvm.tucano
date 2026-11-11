@@ -144,7 +144,10 @@ Workers de materializacao nao devem consumir filas de ingestao. Novas publicacoe
 
 ## Gate de materializacao
 
-Todo disparo administrativo de ingestao cria uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task Celery.
+Todo disparo administrativo de ingestao cria um lote e uma `ExecucaoSincronizacao` em `agendada` na fila persistida
+antes de qualquer publicacao Celery. O escalonador reserva capacidade e publica apenas a etapa admitida; tarefas de
+beat, bootstrap e atualizacoes automaticas usam o mesmo caminho. `GET /ingestion/queue` informa ordem, progresso e
+motivo de espera.
 O gate automatico da materializacao considera bloqueadores os status:
 
 - `agendada`

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import shutil
 import uuid
@@ -1225,8 +1226,7 @@ def trigger_update(db: Session, pending_update_id: uuid.UUID, user: str | None =
             )
         raise ValueError(f"PendingUpdate is in state '{pending.status}', not 'ready_for_ingestion'.")
 
-    # Call the ingestion workflow
-    # Import tasks here to avoid circular imports
+    # Persist the update request through the same admission queue as API and bootstrap work.
     from app.worker.tasks import (
         sincronizar_cadastro_companhias_task,
         sincronizar_cgvn_task,
@@ -1248,32 +1248,61 @@ def trigger_update(db: Session, pending_update_id: uuid.UUID, user: str | None =
         "cgvn": sincronizar_cgvn_task,
     }
 
-    if pending.fonte == "cadastro":
-        # Pass skip_probe=True and pending_update_id
-        task_res = sincronizar_cadastro_companhias_task.delay(
-            force_reimport=False,
-            skip_probe=True,
-            pending_update_id=str(pending.id)
-        )
-    else:
-        task_func = task_map.get(pending.fonte)
-        if task_func is None:
-            raise ValueError(f"Invalid fonte: {pending.fonte}")
-        
-        task_res = task_func.delay(
-            pending.ano,
-            force_reimport=False,
-            skip_probe=True,
-            pending_update_id=str(pending.id)
-        )
+    from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
+    from app.services.ingestion.scheduling import criar_execucao_sincronizacao_agendada, novo_task_id
 
-    # A task accepted by Celery is only queued; it is not evidence of completed ingestion.
+    task_id = novo_task_id()
+    if pending.fonte == "cadastro":
+        task = sincronizar_cadastro_companhias_task
+        args: list[Any] = []
+        kind = "cadastro"
+    else:
+        task = task_map.get(pending.fonte)
+        if task is None:
+            raise ValueError(f"Invalid fonte: {pending.fonte}")
+        args = [pending.ano]
+        kind = "zip_prepare"
+
+    execution = criar_execucao_sincronizacao_agendada(
+        db,
+        tipo_fonte=pending.fonte,
+        ano=pending.ano,
+        task_id=task_id,
+    )
+    batch = criar_lote(
+        db,
+        source="automatic_update",
+        requested_by=user,
+        metadata={"pending_update_id": str(pending.id)},
+    )
+    adicionar_execucao_a_fila(
+        db,
+        batch=batch,
+        execucao=execution,
+        task_name=task.name,
+        args=args,
+        kwargs={
+            "force_reimport": False,
+            "skip_probe": True,
+            "pending_update_id": str(pending.id),
+        },
+        kind=kind,
+    )
+
     pending.status = "triggered"
-    pending.ingestion_task_id = str(task_res.id)
+    pending.ingestion_task_id = task_id
     pending.resolved_timestamp = None
     pending.resolved_by = user or "api"
     db.commit()
-    return str(task_res.id)
+    try:
+        from app.worker.tasks import despachar_fila_ingestao_task
+
+        despachar_fila_ingestao_task.delay()
+    except Exception:
+        logging.getLogger(__name__).exception("Falha ao sinalizar a fila de ingestao para update")
+
+    # The task ID identifies a durable queue item; Celery publication happens after admission.
+    return task_id
 
 
 def discard_update(db: Session, pending_update_id: uuid.UUID) -> PendingUpdate:

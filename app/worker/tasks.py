@@ -41,13 +41,314 @@ def _resultado_cancelado(execucao_id: Any, message: str) -> dict[str, Any]:
     return {"execucao_id": str(execucao_id), "status": "cancelada", "message": message}
 
 
-def _publicar_fontes_anuais_agendadas(
+def _capturar_na_fila(
+    task_self: Any,
+    *,
+    task_name: str,
+    task_args: list[Any],
+    task_kwargs: dict[str, Any],
+    execution_id: str | None = None,
+    kind: str | None = None,
+    task_id_override: str | None = None,
+) -> dict[str, Any]:
+    """Converte chamadas legadas/automáticas em pedidos persistidos sem acessar a CVM."""
+    from app.models.ingestion_queue import IngestionQueueItem
+    from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.queue import _control_lock, adicionar_execucao_a_fila, criar_lote
+
+    db = SessionLocal()
+    try:
+        _control_lock(db)
+        task_id = task_id_override or str(task_self.request.id or uuid.uuid4())
+        execution = db.get(ExecucaoSincronizacao, uuid.UUID(execution_id)) if execution_id else None
+        if execution is None:
+            execution = db.scalar(
+                select(ExecucaoSincronizacao).where(ExecucaoSincronizacao.id_tarefa == task_id).limit(1)
+            )
+        if execution is None:
+            task_year = task_args[0] if task_args and isinstance(task_args[0], int) else task_kwargs.get("ano")
+            task_source = str(task_kwargs.get("tipo_fonte") or task_name.rsplit("_", 2)[-2]).lower()
+            task_source = task_source.removesuffix("_task")
+            if task_name.endswith("sincronizar_cadastro_companhias_task"):
+                task_source, task_year = "cadastro", None
+            from app.services.ingestion.scheduling import sync_execution_metadata
+
+            archive, url, execution_type = sync_execution_metadata(tipo_fonte=task_source, ano=task_year)
+            execution = ExecucaoSincronizacao(
+                tipo_execucao=execution_type,
+                tipo_fonte=task_source,
+                ano=task_year,
+                id_tarefa=task_id,
+                arquivo=archive,
+                url=url,
+                status="agendada",
+            )
+            db.add(execution)
+            db.flush()
+        existing = db.scalar(
+            select(IngestionQueueItem).where(
+                IngestionQueueItem.execucao_sincronizacao_id == execution.id
+            )
+        )
+        if existing is not None and existing.status == "waiting_manual":
+            existing.kind = "continuation"
+            existing.task_name = task_name
+            existing.task_args = task_args
+            existing.task_kwargs = task_kwargs
+            existing.task_id = task_id
+            existing.status = "queued"
+            existing.reason_code = "confirmacao_recebida"
+            existing.reservation_token = None
+            existing.not_before = None
+            existing.finished_at = None
+            execution.id_tarefa = task_id
+        elif existing is not None and existing.status in ("completed", "failed", "cancelled"):
+            batch = criar_lote(db, source="celery_replay")
+            existing.batch_id = batch.id
+            existing.sequence = 0
+            existing.kind = kind or (
+                "csv" if execution.tipo_execucao == "arquivo_membro"
+                else "cadastro" if execution.tipo_fonte == "cadastro"
+                else "zip_prepare" if execution.tipo_execucao == "arquivo_zip"
+                else "simple"
+            )
+            existing.task_name = task_name
+            existing.task_args = task_args
+            existing.task_kwargs = task_kwargs
+            existing.task_id = task_id
+            existing.status = "queued"
+            existing.reason_code = "novo_pedido_de_reprocessamento"
+            existing.reservation_token = None
+            existing.not_before = None
+            existing.reserved_at = None
+            existing.published_at = None
+            existing.started_at = None
+            existing.finished_at = None
+            execution.id_tarefa = task_id
+            execution.status = "agendada"
+            execution.finalizada_em = None
+        elif existing is None:
+            batch = criar_lote(db, source="celery_automatic")
+            adicionar_execucao_a_fila(
+                db,
+                batch=batch,
+                execucao=execution,
+                task_name=task_name,
+                args=task_args,
+                kwargs=task_kwargs,
+                kind=kind,
+            )
+        else:
+            return {"status": "already_queued", "execucao_id": str(execution.id)}
+        db.commit()
+        despachar_fila_ingestao_task.delay()
+        return {"status": "queued", "execucao_id": str(execution.id)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(
+    bind=True,
+    name="app.worker.tasks.agendar_ingestao_automatica_task",
+    **_RETRY_KWARGS,
+)  # type: ignore[untyped-decorator]
+def agendar_ingestao_automatica_task(
+    self: Any,
+    task_name: str,
+    task_args: list[Any] | tuple[Any, ...] | None = None,
+    task_kwargs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    allowed_tasks = {
+        "app.worker.tasks.sincronizar_cadastro_companhias_task",
+        "app.worker.tasks.sincronizar_dfp_task",
+        "app.worker.tasks.sincronizar_itr_task",
+        "app.worker.tasks.sincronizar_fre_task",
+        "app.worker.tasks.sincronizar_fca_task",
+        "app.worker.tasks.sincronizar_ipe_task",
+        "app.worker.tasks.sincronizar_vlmo_task",
+        "app.worker.tasks.sincronizar_cgvn_task",
+    }
+    if task_name not in allowed_tasks:
+        raise ValueError(f"Task de ingestao automatica nao permitida: {task_name}")
+    from app.services.ingestion.scheduling import novo_task_id
+
+    return _capturar_na_fila(
+        self,
+        task_name=task_name,
+        task_args=list(task_args or []),
+        task_kwargs=task_kwargs or {},
+        task_id_override=novo_task_id(),
+    )
+
+
+def _executar_com_reserva(
+    task_self: Any,
+    *,
+    queue_item_id: str | None,
+    reservation_token: str | None,
+    task_name: str,
+    task_args: list[Any],
+    task_kwargs: dict[str, Any],
+    operation: Any,
+    execution_id: str | None = None,
+    kind: str | None = None,
+) -> dict[str, Any]:
+    if queue_item_id is None or reservation_token is None:
+        return _capturar_na_fila(
+            task_self,
+            task_name=task_name,
+            task_args=task_args,
+            task_kwargs=task_kwargs,
+            execution_id=execution_id,
+            kind=kind,
+        )
+    from app.services.ingestion.queue import concluir_item, iniciar_item, liberar_para_retentativa
+
+    item_id = uuid.UUID(queue_item_id)
+    db = SessionLocal()
+    try:
+        started = iniciar_item(db, item_id=item_id, token=reservation_token)
+        db.commit()
+    finally:
+        db.close()
+    if not started:
+        despachar_fila_ingestao_task.delay()
+        return {"status": "stale_reservation", "queue_item_id": queue_item_id}
+    try:
+        result = operation()
+    except Exception as exc:
+        db = SessionLocal()
+        try:
+            liberar_para_retentativa(
+                db,
+                item_id=item_id,
+                token=reservation_token,
+                error=str(exc),
+                retryable=isinstance(exc, _AUTORETRY_FOR),
+            )
+            db.commit()
+        finally:
+            db.close()
+        despachar_fila_ingestao_task.delay()
+        raise
+    db = SessionLocal()
+    try:
+        concluir_item(db, item_id=item_id, token=reservation_token)
+        db.commit()
+    finally:
+        db.close()
+    despachar_fila_ingestao_task.delay()
+    return cast(dict[str, Any], result)
+
+
+def _iniciar_reserva(queue_item_id: str, token: str) -> bool:
+    from app.services.ingestion.queue import iniciar_item
+
+    db = SessionLocal()
+    try:
+        result = iniciar_item(db, item_id=uuid.UUID(queue_item_id), token=token)
+        db.commit()
+        return result
+    finally:
+        db.close()
+
+
+def _concluir_reserva(queue_item_id: str, token: str) -> None:
+    from app.services.ingestion.queue import concluir_item
+
+    db = SessionLocal()
+    try:
+        concluir_item(db, item_id=uuid.UUID(queue_item_id), token=token)
+        db.commit()
+    finally:
+        db.close()
+    despachar_fila_ingestao_task.delay()
+
+
+def _liberar_reserva(queue_item_id: str, token: str, error: str, *, retryable: bool = True) -> None:
+    from app.services.ingestion.queue import liberar_para_retentativa
+
+    db = SessionLocal()
+    try:
+        liberar_para_retentativa(
+            db,
+            item_id=uuid.UUID(queue_item_id),
+            token=token,
+            error=error,
+            retryable=retryable,
+        )
+        db.commit()
+    finally:
+        db.close()
+    despachar_fila_ingestao_task.delay()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.despachar_fila_ingestao_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def despachar_fila_ingestao_task(self: Any) -> dict[str, Any]:
+    from app.services.ingestion.queue import (
+        marcar_erro_publicacao,
+        marcar_publicada,
+        obter_publicacoes_pendentes,
+        reconciliar_fila,
+    )
+
+    db = SessionLocal()
+    try:
+        result = reconciliar_fila(db)
+        db.commit()
+    finally:
+        db.close()
+
+    db = SessionLocal()
+    try:
+        pending = [
+            (item.id, item.reservation_token, item.task_name, list(item.task_args), dict(item.task_kwargs), item.task_id)
+            for item in obter_publicacoes_pendentes(db)
+            if item.reservation_token is not None
+        ]
+    finally:
+        db.close()
+    published = 0
+    for item_id, token, task_name, args, kwargs, task_id in pending:
+        payload = {**kwargs, "_queue_item_id": str(item_id), "_queue_reservation_token": token}
+        try:
+            celery_app.send_task(
+                task_name,
+                args=args,
+                kwargs=payload,
+                task_id=task_id,
+                queue=_settings.ingestion_queue_name,
+            )
+        except Exception as exc:
+            db = SessionLocal()
+            try:
+                marcar_erro_publicacao(db, item_id=item_id, token=str(token), error=str(exc))
+                db.commit()
+            finally:
+                db.close()
+        else:
+            db = SessionLocal()
+            try:
+                marcar_publicada(db, item_id=item_id, token=str(token))
+                db.commit()
+            finally:
+                db.close()
+            published += 1
+    return {"status": "completed", **result, "published": published}
+
+
+def _enfileirar_fontes_anuais_agendadas(
     db: Any,
     *,
     ano: int,
     force_reimport: bool,
 ) -> list[str]:
+    from app.models.ingestion_queue import IngestionQueueItem
     from app.models.sincronizacao import ExecucaoSincronizacao
+    from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
 
     task_map = {
         "dfp": sincronizar_dfp_task,
@@ -70,17 +371,40 @@ def _publicar_fontes_anuais_agendadas(
         )
         .order_by(ExecucaoSincronizacao.tipo_fonte.asc())
     ).all()
-    published: list[str] = []
-    for execucao in rows:
-        if execucao.id_tarefa is None:
+    pendentes = [
+        execucao
+        for execucao in rows
+        if execucao.id_tarefa is not None
+        and db.scalar(
+            select(IngestionQueueItem.id).where(
+                IngestionQueueItem.execucao_sincronizacao_id == execucao.id
+            )
+        ) is None
+    ]
+    if not pendentes:
+        return []
+    batch = criar_lote(
+        db,
+        source="annual_after_cadastro",
+        metadata={"ano": ano, "force_reimport": force_reimport},
+    )
+    queued: list[str] = []
+    for sequence, execucao in enumerate(pendentes):
+        task = task_map.get(execucao.tipo_fonte)
+        if execucao.id_tarefa is None or task is None:
             continue
-        task_map[execucao.tipo_fonte].apply_async(
-            args=(ano,),
+        adicionar_execucao_a_fila(
+            db,
+            batch=batch,
+            execucao=execucao,
+            task_name=task.name,
+            args=[ano],
             kwargs={"force_reimport": force_reimport},
-            task_id=execucao.id_tarefa,
+            sequence=sequence,
         )
-        published.append(execucao.id_tarefa)
-    return published
+        queued.append(execucao.id_tarefa)
+    db.commit()
+    return queued
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.reconciliar_ingestion_stale_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -735,6 +1059,8 @@ def sincronizar_cadastro_companhias_task(
     skip_probe: bool = False,
     pending_update_id: str | None = None,
     dispatch_year_after_success: int | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
     import uuid
 
@@ -742,6 +1068,25 @@ def sincronizar_cadastro_companhias_task(
 
     from app.models.ingestion import IngestionRun
     from app.updates.lifecycle import finalize_pending_update_by_run_id
+
+    if _queue_item_id is None or _queue_reservation_token is None:
+        return cast(
+            dict[str, str],
+            _capturar_na_fila(
+                self,
+                task_name=self.name,
+                task_args=[],
+                task_kwargs={
+                    "force_reimport": force_reimport,
+                    "skip_probe": skip_probe,
+                    "pending_update_id": pending_update_id,
+                    "dispatch_year_after_success": dispatch_year_after_success,
+                },
+            ),
+        )
+    if not _iniciar_reserva(_queue_item_id, _queue_reservation_token):
+        despachar_fila_ingestao_task.delay()
+        return {"status": "stale_reservation", "execucao_id": ""}
 
     db = SessionLocal()
     try:
@@ -767,7 +1112,7 @@ def sincronizar_cadastro_companhias_task(
                 db.commit()
         if status_res in ("sucesso", "sem_alteracao", "skipped"):
             if dispatch_year_after_success is not None:
-                published = _publicar_fontes_anuais_agendadas(
+                queued = _enfileirar_fontes_anuais_agendadas(
                     db,
                     ano=dispatch_year_after_success,
                     force_reimport=force_reimport,
@@ -776,13 +1121,22 @@ def sincronizar_cadastro_companhias_task(
                     "ingestion.batch_annual_sources_published",
                     extra={
                         "dispatch_year": dispatch_year_after_success,
-                        "published_tasks": published,
+                        "queued_tasks": queued,
                     },
                 )
+                if queued:
+                    despachar_fila_ingestao_task.delay()
 
+        _concluir_reserva(_queue_item_id, _queue_reservation_token)
         return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        _liberar_reserva(
+            _queue_item_id,
+            _queue_reservation_token,
+            str(exc),
+            retryable=isinstance(exc, _AUTORETRY_FOR),
+        )
         run = db.scalar(
             select(IngestionRun)
             .where(IngestionRun.requested_by_task_id == str(self.request.id))
@@ -2058,23 +2412,45 @@ def sincronizar_member_task(
     parent_execucao_id: str,
     child_execucao_id: str,
     force_reimport: bool = False,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    db = SessionLocal()
-    try:
-        return sincronizar_member_internal(
-            db=db,
-            tipo_fonte=tipo_fonte,
-            ano=ano,
-            member_name=member_name,
-            parent_execucao_id=parent_execucao_id,
-            child_execucao_id=child_execucao_id,
-            force_reimport=force_reimport,
-            task_id=str(self.request.id),
-            task_retry_count=int(self.request.retries),
-            max_retries=_settings.ingestion_max_retries,
-        )
-    finally:
-        db.close()
+    def operation() -> dict[str, str]:
+        db = SessionLocal()
+        try:
+            return sincronizar_member_internal(
+                db=db,
+                tipo_fonte=tipo_fonte,
+                ano=ano,
+                member_name=member_name,
+                parent_execucao_id=parent_execucao_id,
+                child_execucao_id=child_execucao_id,
+                force_reimport=force_reimport,
+                task_id=str(self.request.id),
+                task_retry_count=int(self.request.retries),
+                max_retries=_settings.ingestion_max_retries,
+            )
+        finally:
+            db.close()
+
+    return cast(dict[str, str], _executar_com_reserva(
+        self,
+        queue_item_id=_queue_item_id,
+        reservation_token=_queue_reservation_token,
+        task_name=self.name,
+        task_args=[],
+        task_kwargs={
+            "tipo_fonte": tipo_fonte,
+            "ano": ano,
+            "member_name": member_name,
+            "parent_execucao_id": parent_execucao_id,
+            "child_execucao_id": child_execucao_id,
+            "force_reimport": force_reimport,
+        },
+        operation=operation,
+        execution_id=child_execucao_id,
+        kind="csv",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.disparar_dependentes_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2084,172 +2460,53 @@ def disparar_dependentes_task(
     force_reimport: bool = False,
     pending_update_id: str | None = None,
 ) -> dict[str, str]:
+    # A transicao do ZIP para os members e persistida antes que o escalonador libere a vaga.
     import uuid
 
-    from celery import chord, group
-    from sqlalchemy import select
-
-    from app.db.session import SessionLocal
-    from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
-    from app.services.ingestion.operational import get_latest_phase_execution
-    from app.services.ingestion.staging import update_run_state
+    from app.services.ingestion.queue import (
+        _control_lock,
+        _ensure_child_items,
+        adicionar_execucao_a_fila,
+        criar_lote,
+        db_item_for_execution,
+    )
 
     db = SessionLocal()
     try:
-        parent_uuid = uuid.UUID(parent_execucao_id)
-        execucao = db.get(ExecucaoSincronizacao, parent_uuid)
-        if execucao is None:
+        parent = db.get(ExecucaoSincronizacao, uuid.UUID(parent_execucao_id))
+        if parent is None:
             raise ValueError(f"Parent execution not found: {parent_execucao_id}")
-        if execucao.status == "cancelada":
-            return _resultado_cancelado(execucao.id, "Parent execution was cancelled before dependent dispatch.")
-        if execucao.status in _STATUS_FINAL_EXECUCAO:
-            result = {"status": execucao.status, "parent_execucao_id": parent_execucao_id}
-            if execucao.status == "falha":
-                result["error"] = "Parent execution already failed."
-            return result
-
-        document_file = f"{execucao.tipo_fonte}_cia_aberta_{execucao.ano}.csv"
-        header_exec = db.scalar(
-            select(ExecucaoSincronizacao)
-            .where(
-                ExecucaoSincronizacao.parent_execucao_id == parent_uuid,
-                ExecucaoSincronizacao.arquivo == document_file,
+        _control_lock(db)
+        if parent.status in ("falha", "cancelada"):
+            return {"status": parent.status, "parent_execucao_id": parent_execucao_id}
+        parent_item = db_item_for_execution(db, parent.id)
+        if parent_item is None:
+            # Drain callbacks from work admitted before the durable queue was enabled.
+            batch = criar_lote(
+                db,
+                source="legacy_transition",
+                metadata={"parent_execucao_id": parent_execucao_id},
             )
-        )
-        if header_exec is not None and header_exec.status in ("falha", "quality_fail"):
-            raise RuntimeError(f"Cannot dispatch dependents. Document header task failed: {header_exec.id}")
-
-        children = db.scalars(
-            select(ExecucaoSincronizacao)
-            .where(ExecucaoSincronizacao.parent_execucao_id == parent_uuid)
-            .order_by(ExecucaoSincronizacao.arquivo.asc())
-        ).all()
-
-        final_statuses = _STATUS_FINAL_EXECUCAO | {"skipped", "sem_alteracao", "sucesso_com_alerta", "quality_fail"}
-        active_statuses = {"agendada", "em_execucao"}
-        active_children = [c for c in children if c.status in active_statuses]
-        if active_children:
-            return {
-                "status": "waiting_active_members",
-                "parent_execucao_id": parent_execucao_id,
-                "active_members": str(len(active_children)),
-            }
-
-        header_pending = header_exec is not None and header_exec.status not in final_statuses
-        pending_children = (
-            [header_exec]
-            if header_pending and header_exec is not None
-            else [
-                child
-                for child in children
-                if child.arquivo != document_file
-                and child.status not in final_statuses
-                and child.status not in active_statuses
-            ]
-        )
-
-        if not pending_children:
-            finalizar_sincronizacao_zip_task.delay(
-                parent_execucao_id=parent_execucao_id,
-                pending_update_id=pending_update_id,
+            parent_item = adicionar_execucao_a_fila(
+                db,
+                batch=batch,
+                execucao=parent,
+                task_name=self.name,
+                args=[parent_execucao_id],
+                kwargs={"force_reimport": force_reimport, "pending_update_id": pending_update_id},
+                kind="continuation",
             )
-            return {"status": "finalization_dispatched", "parent_execucao_id": parent_execucao_id}
-
-        admitted_members = list(
-            db.scalars(
-                select(ExecucaoSincronizacao).where(
-                    ExecucaoSincronizacao.tipo_execucao == "arquivo_membro",
-                    ExecucaoSincronizacao.status.in_(active_statuses),
-                )
-            ).all()
-        )
-        active_member_count = 0
-        for admitted_member in admitted_members:
-            member_run = db.scalar(
-                select(IngestionRun)
-                .where(IngestionRun.execucao_sincronizacao_id == admitted_member.id)
-                .order_by(IngestionRun.created_at.desc())
-                .limit(1)
-            )
-            latest_phase = get_latest_phase_execution(db, run_id=member_run.id) if member_run is not None else None
-            if latest_phase is None or latest_phase.status != "failed_retryable":
-                active_member_count += 1
-
-        global_capacity = _settings.ingestion_max_active_members_global - active_member_count
-        if global_capacity <= 0:
-            execucao.status = "aguardando_ingestao"
-            execucao.finalizada_em = None
-            parent_run = db.scalar(
-                select(IngestionRun)
-                .where(IngestionRun.execucao_sincronizacao_id == parent_uuid)
-                .order_by(IngestionRun.created_at.desc())
-                .limit(1)
-            )
-            if parent_run is not None:
-                parent_run.finished_at = None
-                update_run_state(parent_run, status="aguardando_ingestao", phase="stage")
-            db.commit()
-            self.apply_async(
-                args=(parent_execucao_id,),
-                kwargs={
-                    "force_reimport": force_reimport,
-                    "pending_update_id": pending_update_id,
-                },
-                countdown=_settings.ingestion_queue_dispatch_poll_seconds,
-                queue=_settings.ingestion_control_queue_name,
-            )
-            return {
-                "status": "waiting_global_capacity",
-                "parent_execucao_id": parent_execucao_id,
-                "active_members": str(active_member_count),
-            }
-
-        window_size = min(_settings.ingestion_max_active_members_per_parent, global_capacity)
-        selected_children = pending_children[:window_size]
-        dep_signatures = []
-        for c in selected_children:
-            c.status = "agendada"
-            child_run = db.scalar(
-                select(IngestionRun).where(IngestionRun.execucao_sincronizacao_id == c.id)
-            )
-            if child_run is not None:
-                update_run_state(child_run, status="agendada", phase="stage")
-
-            sig = sincronizar_member_task.si(
-                tipo_fonte=execucao.tipo_fonte,
-                ano=execucao.ano,
-                member_name=c.arquivo,
-                parent_execucao_id=parent_execucao_id,
-                child_execucao_id=str(c.id),
-                force_reimport=force_reimport,
-            )
-            dep_signatures.append(sig)
-
-        execucao.status = "aguardando_ingestao"
-        execucao.finalizada_em = None
-        parent_run = db.scalar(
-            select(IngestionRun)
-            .where(IngestionRun.execucao_sincronizacao_id == parent_uuid)
-            .order_by(IngestionRun.created_at.desc())
-            .limit(1)
-        )
-        if parent_run is not None:
-            parent_run.finished_at = None
-            update_run_state(parent_run, status="aguardando_ingestao", phase="stage")
+            parent_item.status = "completed"
+            parent_item.reason_code = "transicao_legada_aplicada"
+        admitted = _ensure_child_items(db, parent, parent_item.batch_id)
         db.commit()
-
-        if dep_signatures:
-            workflow = chord(
-                group(dep_signatures),
-                disparar_dependentes_task.si(
-                    parent_execucao_id=parent_execucao_id,
-                    force_reimport=force_reimport,
-                    pending_update_id=pending_update_id,
-                ),
-            )
-            workflow.delay()
-        return {"status": "dispatched", "parent_execucao_id": parent_execucao_id}
+        despachar_fila_ingestao_task.delay()
+        return {
+            "status": "queued",
+            "parent_execucao_id": parent_execucao_id,
+            "members_admitted": str(admitted),
+        }
     finally:
         db.close()
 
@@ -2280,6 +2537,8 @@ def finalizar_sincronizacao_zip_task(
     self: Any,
     parent_execucao_id: str,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, Any]:
     import uuid
     from datetime import UTC, datetime
@@ -2292,6 +2551,19 @@ def finalizar_sincronizacao_zip_task(
     from app.models.ingestion import IngestionFile, IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.staging import purge_member_success_rows, update_run_state
+
+    if _queue_item_id is None or _queue_reservation_token is None:
+        return _capturar_na_fila(
+            self,
+            task_name=self.name,
+            task_args=[parent_execucao_id],
+            task_kwargs={"pending_update_id": pending_update_id},
+            execution_id=parent_execucao_id,
+            kind="continuation",
+        )
+    if not _iniciar_reserva(_queue_item_id, _queue_reservation_token):
+        despachar_fila_ingestao_task.delay()
+        return {"status": "stale_reservation", "parent_execucao_id": parent_execucao_id}
 
     db = SessionLocal()
     try:
@@ -2452,7 +2724,7 @@ def finalizar_sincronizacao_zip_task(
         except Exception:
             pass
 
-        return {
+        result = {
             "execucao_id": str(execucao.id),
             "status": parent_status,
             "total_linhas_lidas": total_lidas,
@@ -2461,6 +2733,16 @@ def finalizar_sincronizacao_zip_task(
             "total_inalterados": total_inalterados,
             "total_rejeitados": total_rejeitados,
         }
+        _concluir_reserva(_queue_item_id, _queue_reservation_token)
+        return result
+    except Exception as exc:
+        _liberar_reserva(
+            _queue_item_id,
+            _queue_reservation_token,
+            str(exc),
+            retryable=isinstance(exc, _AUTORETRY_FOR),
+        )
+        raise
     finally:
         db.close()
 
@@ -2472,14 +2754,31 @@ def sincronizar_dfp_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
+) -> dict[str, str]:
+    return cast(dict[str, str], _executar_com_reserva(
+        self,
+        queue_item_id=_queue_item_id,
+        reservation_token=_queue_reservation_token,
+        task_name=self.name,
+        task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="dfp", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ),
+        kind="zip_prepare",
+    ))
+
+
+def _resultado_zip_enfileirado(
+    *, tipo_fonte: str, ano: int, task_id: str, force_reimport: bool, skip_probe: bool,
+    pending_update_id: str | None,
 ) -> dict[str, str]:
     resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="dfp",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
+        tipo_fonte=tipo_fonte, ano=ano, task_id=task_id, force_reimport=force_reimport,
+        skip_probe=skip_probe, pending_update_id=pending_update_id,
     )
     return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
 
@@ -2491,16 +2790,18 @@ def sincronizar_itr_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="itr",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="itr", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fre_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2510,16 +2811,18 @@ def sincronizar_fre_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="fre",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="fre", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fca_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2529,16 +2832,18 @@ def sincronizar_fca_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="fca",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="fca", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_ipe_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2548,16 +2853,18 @@ def sincronizar_ipe_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="ipe",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="ipe", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_vlmo_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2567,16 +2874,18 @@ def sincronizar_vlmo_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="vlmo",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="vlmo", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cgvn_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2586,16 +2895,18 @@ def sincronizar_cgvn_task(
     force_reimport: bool = False,
     skip_probe: bool = False,
     pending_update_id: str | None = None,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, str]:
-    resultado = _coordenar_sincronizacao_zip(
-        tipo_fonte="cgvn",
-        ano=ano,
-        task_id=str(self.request.id),
-        force_reimport=force_reimport,
-        skip_probe=skip_probe,
-        pending_update_id=pending_update_id,
-    )
-    return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+    return cast(dict[str, str], _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport, "skip_probe": skip_probe, "pending_update_id": pending_update_id},
+        operation=lambda: _resultado_zip_enfileirado(
+            tipo_fonte="cgvn", ano=ano, task_id=str(self.request.id), force_reimport=force_reimport,
+            skip_probe=skip_probe, pending_update_id=pending_update_id,
+        ), kind="zip_prepare",
+    ))
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.pre_processar_sincronizacao_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2604,6 +2915,21 @@ def pre_processar_sincronizacao_task(
     tipo_fonte: str,
     ano: int | None = None,
     force_reimport: bool = False,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
+) -> dict[str, Any]:
+    return _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[],
+        task_kwargs={"tipo_fonte": tipo_fonte, "ano": ano, "force_reimport": force_reimport},
+        operation=lambda: _pre_processar_sincronizacao_operacao(
+            self, tipo_fonte=tipo_fonte, ano=ano, force_reimport=force_reimport,
+        ), kind="zip_prepare" if tipo_fonte != "cadastro" else "cadastro",
+    )
+
+
+def _pre_processar_sincronizacao_operacao(
+    task_self: Any, *, tipo_fonte: str, ano: int | None, force_reimport: bool
 ) -> dict[str, Any]:
     from app.db.session import SessionLocal
     db = SessionLocal()
@@ -2620,31 +2946,28 @@ def pre_processar_sincronizacao_task(
             settings = get_settings()
             url_aberta = f"{settings.cvm_base_url}/CIA_ABERTA/CAD/DADOS/{ARQUIVO_CADASTRO_ABERTA}"
             url_estrang = f"{settings.cvm_base_url}/CIA_ESTRANG/CAD/DADOS/{ARQUIVO_CADASTRO_ESTRANGEIRA}"
-            execucao = ExecucaoSincronizacao(
-                tipo_fonte="cadastro",
-                ano=None,
-                id_tarefa=str(self.request.id),
-                arquivo=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
-                url=f"{url_aberta}|{url_estrang}",
-                status="em_execucao",
+            execucao = db.scalar(
+                select(ExecucaoSincronizacao).where(
+                    ExecucaoSincronizacao.id_tarefa == str(task_self.request.id)
+                ).limit(1)
             )
-            db.add(execucao)
-            db.commit()
-            db.refresh(execucao)
+            if execucao is None:
+                execucao = ExecucaoSincronizacao(
+                    tipo_fonte="cadastro", ano=None, id_tarefa=str(task_self.request.id),
+                    arquivo=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
+                    url=f"{url_aberta}|{url_estrang}", status="em_execucao",
+                )
+                db.add(execucao)
+                db.commit()
+                db.refresh(execucao)
             resultado = pre_processar_cadastro(
-                db,
-                execucao_id=execucao.id,
-                task_id=str(self.request.id),
-                force_reimport=force_reimport,
+                db, execucao_id=execucao.id, task_id=str(task_self.request.id), force_reimport=force_reimport,
             )
         else:
             if ano is None:
                 raise ValueError(f"Ano obrigatorio para pre-processar {tipo_fonte.upper()}.")
             resultado = pre_processar_sincronizacao_zip(
-                tipo_fonte=tipo_fonte,
-                ano=ano,
-                task_id=str(self.request.id),
-                force_reimport=force_reimport,
+                tipo_fonte=tipo_fonte, ano=ano, task_id=str(task_self.request.id), force_reimport=force_reimport,
             )
         return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
     finally:
@@ -2656,30 +2979,32 @@ def ingerir_sincronizacao_task(
     self: Any,
     execucao_id: str,
     force_reimport: bool = False,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
 ) -> dict[str, Any]:
+    return _executar_com_reserva(
+        self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+        task_name=self.name, task_args=[],
+        task_kwargs={"execucao_id": execucao_id, "force_reimport": force_reimport},
+        execution_id=execucao_id,
+        operation=lambda: _ingerir_sincronizacao_operacao(self, execucao_id=execucao_id, force_reimport=force_reimport),
+        kind="continuation",
+    )
+
+
+def _ingerir_sincronizacao_operacao(task_self: Any, *, execucao_id: str, force_reimport: bool) -> dict[str, Any]:
     from app.db.session import SessionLocal
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.cadastro import ingerir_cadastro
-
     db = SessionLocal()
     try:
-        exec_uuid = uuid.UUID(execucao_id)
-        execucao = db.get(ExecucaoSincronizacao, exec_uuid)
+        execucao = db.get(ExecucaoSincronizacao, uuid.UUID(execucao_id))
         if execucao is None:
-            raise ValueError(f"Execution not found: {execucao_id}")
-        if execucao.status == "cancelada":
-            return _resultado_cancelado(execucao.id, "Execution was cancelled before task start.")
-
-        execucao.id_tarefa = str(self.request.id)
-        db.commit()
-
+            raise ValueError(f"Execucao nao encontrada: {execucao_id}")
+        if execucao.status != "aguardando_ingestao":
+            raise ValueError(f"Execucao deve estar aguardando_ingestao; status atual: {execucao.status}")
         if execucao.tipo_fonte == "cadastro":
-            resultado = ingerir_cadastro(db, execucao_id=exec_uuid)
-        else:
-            resultado = ingerir_sincronizacao_zip(
-                execucao_id=exec_uuid,
-                force_reimport=force_reimport,
-            )
-        return {"status": str(resultado["status"]), "execucao_id": str(resultado["execucao_id"])}
+            return ingerir_cadastro(db, execucao_id=execucao.id)
+        return ingerir_sincronizacao_zip(execucao_id=execucao.id, force_reimport=force_reimport)
     finally:
         db.close()

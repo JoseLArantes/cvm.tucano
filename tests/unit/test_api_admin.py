@@ -19,6 +19,7 @@ from app.models.ingestion import (
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.services.ingestion.scheduling import (
     adotar_ou_criar_execucao_sincronizacao,
@@ -62,14 +63,7 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduled: dict[str, object] = {}
-
-    def fake_apply_async(*, kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
-        scheduled["kwargs"] = kwargs
-        scheduled["task_id"] = task_id
-        return SimpleNamespace(id=task_id)
-
-    monkeypatch.setattr("app.api.routers.admin.sincronizar_cadastro_companhias_task.apply_async", fake_apply_async)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
 
     resposta = client.post("/ingestion/sincronizacoes/tudo/2025?force_reimport=true")
     assert resposta.status_code == 200
@@ -78,6 +72,8 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert len(payload["tarefas"]) == 8
     assert payload["tarefas"][0]["tipo_fonte"] == "cadastro"
     assert payload["tarefas"][0]["ano"] is None
+    assert payload["lote_id"]
+    assert all(item["lote_id"] == payload["lote_id"] for item in payload["tarefas"])
     assert [item["ano"] for item in payload["tarefas"][1:]] == [2025] * 7
     task_ids = [item["id_tarefa"] for item in payload["tarefas"]]
     execucoes = (
@@ -88,8 +84,15 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert len(execucoes) == 8
     assert {execucao.status for execucao in execucoes} == {"agendada"}
     assert {execucao.tipo_execucao for execucao in execucoes} == {"arquivo_simples", "arquivo_zip"}
-    assert scheduled["task_id"] == payload["tarefas"][0]["id_tarefa"]
-    assert scheduled["kwargs"] == {"force_reimport": True, "dispatch_year_after_success": 2025}
+    queue_items = (
+        db_session.query(IngestionQueueItem)
+        .filter(IngestionQueueItem.batch_id == uuid.UUID(payload["lote_id"]))
+        .order_by(IngestionQueueItem.sequence)
+        .all()
+    )
+    assert len(queue_items) == 8
+    assert {item.status for item in queue_items} == {"queued"}
+    assert [item.kind for item in queue_items] == ["cadastro", *(["zip_prepare"] * 7)]
 
 
 def test_admin_fontes_endpoints_expoem_registry(client: TestClient) -> None:
@@ -114,24 +117,14 @@ def test_admin_sincronizacao_vlmo_agenda_tarefa(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduled: dict[str, object] = {}
-
-    def fake_apply_async(*, args: tuple[object, ...], kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
-        scheduled["args"] = args
-        scheduled["kwargs"] = kwargs
-        scheduled["task_id"] = task_id
-        return SimpleNamespace(id=task_id)
-
-    monkeypatch.setattr("app.api.routers.admin.sincronizar_vlmo_task.apply_async", fake_apply_async)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
 
     resposta = client.post("/ingestion/sincronizacoes/vlmo/2025?force_reimport=true")
 
     assert resposta.status_code == 200
     payload = resposta.json()
     assert payload["status"] == "agendada"
-    assert scheduled["args"] == (2025,)
-    assert scheduled["kwargs"] == {"force_reimport": True}
-    assert scheduled["task_id"] == payload["id_tarefa"]
+    assert payload["lote_id"]
     execucao = (
         db_session.query(ExecucaoSincronizacao)
         .filter(ExecucaoSincronizacao.id_tarefa == payload["id_tarefa"])
@@ -140,6 +133,11 @@ def test_admin_sincronizacao_vlmo_agenda_tarefa(
     assert execucao.tipo_fonte == "vlmo"
     assert execucao.ano == 2025
     assert execucao.status == "agendada"
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.status == "queued"
+    assert item.task_args == [2025]
+    assert item.task_kwargs == {"force_reimport": True}
+    assert str(item.batch_id) == payload["lote_id"]
 
 
 def test_admin_fontes_auditar_expoe_resposta_estruturada(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -314,7 +312,14 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
     assert resposta_forcada.status_code == 200
     resposta_forcada_task_id = resposta_forcada.json()["tarefas"][0]["id_tarefa"]
     uuid.UUID(resposta_forcada_task_id)
-    assert resposta_forcada_task_id in {str(item["task_id"]) for item in published}
+    fila_reprocessamento = (
+        db_session.query(IngestionQueueItem)
+        .filter(IngestionQueueItem.task_id == resposta_forcada_task_id)
+        .one()
+    )
+    assert fila_reprocessamento.status == "queued"
+    assert fila_reprocessamento.kind == "zip_prepare"
+    assert published == []
 
 
 def test_admin_dashboard_quarentena_alteracoes(client: TestClient, db_session: Session) -> None:
@@ -683,6 +688,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_quarentena_resumo = payload["paths"]["/ingestion/quarentena/resumo"]["get"]
     rota_replay_run = payload["paths"]["/ingestion/runs/{run_id}/replay"]["post"]
     rota_recover_run = payload["paths"]["/ingestion/runs/{run_id}/recover"]["post"]
+    rota_queue = payload["paths"]["/ingestion/queue"]["get"]
     rota_identity = payload["paths"]["/ingestion/identity/rebuild"]["post"]
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
     rota_stream = payload["paths"]["/ingestion/events/stream"]["get"]
@@ -719,7 +725,11 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert rota_quarentena_resumo["summary"] == "Resumo Analítico da Quarentena"
     assert "status" in rota_quarentena_resumo["description"]
     assert rota_replay_run["summary"] == "Reprocessar Run de Ingestion"
-    assert "recovery_dispatch_failed" in rota_recover_run["responses"]["503"]["content"]["application/json"]["examples"]
+    assert "lote_id" in rota_recover_run["description"]
+    assert "reconciliacao periodica" in rota_recover_run["description"]
+    assert rota_recover_run["responses"]["503"]["content"]["application/json"]["example"]["detail"]["reason_code"] == "DATABASE_POOL_EXHAUSTED"
+    assert rota_queue["operationId"] == "listarFilaIngestionAdmin"
+    assert "reservados" in rota_queue["description"]
     assert rota_identity["summary"] == "Reconstruir Identidade de Ingestion"
     assert rota_runs["operationId"] == "listarIngestionRunsAdmin"
     assert rota_runs["responses"]["503"]["content"]["application/json"]["example"]["detail"] == {
@@ -1423,26 +1433,35 @@ def test_admin_run_cancel_member_cancel_e_recover(
     assert resposta_recover.json()["detalhe"]["status"] == "replayed"
 
 
-def test_admin_pre_processar_cadastro_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routers.admin.pre_processar_sincronizacao_task.delay",
-        lambda tipo_fonte, force_reimport: SimpleNamespace(id=f"task-preprocess-{tipo_fonte}-{force_reimport}"),
-    )
-
+def test_admin_pre_processar_cadastro_agenda_tarefa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     resposta = client.post("/ingestion/sincronizacoes/pre-processar/cadastro?force_reimport=true")
     assert resposta.status_code == 200
-    assert resposta.json() == {"id_tarefa": "task-preprocess-cadastro-True", "status": "agendada"}
+    payload = resposta.json()
+    assert payload["status"] == "agendada"
+    assert payload["lote_id"]
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.kind == "cadastro"
+    assert item.task_kwargs == {"tipo_fonte": "cadastro", "force_reimport": True}
 
 
-def test_admin_pre_processar_fonte_anual_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routers.admin.pre_processar_sincronizacao_task.delay",
-        lambda tipo_fonte, ano, force_reimport: SimpleNamespace(id=f"task-preprocess-{tipo_fonte}-{ano}-{force_reimport}"),
-    )
-
+def test_admin_pre_processar_fonte_anual_agenda_tarefa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     resposta = client.post("/ingestion/sincronizacoes/pre-processar/dfp/2025?force_reimport=true")
     assert resposta.status_code == 200
-    assert resposta.json() == {"id_tarefa": "task-preprocess-dfp-2025-True", "status": "agendada"}
+    payload = resposta.json()
+    assert payload["status"] == "agendada"
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.kind == "zip_prepare"
+    assert item.task_kwargs == {"tipo_fonte": "dfp", "ano": 2025, "force_reimport": True}
 
     # Unsupported source path
     resposta_invalid = client.post("/ingestion/sincronizacoes/pre-processar/invalid_source/2025")
@@ -1452,6 +1471,7 @@ def test_admin_pre_processar_fonte_anual_agenda_tarefa(client: TestClient, monke
 def test_admin_ingerir_fonte_pre_processada_route(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, db_session: Session
 ) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     exec_uuid = uuid.uuid4()
     # 1. Non-existent execution
     resposta_404 = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir")
@@ -1485,7 +1505,12 @@ def test_admin_ingerir_fonte_pre_processada_route(
 
     resposta_ok = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir?force_reimport=true")
     assert resposta_ok.status_code == 200
-    assert resposta_ok.json() == {"id_tarefa": f"task-ingest-{exec_uuid}-True", "status": "agendada"}
+    payload = resposta_ok.json()
+    assert payload["status"] == "agendada"
+    assert payload["lote_id"]
+    queue_item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert queue_item.kind == "continuation"
+    assert queue_item.task_kwargs == {"execucao_id": str(exec_uuid), "force_reimport": True}
 
 
 def test_admin_run_waiting_expoe_start_ingestion_com_execucao_correlata(
@@ -1609,7 +1634,7 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
     assert recover.json()["detalhe"]["strategy"] == "rerun_member_execution"
 
 
-def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
+def test_admin_recovery_persists_queue_item_when_dispatch_signal_fails(
     client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
@@ -1673,36 +1698,21 @@ def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
             "The Celery application must be restarted."
         )
 
-    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", _dispatch_indisponivel)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", _dispatch_indisponivel)
 
     recover = client.post(f"/ingestion/runs/{run_id}/recover")
-    assert recover.status_code == 503
-    assert recover.json()["detail"] == {
-        "reason_code": "RECOVERY_DISPATCH_FAILED",
-        "retryable": False,
-        "run_id": str(run_id),
-    }
+    assert recover.status_code == 200
+    assert recover.json()["status"] == "agendada"
+    task_id = recover.json()["detalhe"]["task_id"]
+    assert recover.json()["lote_id"]
+    queue_item = db_session.query(IngestionQueueItem).filter_by(task_id=task_id).one()
+    assert queue_item.status == "queued"
+    assert queue_item.kind == "csv"
 
     detalhe = client.get(f"/ingestion/runs/{run_id}")
     assert detalhe.status_code == 200
-    assert detalhe.json()["state"] == "failed"
-    assert detalhe.json()["next_action"] == "inspect_error"
-    assert detalhe.json()["recovery"] == {
-        "eligible": False,
-        "strategy": None,
-        "reason_code": "NON_RETRYABLE_FAILURE",
-    }
-    assert detalhe.json()["last_error"]["retryable"] is False
-    assert "Celery result store backend" in detalhe.json()["last_error"]["error_message"]
-
-    phases = client.get(f"/ingestion/runs/{run_id}/phases")
-    assert phases.status_code == 200
-    assert phases.json()["dados"][-1]["status"] == "failed_final"
-    assert phases.json()["dados"][-1]["error_retryable"] is False
-
-    operations = client.get("/ingestion/operations")
-    assert operations.status_code == 200
-    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+    assert detalhe.json()["state"] != "failed"
+    assert detalhe.json()["next_action"] == "wait"
 
 
 def test_admin_legacy_recovery_dispatch_failure_ignores_old_retryable_phase(

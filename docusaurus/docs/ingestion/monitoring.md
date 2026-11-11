@@ -22,6 +22,7 @@ Para cada tipo de tela:
 | auditoria do disparo | `GET /ingestion/sincronizacoes` |
 | detalhe da execucao administrativa | `GET /ingestion/sincronizacoes/{id_execucao}` |
 | snapshot global do cluster | `GET /ingestion/operations` |
+| lotes e posições da fila de admissão | `GET /ingestion/queue` |
 | limpeza transitoria de run cancelada/falha | `POST /ingestion/runs/{run_id}/cleanup-transient-state` |
 
 ## `GET /ingestion/runs`
@@ -227,6 +228,32 @@ O retorno agrega:
 - `materialization_gate`
 - `active_runs`
 - `recoverable_runs`
+- `ingestion_queue` com profundidade, idade do pedido mais antigo, capacidade configurada, reservas e preparações ZIP ativas
+
+### `GET /ingestion/queue`
+
+Retorna lotes paginados pela ordem persistida de chegada. Cada lote inclui fontes/anos, posição, progresso agregado,
+motivo de espera e as etapas relacionadas. Use `lote_id` recebido no disparo para localizar o lote.
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/queue?pagina=1&tamanho_pagina=25" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+Cada etapa inclui `item_id`, `execucao_id`, fonte, ano, arquivo, etapa, status, tentativa, início e reserva. Os status
+operacionais são:
+
+| Status | Interpretação |
+| --- | --- |
+| `queued` | aguarda uma vaga do pool e ainda não foi enviada ao worker |
+| `reserved` | vaga reservada e intenção de publicação registrada no outbox |
+| `running` | um worker validou o token e assumiu a etapa |
+| `transition_pending` | resultado já persistido; a transição de fase precisa ser aplicada |
+| `waiting_manual` | espera confirmação do operador e não ocupa vaga |
+| `completed`, `failed`, `cancelled` | estado terminal da etapa |
+
+O outbox é publicado após o commit. Mensagens duplicadas não executam a etapa sem a reserva e o token vigentes. Um
+dispatcher periódico retoma publicações pendentes e aplica transições interrompidas após reinício.
 
 ## Filas e independencia operacional
 
@@ -234,17 +261,21 @@ Ingestao e materializacao usam filas separadas:
 
 | Fila | Responsabilidade |
 | --- | --- |
-| `ingestion` | processamento pesado de members |
-| `ingestion_control` | coordenacao, finalizacao e recovery de ingestao |
+| `ingestion` | cadastro, preparação de ZIP, CSV e finalização admitidos |
+| `ingestion_control` | seleção global, outbox e reconciliação da fila de ingestão |
 | `analise_materializacao` | chunks e campanhas de materializacao |
 
-O worker de ingestion pesado consome somente `ingestion`. Um worker de controle separado consome `ingestion_control` e
-`celery`, preservando capacidade para coordenacao e recovery enquanto um member usa CPU ou banco. A admissao observa
-`INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` entre todos os ZIPs e tambem respeita
-`INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`; ambos usam valor `1` no chart Helm. Quando nao ha vaga, o pai e os members
-ainda nao admitidos permanecem em `aguardando_ingestao`, e o controle tenta novamente apos
-`INGESTION_QUEUE_DISPATCH_POLL_SECONDS` (15 segundos no chart). Mantenha o worker de controle com uma replica: ele
-serializa a leitura da vaga e a publicacao da proxima janela.
+O worker de ingestão pesado consome somente `ingestion`. Um worker de controle separado consome `ingestion_control` e
+`celery`, preservando capacidade para seleção, outbox e recovery enquanto uma etapa usa CPU ou banco. O PostgreSQL
+serializa a reserva global por uma linha de controle, inclusive entre réplicas do dispatcher. A capacidade é derivada
+de `worker.replicaCount x worker.concurrency`, com opção `ingestion.executionSlots` para impor um limite menor. Apenas
+uma preparação ZIP é admitida por vez. Quando não há vaga, a execução permanece `agendada` e aparece em
+`GET /ingestion/queue`; `em_processamento` só aparece depois da validação da reserva no início do worker.
+
+Ao liberar dependentes, CSVs elegíveis são selecionados antes de novos ZIPs. O CSV de cabeçalho precisa terminar antes
+dos members que dependem dele. A etapa que terminou mantém sua reserva lógica até que a transição e a nova elegibilidade
+sejam persistidas. O worker revalida a fila antes de iniciar um ZIP e devolve uma publicação deslocada à posição
+original se um CSV tiver passado à frente.
 
 O gate de materializacao bloqueia a execucao de novos chunks de materializacao quando ha ingestao ativa ou pausa manual. Ele nao bloqueia workers de ingestao.
 
@@ -342,9 +373,14 @@ nomes dos members e a primeira linha de seus erros; use o detalhe da execucao fi
 
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
 
-Quando a estrategia for `rerun_member_execution`, o comando agenda uma task na fila de ingestao e responde `status=agendada`; ele nao executa o processamento pesado dentro da requisicao HTTP.
+Quando a estrategia for `rerun_member_execution` ou `rerun_parent_execution`, o comando cria um lote persistido, retorna
+`status=agendada` e `lote_id`, e nao executa o processamento pesado dentro da requisicao HTTP. Acompanhe a ordem, a etapa
+e o motivo de espera em `GET /ingestion/queue`.
 
-Se a publicacao dessa task falhar, inclusive por indisponibilidade do result backend Celery, a run e a execucao filha terminam em `falha`. A run recebe uma fase `failed_final` com `error_retryable=false`, passa a expor `recovery.reason_code=NON_RETRYABLE_FAILURE` e deixa imediatamente de `recoverable_runs`. A resposta do comando e `503` com `reason_code=RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`. O backend nao limpa filas nem tenta anunciar um recovery que nao foi publicado. Runs antigas cuja mensagem persistida começa com `Falha ao agendar recovery de member:` recebem a mesma classificação terminal durante a leitura, mesmo que uma fase anterior ainda esteja marcada como retentável.
+Falha de publicacao do Celery nao converte o pedido de recovery em falha terminal nem altera a run para `failed_final`:
+o item continua reservado com erro de publicacao e o dispatcher periodico tenta publicar novamente. O lote e a execucao
+permanecem visiveis em `GET /ingestion/queue` enquanto aguardam publicacao ou inicio pelo worker. A reaplicacao de staging
+retido que nao exige nova execucao de ZIP ou CSV continua sendo sincrona no banco.
 
 ## Encerramento de falhas investigadas
 
@@ -423,14 +459,14 @@ Parametros de consulta suportados:
 - `ano`: ano de referencia
 - `fonte`: tipo de fonte (`dfp`, `itr`, `fre`, `fca`, `ipe`, `cgvn`, `vlmo`, `cadastro`)
 - `arquivo`: filtro por trecho do nome do arquivo
-- `atividade`: filtrar por atividade corrente (`idle`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window`, `bloqueada`)
+- `atividade`: filtrar por atividade corrente (`idle`, `na_fila`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window`, `bloqueada`)
 - `integridade`: filtrar por integridade em uso (`completo`, `completo_com_ressalvas`, `parcial`, `nao_aplicado`, `evidencia_insuficiente`)
 - `necessidade_intervencao`: booleano indicando necessidade de intervencao manual de operador
 - `resolucao_falha`: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida`, `encerrada_sem_restauracao`
 - `concluido_apos` e `concluido_antes`: intervalo de data/hora de conclusao
 - `pagina` e `tamanho_pagina`
 
-Quando `atividade=em_processamento`, o serviço identifica primeiro os escopos atualmente ativos e só então monta os detalhes dos arquivos correspondentes. A listagem reutiliza snapshots idênticos pelo TTL configurado em `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache).
+`atividade=na_fila` identifica uma execução que aguarda vaga ou confirmação de reserva pelo worker. `atividade=em_processamento` identifica somente etapas com início confirmado pelo worker. A listagem reutiliza snapshots idênticos pelo TTL configurado em `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache).
 
 ### `GET /ingestion/files/{file_id}`
 
