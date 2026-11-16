@@ -9,6 +9,18 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-16 - Filtro Exato e Resolução Atual de Ticker FCA
+
+### Superfície afetada
+
+- `GET /fca/valores-mobiliarios` aceita `codigo_negociacao` e `current`.
+
+### Comportamento entregue
+
+- `codigo_negociacao` faz comparação exata sem diferenciar maiúsculas e minúsculas.
+- `current=true` seleciona o documento FCA e a versão mais recentes por CNPJ antes de aplicar o filtro de ticker. A resposta continua paginada e preserva os identificadores do documento, CNPJ, versão, data de referência, classe, mercado e datas de negociação e listagem.
+- Sem os novos parâmetros, a consulta conserva o comportamento anterior.
+
 ## 2026-11-11 - Fila Persistida com Admissao de Etapas
 
 ### Superficies afetadas
