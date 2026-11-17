@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/JoseLArantes/cvm.tucano/compare/v1.2.0...v1.3.0) (2026-11-17)
+
+
+### Features
+
+* filter current FCA listings by ticker ([#9](https://github.com/JoseLArantes/cvm.tucano/issues/9)) ([3771863](https://github.com/JoseLArantes/cvm.tucano/commit/377186339c5f063f5ff280f0b3996f65705d4087))
+
 ## [1.2.0](https://github.com/JoseLArantes/cvm.tucano/compare/v1.1.1...v1.2.0) (2026-07-24)
 
 
