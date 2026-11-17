@@ -109,6 +109,16 @@ class ObservabilidadeMiddleware(BaseHTTPMiddleware):
         inicio = perf_counter()
         status_code = 500
         response = None
+        if request.url.path in {"/auth/login", "/ingestion/files", "/ingestion/operations"}:
+            self.logger.info(
+                "request.iniciada",
+                extra={
+                    "evento": "http_request_start",
+                    "request_id": request_id,
+                    "metodo": request.method,
+                    "path": request.url.path,
+                },
+            )
         try:
             response = await call_next(request)
             status_code = response.status_code

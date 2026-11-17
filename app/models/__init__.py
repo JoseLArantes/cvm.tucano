@@ -88,7 +88,18 @@ from app.models.ingestion import (
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueControl, IngestionQueueItem
 from app.models.ipe import IpeDocumento
+from app.models.setores import (
+    Setor,
+    SetorAlias,
+    SetorClassificacaoCompanhia,
+    SetorCorrespondencia,
+    SetorTaxonomia,
+    SetorTaxonomiaImportacao,
+    SetorTaxonomiaMudanca,
+    SetorTaxonomiaVersao,
+)
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo, RegistroQuarentena
 from app.models.usuario import Usuario
 from app.models.vlmo import VlmoConsolidado, VlmoDocumento
@@ -187,9 +198,20 @@ __all__ = [
     "IngestionRow",
     "IngestionRowEvent",
     "IngestionRun",
+    "IngestionQueueBatch",
+    "IngestionQueueControl",
+    "IngestionQueueItem",
     "ParecerFinanceiro",
     "QuarantineItem",
     "RegistroQuarentena",
+    "Setor",
+    "SetorAlias",
+    "SetorClassificacaoCompanhia",
+    "SetorCorrespondencia",
+    "SetorTaxonomiaImportacao",
+    "SetorTaxonomia",
+    "SetorTaxonomiaMudanca",
+    "SetorTaxonomiaVersao",
     "RepairRule",
     "SourceArtifactSnapshot",
     "SourceDeliverySnapshot",

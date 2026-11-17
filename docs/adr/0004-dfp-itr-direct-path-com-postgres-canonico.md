@@ -52,4 +52,4 @@ Parquet e DuckDB permanecem opcionais para benchmark posterior. O formato operac
 - Replay continua artifact-backed.
 - A API operacional passa a expor fases mais especificas para members financeiros: `profile`, `normalize_artifact`, `load_typed_staging`, `promote`, `reconcile`, `complete`.
 - Workers de ingestao usam filas `ingestion` e `ingestion_control`; materializacao permanece isolada em `analise_materializacao`.
-- O dispatcher financeiro limita members ativos por ZIP com `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, default `2`.
+- A implementação atual limita members ativos por ZIP em todas as fontes com `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`. O default da configuração da aplicação é `2`; o chart Helm usa `1` como padrão operacional conservador.

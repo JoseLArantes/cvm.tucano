@@ -1474,7 +1474,7 @@ def write_validation_result(
     update_row_validation(
         ingestion_row,
         validation_status=result.status,
-        validation_reason_code=result.reason_code,
+        validation_reason_code=result.reason_code[:64] if result.reason_code else None,
         validation_details=result.to_json_payload(),
         normalized_data=normalized_data_payload,
         normalized_hash=normalized_hash,

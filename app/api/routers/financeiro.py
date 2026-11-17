@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Any
 
@@ -308,7 +309,7 @@ def _listar_documentos(
         },
     )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaDocumentosFinanceirosResposta(
         dados=[DocumentoFinanceiroResposta.model_validate(item) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
@@ -382,7 +383,7 @@ def _listar_demonstracoes(
                 campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "codigo_conta", "valor_conta"},
             )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaDemonstracoesFinanceirasResposta(
         dados=[DemonstracaoFinanceiraResposta.model_validate(serializar_demonstracao_financeira(item)) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
@@ -507,7 +508,7 @@ def _listar_composicao_capital(
         campos_permitidos={"data_referencia", "versao", "cnpj_companhia"},
     )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaComposicoesCapitalResposta(
         dados=[ComposicaoCapitalResposta.model_validate(item) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),
@@ -637,7 +638,7 @@ def _listar_pareceres(
         },
     )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return ListaPareceresFinanceirosResposta(
         dados=[ParecerFinanceiroResposta.model_validate(item) for item in itens],
         paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total),

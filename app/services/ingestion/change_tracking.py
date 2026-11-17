@@ -139,12 +139,21 @@ def reconcile_promoted_rows(
     normalized_artifact_uri: str | None = None,
 ) -> int:
     db.flush()
+    extra_filters = []
+    if hasattr(model, "tipo_formulario"):
+        nome_lower = arquivo_origem.lower()
+        if "dfp" in nome_lower:
+            extra_filters.append(model.tipo_formulario == "DFP")
+        elif "itr" in nome_lower:
+            extra_filters.append(model.tipo_formulario == "ITR")
+
     if normalized_artifact_uri is not None:
         current_hashes = read_normalized_hashes(artifact_uri=normalized_artifact_uri)
         deleted = db.execute(
             delete(model).where(
                 model.arquivo_origem == arquivo_origem,
                 model.ano_origem == ano_origem,
+                *extra_filters,
                 model.hash_origem.not_in(sorted(current_hashes)) if current_hashes else true(),
             )
         )
@@ -169,6 +178,7 @@ def reconcile_promoted_rows(
         delete(model).where(
             model.arquivo_origem == arquivo_origem,
             model.ano_origem == ano_origem,
+            *extra_filters,
             model.hash_origem.not_in(current_hashes_subquery),
         )
     )

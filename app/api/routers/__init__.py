@@ -13,6 +13,7 @@ from app.api.routers.health import router as health_router
 from app.api.routers.ipe import router as ipe_router
 from app.api.routers.mestre import router as mestre_router
 from app.api.routers.public_analise import router as public_analise_router
+from app.api.routers.setores import router as setores_router
 from app.api.routers.usuarios import router as usuarios_router
 from app.api.routers.vlmo import router as vlmo_router
 from app.updates.router import router as updates_router
@@ -26,6 +27,7 @@ protected_router = APIRouter()
 protected_router.include_router(analise_router, tags=["analise"])
 protected_router.include_router(mestre_router, tags=["mestre"])
 protected_router.include_router(companhias_router, tags=["companhias"])
+protected_router.include_router(setores_router, tags=["setores"])
 protected_router.include_router(exportacao_router)
 protected_router.include_router(financeiro_router, tags=["financeiro"])
 protected_router.include_router(fca_router, tags=["fca"])

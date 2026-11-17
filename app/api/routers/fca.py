@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Any
 
@@ -141,6 +142,8 @@ def _lista_fca_generica(
     ordenar_por: str | None,
     campos_permitidos: set[str],
     filtros_adicionais: dict[str, Any] | None = None,
+    codigo_negociacao: str | None = None,
+    atual: bool = False,
 ) -> tuple[list[Any], int]:
     if codigo_cvm is not None and not cnpj_companhia:
         cnpj_resolvido = db.scalar(select(Companhia.cnpj_companhia).where(Companhia.codigo_cvm == codigo_cvm))
@@ -150,6 +153,26 @@ def _lista_fca_generica(
             return [], 0
     query: Select[Any] = select(modelo)
     query_total = select(func.count()).select_from(modelo)
+    if atual and modelo is FcaValorMobiliario:
+        ultima_versao = (
+            select(
+                modelo.id,
+                func.dense_rank()
+                .over(
+                    partition_by=modelo.cnpj_companhia,
+                    order_by=(modelo.data_referencia.desc(), modelo.versao.desc(), modelo.id_documento.desc()),
+                )
+                .label("ordem_atual"),
+            )
+            .subquery()
+        )
+        query = select(modelo).join(ultima_versao, ultima_versao.c.id == modelo.id).where(ultima_versao.c.ordem_atual == 1)
+        query_total = (
+            select(func.count())
+            .select_from(modelo)
+            .join(ultima_versao, ultima_versao.c.id == modelo.id)
+            .where(ultima_versao.c.ordem_atual == 1)
+        )
     query, query_total = _aplicar_filtros_base(
         query,
         query_total,
@@ -168,9 +191,13 @@ def _lista_fca_generica(
             if valor is not None:
                 query = query.where(_col(modelo, campo) == valor)
                 query_total = query_total.where(_col(modelo, campo) == valor)
+    if codigo_negociacao is not None and modelo is FcaValorMobiliario:
+        ticker = codigo_negociacao.strip().upper()
+        query = query.where(func.upper(modelo.codigo_negociacao) == ticker)
+        query_total = query_total.where(func.upper(modelo.codigo_negociacao) == ticker)
     query = _aplicar_ordenacao(query, modelo=modelo, ordenar_por=ordenar_por, campos_permitidos=campos_permitidos)
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return [schema.model_validate(item) for item in itens], total
 
 
@@ -432,6 +459,14 @@ def listar_valores_mobiliarios_fca(
     ano_fim: ParametroAnoFim = None,
     versao: ParametroVersao = None,
     tipo_valor_mobiliario: Annotated[str | None, Query(description="Filtrar por tipo de valor mobiliario.")] = None,
+    codigo_negociacao: Annotated[
+        str | None,
+        Query(min_length=1, max_length=100, description="Filtrar pelo código de negociação exato, sem diferenciar maiúsculas."),
+    ] = None,
+    current: Annotated[
+        bool,
+        Query(alias="current", description="Restringe ao arquivo e versão mais recentes por CNPJ antes dos filtros de ticker."),
+    ] = False,
     ordenar_por: Annotated[
         str | None,
         Query(description="Campos: data_referencia, versao, cnpj_companhia, tipo_valor_mobiliario, codigo_negociacao."),
@@ -453,6 +488,8 @@ def listar_valores_mobiliarios_fca(
         ordenar_por=ordenar_por,
         campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "tipo_valor_mobiliario", "codigo_negociacao"},
         filtros_adicionais={"tipo_valor_mobiliario": tipo_valor_mobiliario},
+        codigo_negociacao=codigo_negociacao,
+        atual=current,
     )
     return ListaFcaValoresMobiliariosResposta(
         dados=dados, paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total)

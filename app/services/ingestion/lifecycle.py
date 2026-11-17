@@ -4,12 +4,13 @@ import csv
 import hashlib
 import io
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.ingestion import (
@@ -423,8 +424,7 @@ def capture_member_lifecycle_snapshot(
     return {"member_snapshot": snapshot, "delivery_delta": delivery_delta}
 
 
-def build_artifact_snapshot_response(db: Session, *, run_id: Any) -> dict[str, Any] | None:
-    snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
+def _serialize_artifact_snapshot(snapshot: SourceArtifactSnapshot | None) -> dict[str, Any] | None:
     if snapshot is None:
         return None
     return {
@@ -452,15 +452,7 @@ def build_artifact_snapshot_response(db: Session, *, run_id: Any) -> dict[str, A
     }
 
 
-def build_member_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, Any] | None:
-    artifact_snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
-    if artifact_snapshot is None:
-        return None
-    members = list(
-        db.execute(
-            select(SourceMemberSnapshot).where(SourceMemberSnapshot.artifact_snapshot_id == artifact_snapshot.id)
-        ).scalars()
-    )
+def _serialize_member_snapshot_summary(members: Sequence[SourceMemberSnapshot]) -> dict[str, Any] | None:
     if not members:
         return None
     statuses = Counter(member.lifecycle_status for member in members)
@@ -494,23 +486,53 @@ def build_member_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, Any]
     }
 
 
+def build_artifact_snapshot_response(db: Session, *, run_id: Any) -> dict[str, Any] | None:
+    snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
+    return _serialize_artifact_snapshot(snapshot)
+
+
+def build_member_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, Any] | None:
+    artifact_snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
+    if artifact_snapshot is None:
+        return None
+    members = list(
+        db.execute(
+            select(SourceMemberSnapshot).where(SourceMemberSnapshot.artifact_snapshot_id == artifact_snapshot.id)
+        ).scalars()
+    )
+    return _serialize_member_snapshot_summary(members)
+
+
 def build_delivery_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, Any] | None:
     artifact_snapshot = db.scalar(select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id == run_id))
     if artifact_snapshot is None:
         return None
-    deliveries = list(
-        db.execute(
-            select(SourceDeliverySnapshot).where(SourceDeliverySnapshot.artifact_snapshot_id == artifact_snapshot.id)
-        ).scalars()
-    )
-    if not deliveries:
+    status_rows = db.execute(
+        select(SourceDeliverySnapshot.status, func.count(SourceDeliverySnapshot.id))
+        .where(SourceDeliverySnapshot.artifact_snapshot_id == artifact_snapshot.id)
+        .group_by(SourceDeliverySnapshot.status)
+    ).all()
+    if not status_rows:
         return None
-    status_counts = Counter(item.status for item in deliveries)
-    member_counts = Counter(item.member_name for item in deliveries)
+    by_status = {str(status): int(cnt) for status, cnt in status_rows}
+    total = sum(by_status.values())
+    member_rows = db.execute(
+        select(SourceDeliverySnapshot.member_name, func.count(SourceDeliverySnapshot.id))
+        .where(SourceDeliverySnapshot.artifact_snapshot_id == artifact_snapshot.id)
+        .group_by(SourceDeliverySnapshot.member_name)
+    ).all()
+    by_member = {str(member_name): int(cnt) for member_name, cnt in member_rows}
+    sample_deliveries = list(
+        db.scalars(
+            select(SourceDeliverySnapshot)
+            .where(SourceDeliverySnapshot.artifact_snapshot_id == artifact_snapshot.id)
+            .limit(10)
+        ).all()
+    )
     return {
-        "total": len(deliveries),
-        "by_status": dict(status_counts),
-        "by_member": dict(member_counts),
+        "total": total,
+        "by_status": by_status,
+        "by_member": by_member,
         "sample": [
             {
                 "member_name": item.member_name,
@@ -522,9 +544,110 @@ def build_delivery_snapshot_summary(db: Session, *, run_id: Any) -> dict[str, An
                 "data_entrega": item.data_entrega,
                 "versao": item.versao,
             }
-            for item in deliveries[:10]
+            for item in sample_deliveries
         ],
     }
+
+
+def bulk_build_snapshot_summaries(
+    db: Session,
+    *,
+    run_ids: Sequence[Any],
+) -> dict[Any, dict[str, Any]]:
+    if not run_ids:
+        return {}
+    unique_run_ids = list(dict.fromkeys(run_ids))
+    snapshots = list(
+        db.scalars(
+            select(SourceArtifactSnapshot).where(SourceArtifactSnapshot.ingestion_run_id.in_(unique_run_ids))
+        ).all()
+    )
+    snapshot_by_run_id: dict[Any, SourceArtifactSnapshot] = {}
+    for snap_item in snapshots:
+        snapshot_by_run_id[snap_item.ingestion_run_id] = snap_item
+
+    artifact_ids = [snap_item.id for snap_item in snapshots]
+    members_by_artifact: dict[Any, list[SourceMemberSnapshot]] = defaultdict(list)
+    delivery_status_by_artifact: dict[Any, dict[str, int]] = defaultdict(dict)
+    delivery_member_by_artifact: dict[Any, dict[str, int]] = defaultdict(dict)
+    delivery_samples_by_artifact: dict[Any, list[SourceDeliverySnapshot]] = defaultdict(list)
+
+    if artifact_ids:
+        for member in db.scalars(
+            select(SourceMemberSnapshot).where(SourceMemberSnapshot.artifact_snapshot_id.in_(artifact_ids))
+        ).all():
+            members_by_artifact[member.artifact_snapshot_id].append(member)
+
+        for art_id, status, cnt in db.execute(
+            select(
+                SourceDeliverySnapshot.artifact_snapshot_id,
+                SourceDeliverySnapshot.status,
+                func.count(SourceDeliverySnapshot.id),
+            )
+            .where(SourceDeliverySnapshot.artifact_snapshot_id.in_(artifact_ids))
+            .group_by(SourceDeliverySnapshot.artifact_snapshot_id, SourceDeliverySnapshot.status)
+        ).all():
+            delivery_status_by_artifact[art_id][str(status)] = int(cnt)
+
+        if delivery_status_by_artifact:
+            active_delivery_art_ids = list(delivery_status_by_artifact.keys())
+            for art_id, member_name, cnt in db.execute(
+                select(
+                    SourceDeliverySnapshot.artifact_snapshot_id,
+                    SourceDeliverySnapshot.member_name,
+                    func.count(SourceDeliverySnapshot.id),
+                )
+                .where(SourceDeliverySnapshot.artifact_snapshot_id.in_(active_delivery_art_ids))
+                .group_by(SourceDeliverySnapshot.artifact_snapshot_id, SourceDeliverySnapshot.member_name)
+            ).all():
+                delivery_member_by_artifact[art_id][str(member_name)] = int(cnt)
+
+            for art_id in active_delivery_art_ids:
+                delivery_samples_by_artifact[art_id] = list(
+                    db.scalars(
+                        select(SourceDeliverySnapshot)
+                        .where(SourceDeliverySnapshot.artifact_snapshot_id == art_id)
+                        .limit(10)
+                    ).all()
+                )
+
+    result: dict[Any, dict[str, Any]] = {}
+    for run_id in unique_run_ids:
+        snap = snapshot_by_run_id.get(run_id)
+        if snap is None:
+            result[run_id] = {
+                "artifact_snapshot": None,
+                "member_snapshot_summary": None,
+                "delivery_snapshot_summary": None,
+            }
+            continue
+        by_status = delivery_status_by_artifact.get(snap.id)
+        delivery_summary = None
+        if by_status:
+            delivery_summary = {
+                "total": sum(by_status.values()),
+                "by_status": by_status,
+                "by_member": delivery_member_by_artifact.get(snap.id, {}),
+                "sample": [
+                    {
+                        "member_name": item.member_name,
+                        "cnpj_companhia": item.cnpj_companhia,
+                        "codigo_cvm": item.codigo_cvm,
+                        "id_documento": item.id_documento,
+                        "protocolo_entrega": item.protocolo_entrega,
+                        "data_referencia": item.data_referencia,
+                        "data_entrega": item.data_entrega,
+                        "versao": item.versao,
+                    }
+                    for item in delivery_samples_by_artifact.get(snap.id, [])
+                ],
+            }
+        result[run_id] = {
+            "artifact_snapshot": _serialize_artifact_snapshot(snap),
+            "member_snapshot_summary": _serialize_member_snapshot_summary(members_by_artifact.get(snap.id, [])),
+            "delivery_snapshot_summary": delivery_summary,
+        }
+    return result
 
 
 def fetch_cvm_novidades_summary(*, timeout: float = 20.0) -> dict[str, Any] | None:

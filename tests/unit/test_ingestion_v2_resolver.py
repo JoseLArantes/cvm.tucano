@@ -17,6 +17,8 @@ from app.services.ingestion.resolver import (
     DocumentHeaderMap,
     ResolverInput,
     build_document_header_key,
+    get_cached_companhia_entry,
+    limpar_caches_resolver,
     persist_resolution_result,
     register_document_header,
     resolve_companhia,
@@ -352,3 +354,27 @@ def test_persist_resolution_result_updates_staging_row_and_event() -> None:
         assert row.resolution_confidence is not None
     finally:
         session.close()
+
+
+def test_get_cached_companhia_entry_resolves_and_caches() -> None:
+    session = _session()
+    try:
+        limpar_caches_resolver()
+        companhia = _companhia(session, cnpj="08773135000100", codigo_cvm=25224, denominacao="EMPRESA SA")
+        session.commit()
+
+        entry = get_cached_companhia_entry(session, companhia.id)
+        assert entry is not None
+        assert entry.id == companhia.id
+        assert entry.cnpj_companhia == "08773135000100"
+        assert entry.codigo_cvm == 25224
+
+        assert get_cached_companhia_entry(session, None) is None
+
+        entry2 = get_cached_companhia_entry(session, companhia.id)
+        assert entry2 is not None
+        assert entry2.id == companhia.id
+    finally:
+        limpar_caches_resolver()
+        session.close()
+

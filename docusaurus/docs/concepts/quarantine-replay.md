@@ -362,9 +362,14 @@ GET /ingestion/dashboard
   "total_sem_alteracao": 3,
   "total_falha": 2,
   "total_rejeitados": 42,
+  "total_quarentena_pendente": 0,
   "ultimas_execucoes": [...]
 }
 ```
+
+> **Campos de monitoramento de rejeição:**
+> - `total_rejeitados`: Total histórico acumulado de linhas rejeitadas pelas execuções primárias (desduplicado, sem sobreposição pai-filho).
+> - `total_quarentena_pendente`: Total de registros atualmente pendentes em quarentena ativa no sistema que demandam resolução. É este o campo a ser monitorado para alertas operacionais em tempo real.
 
 ## Boas Práticas
 

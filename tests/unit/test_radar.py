@@ -118,6 +118,7 @@ def _settings(tmp_path: Path) -> Settings:
     settings.radar_cvm_novidades_dados_enabled = True
     settings.radar_cvm_normas_enabled = True
     settings.radar_cvm_requests_per_second = 10000
+    settings.radar_cvm_retention_days = 365
     return settings
 
 

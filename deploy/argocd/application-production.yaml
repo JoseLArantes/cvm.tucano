@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1 
+kind: Application
+metadata:
+  name: tucano-cvm
+  namespace: argocd
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+
+spec:
+  project: tucano-cvm
+  source:
+    repoURL: 'git@github.com:JoseLArantes/tucano-cvm.git'
+    targetRevision: main
+    path: k8s/helm
+    helm:
+      releaseName: tucano-cvm
+      valueFiles:
+        - values.yaml
+        - values-production.yaml
+  destination:
+    server: 'https://kubernetes.default.svc'
+    namespace: tucano-services
+  syncPolicy:
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    # Tip: Start with automated sync disabled to verify adoption safely.
+    # Enable once initial sync is verified green.
+    automated:
+      prune: true
+      selfHeal: true
+  # Required on this project since it is using Rollouts which is a CRD and not a native Kubernetes resource
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/restartAt
+      jqPathExpressions:
+        - .spec.template.spec.containers[].resources
+        - .spec.template.spec.containers[].ports[].protocol

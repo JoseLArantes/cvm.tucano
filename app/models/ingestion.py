@@ -518,6 +518,7 @@ class IngestionFinanceiroStageRow(Base):
     linha_origem: Mapped[int] = mapped_column(Integer, nullable=False)
     normalized_hash: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     hash_origem: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    chave_negocio: Mapped[str | None] = mapped_column(String(64), index=True, nullable=True)
     companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
     natural_key: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 

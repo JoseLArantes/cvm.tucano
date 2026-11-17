@@ -18,15 +18,34 @@ from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.analise import (
     campanha_tem_requeue_em_transito,
     claim_materializacao_campanha_chunk,
+    claim_materializacao_campanha_chunks,
     classificar_recuperacao_materializacao_campanha,
     criar_materializacao_campanha,
     obter_estado_gate_materializacao,
     pausar_controle_materializacao,
+    prewarm_fundamentalista_snapshot,
     reativar_materializacao_campanha,
     recuperar_chunks_materializacao_stale,
     recuperar_materializacao_pendente,
 )
+from app.services.ingestion.queue import adicionar_execucao_a_fila, criar_lote
 from app.worker import tasks as worker_tasks
+
+
+def _admit_finalizer(db_session: Session, execution: ExecucaoSincronizacao) -> tuple[str, str]:
+    batch = criar_lote(db_session, source="test_finalizer")
+    item = adicionar_execucao_a_fila(
+        db_session,
+        batch=batch,
+        execucao=execution,
+        task_name=worker_tasks.finalizar_sincronizacao_zip_task.name,
+        args=[str(execution.id)],
+        kind="continuation",
+    )
+    item.status = "reserved"
+    item.reservation_token = "test-reservation"
+    db_session.commit()
+    return str(item.id), "test-reservation"
 
 
 def _companhia(db_session: Session, codigo_cvm: int = 9512, situacao_registro: str = "ATIVO") -> Companhia:
@@ -290,7 +309,11 @@ def test_finalizar_sincronizacao_zip_cria_campanha_e_dispara_dispatcher(
     monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
-    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    queue_item_id, token = _admit_finalizer(db_session, execucao)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(
+        str(execucao.id), _queue_item_id=queue_item_id, _queue_reservation_token=token
+    )
 
     campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
     assert resultado["status"] == "sucesso"
@@ -664,6 +687,7 @@ def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(
         captured["chunk_execucao_id"] = chunk_execucao_id
 
     monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks._settings, "analise_materializacao_max_active_chunks_per_campaign", 1)
     monkeypatch.setattr(worker_tasks.materializar_analise_chunk_task, "delay", _fake_delay)
 
     resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
@@ -750,7 +774,11 @@ def test_finalizar_sincronizacao_zip_nao_enfileira_dispatcher_quando_gate_vermel
     monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
     monkeypatch.setattr("app.db.session.SessionLocal", lambda: db_session)
 
-    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(str(execucao.id))
+    queue_item_id, token = _admit_finalizer(db_session, execucao)
+    monkeypatch.setattr(worker_tasks.despachar_fila_ingestao_task, "delay", lambda: None)
+    resultado = worker_tasks.finalizar_sincronizacao_zip_task.run(
+        str(execucao.id), _queue_item_id=queue_item_id, _queue_reservation_token=token
+    )
     campanha = db_session.scalar(select(AnaliseMaterializacaoCampanha).order_by(AnaliseMaterializacaoCampanha.created_at.desc()))
 
     assert resultado["status"] == "sucesso"
@@ -1263,3 +1291,84 @@ def test_recuperar_materializacao_pendente_task_reenfileira_campanhas(
     assert captured["args"] == (str(campanha.id),)
     assert captured["countdown"] == 0
     assert captured["queue"] == "analise_materializacao"
+
+
+def test_claim_materializacao_campanha_chunks_respeita_chunks_ativos_preexistentes(
+    db_session: Session,
+) -> None:
+    _companhia(db_session, codigo_cvm=9512)
+    _companhia(db_session, codigo_cvm=9513)
+    _companhia(db_session, codigo_cvm=9514)
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[9512, 9513, 9514],
+        source="manual",
+        chunk_size=1,
+    )
+    first_claim = claim_materializacao_campanha_chunks(
+        db_session,
+        campanha.id,
+        chunk_size=1,
+        max_chunks=1,
+    )
+    assert len(first_claim) == 1
+    db_session.commit()
+
+    claimed = claim_materializacao_campanha_chunks(
+        db_session,
+        campanha.id,
+        chunk_size=1,
+        max_chunks=3,
+    )
+    assert len(claimed) == 2
+
+
+def test_materializar_analise_campanha_task_enfileira_multiplos_chunks(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _companhia(db_session, codigo_cvm=9512)
+    _companhia(db_session, codigo_cvm=9513)
+    _companhia(db_session, codigo_cvm=9514)
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[9512, 9513, 9514],
+        source="manual",
+        chunk_size=1,
+    )
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+    monkeypatch.setattr(worker_tasks._settings, "analise_materializacao_max_active_chunks_per_campaign", 3)
+    enqueued_chunks: list[str] = []
+
+    def _fake_delay(campanha_id: str, chunk_id: str) -> None:
+        enqueued_chunks.append(chunk_id)
+
+    monkeypatch.setattr(worker_tasks.materializar_analise_chunk_task, "delay", _fake_delay)
+
+    resultado = worker_tasks.materializar_analise_campanha_task.run(str(campanha.id))
+
+    assert resultado["status"] == "enqueued"
+    assert resultado["chunk_count"] == 3
+    assert len(enqueued_chunks) == 3
+
+
+def test_prewarm_fundamentalista_snapshot_skips_when_no_facts(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    execucao = AnaliseMaterializacaoExecucao(
+        companhia_id=cia.id,
+        codigo_cvm=cia.codigo_cvm,
+        escopo="consolidated",
+        calculation_version="2026.2",
+        status="success",
+        summary={"fact_revisions": 0},
+    )
+    db_session.add(execucao)
+    db_session.commit()
+
+    monkeypatch.setattr("app.services.analise._settings.analise_fundamentalista_prewarm_enabled", True)
+    result = prewarm_fundamentalista_snapshot(db_session, cia, execucao)
+    assert result is None
+

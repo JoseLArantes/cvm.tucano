@@ -4,6 +4,7 @@ import pytest
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.worker.bootstrap import agendar_sincronizacoes_iniciais
 from app.worker.celery_app import celery_app, construir_beat_schedule
@@ -22,48 +23,9 @@ def test_agendar_sincronizacoes_iniciais_agenda_fontes_pendentes(
     monkeypatch.setattr(settings, "anos_iniciais_cgvn", "2030")
     monkeypatch.setattr("app.worker.bootstrap.SessionLocal", lambda: db_session)
 
-    chamadas: list[tuple[str, int | None]] = []
-
-    def registrar_chamada(tipo_fonte: str, ano: int | None) -> SimpleNamespace:
-        chamadas.append((tipo_fonte, ano))
-        suffix = "cadastro" if ano is None else f"{tipo_fonte}-{ano}"
-        return SimpleNamespace(id=suffix)
-
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_cadastro_companhias_task.delay",
-        lambda: registrar_chamada("cadastro", None),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_dfp_task.delay",
-        lambda ano: registrar_chamada("dfp", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_itr_task.delay",
-        lambda ano: registrar_chamada("itr", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_fre_task.delay",
-        lambda ano: registrar_chamada("fre", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_fca_task.delay",
-        lambda ano: registrar_chamada("fca", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_ipe_task.delay",
-        lambda ano: registrar_chamada("ipe", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_vlmo_task.delay",
-        lambda ano: registrar_chamada("vlmo", ano),
-    )
-    monkeypatch.setattr(
-        "app.worker.bootstrap.sincronizar_cgvn_task.delay",
-        lambda ano: registrar_chamada("cgvn", ano),
-    )
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     agendadas = agendar_sincronizacoes_iniciais()
 
-    assert agendadas == chamadas
     assert agendadas == [
         ("cadastro", None),
         ("dfp", 2024),
@@ -74,6 +36,10 @@ def test_agendar_sincronizacoes_iniciais_agenda_fontes_pendentes(
         ("vlmo", 2029),
         ("cgvn", 2030),
     ]
+    queued = db_session.query(IngestionQueueItem).order_by(IngestionQueueItem.sequence).all()
+    assert len(queued) == 8
+    assert {item.status for item in queued} == {"queued"}
+    assert [item.kind for item in queued] == ["cadastro", *(["zip_prepare"] * 7)]
 
 
 def test_agendar_sincronizacoes_iniciais_pula_execucoes_validas_existentes(
@@ -210,19 +176,34 @@ def test_construir_beat_schedule_inclui_fontes_configuradas(monkeypatch: pytest.
     schedule = construir_beat_schedule()
 
     assert "sincronizar-cadastro-diario" in schedule
-    assert schedule["sincronizar-dfp-2024-diario"]["args"] == (2024,)
-    assert schedule["sincronizar-dfp-2025-diario"]["args"] == (2025,)
-    assert schedule["sincronizar-itr-2026-diario"]["args"] == (2026,)
-    assert schedule["sincronizar-fre-2027-diario"]["args"] == (2027,)
-    assert schedule["sincronizar-fca-2028-diario"]["args"] == (2028,)
-    assert schedule["sincronizar-ipe-2029-diario"]["args"] == (2029,)
-    assert schedule["sincronizar-vlmo-2030-diario"]["args"] == (2030,)
-    assert schedule["sincronizar-cgvn-2031-diario"]["args"] == (2031,)
+    assert schedule["sincronizar-cadastro-diario"]["task"] == "app.worker.tasks.agendar_ingestao_automatica_task"
+    assert schedule["sincronizar-cadastro-diario"]["args"] == (
+        "app.worker.tasks.sincronizar_cadastro_companhias_task",
+        (),
+        {},
+    )
+    for source, year in (
+        ("dfp", 2024),
+        ("dfp", 2025),
+        ("itr", 2026),
+        ("fre", 2027),
+        ("fca", 2028),
+        ("ipe", 2029),
+        ("vlmo", 2030),
+        ("cgvn", 2031),
+    ):
+        entry = schedule[f"sincronizar-{source}-{year}-diario"]
+        assert entry["task"] == "app.worker.tasks.agendar_ingestao_automatica_task"
+        assert entry["args"] == (
+            f"app.worker.tasks.sincronizar_{source}_task",
+            (year,),
+            {},
+        )
 
 
 def test_celery_routes_isolam_ingestao_e_materializacao() -> None:
     routes = celery_app.conf.task_routes
-    assert routes["app.worker.tasks.sincronizar_dfp_task"]["queue"] == "ingestion_control"
+    assert routes["app.worker.tasks.sincronizar_dfp_task"]["queue"] == "ingestion"
     assert routes["app.worker.tasks.disparar_dependentes_task"]["queue"] == "ingestion_control"
     assert routes["app.worker.tasks.finalizar_sincronizacao_zip_task"]["queue"] == "ingestion_control"
     assert routes["app.worker.tasks.sincronizar_member_task"]["queue"] == "ingestion"

@@ -11,13 +11,18 @@ Para cada tipo de tela:
 
 | Tela | Endpoint principal |
 | --- | --- |
+| visao operacional centrada em arquivos | `GET /ingestion/files` |
+| detalhe e linhagem do arquivo logico | `GET /ingestion/files/{file_id}` |
+| linha do tempo de membro delimitada | `GET /ingestion/files/{file_id}/members/{member_name}/timeline` |
 | lista operacional de runs | `GET /ingestion/runs` |
 | detalhe de run | `GET /ingestion/runs/{run_id}` |
 | timeline de fases | `GET /ingestion/runs/{run_id}/phases` |
 | inventario de members | `GET /ingestion/runs/{run_id}/members` |
+| linha do tempo e ciclo de vida do member | `GET /ingestion/members/{member_name}/timeline` |
 | auditoria do disparo | `GET /ingestion/sincronizacoes` |
 | detalhe da execucao administrativa | `GET /ingestion/sincronizacoes/{id_execucao}` |
 | snapshot global do cluster | `GET /ingestion/operations` |
+| lotes e posições da fila de admissão | `GET /ingestion/queue` |
 | limpeza transitoria de run cancelada/falha | `POST /ingestion/runs/{run_id}/cleanup-transient-state` |
 
 ## `GET /ingestion/runs`
@@ -154,6 +159,26 @@ Estados sinteticos hoje:
 - `schema_invalid`
 - `unknown`
 
+## `GET /ingestion/members/{member_name}/timeline`
+
+Linha do tempo e ciclo de vida completo de um arquivo member CSV especifico (ex: `fre_cia_aberta_auditor_responsavel_2021.csv`).
+
+Disseca em profundidade tudo o que ocorreu com o arquivo:
+
+- **Metadados do dataset**: chave do dataset, descricao funcional, entidade de destino promovido e se o membro e obrigatorio;
+- **Historico de execucoes de sincronizacao**: lista todas as execucoes do member (`ExecucaoSincronizacao`), o arquivo ZIP pai de origem, horarios de inicio/fim, contadores de linhas (lidas, inseridas, atualizadas, inalteradas, rejeitadas) e a timeline detalhada de todas as fases operacionais executadas (`profile`, `stage`, `load_typed_staging`, `promote`, `reconcile`, `complete`);
+- **Snapshots do artefato**: historico de versoes do payload observadas nos downloads (SHA-256, tamanho em bytes, contagem de linhas, schema status, lifecycle status e caminhos dos artefatos bruto e normalizado em disco);
+- **Historico de drifts CVM (`pending_updates`)**: deteccoes de alteracoes entre versoes de pacotes publicadas pela CVM (`change_category`: `new_member`, `modified`, `unchanged`, `removed`), comparando SHA anterior vs atual e contagem de linhas;
+- **Resumo e itens de quarentena**: total de rejeicoes, itens pendentes, distribuicao por codigo de erro e amostra dos itens mais recentes;
+- **Impacto no dominio**: total de alteracoes em campos de entidades de negocio promovidas a partir deste arquivo (`HistoricoAlteracaoCampo`).
+
+Exemplo:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/members/fre_cia_aberta_auditor_responsavel_2021.csv/timeline" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
 ## `GET /ingestion/sincronizacoes`
 
 Lista paginada das execucoes administrativas.
@@ -203,6 +228,32 @@ O retorno agrega:
 - `materialization_gate`
 - `active_runs`
 - `recoverable_runs`
+- `ingestion_queue` com profundidade, idade do pedido mais antigo, capacidade configurada, reservas e preparações ZIP ativas
+
+### `GET /ingestion/queue`
+
+Retorna lotes paginados pela ordem persistida de chegada. Cada lote inclui fontes/anos, posição, progresso agregado,
+motivo de espera e as etapas relacionadas. Use `lote_id` recebido no disparo para localizar o lote.
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/queue?pagina=1&tamanho_pagina=25" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+Cada etapa inclui `item_id`, `execucao_id`, fonte, ano, arquivo, etapa, status, tentativa, início e reserva. Os status
+operacionais são:
+
+| Status | Interpretação |
+| --- | --- |
+| `queued` | aguarda uma vaga do pool e ainda não foi enviada ao worker |
+| `reserved` | vaga reservada e intenção de publicação registrada no outbox |
+| `running` | um worker validou o token e assumiu a etapa |
+| `transition_pending` | resultado já persistido; a transição de fase precisa ser aplicada |
+| `waiting_manual` | espera confirmação do operador e não ocupa vaga |
+| `completed`, `failed`, `cancelled` | estado terminal da etapa |
+
+O outbox é publicado após o commit. Mensagens duplicadas não executam a etapa sem a reserva e o token vigentes. Um
+dispatcher periódico retoma publicações pendentes e aplica transições interrompidas após reinício.
 
 ## Filas e independencia operacional
 
@@ -210,9 +261,21 @@ Ingestao e materializacao usam filas separadas:
 
 | Fila | Responsabilidade |
 | --- | --- |
-| `ingestion` | processamento pesado de members |
-| `ingestion_control` | coordenacao, finalizacao e recovery de ingestao |
+| `ingestion` | cadastro, preparação de ZIP, CSV e finalização admitidos |
+| `ingestion_control` | seleção global, outbox e reconciliação da fila de ingestão |
 | `analise_materializacao` | chunks e campanhas de materializacao |
+
+O worker de ingestão pesado consome somente `ingestion`. Um worker de controle separado consome `ingestion_control` e
+`celery`, preservando capacidade para seleção, outbox e recovery enquanto uma etapa usa CPU ou banco. O PostgreSQL
+serializa a reserva global por uma linha de controle, inclusive entre réplicas do dispatcher. A capacidade é derivada
+de `worker.replicaCount x worker.concurrency`, com opção `ingestion.executionSlots` para impor um limite menor. Apenas
+uma preparação ZIP é admitida por vez. Quando não há vaga, a execução permanece `agendada` e aparece em
+`GET /ingestion/queue`; `em_processamento` só aparece depois da validação da reserva no início do worker.
+
+Ao liberar dependentes, CSVs elegíveis são selecionados antes de novos ZIPs. O CSV de cabeçalho precisa terminar antes
+dos members que dependem dele. A etapa que terminou mantém sua reserva lógica até que a transição e a nova elegibilidade
+sejam persistidas. O worker revalida a fila antes de iniciar um ZIP e devolve uma publicação deslocada à posição
+original se um CSV tiver passado à frente.
 
 O gate de materializacao bloqueia a execucao de novos chunks de materializacao quando ha ingestao ativa ou pausa manual. Ele nao bloqueia workers de ingestao.
 
@@ -269,14 +332,14 @@ vida do SSE nem durante operações externas como a inspeção Celery.
 
 `POST /ingestion/dispatch/plan` valida escopos e devolve `plan_token` de validade curta, conflitos, possibilidade de reuso por SHA-256 e impacto no gate de materialização. `POST /ingestion/dispatch` confirma o mesmo conjunto com `plan_token` e o header obrigatório `Idempotency-Key`. A resposta é persistida por ator/operação/chave durante 24h; chave repetida com payload diferente retorna `409`. `force_reimport=true` exige `reason` e gera auditoria persistida.
 
-`GET /ingestion/operations` também informa `revision`, `poll_after_ms`, `action_counts`, `waiting_for_operator_count`, progresso agregado, totais reais, truncamento de preview e `queue_health[]`. Cada fila inclui workers observados, slots ocupados, tasks ativas/reservadas/agendadas, backlog e estado `ready`, `paused` ou `without_worker`.
+`GET /ingestion/operations` também informa `revision`, `poll_after_ms`, `action_counts`, `waiting_for_operator_count`, progresso agregado, totais reais, truncamento de preview e `queue_health[]`. Cada fila inclui workers observados, slots ocupados, tasks ativas/reservadas/agendadas, backlog e estado `ready`, `paused` ou `without_worker`. Respostas de monitoramento podem reutilizar o mesmo snapshot por até `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache), mantendo baixa latência em polling frequente.
 
 ## Interpretacao de `next_action`
 
 | Valor | Significado |
 | --- | --- |
-| `wait` | run em andamento ou aguardando continuidade normal |
-| `start_ingestion` | pre-processamento concluido; use a execucao correlata para iniciar a fase 2 |
+| `wait` | run em andamento, na fila ou member filho aguardando vaga global ou janela de despacho do ZIP pai ativo (`blocking.reason_code=awaiting_parent_window`) |
+| `start_ingestion` | pre-processamento concluido em modo two-step; use a execucao correlata para iniciar a fase 2 |
 | `recover` | run stale, falha recuperavel ou member aguardando retomada apos falha do ZIP pai, desde que possua fonte executavel |
 | `inspect_error` | erro impeditivo sem recover direto |
 | `inspect_quarantine` | a fila de quarentena deve ser o proximo passo |
@@ -296,11 +359,28 @@ Efeitos esperados:
 - runs terminais nao bloqueiam novo dispatch do mesmo escopo, e o work item oferece `start_ingestion` com `TERMINAL_RUN_REDISPATCH_ALLOWED`, sem exigir limpeza de filas ou staging para liberar a nova execucao;
 - cancelamentos pendentes em runs stale podem ser estabilizados como `cancelled`.
 
+Durante uma retentativa automatica de member, a execucao filha e a run ficam em `agendada`, a fase fica
+`failed_retryable` e `last_error.retryable=true`. A UI deve apresentar o member como aguardando nova tentativa, sem
+marcar a run como falha terminal. Cada tentativa e registrada separadamente; se o limite de tentativas for esgotado, a
+run termina em `state=failed`, com a fase `failed_final` e `last_error.retryable=true` quando o erro continuar
+recuperavel.
+
+Uma run com `recovery.strategy=rerun_member_execution` so e recuperavel quando existe `IngestionFile` persistido para o
+pacote pai. O replay direto do member sem essa fonte responde `409` com `detail.reason_code=NO_RECOVERY_SOURCE`,
+`detail.next_action=replay_parent_execution` e `parent_execucao_id`; a execucao filha nao e alterada nem publicada.
+Nesse caso, reprocesse o ZIP pai primeiro. Ao fechar um ZIP com falhas, `ExecucaoSincronizacao.mensagem_erro` resume
+nomes dos members e a primeira linha de seus erros; use o detalhe da execucao filha para o erro completo.
+
 `POST /ingestion/runs/{run_id}/recover` retorna `409` com o mesmo objeto `recovery` e `reason_code=NO_RECOVERY_SOURCE` quando nao existir fonte executavel. O comando nao devolve sucesso com uma lista vazia nesse caso.
 
-Quando a estrategia for `rerun_member_execution`, o comando agenda uma task na fila de ingestao e responde `status=agendada`; ele nao executa o processamento pesado dentro da requisicao HTTP.
+Quando a estrategia for `rerun_member_execution` ou `rerun_parent_execution`, o comando cria um lote persistido, retorna
+`status=agendada` e `lote_id`, e nao executa o processamento pesado dentro da requisicao HTTP. Acompanhe a ordem, a etapa
+e o motivo de espera em `GET /ingestion/queue`.
 
-Se a publicacao dessa task falhar, inclusive por indisponibilidade do result backend Celery, a run e a execucao filha terminam em `falha`. A run recebe uma fase `failed_final` com `error_retryable=false`, passa a expor `recovery.reason_code=NON_RETRYABLE_FAILURE` e deixa imediatamente de `recoverable_runs`. A resposta do comando e `503` com `reason_code=RECOVERY_DISPATCH_FAILED`, `retryable=false` e `run_id`. O backend nao limpa filas nem tenta anunciar um recovery que nao foi publicado. Runs antigas cuja mensagem persistida começa com `Falha ao agendar recovery de member:` recebem a mesma classificação terminal durante a leitura, mesmo que uma fase anterior ainda esteja marcada como retentável.
+Falha de publicacao do Celery nao converte o pedido de recovery em falha terminal nem altera a run para `failed_final`:
+o item continua reservado com erro de publicacao e o dispatcher periodico tenta publicar novamente. O lote e a execucao
+permanecem visiveis em `GET /ingestion/queue` enquanto aguardam publicacao ou inicio pelo worker. A reaplicacao de staging
+retido que nao exige nova execucao de ZIP ou CSV continua sendo sincrona no banco.
 
 ## Encerramento de falhas investigadas
 
@@ -324,3 +404,85 @@ Depois do reconhecimento:
 - uma falha posterior na mesma run possui outra `failure_key` e exige novo reconhecimento.
 
 Use `acknowledge-failure` para limpar a fila de atencao sem perda de evidencia. `cleanup-transient-state` tem outra finalidade: remove estado transitorio quando uma reconstrução administrativa exigir essa limpeza.
+
+## Superficie Operacional Centrada no Arquivo
+
+A superficie de consulta centrada no arquivo organiza o ciclo de vida operacional na hierarquia do dominio:
+**ANO → ARQUIVO PRINCIPAL → MEMBRO → TENTATIVAS E ETAPAS → RESULTADO**.
+
+Arquivos simples (como o cadastro global `cadastro:cad_cia_aberta.csv`) nao possuem ZIP, ano ficticio ou membro artificial.
+Runs, work items e execucoes administrativas sao registros subordinados e nao definem a identidade do arquivo.
+
+### Identificadores Estaveis
+
+- **Arquivo Logico**: `file_id` estavel:
+  - Pacotes anuais: `{tipo_fonte}:{ano}:{arquivo_principal}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip`)
+  - Arquivos simples sem ano: `{tipo_fonte}:{arquivo_principal}` (ex: `cadastro:cad_cia_aberta.csv`)
+- **Membro**: `member_id` delimitado pelo arquivo pai e chave canonica:
+  - `{file_id}:{member_name}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv`)
+  - Membros homonimos em pacotes diferentes nunca misturam historicos ou estados.
+
+### Integridade, Atividade e Versoes
+
+A API retorna separadamente:
+1. `versao_em_uso`: versao de dados efetivamente em uso no banco, com sua integridade comprovada.
+2. `versao_alvo`: versao alvo da ingestao mais recente ou em processamento (mostrando se foi apenas detectada, se esta em processamento ou se falhou).
+   Uma falha no processamento de uma atualizacao CVM nao torna, por si so, a versao em uso anterior incompleta!
+3. `atividade_atual`: `idle`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window` (espera automatica) ou `bloqueada`.
+
+#### Estados de Integridade Calculados no Servidor
+
+- `completo`: todos os membros obrigatorios esperados pelo catalogo foram processados e promovidos com escrita confirmada, sem ressalvas.
+- `completo_com_ressalvas`: dados centrais promovidos, com ressalvas nao bloqueantes (ex: itens em quarentena ou membros opcionais ausentes).
+- `parcial`: promocao incompleta (membros obrigatorios faltantes no pacote, ou com falha/quarentena impeditiva).
+- `nao_aplicado`: arquivo apenas detectado, agendado ou falhou antes do download/promocao.
+- `evidencia_insuficiente`: registros incompletos ou legados sem confirmacao de escrita canonica.
+
+#### Resolucao de Falhas
+
+- `aberta`: falha ativa pendente de solucao.
+- `em_nova_tentativa`: nova tentativa em processamento.
+- `restaurada_com_evidencia`: recuperada ou reprocessada com sucesso comprovado na mesma versao.
+- `versao_substituida`: substituida por uma versao mais recente integra (sem provar que a antiga foi reparada).
+- `encerrada_sem_restauracao`: falha investigada e reconhecida via `acknowledge-failure` (encerra a investigacao sem reparar a integridade).
+
+### `GET /ingestion/files`
+
+Listagem paginada por arquivo logico com contagem nao truncada e filtros server-side:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files?ano=2022&fonte=dfp&pagina=1&tamanho_pagina=50" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+Parametros de consulta suportados:
+- `ano`: ano de referencia
+- `fonte`: tipo de fonte (`dfp`, `itr`, `fre`, `fca`, `ipe`, `cgvn`, `vlmo`, `cadastro`)
+- `arquivo`: filtro por trecho do nome do arquivo
+- `atividade`: filtrar por atividade corrente (`idle`, `na_fila`, `em_processamento`, `aguardando_ingestao`, `aguardando_parent_window`, `bloqueada`)
+- `integridade`: filtrar por integridade em uso (`completo`, `completo_com_ressalvas`, `parcial`, `nao_aplicado`, `evidencia_insuficiente`)
+- `necessidade_intervencao`: booleano indicando necessidade de intervencao manual de operador
+- `resolucao_falha`: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida`, `encerrada_sem_restauracao`
+- `concluido_apos` e `concluido_antes`: intervalo de data/hora de conclusao
+- `pagina` e `tamanho_pagina`
+
+`atividade=na_fila` identifica uma execução que aguarda vaga ou confirmação de reserva pelo worker. `atividade=em_processamento` identifica somente etapas com início confirmado pelo worker. A listagem reutiliza snapshots idênticos pelo TTL configurado em `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache).
+
+### `GET /ingestion/files/{file_id}`
+
+Detalhe completo do arquivo logico com versoes, membros, auditoria de integridade com evidencias, historico de tentativas correlacionadas e acoes permitidas:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files/dfp:2022:dfp_cia_aberta_2022.zip" \
+  -H "Authorization: Bearer <token-admin>"
+```
+
+### `GET /ingestion/files/{file_id}/members/{member_name}/timeline`
+
+Linha do tempo e ciclo de vida completo do membro delimitado pelo arquivo principal:
+
+```bash
+curl -X GET "http://localhost:8007/ingestion/files/dfp:2022:dfp_cia_aberta_2022.zip/members/dfp_cia_aberta_BPA_con_2022.csv/timeline" \
+  -H "Authorization: Bearer <token-admin>"
+```
+

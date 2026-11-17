@@ -97,7 +97,7 @@ Garantias operacionais:
 - linhas rejeitadas ainda entram em quarentena com contexto minimo;
 - artifacts normalizados preservam replay e auditoria;
 - staging tipado e purgado ao final do member;
-- o ZIP financeiro despacha members em janela ativa limitada por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, default `2`.
+- ZIPs com members de todas as fontes liberam trabalho em janelas limitadas por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`. O default da configuração da aplicação é `2`; o chart Helm usa `1` para limitar a pressão sobre os recursos do cluster.
 
 ## Reuso por member
 
@@ -144,7 +144,10 @@ Workers de materializacao nao devem consumir filas de ingestao. Novas publicacoe
 
 ## Gate de materializacao
 
-Todo disparo administrativo de ingestao cria uma `ExecucaoSincronizacao` em `agendada` antes de publicar a task Celery.
+Todo disparo administrativo de ingestao cria um lote e uma `ExecucaoSincronizacao` em `agendada` na fila persistida
+antes de qualquer publicacao Celery. O escalonador reserva capacidade e publica apenas a etapa admitida; tarefas de
+beat, bootstrap e atualizacoes automaticas usam o mesmo caminho. `GET /ingestion/queue` informa ordem, progresso e
+motivo de espera.
 O gate automatico da materializacao considera bloqueadores os status:
 
 - `agendada`

@@ -6,8 +6,10 @@ from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base
 from app.models import companhia, financeiro, fre, identidade, ingestion, sincronizacao, usuario  # noqa: F401
-from app.models.ingestion import IngestionAttempt
+from app.models.ingestion import IngestionAttempt, IngestionFile
+from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.acquisition import download_with_attempts
+from app.services.ingestion.recovery import assess_ingestion_run_recovery
 from app.services.ingestion.retry import (
     DependencyNotReady,
     RetryableHttpStatus,
@@ -125,3 +127,67 @@ def test_download_with_attempts_success_returns_payload_and_metadata() -> None:
 
 def test_dependency_not_ready_is_retryable_exception() -> None:
     assert isinstance(DependencyNotReady("deps"), RetryableIngestionError)
+
+
+def test_member_recovery_requires_a_persisted_parent_file() -> None:
+    session = _session()
+    try:
+        parent = ExecucaoSincronizacao(
+            tipo_fonte="itr",
+            ano=2023,
+            arquivo="itr_cia_aberta_2023.zip",
+            url="https://dados.cvm.gov.br/itr_2023.zip",
+            status="sucesso",
+        )
+        session.add(parent)
+        session.flush()
+        child = ExecucaoSincronizacao(
+            parent_execucao_id=parent.id,
+            tipo_fonte="itr",
+            ano=2023,
+            arquivo="itr_cia_aberta_DMPL_ind_2023.csv",
+            url="https://dados.cvm.gov.br/itr_2023.zip",
+            status="falha",
+        )
+        session.add(child)
+        session.flush()
+        run = create_run(
+            session,
+            tipo_fonte="itr",
+            ano=2023,
+            execucao_sincronizacao_id=child.id,
+            status="falha",
+            phase="complete",
+        )
+        session.commit()
+
+        unavailable = assess_ingestion_run_recovery(session, run=run)
+        assert unavailable.eligible is False
+        assert unavailable.reason_code == "NO_RECOVERY_SOURCE"
+
+        parent_run = create_run(
+            session,
+            tipo_fonte="itr",
+            ano=2023,
+            execucao_sincronizacao_id=parent.id,
+            status="sucesso",
+            phase="complete",
+        )
+        session.add(
+            IngestionFile(
+                ingestion_run_id=parent_run.id,
+                source_url=parent.url,
+                source_filename=parent.arquivo,
+                content_sha256="a" * 64,
+                content_length_bytes=1,
+                is_zip=True,
+            )
+        )
+        session.commit()
+
+        available = assess_ingestion_run_recovery(session, run=run)
+        assert available.eligible is True
+        assert available.strategy == "rerun_member_execution"
+        assert available.reason_code == "MEMBER_EXECUTION_AVAILABLE"
+    finally:
+        session.close()

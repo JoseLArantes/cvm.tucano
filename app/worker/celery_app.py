@@ -3,7 +3,7 @@ from typing import Any
 
 from celery import Celery
 from celery.schedules import crontab
-from kombu import Exchange, Queue
+from kombu import Exchange, Queue  # type: ignore[attr-defined]
 
 from app.core.config import get_settings
 
@@ -30,9 +30,9 @@ queue_names = (
     settings.radar_cvm_queue_name,
 )
 celery_app.conf.task_queues = tuple(
-    Queue(
+    Queue(  # type: ignore[no-untyped-call]
         queue_name,
-        Exchange(queue_name, type="direct"),
+        Exchange(queue_name, type="direct"),  # type: ignore[no-untyped-call]
         routing_key=queue_name,
     )
     for queue_name in dict.fromkeys(queue_names)
@@ -42,16 +42,18 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.sincronizar_member_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.disparar_dependentes_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.finalizar_sincronizacao_zip_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_dfp_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_itr_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_fre_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_fca_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_ipe_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_vlmo_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.sincronizar_cgvn_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
-    "app.worker.tasks.ingerir_sincronizacao_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.sincronizar_dfp_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_itr_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_fre_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_fca_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_ipe_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_vlmo_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_cgvn_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.ingerir_sincronizacao_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.reconciliar_ingestion_stale_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.despachar_fila_ingestao_task": {"queue": settings.ingestion_control_queue_name},
+    "app.worker.tasks.agendar_ingestao_automatica_task": {"queue": settings.ingestion_control_queue_name},
     "app.updates.tasks.run_daily_scanner_task": {"queue": settings.ingestion_control_queue_name},
     "app.updates.tasks.run_deep_analysis_task": {"queue": settings.ingestion_control_queue_name},
     "app.updates.tasks.cleanup_temp_files_task": {"queue": settings.ingestion_control_queue_name},
@@ -68,6 +70,10 @@ celery_app.conf.task_routes = {
 
 def construir_beat_schedule() -> dict[str, dict[str, Any]]:
     beat_schedule: dict[str, dict[str, Any]] = {
+        "ingestion-queue-dispatcher": {
+            "task": "app.worker.tasks.despachar_fila_ingestao_task",
+            "schedule": timedelta(seconds=settings.ingestion_queue_dispatch_poll_seconds),
+        },
         "ingestion-stale-recovery": {
             "task": "app.worker.tasks.reconciliar_ingestion_stale_task",
             "schedule": timedelta(seconds=settings.ingestion_recovery_sweep_seconds),
@@ -101,8 +107,9 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
     
     if settings.auto_trigger_updates:
         beat_schedule["sincronizar-cadastro-diario"] = {
-            "task": "app.worker.tasks.sincronizar_cadastro_companhias_task",
+            "task": "app.worker.tasks.agendar_ingestao_automatica_task",
             "schedule": crontab(hour=1, minute=0),
+            "args": ("app.worker.tasks.sincronizar_cadastro_companhias_task", (), {}),
         }
         tarefas_anuais = (
             ("dfp", settings.anos_iniciais_dfp, "app.worker.tasks.sincronizar_dfp_task"),
@@ -117,9 +124,9 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
         for tipo_fonte, anos_configurados, tarefa in tarefas_anuais:
             for ano in settings.parse_anos(anos_configurados):
                 beat_schedule[f"sincronizar-{tipo_fonte}-{ano}-diario"] = {
-                    "task": tarefa,
+                    "task": "app.worker.tasks.agendar_ingestao_automatica_task",
                     "schedule": crontab(hour=2 + (deslocamento_minutos // 60), minute=deslocamento_minutos % 60),
-                    "args": (ano,),
+                    "args": (tarefa, (ano,), {}),
                 }
                 deslocamento_minutos += 5
     elif settings.updates_service_enabled:

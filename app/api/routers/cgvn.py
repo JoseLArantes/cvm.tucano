@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from datetime import date
 from typing import Annotated, Any
 
@@ -162,7 +163,7 @@ def _listar_generico(
         campo_padrao=campo_padrao,
     )
     total = db.scalar(query_total) or 0
-    itens = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
+    itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
     return [schema.model_validate(item) for item in itens], total
 
 

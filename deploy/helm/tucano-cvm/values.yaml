@@ -40,20 +40,37 @@ api:
 worker:
   enabled: true
   replicaCount: 1
+  concurrency: 1
   command:
     - sh
     - -c
-    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery"
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=${INGESTION_WORKER_CONCURRENCY:-1} -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion}"
+  resources: {}
+  podAnnotations: {}
+
+ingestion:
+  # 0 derives the admission budget from worker replicas x concurrency.
+  executionSlots: 0
+
+controlWorker:
+  enabled: true
+  replicaCount: 1
+  concurrency: 1
+  command:
+    - sh
+    - -c
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=${INGESTION_CONTROL_WORKER_CONCURRENCY:-1} -Ofair -Q ${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery"
   resources: {}
   podAnnotations: {}
 
 materializationWorker:
   enabled: true
   replicaCount: 1
+  concurrency: 2
   command:
     - sh
     - -c
-    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=2 -Ofair -Q ${ANALISE_MATERIALIZACAO_QUEUE_NAME:-analise_materializacao}"
+    - "celery -A app.worker.celery_app worker --loglevel=info --concurrency=${ANALISE_MATERIALIZACAO_WORKER_CONCURRENCY:-2} -Ofair -Q ${ANALISE_MATERIALIZACAO_QUEUE_NAME:-analise_materializacao}"
   resources: {}
   podAnnotations: {}
 
@@ -91,6 +108,7 @@ env:
   ANALISE_MATERIALIZACAO_CHUNK_SIZE: "25"
   ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS: "1"
   ANALISE_MATERIALIZACAO_QUEUE_NAME: "analise_materializacao"
+  INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS: "3"
   ANALISE_MATERIALIZACAO_DEDUP_WINDOW_SECONDS: "0"
   INGESTION_STAGE_BATCH_SIZE: "5000"
   INGESTION_PROMOTE_BATCH_SIZE: "5000"
@@ -98,6 +116,9 @@ env:
   INGESTION_V2_ENABLED: "true"
   INGESTION_V2_PROMOTE_ENABLED: "true"
   INGESTION_DUCKDB_STAGING_ENABLED: "true"
+  INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "2"
+  INGESTION_EXECUTION_SLOTS: "2"
+  INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL: "2"
   CELERY_WORKER_MAX_TASKS_PER_CHILD: "1"
   CELERY_WORKER_MAX_MEMORY_PER_CHILD_KB: "1500000"
   ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN: "10"
@@ -111,7 +132,7 @@ env:
   ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS: "60"
   UPDATES_SERVICE_ENABLED: "true"
   UPDATES_SCANNER_STALE_AFTER_HOURS: "36"
-  INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT: "1"
+  INGESTION_QUEUE_DISPATCH_POLL_SECONDS: "15"
   BACKEND_CORS_ORIGINS: http://127.0.0.1:8110,http://127.0.0.1:8010,https://portal.swaggerhub.com,https://cvm.tucano.beakcloud.com,https://cvm.companhias.tucano.beakcloud.com
   API_URL: https://cvm.tucano.beakcloud.com
   MCP_HTTP_ENABLED: "true"

@@ -1,6 +1,7 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,6 +19,7 @@ from app.models.ingestion import (
     SourceDeliverySnapshot,
     SourceMemberSnapshot,
 )
+from app.models.ingestion_queue import IngestionQueueItem
 from app.models.sincronizacao import ExecucaoSincronizacao, HistoricoAlteracaoCampo
 from app.services.ingestion.scheduling import (
     adotar_ou_criar_execucao_sincronizacao,
@@ -61,14 +63,7 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduled: dict[str, object] = {}
-
-    def fake_apply_async(*, kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
-        scheduled["kwargs"] = kwargs
-        scheduled["task_id"] = task_id
-        return SimpleNamespace(id=task_id)
-
-    monkeypatch.setattr("app.api.routers.admin.sincronizar_cadastro_companhias_task.apply_async", fake_apply_async)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
 
     resposta = client.post("/ingestion/sincronizacoes/tudo/2025?force_reimport=true")
     assert resposta.status_code == 200
@@ -77,6 +72,8 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert len(payload["tarefas"]) == 8
     assert payload["tarefas"][0]["tipo_fonte"] == "cadastro"
     assert payload["tarefas"][0]["ano"] is None
+    assert payload["lote_id"]
+    assert all(item["lote_id"] == payload["lote_id"] for item in payload["tarefas"])
     assert [item["ano"] for item in payload["tarefas"][1:]] == [2025] * 7
     task_ids = [item["id_tarefa"] for item in payload["tarefas"]]
     execucoes = (
@@ -87,8 +84,23 @@ def test_admin_sincronizacao_tudo_agenda_tarefas(
     assert len(execucoes) == 8
     assert {execucao.status for execucao in execucoes} == {"agendada"}
     assert {execucao.tipo_execucao for execucao in execucoes} == {"arquivo_simples", "arquivo_zip"}
-    assert scheduled["task_id"] == payload["tarefas"][0]["id_tarefa"]
-    assert scheduled["kwargs"] == {"force_reimport": True, "dispatch_year_after_success": 2025}
+    queue_items = (
+        db_session.query(IngestionQueueItem)
+        .filter(IngestionQueueItem.batch_id == uuid.UUID(payload["lote_id"]))
+        .order_by(IngestionQueueItem.sequence)
+        .all()
+    )
+    assert len(queue_items) == 8
+    assert {item.status for item in queue_items} == {"queued"}
+    assert [item.kind for item in queue_items] == ["cadastro", *(["zip_prepare"] * 7)]
+
+    resposta_fila = client.get("/ingestion/queue")
+    assert resposta_fila.status_code == 200
+    lote = resposta_fila.json()["dados"][0]
+    assert lote["lote_id"] == payload["lote_id"]
+    assert lote["solicitado_em"]
+    assert len(lote["itens"]) == 8
+    assert all("solicitado_em" not in item for item in lote["itens"])
 
 
 def test_admin_fontes_endpoints_expoem_registry(client: TestClient) -> None:
@@ -113,24 +125,14 @@ def test_admin_sincronizacao_vlmo_agenda_tarefa(
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduled: dict[str, object] = {}
-
-    def fake_apply_async(*, args: tuple[object, ...], kwargs: dict[str, object], task_id: str) -> SimpleNamespace:
-        scheduled["args"] = args
-        scheduled["kwargs"] = kwargs
-        scheduled["task_id"] = task_id
-        return SimpleNamespace(id=task_id)
-
-    monkeypatch.setattr("app.api.routers.admin.sincronizar_vlmo_task.apply_async", fake_apply_async)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
 
     resposta = client.post("/ingestion/sincronizacoes/vlmo/2025?force_reimport=true")
 
     assert resposta.status_code == 200
     payload = resposta.json()
     assert payload["status"] == "agendada"
-    assert scheduled["args"] == (2025,)
-    assert scheduled["kwargs"] == {"force_reimport": True}
-    assert scheduled["task_id"] == payload["id_tarefa"]
+    assert payload["lote_id"]
     execucao = (
         db_session.query(ExecucaoSincronizacao)
         .filter(ExecucaoSincronizacao.id_tarefa == payload["id_tarefa"])
@@ -139,6 +141,11 @@ def test_admin_sincronizacao_vlmo_agenda_tarefa(
     assert execucao.tipo_fonte == "vlmo"
     assert execucao.ano == 2025
     assert execucao.status == "agendada"
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.status == "queued"
+    assert item.task_args == [2025]
+    assert item.task_kwargs == {"force_reimport": True}
+    assert str(item.batch_id) == payload["lote_id"]
 
 
 def test_admin_fontes_auditar_expoe_resposta_estruturada(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -313,7 +320,14 @@ def test_admin_reprocessar_arquivo_valida_registry_para_csv_e_zip(
     assert resposta_forcada.status_code == 200
     resposta_forcada_task_id = resposta_forcada.json()["tarefas"][0]["id_tarefa"]
     uuid.UUID(resposta_forcada_task_id)
-    assert resposta_forcada_task_id in {str(item["task_id"]) for item in published}
+    fila_reprocessamento = (
+        db_session.query(IngestionQueueItem)
+        .filter(IngestionQueueItem.task_id == resposta_forcada_task_id)
+        .one()
+    )
+    assert fila_reprocessamento.status == "queued"
+    assert fila_reprocessamento.kind == "zip_prepare"
+    assert published == []
 
 
 def test_admin_dashboard_quarentena_alteracoes(client: TestClient, db_session: Session) -> None:
@@ -399,6 +413,8 @@ def test_admin_dashboard_quarentena_alteracoes(client: TestClient, db_session: S
     resposta_dashboard = client.get("/ingestion/dashboard")
     assert resposta_dashboard.status_code == 200
     assert resposta_dashboard.json()["total_execucoes"] == 1
+    assert "total_quarentena_pendente" in resposta_dashboard.json()
+    assert "total_rejeitados" in resposta_dashboard.json()
 
     resposta_quarentena = client.get("/ingestion/quarentena")
     assert resposta_quarentena.status_code == 200
@@ -680,10 +696,21 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     rota_quarentena_resumo = payload["paths"]["/ingestion/quarentena/resumo"]["get"]
     rota_replay_run = payload["paths"]["/ingestion/runs/{run_id}/replay"]["post"]
     rota_recover_run = payload["paths"]["/ingestion/runs/{run_id}/recover"]["post"]
+    rota_queue = payload["paths"]["/ingestion/queue"]["get"]
     rota_identity = payload["paths"]["/ingestion/identity/rebuild"]["post"]
     rota_tudo = payload["paths"]["/ingestion/sincronizacoes/tudo/{ano}"]["post"]
     rota_stream = payload["paths"]["/ingestion/events/stream"]["get"]
     rota_acknowledge_failure = payload["paths"]["/ingestion/runs/{run_id}/acknowledge-failure"]["post"]
+    rota_replay_sincronizacao = payload["paths"]["/ingestion/sincronizacoes/{id_execucao}/replay"]["post"]
+
+    assert rota_replay_sincronizacao["operationId"] == "replaySincronizacaoAdmin"
+    assert rota_replay_sincronizacao["summary"] == "Executar replay de execucao de sincronizacao"
+    resposta_sem_fonte = rota_replay_sincronizacao["responses"]["409"]
+    assert "IngestionFile" in resposta_sem_fonte["description"]
+    assert (
+        resposta_sem_fonte["content"]["application/json"]["example"]["detail"]["next_action"]
+        == "replay_parent_execution"
+    )
 
     assert rota_runs["summary"] == "Listar Runs de Ingestion"
     assert rota_run_phases["summary"] == "Listar fases de uma run de ingestion"
@@ -706,7 +733,11 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     assert rota_quarentena_resumo["summary"] == "Resumo Analítico da Quarentena"
     assert "status" in rota_quarentena_resumo["description"]
     assert rota_replay_run["summary"] == "Reprocessar Run de Ingestion"
-    assert "recovery_dispatch_failed" in rota_recover_run["responses"]["503"]["content"]["application/json"]["examples"]
+    assert "lote_id" in rota_recover_run["description"]
+    assert "reconciliacao periodica" in rota_recover_run["description"]
+    assert rota_recover_run["responses"]["503"]["content"]["application/json"]["example"]["detail"]["reason_code"] == "DATABASE_POOL_EXHAUSTED"
+    assert rota_queue["operationId"] == "listarFilaIngestionAdmin"
+    assert "reservados" in rota_queue["description"]
     assert rota_identity["summary"] == "Reconstruir Identidade de Ingestion"
     assert rota_runs["operationId"] == "listarIngestionRunsAdmin"
     assert rota_runs["responses"]["503"]["content"]["application/json"]["example"]["detail"] == {
@@ -728,6 +759,7 @@ def test_openapi_documenta_admin_ingestion(client: TestClient) -> None:
     esquema_resumo_quarentena = payload["components"]["schemas"]["QuarentenaResumoResposta"]
 
     assert "quality_summary" in esquema_run["properties"]
+    assert "admissao global" in esquema_run["properties"]["status"]["description"]
     assert "artifact_snapshot" in esquema_run["properties"]
     assert "member_snapshot_summary" in esquema_run["properties"]
     assert "delivery_snapshot_summary" in esquema_run["properties"]
@@ -901,7 +933,7 @@ def test_admin_runs_expoem_estado_operacional_e_fases(client: TestClient, db_ses
     assert run_payload["liveness"]["is_stale"] is True
     assert run_payload["blocking"]["reason_code"] == "stale"
     assert run_payload["cancellation"]["status"] == "propagated"
-    assert run_payload["next_action"] == "inspect_error"
+    assert run_payload["next_action"] == "recover"
     assert run_payload["links"]["run_phases"] == f"/ingestion/runs/{run_id}/phases"
 
     resposta_run = client.get(f"/ingestion/runs/{run_id}")
@@ -1090,23 +1122,66 @@ def test_admin_run_members_e_operations_expoem_snapshot_operacional(
     assert payload["materialization_gate"]["status"] in {"green", "red"}
 
 
+def test_admin_operations_resiliente_quando_broker_indisponivel(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_inspect(timeout: float = 1.0) -> Any:
+        raise ConnectionError("Error -2 connecting to cvm_redis:6379. Name or service not known.")
+
+    monkeypatch.setattr("app.api.routers.admin.celery_app.control.inspect", _fail_inspect)
+
+    resposta = client.get("/ingestion/operations")
+    assert resposta.status_code == 200
+    payload = resposta.json()
+    assert payload["task_counts"]["active_total"] == 0
+    assert payload["task_counts"]["ingestion_active"] == 0
+    assert all(q["state"] == "without_worker" for q in payload["queue_health"])
+
+
 def test_admin_run_failed_retryable_expoe_next_action_recover(client: TestClient, db_session: Session) -> None:
     agora = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     execucao_id = uuid.uuid4()
     run_id = uuid.uuid4()
-    db_session.add(
-        ExecucaoSincronizacao(
-            id=execucao_id,
-            parent_execucao_id=uuid.uuid4(),
-            tipo_fonte="itr",
-            ano=2026,
-            arquivo="itr_cia_aberta_2026.zip",
-            url="http://exemplo/itr-2026",
-            status="falha",
-            tipo_execucao="arquivo_zip",
-            mensagem_erro="falha recuperavel",
-            finalizada_em=agora,
-        )
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                arquivo="itr_cia_aberta_2026.zip",
+                url="http://exemplo/itr-2026",
+                status="sucesso",
+                tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2026",
+                source_filename="itr_cia_aberta_2026.zip",
+                content_sha256="a" * 64,
+                content_length_bytes=1,
+                is_zip=True,
+            ),
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2026,
+                arquivo="itr_cia_aberta_DRE_ind_2026.csv",
+                url="http://exemplo/itr-2026",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                mensagem_erro="falha recuperavel",
+                finalizada_em=agora,
+            ),
+        ]
     )
     db_session.add(
         IngestionRun(
@@ -1366,26 +1441,35 @@ def test_admin_run_cancel_member_cancel_e_recover(
     assert resposta_recover.json()["detalhe"]["status"] == "replayed"
 
 
-def test_admin_pre_processar_cadastro_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routers.admin.pre_processar_sincronizacao_task.delay",
-        lambda tipo_fonte, force_reimport: SimpleNamespace(id=f"task-preprocess-{tipo_fonte}-{force_reimport}"),
-    )
-
+def test_admin_pre_processar_cadastro_agenda_tarefa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     resposta = client.post("/ingestion/sincronizacoes/pre-processar/cadastro?force_reimport=true")
     assert resposta.status_code == 200
-    assert resposta.json() == {"id_tarefa": "task-preprocess-cadastro-True", "status": "agendada"}
+    payload = resposta.json()
+    assert payload["status"] == "agendada"
+    assert payload["lote_id"]
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.kind == "cadastro"
+    assert item.task_kwargs == {"tipo_fonte": "cadastro", "force_reimport": True}
 
 
-def test_admin_pre_processar_fonte_anual_agenda_tarefa(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        "app.api.routers.admin.pre_processar_sincronizacao_task.delay",
-        lambda tipo_fonte, ano, force_reimport: SimpleNamespace(id=f"task-preprocess-{tipo_fonte}-{ano}-{force_reimport}"),
-    )
-
+def test_admin_pre_processar_fonte_anual_agenda_tarefa(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     resposta = client.post("/ingestion/sincronizacoes/pre-processar/dfp/2025?force_reimport=true")
     assert resposta.status_code == 200
-    assert resposta.json() == {"id_tarefa": "task-preprocess-dfp-2025-True", "status": "agendada"}
+    payload = resposta.json()
+    assert payload["status"] == "agendada"
+    item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert item.kind == "zip_prepare"
+    assert item.task_kwargs == {"tipo_fonte": "dfp", "ano": 2025, "force_reimport": True}
 
     # Unsupported source path
     resposta_invalid = client.post("/ingestion/sincronizacoes/pre-processar/invalid_source/2025")
@@ -1395,6 +1479,7 @@ def test_admin_pre_processar_fonte_anual_agenda_tarefa(client: TestClient, monke
 def test_admin_ingerir_fonte_pre_processada_route(
     client: TestClient, monkeypatch: pytest.MonkeyPatch, db_session: Session
 ) -> None:
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", lambda: None)
     exec_uuid = uuid.uuid4()
     # 1. Non-existent execution
     resposta_404 = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir")
@@ -1428,7 +1513,12 @@ def test_admin_ingerir_fonte_pre_processada_route(
 
     resposta_ok = client.post(f"/ingestion/sincronizacoes/{exec_uuid}/ingerir?force_reimport=true")
     assert resposta_ok.status_code == 200
-    assert resposta_ok.json() == {"id_tarefa": f"task-ingest-{exec_uuid}-True", "status": "agendada"}
+    payload = resposta_ok.json()
+    assert payload["status"] == "agendada"
+    assert payload["lote_id"]
+    queue_item = db_session.query(IngestionQueueItem).filter_by(task_id=payload["id_tarefa"]).one()
+    assert queue_item.kind == "continuation"
+    assert queue_item.task_kwargs == {"execucao_id": str(exec_uuid), "force_reimport": True}
 
 
 def test_admin_run_waiting_expoe_start_ingestion_com_execucao_correlata(
@@ -1487,6 +1577,7 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
 ) -> None:
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     run_id = uuid.uuid4()
     db_session.add_all(
         [
@@ -1498,6 +1589,22 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
                 url="http://exemplo/itr-2022",
                 status="falha",
                 tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2022",
+                source_filename="itr_cia_aberta_2022.zip",
+                content_sha256="b" * 64,
+                content_length_bytes=1,
+                is_zip=True,
             ),
             ExecucaoSincronizacao(
                 id=child_id,
@@ -1535,13 +1642,14 @@ def test_admin_run_waiting_member_of_failed_parent_allows_recover(
     assert recover.json()["detalhe"]["strategy"] == "rerun_member_execution"
 
 
-def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
+def test_admin_recovery_persists_queue_item_when_dispatch_signal_fails(
     client: TestClient,
     db_session: Session,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     parent_id = uuid.uuid4()
     child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
     run_id = uuid.uuid4()
     db_session.add_all(
         [
@@ -1553,6 +1661,22 @@ def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
                 url="http://exemplo/itr-2021",
                 status="falha",
                 tipo_execucao="arquivo_zip",
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="sucesso",
+                phase="complete",
+            ),
+            IngestionFile(
+                ingestion_run_id=parent_run_id,
+                source_url="http://exemplo/itr-2021",
+                source_filename="itr_cia_aberta_2021.zip",
+                content_sha256="c" * 64,
+                content_length_bytes=1,
+                is_zip=True,
             ),
             ExecucaoSincronizacao(
                 id=child_id,
@@ -1582,36 +1706,21 @@ def test_admin_recovery_dispatch_failure_becomes_terminal_and_non_retryable(
             "The Celery application must be restarted."
         )
 
-    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", _dispatch_indisponivel)
+    monkeypatch.setattr("app.worker.tasks.despachar_fila_ingestao_task.delay", _dispatch_indisponivel)
 
     recover = client.post(f"/ingestion/runs/{run_id}/recover")
-    assert recover.status_code == 503
-    assert recover.json()["detail"] == {
-        "reason_code": "RECOVERY_DISPATCH_FAILED",
-        "retryable": False,
-        "run_id": str(run_id),
-    }
+    assert recover.status_code == 200
+    assert recover.json()["status"] == "agendada"
+    task_id = recover.json()["detalhe"]["task_id"]
+    assert recover.json()["lote_id"]
+    queue_item = db_session.query(IngestionQueueItem).filter_by(task_id=task_id).one()
+    assert queue_item.status == "queued"
+    assert queue_item.kind == "csv"
 
     detalhe = client.get(f"/ingestion/runs/{run_id}")
     assert detalhe.status_code == 200
-    assert detalhe.json()["state"] == "failed"
-    assert detalhe.json()["next_action"] == "inspect_error"
-    assert detalhe.json()["recovery"] == {
-        "eligible": False,
-        "strategy": None,
-        "reason_code": "NON_RETRYABLE_FAILURE",
-    }
-    assert detalhe.json()["last_error"]["retryable"] is False
-    assert "Celery result store backend" in detalhe.json()["last_error"]["error_message"]
-
-    phases = client.get(f"/ingestion/runs/{run_id}/phases")
-    assert phases.status_code == 200
-    assert phases.json()["dados"][-1]["status"] == "failed_final"
-    assert phases.json()["dados"][-1]["error_retryable"] is False
-
-    operations = client.get("/ingestion/operations")
-    assert operations.status_code == 200
-    assert all(item["id"] != str(run_id) for item in operations.json()["recoverable_runs"])
+    assert detalhe.json()["state"] != "failed"
+    assert detalhe.json()["next_action"] == "wait"
 
 
 def test_admin_legacy_recovery_dispatch_failure_ignores_old_retryable_phase(
@@ -1878,3 +1987,670 @@ def test_admin_run_concluida_com_execucao_filha_nao_expoe_recovery(
     recover = client.post(f"/ingestion/runs/{run_id}/recover")
     assert recover.status_code == 409
     assert recover.json()["detail"]["reason_code"] == "RUN_ALREADY_COMPLETED"
+
+
+def test_ingestion_runs_superseded_detection_and_cleanup_endpoint(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    old_child_id = uuid.uuid4()
+    old_run_id = uuid.uuid4()
+    new_child_id = uuid.uuid4()
+    new_run_id = uuid.uuid4()
+
+    # Old failed execution
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=old_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DRE_ind_2024.csv",
+                url="http://exemplo/itr-2024/dre",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now - timedelta(hours=2),
+                finalizada_em=now - timedelta(hours=2),
+                mensagem_erro="Falha temporaria de download.",
+            ),
+            IngestionRun(
+                id=old_run_id,
+                execucao_sincronizacao_id=old_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="falha",
+                phase="stage",
+                started_at=now - timedelta(hours=2),
+                message="Falha temporaria de download.",
+            ),
+            # Newer successful execution for the same file
+            ExecucaoSincronizacao(
+                id=new_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                arquivo="itr_cia_aberta_DRE_ind_2024.csv",
+                url="http://exemplo/itr-2024/dre",
+                status="sucesso",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now - timedelta(minutes=10),
+                finalizada_em=now - timedelta(minutes=5),
+            ),
+            IngestionRun(
+                id=new_run_id,
+                execucao_sincronizacao_id=new_child_id,
+                tipo_fonte="itr",
+                ano=2024,
+                status="sucesso",
+                phase="complete",
+                started_at=now - timedelta(minutes=10),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # 1. Detail old run: must be marked superseded with next_action=none
+    res_old = client.get(f"/ingestion/runs/{old_run_id}")
+    assert res_old.status_code == 200
+    old_payload = res_old.json()
+    assert old_payload["superseded"] is True
+    assert old_payload["superseded_by"] is not None
+    assert old_payload["superseded_by"]["run_id"] == str(new_run_id)
+    assert old_payload["superseded_by"]["status"] == "sucesso"
+    assert old_payload["next_action"] == "none"
+
+    # 2. Querying with next_action=inspect_error must NOT return the superseded run
+    res_list = client.get("/ingestion/runs?next_action=inspect_error")
+    assert res_list.status_code == 200
+    ids_returned = [r["id"] for r in res_list.json()["dados"]]
+    assert str(old_run_id) not in ids_returned
+
+    # 3. Call cleanup-superseded endpoint
+    res_cleanup = client.post("/ingestion/runs/cleanup-superseded")
+    assert res_cleanup.status_code == 200
+    cleanup_payload = res_cleanup.json()
+    assert cleanup_payload["status"] == "sucesso"
+    assert cleanup_payload["total_superseded_cleaned"] >= 1
+    assert any(c["run_id"] == str(old_run_id) for c in cleanup_payload["cleaned_runs"])
+
+    # 4. Detail old run again: failure_acknowledgement is now present
+    res_old_after = client.get(f"/ingestion/runs/{old_run_id}")
+    assert res_old_after.status_code == 200
+    assert res_old_after.json()["failure_acknowledgement"] is not None
+
+
+def test_admin_parent_execution_failed_allows_recover_with_rerun_parent_execution(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                tipo_fonte="dfp",
+                ano=2021,
+                arquivo="dfp_cia_aberta_2021.zip",
+                url="http://exemplo/dfp-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                mensagem_erro="Timeout ao baixar arquivo CVM",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=execucao_id,
+                tipo_fonte="dfp",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+                message="Timeout ao baixar arquivo CVM",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # 1. Detail run: next_action should be 'recover' with strategy 'rerun_parent_execution'
+    res_run = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run.status_code == 200
+    payload = res_run.json()
+    assert payload["state"] == "failed"
+    assert payload["next_action"] == "recover"
+    assert payload["recovery"]["eligible"] is True
+    assert payload["recovery"]["strategy"] == "rerun_parent_execution"
+
+    # 2. Mock Celery apply_async on sincronizar_dfp_task
+    dispatched_args: dict[str, Any] = {}
+
+    def dummy_apply_async(*args: Any, **kwargs: Any) -> Any:
+        dispatched_args.update(kwargs)
+        return type("DummyAsyncResult", (), {"id": kwargs.get("task_id", "dummy-task-id")})()
+
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_dfp_task.apply_async", dummy_apply_async)
+
+    # 3. Recover the run
+    res_recover = client.post(f"/ingestion/runs/{run_id}/recover")
+    assert res_recover.status_code == 200
+    recover_payload = res_recover.json()
+    assert recover_payload["status"] == "agendada"
+    assert recover_payload["detalhe"]["strategy"] == "rerun_parent_execution"
+
+
+def test_admin_sincronizacao_replay_endpoint_parent_and_member(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_2021.zip",
+                url="http://exemplo/itr-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2021,
+                arquivo="itr_cia_aberta_BPA_ind_2021.csv",
+                url="http://exemplo/itr-2021/bpa",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2021,
+                status="falha",
+                phase="stage",
+                started_at=now,
+            ),
+        ]
+    )
+    db_session.add(
+        IngestionFile(
+            ingestion_run_id=parent_run_id,
+            source_url="http://exemplo/itr-2021",
+            source_filename="itr_cia_aberta_2021.zip",
+            content_sha256="d" * 64,
+            content_length_bytes=1,
+            is_zip=True,
+        )
+    )
+    db_session.commit()
+
+    # Verify links in GET /ingestion/sincronizacoes/{id}
+    res_parent_detail = client.get(f"/ingestion/sincronizacoes/{parent_id}")
+    assert res_parent_detail.status_code == 200
+    assert res_parent_detail.json()["links"]["replay"] == f"/ingestion/sincronizacoes/{parent_id}/replay"
+
+    # Mock Celery tasks
+    monkeypatch.setattr("app.api.routers.admin.sincronizar_itr_task.apply_async", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.worker.tasks.sincronizar_member_task.apply_async", lambda *args, **kwargs: None)
+
+    # Replay parent execution
+    res_replay_parent = client.post(f"/ingestion/sincronizacoes/{parent_id}/replay")
+    assert res_replay_parent.status_code == 200
+    assert res_replay_parent.json()["status"] == "agendada"
+    assert res_replay_parent.json()["detalhe"]["strategy"] == "rerun_parent_execution"
+
+    # Replay child execution
+    res_replay_child = client.post(f"/ingestion/sincronizacoes/{child_id}/replay")
+    assert res_replay_child.status_code == 200
+    assert res_replay_child.json()["status"] == "agendada"
+    assert res_replay_child.json()["detalhe"]["strategy"] == "rerun_member_execution"
+
+
+def test_admin_sincronizacao_member_replay_requer_arquivo_pai_persistido(
+    client: TestClient,
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_2023.zip",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2023,
+                arquivo="itr_cia_aberta_DMPL_ind_2023.csv",
+                url="http://exemplo/itr-2023",
+                status="falha",
+                tipo_execucao="arquivo_membro",
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2023,
+                status="falha",
+                phase="complete",
+            ),
+        ]
+    )
+    db_session.commit()
+    monkeypatch.setattr(
+        "app.worker.tasks.sincronizar_member_task.apply_async",
+        lambda **kwargs: pytest.fail("nao deve agendar replay sem arquivo pai"),
+    )
+
+    response = client.post(f"/ingestion/sincronizacoes/{child_id}/replay")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "reason_code": "NO_RECOVERY_SOURCE",
+        "next_action": "replay_parent_execution",
+        "parent_execucao_id": str(parent_id),
+    }
+    child = db_session.get(ExecucaoSincronizacao, child_id)
+    assert child is not None
+    db_session.refresh(child)
+    assert child.status == "falha"
+
+
+def test_admin_run_acknowledge_failure_when_next_action_recover(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    execucao_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=execucao_id,
+                tipo_fonte="fre",
+                ano=2021,
+                arquivo="fre_cia_aberta_2021.zip",
+                url="http://exemplo/fre-2021",
+                status="falha",
+                tipo_execucao="arquivo_zip",
+                mensagem_erro="Falha transitoria",
+                finalizada_em=now,
+            ),
+            IngestionRun(
+                id=run_id,
+                execucao_sincronizacao_id=execucao_id,
+                tipo_fonte="fre",
+                ano=2021,
+                status="falha",
+                phase="download",
+                started_at=now,
+                message="Falha transitoria",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    # Pre-check: next_action is recover
+    res_run = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run.status_code == 200
+    assert res_run.json()["next_action"] == "recover"
+
+    # Operator acknowledges the failure
+    res_ack = client.post(
+        f"/ingestion/runs/{run_id}/acknowledge-failure",
+        json={"reason": "Investigado e descartado manualmente pelo operador."},
+    )
+    assert res_ack.status_code == 200
+    ack_data = res_ack.json()
+    assert ack_data["reason"] == "Investigado e descartado manualmente pelo operador."
+
+    # Post-check: failure acknowledged, next_action transitions to 'none'
+    res_run_after = client.get(f"/ingestion/runs/{run_id}")
+    assert res_run_after.status_code == 200
+    assert res_run_after.json()["next_action"] == "none"
+    assert res_run_after.json()["failure_acknowledgement"] is not None
+
+
+def test_admin_child_waiting_for_active_parent_reports_wait_not_operator_action(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    now = datetime.now(UTC)
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    db_session.add_all(
+        [
+            ExecucaoSincronizacao(
+                id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_2022.zip",
+                url="http://exemplo/itr-2022.zip",
+                status="em_execucao",
+                tipo_execucao="arquivo_zip",
+                iniciada_em=now,
+            ),
+            IngestionRun(
+                id=parent_run_id,
+                execucao_sincronizacao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="em_execucao",
+                phase="process_members",
+                started_at=now,
+            ),
+            ExecucaoSincronizacao(
+                id=child_id,
+                parent_execucao_id=parent_id,
+                tipo_fonte="itr",
+                ano=2022,
+                arquivo="itr_cia_aberta_BPA_con_2022.csv",
+                url="http://exemplo/itr-2022/bpa",
+                status="aguardando_ingestao",
+                tipo_execucao="arquivo_membro",
+                iniciada_em=now,
+            ),
+            IngestionRun(
+                id=child_run_id,
+                execucao_sincronizacao_id=child_id,
+                tipo_fonte="itr",
+                ano=2022,
+                status="aguardando_ingestao",
+                phase="stage",
+                started_at=now,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    res_child_run = client.get(f"/ingestion/runs/{child_run_id}")
+    assert res_child_run.status_code == 200
+    child_run_payload = res_child_run.json()
+    assert child_run_payload["next_action"] == "wait"
+    assert child_run_payload["blocking"]["reason_code"] == "awaiting_parent_window"
+    assert "start_ingestion" not in child_run_payload["links"]
+
+    res_child_exec = client.get(f"/ingestion/sincronizacoes/{child_id}")
+    assert res_child_exec.status_code == 200
+    child_exec_payload = res_child_exec.json()
+    assert child_exec_payload["next_action"] == "wait"
+    assert child_exec_payload["blocking"]["reason_code"] == "awaiting_parent_window"
+
+    res_ops = client.get("/ingestion/operations?ano=2022")
+    assert res_ops.status_code == 200
+    ops_payload = res_ops.json()
+    assert ops_payload["waiting_for_operator_count"] == 0
+    assert ops_payload["recoverable_runs"] == []
+    assert ops_payload["action_counts"].get("start_ingestion", 0) == 0
+
+
+def test_obter_timeline_member_retorna_404_para_membro_desconhecido(client: TestClient) -> None:
+    res = client.get("/ingestion/members/arquivo_desconhecido_totalmente_inexistente.csv/timeline")
+    assert res.status_code == 404
+    assert "nao encontrado" in res.json()["detail"]
+
+
+def test_obter_timeline_member_sucesso(client: TestClient, db_session: Session) -> None:
+    from app.updates.models import PendingUpdate, PendingUpdateMember
+
+    now = datetime.now(UTC)
+    member_name = "fre_cia_aberta_auditor_responsavel_2021.csv"
+    parent_id = uuid.uuid4()
+    parent_run_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child_run_id = uuid.uuid4()
+
+    parent_exec = ExecucaoSincronizacao(
+        id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        arquivo="fre_cia_aberta_2021.zip",
+        url="http://exemplo/fre-2021.zip",
+        status="sucesso",
+        tipo_execucao="arquivo_zip",
+        iniciada_em=now - timedelta(minutes=10),
+        finalizada_em=now - timedelta(minutes=5),
+    )
+    parent_run = IngestionRun(
+        id=parent_run_id,
+        execucao_sincronizacao_id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        status="sucesso",
+        phase="complete",
+        started_at=now - timedelta(minutes=10),
+        finished_at=now - timedelta(minutes=5),
+    )
+    child_exec = ExecucaoSincronizacao(
+        id=child_id,
+        parent_execucao_id=parent_id,
+        tipo_fonte="fre",
+        ano=2021,
+        arquivo=member_name,
+        url="http://exemplo/fre-2021/auditor",
+        status="sucesso",
+        tipo_execucao="arquivo_membro",
+        hash_arquivo="abc123sha256",
+        iniciada_em=now - timedelta(minutes=8),
+        finalizada_em=now - timedelta(minutes=6),
+        total_linhas_lidas=150,
+        total_inseridos=100,
+        total_atualizados=40,
+        total_inalterados=5,
+        total_rejeitados=5,
+    )
+    child_run = IngestionRun(
+        id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        tipo_fonte="fre",
+        ano=2021,
+        status="sucesso",
+        phase="complete",
+        started_at=now - timedelta(minutes=8),
+        finished_at=now - timedelta(minutes=6),
+        quality_summary={"rows_read": 150, "rows_promoted": 140},
+    )
+    phase1 = IngestionPhaseExecution(
+        ingestion_run_id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        phase="stage",
+        status="succeeded",
+        attempt=1,
+        task_id="celery-task-1",
+        lease_owner="worker-1",
+        started_at=now - timedelta(minutes=8),
+        finished_at=now - timedelta(minutes=7),
+    )
+    phase2 = IngestionPhaseExecution(
+        ingestion_run_id=child_run_id,
+        execucao_sincronizacao_id=child_id,
+        phase="promote",
+        status="succeeded",
+        attempt=1,
+        task_id="celery-task-1",
+        lease_owner="worker-1",
+        started_at=now - timedelta(minutes=7),
+        finished_at=now - timedelta(minutes=6),
+    )
+
+    art_snap = SourceArtifactSnapshot(
+        id=uuid.uuid4(),
+        ingestion_run_id=parent_run_id,
+        tipo_fonte="fre",
+        ano=2021,
+        resource_url="http://exemplo/fre-2021.zip",
+        source_filename="fre_cia_aberta_2021.zip",
+        storage_uri="/storage/fre_2021.zip",
+        content_sha256="zipsha256",
+        status="sucesso",
+    )
+    mem_snap = SourceMemberSnapshot(
+        id=uuid.uuid4(),
+        artifact_snapshot_id=art_snap.id,
+        member_name=member_name,
+        member_sha256="abc123sha256",
+        raw_artifact_size_bytes=10240,
+        row_count=150,
+        schema_status="ok",
+        lifecycle_status="processed",
+        raw_artifact_uri="/storage/raw/fre_auditor.csv",
+        normalized_artifact_uri="/storage/norm/fre_auditor.csv",
+    )
+
+    pending_update = PendingUpdate(
+        id=uuid.uuid4(),
+        fonte="fre",
+        ano=2021,
+        status="applied",
+        artifact_url="http://exemplo/fre-2021.zip",
+        detection_timestamp=now - timedelta(days=1),
+    )
+    pending_member = PendingUpdateMember(
+        id=uuid.uuid4(),
+        pending_update_id=pending_update.id,
+        member_name=member_name,
+        change_category="modified",
+        previous_member_sha256="oldsha123",
+        current_member_sha256="abc123sha256",
+        previous_row_count=145,
+        current_row_count=150,
+        status="applied",
+    )
+
+    ing_file = IngestionFile(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        source_url="http://exemplo/fre-2021.zip",
+        source_filename="fre_cia_aberta_2021.zip",
+        content_sha256="zipsha256",
+        content_length_bytes=10240,
+    )
+    file_member = IngestionFileMember(
+        id=uuid.uuid4(),
+        ingestion_file_id=ing_file.id,
+        member_name=member_name,
+        member_sha256="abc123sha256",
+        member_size_bytes=10240,
+        delimiter=";",
+        row_count=150,
+        schema_status="ok",
+    )
+
+    row = IngestionRow(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        ingestion_file_member_id=file_member.id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+        linha_origem=42,
+        row_kind="fre_auditor_responsavel",
+        raw_data={"NOME": "Auditor Teste"},
+        raw_hash="rawhash123",
+        validation_status="invalid",
+    )
+    quarantine_item = QuarantineItem(
+        id=uuid.uuid4(),
+        ingestion_run_id=child_run_id,
+        ingestion_row_id=row.id,
+        execucao_sincronizacao_id=child_id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+        linha_origem=42,
+        row_kind="fre_auditor_responsavel",
+        status="pendente",
+        motivo_codigo="companhia_nao_encontrada",
+        severidade="error",
+        reparavel=True,
+    )
+    hist_alteracao = HistoricoAlteracaoCampo(
+        id=uuid.uuid4(),
+        entidade="fre_auditor",
+        entidade_id=uuid.uuid4(),
+        campo="nome_auditor",
+        valor_anterior="Nome Antigo",
+        valor_novo="Nome Novo",
+        execucao_sincronizacao_id=child_id,
+        arquivo_origem=member_name,
+        ano_origem=2021,
+    )
+
+    db_session.add_all([
+        parent_exec, parent_run, child_exec, child_run, phase1, phase2,
+        art_snap, mem_snap, pending_update, pending_member,
+        ing_file, file_member, row, quarantine_item, hist_alteracao,
+    ])
+    db_session.commit()
+
+    res = client.get(f"/ingestion/members/{member_name}/timeline")
+    assert res.status_code == 200
+    data = res.json()
+
+    assert data["member_name"] == member_name
+    assert data["tipo_fonte"] == "fre"
+    assert data["ano"] == 2021
+    assert data["dataset"] is not None
+    assert data["total_execucoes"] == 1
+    assert data["total_alteracoes_campo"] == 1
+
+    exec_item = data["execucoes"][0]
+    assert exec_item["id"] == str(child_id)
+    assert exec_item["parent_arquivo"] == "fre_cia_aberta_2021.zip"
+    assert exec_item["total_linhas_lidas"] == 150
+    assert exec_item["total_inseridos"] == 100
+    assert len(exec_item["phases"]) == 2
+    assert exec_item["phases"][0]["phase"] == "stage"
+
+    assert len(data["snapshots"]) >= 1
+    snap = data["snapshots"][0]
+    assert snap["member_sha256"] == "abc123sha256"
+    assert snap["lifecycle_status"] == "processed"
+    assert snap["raw_artifact_uri"] == "/storage/raw/fre_auditor.csv"
+
+    assert len(data["updates"]) == 1
+    up = data["updates"][0]
+    assert up["change_category"] == "modified"
+    assert up["previous_member_sha256"] == "oldsha123"
+
+    quar = data["quarentena"]
+    assert quar["total"] == 1
+    assert quar["total_pendentes"] == 1
+    assert len(quar["recent_items"]) == 1
+    assert quar["recent_items"][0]["motivo_codigo"] == "companhia_nao_encontrada"
+
+

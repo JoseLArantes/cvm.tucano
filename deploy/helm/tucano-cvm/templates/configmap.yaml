@@ -1,3 +1,8 @@
+{{- $workerCapacity := mul (int .Values.worker.replicaCount) (int .Values.worker.concurrency) -}}
+{{- $executionSlots := $workerCapacity -}}
+{{- if and (gt (int .Values.ingestion.executionSlots) 0) (lt (int .Values.ingestion.executionSlots) $workerCapacity) -}}
+{{- $executionSlots = int .Values.ingestion.executionSlots -}}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -5,6 +10,11 @@ metadata:
   labels:
     {{- include "tucano-cvm.labels" . | nindent 4 }}
 data:
-  {{- range $key, $value := .Values.env }}
+  INGESTION_EXECUTION_SLOTS: {{ $executionSlots | toString | quote }}
+  INGESTION_WORKER_CONCURRENCY: {{ .Values.worker.concurrency | toString | quote }}
+  INGESTION_CONTROL_WORKER_CONCURRENCY: {{ .Values.controlWorker.concurrency | toString | quote }}
+  {{ range $key, $value := .Values.env }}
+  {{ if and (ne $key "INGESTION_EXECUTION_SLOTS") (ne $key "INGESTION_WORKER_CONCURRENCY") (ne $key "INGESTION_CONTROL_WORKER_CONCURRENCY") }}
   {{ $key }}: {{ $value | quote }}
-  {{- end }}
+  {{ end }}
+  {{ end }}

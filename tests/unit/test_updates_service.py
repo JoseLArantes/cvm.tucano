@@ -786,8 +786,7 @@ def test_deep_analysis_cadastro_uses_previous_snapshot_without_false_added(
     assert [member.change_category for member in members] == ["unchanged", "unchanged"]
 
 
-@patch("app.worker.tasks.sincronizar_dfp_task.delay")
-def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Session) -> None:
+def test_trigger_and_discard_updates(db_session: Session) -> None:
     pending = PendingUpdate(
         fonte="dfp",
         ano=2025,
@@ -797,13 +796,19 @@ def test_trigger_and_discard_updates(mock_dfp_delay: MagicMock, db_session: Sess
     db_session.add(pending)
     db_session.commit()
 
-    # Trigger update
-    mock_dfp_delay.return_value = MagicMock(id="task-uuid-123")
+    # Trigger update. The queue stores intent before Celery receives an admitted stage.
     task_id = trigger_update(db_session, pending.id, user="tester")
     
-    assert task_id == "task-uuid-123"
+    from app.models.ingestion_queue import IngestionQueueItem
+
+    queue_item = db_session.scalar(
+        select(IngestionQueueItem).where(IngestionQueueItem.task_id == task_id)
+    )
+    assert queue_item is not None
+    assert queue_item.status == "queued"
+    assert queue_item.kind == "zip_prepare"
     assert pending.status == "triggered"
-    assert pending.ingestion_task_id == "task-uuid-123"
+    assert pending.ingestion_task_id == task_id
     assert pending.current_run_id is None
     assert pending.current_execution_id is None
     assert pending.resolved_by == "tester"

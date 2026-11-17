@@ -225,6 +225,17 @@ curl -X GET "http://localhost:8007/fca/valores-mobiliarios?codigo_cvm=25224&tipo
 | Parâmetro | Descrição |
 |-----------|-----------|
 | `tipo_valor_mobiliario` | Filtrar por tipo (ações, debêntures, etc.) |
+| `codigo_negociacao` | Código de negociação exato, sem diferenciar maiúsculas e minúsculas. |
+| `current` | Quando `true`, seleciona o documento FCA e a versão mais recentes por CNPJ antes de filtrar pelo ticker. Padrão `false`. |
+
+O filtro do ticker é uma igualdade exata, não uma busca por prefixo. Use `current=true` para resolver uma listagem corrente. Assim, um ticker presente apenas em uma versão FCA antiga não estabelece uma relação atual. Sem `codigo_negociacao` e `current`, a consulta mantém o comportamento histórico e retorna os documentos conforme os demais filtros.
+
+```bash
+curl -X GET "http://localhost:8007/fca/valores-mobiliarios?codigo_negociacao=bbas3&current=true" \
+  -H "Authorization: Bearer <token>"
+```
+
+Na resposta paginada, cada linha preserva CNPJ do emissor, `id`, `id_documento`, versão, data de referência, tipo do valor mobiliário, ticker, mercado, datas de início/fim da negociação e datas de início/fim da listagem. O cliente deve validar ticker, mercado, classe e intervalo antes de associar um emissor a um instrumento.
 
 ### Campos Principais
 
@@ -237,6 +248,8 @@ curl -X GET "http://localhost:8007/fca/valores-mobiliarios?codigo_cvm=25224&tipo
 | `entidade_administradora` | Entidade administradora |
 | `data_inicio_negociacao` | Início da negociação |
 | `data_fim_negociacao` | Fim da negociação |
+| `data_inicio_listagem` | Início da listagem |
+| `data_fim_listagem` | Fim da listagem |
 | `segmento` | Segmento de listagem |
 
 ### Ordenação Permitida

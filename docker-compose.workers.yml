@@ -3,7 +3,7 @@ services:
     build:
       context: .
       target: development
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=1 -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion},${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${WORKER_CONCURRENCY:-1} -Ofair -Q ${INGESTION_QUEUE_NAME:-ingestion}
     env_file:
       - .env
     mem_limit: ${WORKER_MEM_LIMIT:-4g}
@@ -11,8 +11,28 @@ services:
     cpus: ${WORKER_CPUS:-2.0}
     volumes:
       - .:/app
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data
     deploy:
-      replicas: ${WORKER_REPLICAS:-6}
+      replicas: ${WORKER_REPLICAS:-2}
+    depends_on:
+      cvm_redis:
+        condition: service_healthy
+
+  cvm_control_worker:
+    build:
+      context: .
+      target: development
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${INGESTION_CONTROL_WORKER_CONCURRENCY:-1} -Ofair -Q ${INGESTION_CONTROL_QUEUE_NAME:-ingestion_control},celery
+    env_file:
+      - .env
+    mem_limit: ${CONTROL_WORKER_MEM_LIMIT:-1g}
+    mem_reservation: ${CONTROL_WORKER_MEM_RESERVATION:-512m}
+    cpus: ${CONTROL_WORKER_CPUS:-1.0}
+    volumes:
+      - .:/app
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data
+    deploy:
+      replicas: ${CONTROL_WORKER_REPLICAS:-1}
     depends_on:
       cvm_redis:
         condition: service_healthy
@@ -21,7 +41,7 @@ services:
     build:
       context: .
       target: development
-    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=3 -Ofair -Q analise_materializacao
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${ANALISE_MATERIALIZACAO_WORKER_CONCURRENCY:-3} -Ofair -Q analise_materializacao
     env_file:
       - .env
     mem_limit: ${ANALISE_MATERIALIZACAO_WORKER_MEM_LIMIT:-2g}
@@ -29,6 +49,7 @@ services:
     cpus: ${ANALISE_MATERIALIZACAO_WORKER_CPUS:-2.0}
     volumes:
       - .:/app
+      - /Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data:/Volumes/Sandisk2Mac/TEMP_DATA_TUCANO/cvm_data
     deploy:
       replicas: ${ANALISE_MATERIALIZACAO_WORKER_REPLICAS:-3}
     depends_on:

@@ -168,6 +168,31 @@ def test_endpoints_fca(client: TestClient, db_session: Session) -> None:
     db_session.commit()
     _seed_fca(db_session, companhia.id)
 
+    for ticker in ("BBAS3", "BBAS4"):
+        db_session.add(
+            FcaValorMobiliario(
+                companhia_id=companhia.id,
+                cnpj_companhia="00000000000191",
+                data_referencia=date(2026, 1, 1),
+                versao=1,
+                id_documento=150000,
+                nome_empresarial="BCO BRASIL S.A.",
+                tipo_valor_mobiliario="Ações",
+                codigo_negociacao=ticker,
+                mercado="Bolsa",
+                entidade_administradora="B3 S.A.",
+                data_inicio_negociacao=date(2006, 5, 31),
+                arquivo_origem="fca_cia_aberta_2026.csv",
+                ano_origem=2026,
+                linha_origem=3,
+                hash_origem=f"hash-{ticker}",
+                criado_em=datetime.now(UTC),
+                sincronizado_em=datetime.now(UTC),
+                alterado_em=datetime.now(UTC),
+            )
+        )
+    db_session.commit()
+
     assert client.get("/fca/documentos?cnpj_companhia=00.000.000/0001-91").json()["paginacao"]["total"] == 1
     assert client.get("/fca/geral?codigo_cvm=1023").json()["paginacao"]["total"] == 1
     assert client.get("/fca/enderecos?tipo_endereco=Endereço%20da%20Sede").json()["paginacao"]["total"] == 1
@@ -181,6 +206,11 @@ def test_endpoints_fca(client: TestClient, db_session: Session) -> None:
         == 1
     )
     assert client.get("/fca/valores-mobiliarios?tipo_valor_mobiliario=Debenture").json()["paginacao"]["total"] == 0
+    assert client.get("/fca/valores-mobiliarios?codigo_negociacao=bbas3").json()["paginacao"]["total"] == 2
+    atual_bbas3 = client.get("/fca/valores-mobiliarios?codigo_negociacao=BBAS3&current=true").json()
+    assert atual_bbas3["paginacao"]["total"] == 1
+    assert atual_bbas3["dados"][0]["id_documento"] == 150000
+    assert client.get("/fca/valores-mobiliarios?codigo_negociacao=BBAS3&current=false").json()["paginacao"]["total"] == 2
     assert client.get("/fca/departamento-acionistas?contato=Equipe%20RI").json()["paginacao"]["total"] == 1
     assert client.get("/fca/departamento-acionistas?sigla_uf=RJ").json()["paginacao"]["total"] == 0
     assert client.get("/fca/documentos?ordenar_por=campo_invalido").status_code == 422

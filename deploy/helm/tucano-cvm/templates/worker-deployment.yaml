@@ -43,6 +43,8 @@ spec:
                 secretKeyRef:
                   name: {{ include "tucano-cvm.appSecretName" . }}
                   key: TUCANO_CVM_TOKEN
+            - name: INGESTION_WORKER_CONCURRENCY
+              value: {{ .Values.worker.concurrency | quote }}
             {{- range $key, $val := .Values.secretEnv }}
             - name: {{ $key }}
               valueFrom:

@@ -5,6 +5,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -176,7 +177,7 @@ def normalizar_linha_cadastro_aberta(
 
     endereco = _normalizar_endereco(row)
     responsavel = _normalizar_responsavel(row)
-    data = {
+    data: dict[str, Any] = {
         "fonte_cadastro": FONTE_CADASTRO_ABERTA,
         "arquivo_origem": arquivo_origem,
         "linha_origem": linha_origem,
@@ -194,6 +195,7 @@ def normalizar_linha_cadastro_aberta(
         "motivo_cancelamento": normalizar_texto(row.get("MOTIVO_CANCEL")),
         "data_inicio_situacao": normalizar_data(row.get("DT_INI_SIT")),
         "setor_atividade": normalizar_texto(row.get("SETOR_ATIV")),
+        "setor_atividade_origem": row.get("SETOR_ATIV"),
         "tipo_mercado": normalizar_tipo_mercado(row.get("TP_MERC")),
         "categoria_registro": normalizar_texto(row.get("CATEG_REG")),
         "data_inicio_categoria": normalizar_data(row.get("DT_INI_CATEG")),
@@ -236,7 +238,7 @@ def normalizar_linha_cadastro_estrangeira(
             details={"linha_origem": linha_origem},
         )
 
-    data = {
+    data: dict[str, Any] = {
         "fonte_cadastro": FONTE_CADASTRO_ESTRANGEIRA,
         "arquivo_origem": arquivo_origem,
         "linha_origem": linha_origem,
@@ -254,6 +256,7 @@ def normalizar_linha_cadastro_estrangeira(
         "motivo_cancelamento": normalizar_texto(row.get("MOTIVO_CANCEL")),
         "data_inicio_situacao": normalizar_data(row.get("DT_INI_SIT")),
         "setor_atividade": normalizar_texto(row.get("SETOR_ATIV")),
+        "setor_atividade_origem": row.get("SETOR_ATIV"),
         "tipo_mercado": None,
         "categoria_registro": normalizar_texto(row.get("CATEG_REG")),
         "data_inicio_categoria": normalizar_data(row.get("DT_INI_CATEG")),
@@ -300,9 +303,44 @@ def _chave_grupo_companhia(registro: dict[str, Any]) -> tuple[str, str]:
     return ("codigo_cvm", str(registro["codigo_cvm"]))
 
 
-def _buscar_companhia_existente(db: Session, registro: dict[str, Any]) -> Companhia | None:
+class CadastroBatchContext:
+    def __init__(self, db: Session) -> None:
+        companhias = list(db.execute(select(Companhia)).scalars())
+        self.comp_by_cnpj = {c.cnpj_companhia: c for c in companhias if c.cnpj_companhia}
+        self.comp_by_cvm = {c.codigo_cvm: c for c in companhias if c.codigo_cvm is not None}
+
+        registros = list(db.execute(select(CompanhiaRegistroCvm)).scalars())
+        self.reg_cache = {
+            (r.companhia_id, r.fonte_cadastro, r.cnpj_companhia, r.codigo_cvm): r
+            for r in registros
+        }
+
+        mercados = list(db.execute(select(CompanhiaMercado)).scalars())
+        self.mercado_cache = {
+            (m.companhia_registro_cvm_id, m.tipo_mercado): m
+            for m in mercados
+        }
+
+        identificadores = list(db.execute(select(CompanhiaIdentificador)).scalars())
+        self.ident_cache = {
+            (i.companhia_id, i.tipo, i.valor_normalizado, i.fonte): i
+            for i in identificadores
+        }
+
+
+def _buscar_companhia_existente(
+    db: Session,
+    registro: dict[str, Any],
+    ctx: CadastroBatchContext | None = None,
+) -> Companhia | None:
     cnpj = registro.get("cnpj_companhia")
     codigo_cvm = registro.get("codigo_cvm")
+    if ctx is not None:
+        if cnpj and cnpj in ctx.comp_by_cnpj:
+            return ctx.comp_by_cnpj[cnpj]
+        if codigo_cvm is not None and codigo_cvm in ctx.comp_by_cvm:
+            return ctx.comp_by_cvm[codigo_cvm]
+        return None
     filtros = []
     if cnpj is not None:
         filtros.append(Companhia.cnpj_companhia == cnpj)
@@ -313,11 +351,16 @@ def _buscar_companhia_existente(db: Session, registro: dict[str, Any]) -> Compan
     return db.scalar(select(Companhia).where(or_(*filtros)))
 
 
-def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companhia:
-    companhia = _buscar_companhia_existente(db, registro_canonico)
+def _upsert_companhia(
+    db: Session,
+    registro_canonico: dict[str, Any],
+    ctx: CadastroBatchContext | None = None,
+) -> Companhia:
+    companhia = _buscar_companhia_existente(db, registro_canonico, ctx=ctx)
     agora = _agora()
     if companhia is None:
         companhia = Companhia(
+            id=uuid.uuid4(),
             cnpj_companhia=registro_canonico.get("cnpj_companhia") or f"sem-cnpj-{registro_canonico['codigo_cvm']}",
             codigo_cvm=registro_canonico.get("codigo_cvm"),
             denominacao_social=registro_canonico.get("denominacao_social"),
@@ -352,6 +395,14 @@ def _upsert_companhia(db: Session, registro_canonico: dict[str, Any]) -> Companh
             sincronizado_em=agora,
             alterado_em=agora,
         )
+        if ctx is not None:
+            if companhia.cnpj_companhia:
+                ctx.comp_by_cnpj[companhia.cnpj_companhia] = companhia
+            if companhia.codigo_cvm is not None:
+                ctx.comp_by_cvm[companhia.codigo_cvm] = companhia
+            db.add(companhia)
+            return companhia
+
         from sqlalchemy.exc import IntegrityError
         try:
             with db.begin_nested():
@@ -412,28 +463,35 @@ def _upsert_registro_cvm(
     db: Session,
     companhia: Companhia,
     registro: dict[str, Any],
+    ctx: CadastroBatchContext | None = None,
 ) -> tuple[CompanhiaRegistroCvm, str]:
     cnpj_companhia = registro.get("cnpj_companhia")
     codigo_cvm = registro.get("codigo_cvm")
+    fonte = registro["fonte_cadastro"]
 
-    existente = db.scalar(
-        select(CompanhiaRegistroCvm).where(
-            CompanhiaRegistroCvm.companhia_id == companhia.id,
-            CompanhiaRegistroCvm.fonte_cadastro == registro["fonte_cadastro"],
-            CompanhiaRegistroCvm.cnpj_companhia.is_(None)
-            if cnpj_companhia is None
-            else CompanhiaRegistroCvm.cnpj_companhia == cnpj_companhia,
-            CompanhiaRegistroCvm.codigo_cvm.is_(None)
-            if codigo_cvm is None
-            else CompanhiaRegistroCvm.codigo_cvm == codigo_cvm,
+    existente: CompanhiaRegistroCvm | None = None
+    if ctx is not None:
+        existente = ctx.reg_cache.get((companhia.id, fonte, cnpj_companhia, codigo_cvm))
+    else:
+        existente = db.scalar(
+            select(CompanhiaRegistroCvm).where(
+                CompanhiaRegistroCvm.companhia_id == companhia.id,
+                CompanhiaRegistroCvm.fonte_cadastro == fonte,
+                CompanhiaRegistroCvm.cnpj_companhia.is_(None)
+                if cnpj_companhia is None
+                else CompanhiaRegistroCvm.cnpj_companhia == cnpj_companhia,
+                CompanhiaRegistroCvm.codigo_cvm.is_(None)
+                if codigo_cvm is None
+                else CompanhiaRegistroCvm.codigo_cvm == codigo_cvm,
+            )
         )
-    )
     if existente is None:
         existente = CompanhiaRegistroCvm(
+            id=uuid.uuid4(),
             companhia_id=companhia.id,
-            fonte_cadastro=registro["fonte_cadastro"],
-            cnpj_companhia=registro.get("cnpj_companhia"),
-            codigo_cvm=registro.get("codigo_cvm"),
+            fonte_cadastro=fonte,
+            cnpj_companhia=cnpj_companhia,
+            codigo_cvm=codigo_cvm,
             denominacao_social=registro.get("denominacao_social"),
             denominacao_comercial=registro.get("denominacao_comercial"),
             pais_origem=registro.get("pais_origem"),
@@ -458,8 +516,11 @@ def _upsert_registro_cvm(
             arquivo_origem=registro["arquivo_origem"],
             linha_origem=registro.get("linha_origem"),
         )
+        if ctx is not None:
+            ctx.reg_cache[(companhia.id, fonte, cnpj_companhia, codigo_cvm)] = existente
         db.add(existente)
-        db.flush()
+        if ctx is None:
+            db.flush()
         return existente, "inserted"
 
     houve_alteracao = any(
@@ -491,36 +552,47 @@ def _upsert_registro_cvm(
     return existente, "updated" if houve_alteracao else "unchanged"
 
 
-def _upsert_mercado(db: Session, registro_cvm: CompanhiaRegistroCvm, registro: dict[str, Any]) -> bool:
+def _upsert_mercado(
+    db: Session,
+    registro_cvm: CompanhiaRegistroCvm,
+    registro: dict[str, Any],
+    ctx: CadastroBatchContext | None = None,
+) -> bool:
     tipo_mercado = registro.get("tipo_mercado")
-    for pendente in db.new:
-        if (
-            isinstance(pendente, CompanhiaMercado)
-            and pendente.companhia_registro_cvm_id == registro_cvm.id
-            and pendente.tipo_mercado == tipo_mercado
-        ):
-            pendente.arquivo_origem = registro["arquivo_origem"]
-            pendente.linha_origem = registro.get("linha_origem")
-            pendente.hash_origem = registro["hash_origem"]
-            return False
-    existente = db.scalar(
-        select(CompanhiaMercado).where(
-            CompanhiaMercado.companhia_registro_cvm_id == registro_cvm.id,
-            CompanhiaMercado.tipo_mercado.is_(None)
-            if tipo_mercado is None
-            else CompanhiaMercado.tipo_mercado == tipo_mercado,
-        )
-    )
-    if existente is None:
-        db.add(
-            CompanhiaMercado(
-                companhia_registro_cvm_id=registro_cvm.id,
-                tipo_mercado=tipo_mercado,
-                arquivo_origem=registro["arquivo_origem"],
-                linha_origem=registro.get("linha_origem"),
-                hash_origem=registro["hash_origem"],
+    existente: CompanhiaMercado | None = None
+    if ctx is not None:
+        existente = ctx.mercado_cache.get((registro_cvm.id, tipo_mercado))
+    else:
+        for pendente in db.new:
+            if (
+                isinstance(pendente, CompanhiaMercado)
+                and pendente.companhia_registro_cvm_id == registro_cvm.id
+                and pendente.tipo_mercado == tipo_mercado
+            ):
+                pendente.arquivo_origem = registro["arquivo_origem"]
+                pendente.linha_origem = registro.get("linha_origem")
+                pendente.hash_origem = registro["hash_origem"]
+                return False
+        existente = db.scalar(
+            select(CompanhiaMercado).where(
+                CompanhiaMercado.companhia_registro_cvm_id == registro_cvm.id,
+                CompanhiaMercado.tipo_mercado.is_(None)
+                if tipo_mercado is None
+                else CompanhiaMercado.tipo_mercado == tipo_mercado,
             )
         )
+    if existente is None:
+        novo_mercado = CompanhiaMercado(
+            id=uuid.uuid4(),
+            companhia_registro_cvm_id=registro_cvm.id,
+            tipo_mercado=tipo_mercado,
+            arquivo_origem=registro["arquivo_origem"],
+            linha_origem=registro.get("linha_origem"),
+            hash_origem=registro["hash_origem"],
+        )
+        if ctx is not None:
+            ctx.mercado_cache[(registro_cvm.id, tipo_mercado)] = novo_mercado
+        db.add(novo_mercado)
         return True
     existente.arquivo_origem = registro["arquivo_origem"]
     existente.linha_origem = registro.get("linha_origem")
@@ -537,34 +609,48 @@ def _upsert_identificador(
     valor_normalizado: str,
     fonte: str,
     confianca: str = "alta",
+    ctx: CadastroBatchContext | None = None,
 ) -> None:
-    existente = db.scalar(
-        select(CompanhiaIdentificador).where(
-            CompanhiaIdentificador.companhia_id == companhia.id,
-            CompanhiaIdentificador.tipo == tipo,
-            CompanhiaIdentificador.valor_normalizado == valor_normalizado,
-            CompanhiaIdentificador.fonte == fonte,
-        )
-    )
-    if existente is None:
-        db.add(
-            CompanhiaIdentificador(
-                companhia_id=companhia.id,
-                tipo=tipo,
-                valor=valor,
-                valor_normalizado=valor_normalizado,
-                fonte=fonte,
-                confianca=confianca,
-                ativo=True,
+    existente: CompanhiaIdentificador | None = None
+    if ctx is not None:
+        existente = ctx.ident_cache.get((companhia.id, tipo, valor_normalizado, fonte))
+    else:
+        existente = db.scalar(
+            select(CompanhiaIdentificador).where(
+                CompanhiaIdentificador.companhia_id == companhia.id,
+                CompanhiaIdentificador.tipo == tipo,
+                CompanhiaIdentificador.valor_normalizado == valor_normalizado,
+                CompanhiaIdentificador.fonte == fonte,
             )
         )
-        db.flush()
+    if existente is None:
+        novo_ident = CompanhiaIdentificador(
+            id=uuid.uuid4(),
+            companhia_id=companhia.id,
+            tipo=tipo,
+            valor=valor,
+            valor_normalizado=valor_normalizado,
+            fonte=fonte,
+            confianca=confianca,
+            ativo=True,
+        )
+        if ctx is not None:
+            ctx.ident_cache[(companhia.id, tipo, valor_normalizado, fonte)] = novo_ident
+        db.add(novo_ident)
+        if ctx is None:
+            db.flush()
         return
     existente.ativo = True
     existente.confianca = confianca
 
 
-def gerar_identificadores_companhia(db: Session, *, companhia: Companhia, registros: Iterable[dict[str, Any]]) -> None:
+def gerar_identificadores_companhia(
+    db: Session,
+    *,
+    companhia: Companhia,
+    registros: Iterable[dict[str, Any]],
+    ctx: CadastroBatchContext | None = None,
+) -> None:
     for registro in registros:
         cnpj = registro.get("cnpj_companhia")
         codigo_cvm = registro.get("codigo_cvm")
@@ -576,6 +662,7 @@ def gerar_identificadores_companhia(db: Session, *, companhia: Companhia, regist
                 valor=cnpj,
                 valor_normalizado=cnpj,
                 fonte=registro["fonte_cadastro"],
+                ctx=ctx,
             )
         if codigo_cvm is not None:
             codigo_texto = str(codigo_cvm)
@@ -586,10 +673,18 @@ def gerar_identificadores_companhia(db: Session, *, companhia: Companhia, regist
                 valor=codigo_texto,
                 valor_normalizado=codigo_texto,
                 fonte=registro["fonte_cadastro"],
+                ctx=ctx,
             )
 
 
-def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]) -> dict[str, int]:
+def promover_registros_cadastro(
+    db: Session,
+    registros: Iterable[dict[str, Any]],
+    *,
+    referencia_fonte: str = "cadastro-companhias-cvm",
+    checksum_fonte: str | None = None,
+) -> dict[str, int]:
+    ctx = CadastroBatchContext(db)
     grupos: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for registro in registros:
         grupos.setdefault(_chave_grupo_companhia(registro), []).append(registro)
@@ -603,16 +698,37 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
         "atualizados": 0,
         "inalterados": 0,
     }
-    for registros_companhia in grupos.values():
+
+    # Fase 1: Upsert companhias e registros CVM
+    registros_cvm_por_grupo: dict[tuple[str, str], list[tuple[CompanhiaRegistroCvm, dict[str, Any], str]]] = {}
+    companhias_por_grupo: dict[tuple[str, str], Companhia] = {}
+    rotulos_originais_por_companhia: dict[uuid.UUID, str | None] = {}
+
+    for chave_grupo, registros_companhia in grupos.items():
         registro_canonico = selecionar_registro_canonico(registros_companhia)
-        companhia = _upsert_companhia(db, registro_canonico)
+        companhia = _upsert_companhia(db, registro_canonico, ctx=ctx)
+        companhias_por_grupo[chave_grupo] = companhia
+        if "setor_atividade_origem" in registro_canonico:
+            rotulos_originais_por_companhia[companhia.id] = registro_canonico.get("setor_atividade_origem")
         contadores["companhias"] += 1
+        regs: list[tuple[CompanhiaRegistroCvm, dict[str, Any], str]] = []
         for registro in registros_companhia:
-            registro_cvm, resultado_registro = _upsert_registro_cvm(db, companhia, registro)
+            registro_cvm, resultado_registro = _upsert_registro_cvm(db, companhia, registro, ctx=ctx)
             contadores["registros"] += 1
+            regs.append((registro_cvm, registro, resultado_registro))
+        registros_cvm_por_grupo[chave_grupo] = regs
+
+    # Flush intermediario para que todas as PKs de companhias e registros existam antes das FKs
+    db.flush()
+
+    # Fase 2: Upsert mercados e identificadores dependentes
+    for chave_grupo, registros_companhia in grupos.items():
+        companhia = companhias_por_grupo[chave_grupo]
+        regs = registros_cvm_por_grupo[chave_grupo]
+        for registro_cvm, registro, resultado_registro in regs:
             mercado_inserido = False
             if registro.get("tipo_mercado") is not None:
-                mercado_inserido = _upsert_mercado(db, registro_cvm, registro)
+                mercado_inserido = _upsert_mercado(db, registro_cvm, registro, ctx=ctx)
                 contadores["mercados"] += 1
             if resultado_registro == "inserted" or mercado_inserido:
                 contadores["inseridos"] += 1
@@ -620,7 +736,7 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
                 contadores["atualizados"] += 1
             else:
                 contadores["inalterados"] += 1
-        gerar_identificadores_companhia(db, companhia=companhia, registros=registros_companhia)
+        gerar_identificadores_companhia(db, companhia=companhia, registros=registros_companhia, ctx=ctx)
         contadores["identificadores"] += len(
             [
                 valor
@@ -629,7 +745,20 @@ def promover_registros_cadastro(db: Session, registros: Iterable[dict[str, Any]]
                 if valor is not None
             ]
         )
+
+    # Flush final para persistir mercados e identificadores
     db.flush()
+    # A classificação CVM acompanha a publicação do cadastro na mesma transação.
+    from app.services.setores import publicar_taxonomia_cvm
+
+    publicacao_setorial = publicar_taxonomia_cvm(
+        db,
+        referencia_fonte=referencia_fonte,
+        checksum_fonte=checksum_fonte,
+        rotulos_originais=rotulos_originais_por_companhia,
+    )
+    contadores["setores_publicados"] = int(bool(publicacao_setorial["publicada"]))
+    contadores["classificacoes_setoriais"] = int(publicacao_setorial["classificacoes_alteradas"])
     return contadores
 
 
@@ -644,6 +773,14 @@ def _download(url: str, *, timeout: float) -> bytes:
     response = httpx.get(url, timeout=timeout)
     response.raise_for_status()
     return response.content
+
+
+def _sha256_arquivo(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as arquivo:
+        for bloco in iter(lambda: arquivo.read(1024 * 1024), b""):
+            digest.update(bloco)
+    return digest.hexdigest()
 
 
 def _registrar_lifecycle_snapshots_cadastro(
@@ -701,8 +838,6 @@ def pre_processar_cadastro(
     downloader: Any | None = None,
     pending_update_id: str | None = None,
 ) -> dict[str, Any]:
-    from pathlib import Path
-
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
     from app.services.ingestion.file_manager import (
@@ -978,7 +1113,17 @@ def ingerir_cadastro(
                 continue
             normalizados.append(resultado.data)
 
-        contadores = promover_registros_cadastro(db, normalizados)
+        hash_abertas = _sha256_arquivo(dest_abertas)
+        hash_estrangeiras = _sha256_arquivo(dest_estrangeiras)
+        checksum_cadastro = hashlib.sha256(
+            f"{ARQUIVO_CADASTRO_ABERTA}:{hash_abertas}:{ARQUIVO_CADASTRO_ESTRANGEIRA}:{hash_estrangeiras}".encode()
+        ).hexdigest()
+        contadores = promover_registros_cadastro(
+            db,
+            normalizados,
+            referencia_fonte=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
+            checksum_fonte=checksum_cadastro,
+        )
 
         execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
         execucao.total_inseridos = contadores["inseridos"]
@@ -1009,6 +1154,8 @@ def ingerir_cadastro(
             "total_rejeitados": rejeitados,
             "total_companhias_promovidas": contadores["companhias"],
             "total_registros_promovidos": contadores["registros"],
+            "taxonomia_setorial_publicada": contadores["setores_publicados"],
+            "classificacoes_setoriais_alteradas": contadores["classificacoes_setoriais"],
         }
 
     except Exception as exc:

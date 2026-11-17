@@ -10,7 +10,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy import Select, select
+from sqlalchemy import ScalarResult, Select, select
 
 from app.api.deps import DbSession
 from app.models.cgvn import CgvnDocumento, CgvnPratica
@@ -192,7 +192,7 @@ class CustomEncoder(json.JSONEncoder):
 def generate_json(
     db: DbSession, query: Select[Any], Model: type[Any], columns: list[str]
 ) -> Generator[str, None, None]:
-    result = db.execute(query.execution_options(yield_per=1000)).scalars()
+    result: ScalarResult[Any] = db.execute(query.execution_options(yield_per=1000)).scalars()
     export_columns = colunas_exportacao(Model, columns)
     yield "[\n"
     first = True
@@ -222,7 +222,7 @@ def generate_json(
 
 
 def generate_csv(db: DbSession, query: Select[Any], Model: type[Any], columns: list[str]) -> Generator[str, None, None]:
-    result = db.execute(query.execution_options(yield_per=1000)).scalars()
+    result: ScalarResult[Any] = db.execute(query.execution_options(yield_per=1000)).scalars()
     output = io.StringIO()
     writer = csv.writer(output, delimiter=",", lineterminator="\n")
     export_columns = colunas_exportacao(Model, columns)

@@ -83,8 +83,17 @@ class CompanhiaResposta(BaseModel):
     motivo_cancelamento: str | None = Field(description="Motivo de cancelamento do registro, quando informado.")
     data_inicio_situacao: BrazilianDate | None = Field(description="Data de inicio da situacao atual do registro.")
     setor_atividade: str | None = Field(description="Setor de atividade informado pela CVM.")
+    setor_id: uuid.UUID | None = Field(
+        default=None,
+        description="UUID estável do setor na taxonomia selecionada; nulo quando não há classificação vigente.",
+    )
+    taxonomia_setorial: str | None = Field(
+        default=None,
+        description="Taxonomia usada para resolver `setor_id`, quando selecionada na consulta.",
+    )
     tipo_mercado: str | None = Field(description="Classificacao de mercado (ex.: Novo Mercado).")
     categoria_registro: str | None = Field(description="Categoria de registro do emissor.")
+    tipo_emissor: str | None = Field(default=None, description="Tipo de emissor cadastrado, quando informado.")
     data_inicio_categoria: BrazilianDate | None = Field(description="Data de inicio da categoria de registro atual.")
     situacao_emissor: str | None = Field(description="Situacao do emissor informada pela CVM.")
     data_inicio_situacao_emissor: BrazilianDate | None = Field(description="Data de inicio da situacao do emissor atual.")

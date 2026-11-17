@@ -9,6 +9,341 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-16 - Filtro Exato e Resolução Atual de Ticker FCA
+
+### Superfície afetada
+
+- `GET /fca/valores-mobiliarios` aceita `codigo_negociacao` e `current`.
+
+### Comportamento entregue
+
+- `codigo_negociacao` faz comparação exata sem diferenciar maiúsculas e minúsculas.
+- `current=true` seleciona o documento FCA e a versão mais recentes por CNPJ antes de aplicar o filtro de ticker. A resposta continua paginada e preserva os identificadores do documento, CNPJ, versão, data de referência, classe, mercado e datas de negociação e listagem.
+- Sem os novos parâmetros, a consulta conserva o comportamento anterior.
+
+## 2026-11-11 - Fila Persistida com Admissao de Etapas
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/queue` com paginação de lotes e etapas
+- `GET /ingestion/operations` com `ingestion_queue`
+- `GET /ingestion/files` com `atividade=na_fila` e sem classificar mera espera como `em_processamento`
+- respostas de disparo simples, em lote, `/ingestion/dispatch` e replay de execucao com `lote_id`
+
+### Comportamento entregue
+
+- Cada pedido é persistido no PostgreSQL com sua ordem de chegada; etapas só são publicadas no Celery após reservar
+  capacidade. O acompanhamento por lote informa posição, fontes/anos, progresso, etapa e motivo de espera.
+- `queued` e `reserved` ainda não representam trabalho iniciado. `em_processamento` passa a exigir início confirmado
+  por worker. `waiting_manual` aguarda o operador sem ocupar vaga.
+- Cadastro, preparação de ZIP e CSV compartilham o orçamento de vagas configurado a partir das réplicas e concorrência
+  do worker. Uma preparação ZIP ativa por vez é permitida; CSVs prontos e dependências de cabeçalho têm precedência
+  sobre novos ZIPs.
+- O início de ZIP revalida a prioridade sob o bloqueio global. Publicações sem token vigente e duplicatas não executam
+  trabalho. Transições e publicações interrompidas são retomadas pelo dispatcher periódico.
+- Members liberados pelos ZIPs recebem posições únicas após as etapas já registradas no lote. Disparos anuais com várias
+  fontes podem avançar pelas transições sem colisão de posição; o progresso continua visível em `GET /ingestion/queue`.
+- `POST /ingestion/sincronizacoes/tudo/{ano}` registra cadastro e fontes anuais em um mesmo lote e devolve o mesmo
+  `lote_id` em cada tarefa. `POST /ingestion/dispatch` devolve `lote_id` na resposta e nos itens.
+- Bootstrap, tarefas periodicas de beat e gatilhos de atualizacao automatica gravam pedidos na mesma fila persistida;
+  a falha de publicacao Celery deixa o item no outbox para nova tentativa, sem converter a run em falha terminal.
+
+## 2026-11-10 - Retry de Members e Recovery com Fonte Pai
+
+### Superficies afetadas
+
+- `GET /ingestion/runs`, `GET /ingestion/runs/{run_id}`, `GET /ingestion/operations` e detalhe de `ExecucaoSincronizacao`
+- `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `POST /ingestion/runs/{run_id}/recover`
+
+### Comportamento entregue
+
+- Durante o backoff de uma falha transitoria, a execucao filha e a run passam para `agendada`; a fase fica em
+  `failed_retryable` com `error_retryable=true`. O cliente deve mostrar espera por nova tentativa. Cada tentativa fica
+  registrada separadamente. Depois que os retries automaticos se esgotam, a run pode terminar como falha recuperavel e
+  oferecer `recover` quando ainda houver fonte executavel.
+- O resumo de falha no ZIP pai passa a identificar os members com erro e a primeira linha de cada causa; o detalhe da
+  execucao filha continua sendo a fonte para a mensagem completa.
+- Replay isolado sem `IngestionFile` persistido para o pacote pai retorna `409` com
+  `detail.reason_code=NO_RECOVERY_SOURCE`, `detail.next_action=replay_parent_execution` e `parent_execucao_id`. A
+  execucao filha permanece intacta; o consumidor deve reprocessar o arquivo pai primeiro.
+- O despacho de members respeita `INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL` entre os pacotes e
+  `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT` dentro de cada pacote. Enquanto aguarda uma vaga global, o pai e os filhos
+  nao admitidos permanecem em `aguardando_ingestao`; os detalhes da fila continuam disponiveis em
+  `GET /ingestion/operations`.
+
+## 2026-11-10 - Importação Manual da Hierarquia Setorial B3
+
+### Superfícies afetadas
+
+- novo endpoint administrativo `POST /setores/taxonomias/b3/importacoes` para upload XLSX;
+- novo endpoint `GET /setores/taxonomias/b3/importacoes` para histórico;
+- nova resposta `SetorTaxonomiaImportacaoResposta` com nome/hash/tamanho do arquivo, data da fonte, responsável, status, versão e contagens.
+
+### Comportamento entregue
+
+- O upload publica apenas a hierarquia setor → subsetor → segmento. As colunas de emissores, tickers e segmento de listagem não são importadas e nenhuma associação com companhias CVM é criada.
+- O artefato original é guardado em `STORAGE_DIR`, endereçado pelo SHA-256. O histórico distingue data de atualização indicada pela B3 e data de recebimento, mantém reenvios sem alteração semântica e registra arquivos rejeitados.
+- A primeira importação válida publica a taxonomia `b3`; uma mudança semântica gera nova versão e trilha de mudanças. O endpoint recebe arquivos `.xlsx` até 10 MiB e exige autenticação administrativa.
+
+## 2026-11-10 - Monitoramento de Ingestão e Controle de Concorrência
+
+### Superfícies afetadas
+
+- `GET /ingestion/operations` e `GET /ingestion/files`
+- despacho de membros da ingestão e parâmetros Helm dos workers
+
+### Comportamento entregue
+
+- Snapshots repetidos de `/ingestion/operations` e `/ingestion/files` podem ser reutilizados pelo TTL `INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS` (3 segundos no Helm; `0` desativa o cache). O filtro `atividade=em_processamento` considera os escopos atualmente ativos antes de carregar detalhes históricos.
+- Todos os tipos de fonte liberam membros em janelas limitadas por `INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT`, retomando o despacho conforme os filhos terminam. Isso mantém o backlog controlado em recursos escassos e permite parametrizar o paralelismo com réplicas e `worker.concurrency` no Helm.
+
+## 2026-11-09 - Dicionario Setorial e Agregacao de Margens por Grupo
+
+### Superficies afetadas
+
+- novos endpoints `GET /setores/taxonomias`, `GET /setores/taxonomias/{taxonomia}/versoes`, `GET /setores`, `GET /setores/{setor_id}` e `GET /setores/{setor_id}/companhias`
+- novos endpoints administrativos `POST /setores/aliases` e `POST /setores/correspondencias`
+- novo endpoint `POST /analise/companhias/agregacoes`
+- `GET /companhias` agora aceita `setor_id`, `taxonomia`, `categoria_registro` e `tipo_emissor`
+- schemas de companhia incluem `setor_id`, `taxonomia_setorial` e `tipo_emissor`
+
+### Comportamento entregue
+
+- Setores CVM têm UUID opaco, chave determinística com NFC, espaços e caixa baixa Unicode sem expansões de caracteres, histórico de atribuições, publicação versionada e texto de origem preservado. IDs não são fundidos por aproximação de grafia; aliases precisam de evidência, justificativa e revisão administrativa.
+- O catálogo publica a taxonomia `cvm_cadastro`. A taxonomia `b3` fica sem publicação até o primeiro upload manual válido; selecioná-la antes retorna `409 TAXONOMIA_SEM_PUBLICACAO`.
+- A ingestão v2 e a sincronização cadastral legada promovem as classificações setoriais na transação do cadastro. Migração inicial cria o dicionário e faz backfill dos setores já persistidos.
+- A agregação aceita universo por UUID/Código CVM, setor, categoria, tipo de emissor, situação ou `todas=true`; identificadores explícitos formam uma união e filtros distintos se intersectam. Calcula margens bruta, EBIT e líquida anuais com fatos canônicos em BRL, permitindo escolher média simples, mediana e razão das somas (as três por padrão), com elegibilidade e motivos de exclusão.
+- O resumo usa leitura financeira em lote e cache Redis curto com chave por corpo, publicação de taxonomia e geração financeira. O detalhamento, limitado a 500 companhias, não é cacheado. A resposta identifica a geração canônica e declara atualidade `indeterminada` enquanto não houver assinatura de entrada por companhia/escopo.
+
+## 2026-11-08 - Arquivos Membro como Ancoras Operacionais de Primeira Classe
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/members`
+- novo endpoint `GET /ingestion/members/{member_name}`
+- novo endpoint `GET /ingestion/files/{file_id}/members/{member_name}`
+- esquema `IngestionLogicalMemberSummary` (campos opcionais `tipo_fonte` e `ano`)
+- esquema `IngestionLogicalMemberListResponse` (listagem paginada de membros)
+
+### Comportamento entregue
+
+- **Consulta e Navegacao Ancoradas pelo Arquivo Membro**:
+  - Arquivos membros (como `fre_cia_aberta_distribuicao_dividendos_classe_acao_2021.csv`) agora operam diretamente como ancoras primarias de consulta, sem dependencia obrigatoria de navegar primeiro pelo arquivo ZIP pai.
+  - O endpoint `GET /ingestion/members` permite listar de forma paginada todos os arquivos membros do sistema, suportando filtros por `ano`, `fonte`, `status`, `obrigatorio` e busca textual (`busca`) por substring do nome do membro (ex: `busca=dividendos`).
+  - O endpoint `GET /ingestion/members/{member_name}` disponibiliza o detalhamento e ciclo de vida completo do membro diretamente (mesmo payload e fidelidade de `/timeline`), incluindo catalogo de dataset, arquivo pai, historico de execucoes de sincronizacao, runs tecnicas, timeline de fases (`IngestionPhaseExecution`), snapshots brutos/normalizados com SHAs e quarentena associada.
+  - O endpoint `GET /ingestion/files/{file_id}/members/{member_name}` espelha o detalhamento delimitado estritamente pelo pacote pai.
+
+## 2026-11-08 - Superficie Operacional de Ingestao Centrada no Arquivo
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/files`
+- novo endpoint `GET /ingestion/files/{file_id}`
+- novo endpoint `GET /ingestion/files/{file_id}/members/{member_name}/timeline`
+- `GET /ingestion/members/{member_name}/timeline` (campos `member_id` e `parent_file_id`, alem de suporte a busca direta por ID estavel)
+- stream SSE `GET /events/stream` (inclusao de `file_id` e `member_id` nos eventos operacionais)
+
+### Comportamento entregue
+
+- **Hierarquia de Dominio Centrada no Arquivo Logico**:
+  - A superficie operacional organiza o ciclo de vida na hierarquia estrita: **ANO → ARQUIVO PRINCIPAL → MEMBRO → TENTATIVAS E ETAPAS → RESULTADO**.
+  - Arquivos simples (como o cadastro global `cadastro:cad_cia_aberta.csv`) operam diretamente sem ZIP, sem ano ficticio e sem membros artificiais.
+  - Runs, work items e execucoes administrativas sao registros subordinados e nao definem a identidade do arquivo.
+- **Identificadores Estaveis e Delimitados**:
+  - `file_id`: `{tipo_fonte}:{ano}:{arquivo_principal}` para pacotes anuais (ex: `dfp:2022:dfp_cia_aberta_2022.zip`) e `{tipo_fonte}:{arquivo_principal}` para arquivos simples sem ano (`cadastro:cad_cia_aberta.csv`).
+  - `member_id`: delimitado estritamente pelo pacote pai `{file_id}:{member_name}` (ex: `dfp:2022:dfp_cia_aberta_2022.zip:dfp_cia_aberta_BPA_con_2022.csv`), garantindo que membros homonimos em pacotes ou anos distintos nunca misturem historicos.
+  - Identificacao do arquivo desde o despacho: quando uma falha ocorre antes do download ou da extracao de membros, ela e atribuida diretamente ao arquivo principal, sem inventar membros.
+- **Separacao entre Versao em Uso, Versao Alvo e Atividade Atual**:
+  - Exibe claramente qual versao foi apenas detectada (`apenas_detectada`), qual esta em processamento ou falhou (`alvo`) e qual esta efetivamente em uso no banco (`em_uso`).
+  - Uma falha na atualizacao mais recente nao invalida nem torna incompleta a versao anterior integra que ja estava promovida no dominio.
+- **Calculo Server-side de Integridade**:
+  - Avalia membros obrigatorios esperados pelo catalogo da fonte (`obrigatorios`), presenca no pacote, resultados por membro e escrita canonica confirmada.
+  - Estados retornados: `completo`, `completo_com_ressalvas`, `parcial`, `nao_aplicado` e `evidencia_insuficiente`, com exposicao detalhada dos motivos e referencias de evidencia.
+  - Reuso e contado apenas quando a equivalencia de conteudo (SHA) e a aplicacao anterior com escrita canonica estiverem comprovadas.
+- **Resolucao e Rastreabilidade de Falhas**:
+  - Classificacao determinista: `aberta`, `em_nova_tentativa`, `restaurada_com_evidencia`, `versao_substituida` (quando uma versao posterior sadia substitui uma anterior que falhou) e `encerrada_sem_restauracao` (quando reconhecida via `acknowledge-failure`, sem reparar integridade).
+- **Acoes Permitidas e Alvos Exatos**:
+  - Retorna `next_action`, `requires_operator` e `allowed_actions[]` com `target_type` (`file`, `member`, `run`, `execution`) e `target_id`.
+  - Estados de espera automatica (`awaiting_parent_window`) expõem `next_action: "wait"` e `requires_operator: false`.
+  - Quando a acao de recuperacao do pai cobre a mesma falha do membro filho, preserva o vinculo sem anunciar duas intervencoes manuais independentes.
+- **Paginacao e Eficiencia de Consulta**:
+  - Listagem em `GET /ingestion/files` com filtros server-side (`ano`, `fonte`, `arquivo`, `atividade`, `integridade`, `necessidade_intervencao`, `resolucao_falha`, intervalo de conclusao) e total nao truncado (`total_arquivos`).
+  - Eliminacao de consultas N+1 via carregamento e agregacao em lote no backend.
+
+## 2026-11-08 - Linha do Tempo e Rastreabilidade Completa de Arquivos Membro de Ingestao
+
+### Superficies afetadas
+
+- novo endpoint `GET /ingestion/members/{member_name}/timeline`
+
+### Comportamento entregue
+
+- **Auditoria e Rastreabilidade do Ciclo de Vida de Arquivo Membro (`member_name`)**:
+  - Disponibiliza visualizacao consolidada e cronologica de tudo o que ocorreu com um arquivo membro individual (ex.: `fre_cia_aberta_auditor_responsavel_2021.csv`).
+  - Identifica metadados de catalogo da fonte (`tipo_fonte`, `ano`, `dataset` com descricao, categoria e flag se e arquivo documento principal).
+  - Consolida historico de execucoes de sincronizacao (`ExecucaoSincronizacao` e `IngestionRun`), status operacional, contagem de linhas lidas/inseridas/rejeitadas e fases executadas (`stage`, `promote`, etc.) com timestamps, leases e tentativas.
+  - Exibe snapshots de artefatos (`SourceMemberSnapshot` e `SourceArtifactSnapshot`), com SHAs, tamanho, contagem de linhas e URIs locais/S3 (raw e normalizado).
+  - Exibe historico de deteccao de drifts/atualizacoes (`PendingUpdateMember`), apontando alteracoes de SHA e de volume entre versoes.
+  - Consolida itens em quarentena (`QuarantineItem`) associados ao arquivo membro, expondo metricas de pendencias e lista de ocorrencias recentes com codigo do erro e severidade.
+  - Informa total de alteracoes pontuais de campos de dominio auditadas (`HistoricoAlteracaoCampo`).
+
+## 2026-11-08 - Resiliencia, Liveness e Eficiencia Operacional em Ingestao com 1 Worker
+
+### Superficies afetadas
+
+- `GET /health`
+- `GET /ingestion/operations`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}`
+- `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}`
+- `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `POST /ingestion/runs/{run_id}/recover`
+- Worker de ingestao e sweep de recuperacao (`reconcile_stale_ingestion_phase_executions`, `pre_processar_sincronizacao_zip`, `ingerir_sincronizacao_zip`)
+
+### Comportamento entregue
+
+- **Eliminacao de Falsos Positivos de `waiting_for_operator_count` para Membros Filhos (`awaiting_parent_window`)**:
+  - Quando uma execucao filha (`tipo_execucao == "arquivo_membro"`) encontra-se em `aguardando_ingestao` enquanto sua execucao pai (`arquivo_zip`) esta ativa (`agendada` ou `em_execucao`), ela aguarda apenas a conclusao do membro documento principal (`document_file`) ou vaga na janela de concorrencia (`MAX_CONCURRENT_MEMBERS`), e nao uma acao manual do operador.
+  - Nessa condicao, a API agora expoe `next_action: "wait"` (em vez de `"start_ingestion"`), `blocking.reason_code: "awaiting_parent_window"`, omite o link `start_ingestion` e nao contabiliza esses membros em `waiting_for_operator_count` nem em `oldest_action_required_at` no endpoint `GET /ingestion/operations`.
+  - Execucoes raiz em modo `two_step` (`parent_execucao_id == null` e `status == "aguardando_ingestao"`) continuam expondo `next_action: "start_ingestion"` e `blocking.reason_code: "awaiting_ingestion"`.
+- **Replay/Recovery Idempotente de Sincronizacao Pai e Retomada Automatica de Filhos**:
+  - Ao acionar `POST /ingestion/sincronizacoes/{id_execucao}/replay` em uma execucao pai, o sistema reverte automaticamente execucoes filhas em estado `falha`, `cancelada` ou `quality_fail` de volta para `aguardando_ingestao` (expondo `detalhe.reset_children_count`).
+  - O reprocessamento do pai reutiliza o `IngestionRun`, `IngestionFile` e as `ExecucaoSincronizacao` filhas existentes sem criar registros duplicados, preserva membros que ja concluiram com `sucesso` na mesma arvore e pula a reexecucao do `document_file` caso ele ja tenha sido concluido com sucesso, despachando diretamente `disparar_dependentes_task` para os membros pendentes.
+- **Propagacao de Heartbeat Filho -> Pai e Reconciliacao de Runs Desincronizadas**:
+  - Em cenarios de 1 worker onde o processamento dos membros filhos excede o limite de stale individual (15 minutos), o inicio/conclusao de cada membro e o sweep de reconciliacao (`reconcile_stale_ingestion_phase_executions`) renovam automaticamente o heartbeat da fase `process_members` do pai enquanto houver atividade recente nos filhos, evitando timeouts falsos (`stale_phase`) no pai e falhas em cascata nos filhos restantes.
+  - O sweep periodico tambem reconcilia automaticamente qualquer `IngestionRun` que tenha permanecido em estado nao-terminal (`em_execucao`, `aguardando_ingestao`, `agendada`) quando sua `ExecucaoSincronizacao` correlata ja atingiu estado terminal (`sucesso`, `skipped`, `falha`, `cancelada`).
+- **Otimizacao de Latencia e Memoria**:
+  - `GET /health` passa a executar diretamente no event loop assincrono sem competir pelo threadpool sincrono.
+  - Eliminacao de consultas N+1 e carregamento em lote nos endpoints `GET /ingestion/operations`, `GET /ingestion/runs` e `GET /ingestion/sincronizacoes`, alem de agregacao SQL (`GROUP BY`) para `delivery_snapshot_summary`.
+  - Controle explicito de memoria para DuckDB (`INGESTION_DUCKDB_MEMORY_LIMIT_MB`, padrao `768`), PostgreSQL stage promote (`INGESTION_POSTGRES_PROMOTE_WORK_MEM_MB`, padrao `64`) e coleta de lixo/heartbeat por chunk no processamento do FRE.
+
+### Migracao do frontend e consumidores
+
+- Clientes que exibem badges ou filtros por `blocking.reason_code` podem tratar o novo codigo `"awaiting_parent_window"` como espera automatica do pipeline (sem acao manual necessaria).
+- Nenhuma mudanca estrutural quebradora nos schemas de resposta.
+
+## 2026-11-06 - Recuperacao Deterministica de Falhas de Ingestao e Replay de Sincronizacoes
+
+### Superficies afetadas
+
+- novo endpoint `POST /ingestion/sincronizacoes/{id_execucao}/replay`
+- `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}` (campo `links.replay`)
+- `POST /ingestion/runs/{run_id}/recover`
+- `POST /ingestion/runs/{run_id}/replay`
+- `POST /ingestion/runs/{run_id}/acknowledge-failure`
+- `GET /ingestion/runs` e `GET /ingestion/runs/{run_id}` (campos `next_action`, `recovery.strategy`, `links`)
+- Worker de ingestao e sweep de recuperacao (`reconcile_stale_ingestion_phase_executions`, `_cascade_terminal_state_to_children`)
+
+### Comportamento entregue
+
+- **Eliminacao do Beco Sem Saida em Falhas de Ingestao**: Anteriormente, quando uma sincronizacao pai (arquivo ZIP principal de DFP, ITR, FRE, etc.) sofria falha transitoria (timeout, reinicio de container worker, kill de processo ou heartbeat stale), o sistema marcava a execucao com `error_retryable: false` e `next_action: inspect_error` sem rota direta de recuperacao. Agora:
+  - Arquivos principais com falha sao reconhecidos como elegiveis para recuperacao com estrategia `rerun_parent_execution`.
+  - O campo `next_action` transiciona automaticamente para `recover`, habilitando os botoes de recuperacao e replay na UI.
+- **Novo Endpoint `POST /ingestion/sincronizacoes/{id_execucao}/replay`**: Permite reexecutar qualquer sincronizacao diretamente a partir do identificador da execucao (`ExecucaoSincronizacao.id`), sem depender de lookup previo de run ID.
+  - Para execucoes pai (arquivo principal): reagenda a tarefa correspondente no Celery com `force_reimport=True`.
+  - Para execucoes membro (arquivo filho CSV): reagenda a tarefa `sincronizar_member_task` reaproveitando os artefatos extraidos pelo pai e mantendo a linhagem.
+  - Responde com `status: "agendada"` e detalhamento da tarefa Celery despachada.
+- **Link `replay` Disponivel em Todas as Execucoes**: O dicionario `links` em `GET /ingestion/sincronizacoes` e `GET /ingestion/sincronizacoes/{id_execucao}` agora inclui `replay: "/ingestion/sincronizacoes/{id_execucao}/replay"`.
+- **Reconhecimento Flexivel de Falhas (`acknowledge-failure`)**: O endpoint `POST /ingestion/runs/{run_id}/acknowledge-failure` agora aceita requisicoes nao apenas quando `next_action == "inspect_error"`, mas tambem quando `next_action == "recover"`. Isso permite que operadores descartem conscientemente execucoes falhas que nao desejem retentar, transitando `next_action` para `none` e eliminando alarmes de monitoramento.
+- **Resiliencia em Cascata para Filhos Orfaos**: Quando o arquivo pai sofre encerramento terminal ou timeout, as fases de execucoes filhas abertas sao encerradas como `failed_final` com `error_retryable: true`, garantindo que os membros possam ser recuperados individualmente assim que o pai for restabelecido.
+- **Fallback de IngestionFile em Workers**: O processamento de membros suporta fallback para reaproveitamento de artefatos pai da mesma fonte/ano caso o `parent_execucao_id` tenha sido recriado ou substituido, eliminando erros do tipo `ValueError: IngestionFile not found for parent execution`.
+
+### Migracao do frontend e consumidores
+
+- Telas de listagem e detalhe de sincronizacoes (`/sincronizacoes`) podem adicionar botao "Replay" / "Reprocessar" diretamente consumindo `item.links.replay` com metodo `POST`.
+- Consumidores de `POST /ingestion/runs/{run_id}/acknowledge-failure` podem invocar o endpoint em qualquer run falha (mesmo com `next_action: "recover"`).
+
+## 2026-11-05 - Correcao de Metricas do Dashboard de Ingestao (GET /ingestion/dashboard)
+
+### Superfícies afetadas
+
+- `GET /ingestion/dashboard`
+- Schema de resposta `DashboardExecucoesResposta`
+
+### Comportamento entregue
+
+- **Eliminação de Dupla Contagem em `total_rejeitados`**: Anteriormente, a rota somava indiscriminadamente os contadores de `total_rejeitados` de todas as linhas de `ExecucaoSincronizacao`, gerando duplicação artificial ao somar a execução pai (`.zip`) e as execuções filhas (`.csv`). A consulta agora filtra exclusivamente execuções primárias/raiz (`parent_execucao_id IS NULL`), reportando o valor histórico desduplicado.
+- **Novo Campo `total_quarentena_pendente`**: Adicionado o campo `total_quarentena_pendente: int` no payload de resposta do dashboard. Ele expõe a contagem em tempo real de registros retidos em quarentena com status `pendente` na base (`QuarantineItem`).
+- **Diferenciação Semântica Clara para Clientes**:
+  - `total_rejeitados`: odômetro histórico desduplicado de rejeições ocorridas ao longo do tempo.
+  - `total_quarentena_pendente`: indicador operacional acionável em tempo real. Deve ser o campo monitorado por dashboards e alertas operacionais para identificar se há pendências reais no pipeline.
+
+### Migração do frontend e consumidores
+
+- **Ajuste de Cards e Métricas no Frontend**:
+  - Telas de monitoramento que exibiam `total_rejeitados` como alerta de erro devem passar a consumir `total_quarentena_pendente`. Se `total_quarentena_pendente === 0`, o sistema está completamente saudável e sem nenhuma linha retida em quarentena.
+  - O campo `total_rejeitados` permanece disponível para fins de histórico e telemetria acumulada, agora sem o ruído da dupla contagem pai-filho.
+
+## 2026-11-05 - Auto-Reparo e Replay de Quarentena & Otimizacao da Materializacao Analitica
+
+### Superfícies afetadas
+
+- novo endpoint `POST /quarantine/auto-repair`
+- endpoint existente `POST /quarantine/replay`
+- pipeline de ingestão e normalização (`fre`, `vlmo`, `financeiro`)
+- rotina periódica do scheduler `reconciliar_ingestion_stale_task`
+- camada de cálculo de materialização analítica (`POST /analise/materializacoes/...` e worker `analise_materializacao`)
+
+### Comportamento entregue
+
+- **Auto-Cura e Resiliência de Normalização de Datas**: O normalizador de datas passa a reconhecer e mapear sistematicamente valores sentinelas de ausência (`"N/A"`, `"-"`, `"ND"`, `"SEM DATA"`, `"0000-00-00"`, etc.) para `None`, além de aceitar com resiliência formatos com timestamp e formato brasileiro (`DD/MM/YYYY`).
+- **Proteção contra Estouro de Índices BTree (8191 bytes)**: Campos textuais informados por emissores em relações familiares e governança que compõem chaves naturais/índices (`cargo_Pessoa_relacionada`, etc.) são sanitizados e limitados a 500 caracteres, preservando o texto integral original no campo `observacao`, impedindo que textos extensos inseridos pelas companhias quebrem constraints no PostgreSQL.
+- **Resolução de Conflitos de Chaves Secundárias em VLMO**: O pipeline de promoção e upsert de VLMO detecta reapresentações e documentos com novos protocolos de entrega sobre a mesma chave alternativa (`cnpj_companhia`, `codigo_cvm`, `data_referencia`, `categoria`, `tipo`, `data_entrega`, `versao`), atualizando o registro existente de forma idempotente sem violar a constraint `uq_vlmo_documentos_chave_alternativa`.
+- **Suporte Integral de Replay para Linhas VLMO**: Adicionado suporte completo a normalização e promoção de linhas `vlmo_` em `replay_ingestion_row`.
+- **Novo Endpoint `POST /quarantine/auto-repair` e Reconciliação Contínua**: Permite acionamento de auto-reparo e replay direcionado a itens pendentes em quarentena, sincronizando e limpando tanto `QuarantineItem` quanto a tabela de quarentena legada (`RegistroQuarentena`). Integrado também ao sweep periódico do worker/scheduler para auto-recuperação sem intervenção manual.
+- **Otimização de Throughput na Materialização Analítica**:
+  - **Throttling de commits de progresso**: Em `materializar_analise_companhia`, os commits síncronos de WAL para atualização de progresso deixam de ocorrer a cada knowledge date e passam a ser limitados a intervalos mínimos de tempo ou marcos (reduzindo em mais de 80% o overhead de I/O de disco).
+  - **Short-circuit de snapshots idênticos**: Quando knowledge dates consecutivas não alteram o contexto contábil nem introduzem novas demonstrações financeiras, o cálculo de séries temporais reutiliza o snapshot anterior em memória sem disparar recálculos custosos.
+
+### Migração do frontend
+
+- Novos endpoints e parâmetros são retrocompatíveis.
+- O painel de administração pode chamar `POST /quarantine/auto-repair` para acionar a cura imediata de itens pendentes em quarentena.
+
+## 2026-11-05 - Rastreabilidade de Runs Superadas e Limpeza Operacional (Cleanup Superseded)
+
+### Superfícies afetadas
+
+- `GET /ingestion/runs`
+- `GET /ingestion/runs/{run_id}`
+- novo endpoint `POST /ingestion/runs/cleanup-superseded`
+- rotina periódica do scheduler `reconciliar_ingestion_stale_task`
+
+### Comportamento entregue
+
+- **Identificação de Runs Superadas (`superseded`)**: Runs em estado terminal (`falha` ou `cancelada`) que já possuem uma execução de sucesso posterior para o mesmo arquivo/ano passam a expor `superseded: true` e o objeto estruturado `superseded_by: {"run_id", "execucao_id", "status", "completed_at", "arquivo"}`.
+- **Encerramento Automático de Pendência Operacional**: Para runs marcadas como `superseded`, o campo `next_action` transiciona de `inspect_error` para `none`. Isso remove ruído operacional imediato da consulta `GET /ingestion/runs?next_action=inspect_error`, garantindo que apenas falhas que realmente requeiram intervenção humana sejam exibidas.
+- **Filtro Explícito `superseded`**: O endpoint `GET /ingestion/runs` aceita o parâmetro de query opcional `superseded=true|false` para filtrar runs históricas superadas.
+- **Ações Estruturadas de Descarte e Inspeção**: A lista de `actions` de runs superadas expõe `inspect_replacement` (apontando diretamente para a run com sucesso que a substituiu) e `cleanup_transient_state`.
+- **Endpoint em Lote de Limpeza (`POST /ingestion/runs/cleanup-superseded`)**: Novo endpoint para administradores e rotinas de manutenção limparem estados transitórios (staging/quarentena) e registrarem auto-reconhecimento auditado em lote para todas as runs superadas.
+- **Auto-Reconciliação no Scheduler**: O sweep de reconciliação periódica que roda a cada minuto agora detecta automaticamente runs com falha cujo escopo foi superado por sucesso e registra o encerramento auditado de forma contínua e autônoma.
+
+### Migração do frontend
+
+- Consumidores da listagem `GET /ingestion/runs?next_action=inspect_error` deixam de receber erros obsoletos de execuções já sucedidas.
+- Telas de detalhes e tabelas de histórico podem renderizar o badge ou link direto para a run substituta via `run.superseded_by.run_id`.
+
+## 2026-11-03 - Reengenharia de Armazenamento e Ingestão Vetorizada DuckDB
+
+### Superfícies afetadas
+
+- `GET /dfp/demonstracoes` e `GET /itr/demonstracoes`
+- `GET /dfp/documentos` e `GET /itr/documentos`
+- `GET /analise/companhias/...` (séries temporais, demonstrativos e materialização)
+- Pipeline de ingestão assíncrona (`dfp`, `itr`, `fre`, `fca`, `ipe`, `vlmo`, `cgvn`)
+
+### Comportamento entregue
+
+- **Compatibilidade Contratual Total**: Nenhuma quebra de contrato nos endpoints de DFP, ITR, FRE, FCA, IPE, VLMO, CGVN, Mestre ou Análise. Todos os atributos, filtros e ordenações continuam retornando os mesmos esquemas de dados.
+- **Deduplicação e Chave Negocial Determinística**: As demonstrações financeiras passam a adotar chave negocial unívoca de 64 caracteres (`chave_negocio`), substituindo a restrição de unicidade composta de 12 colunas por lookup de índice único hash O(1).
+- **Ingestão Vetorizada (DuckDB)**: Arquivos de demonstrações financeiras de DFP e ITR são processados diretamente em C++ via engine analítico DuckDB, com deduplicação intra-arquivo em memória por window functions (`QUALIFY ROW_NUMBER() ... = 1`), eliminando gargalos de I/O de SQLite em disco e normalização linha a linha em Python.
+- **Redução Massiva de I/O em Ingestão**: Re-ingestões de demonstrativos inalterados não disparam regravação física (`ON CONFLICT DO UPDATE ... WHERE is_distinct_from`), evitando inchaço de tabela e geração de WAL desnecessária.
+- **Alinhamento do Plano de Consulta de Análise e Materialização**: Consultas de carregamento analítico operam indexadas por código CVM e escopo, e itens sem novas datas de conhecimento na janela invalidada são concluídos com short-circuit sem recálculo custoso.
+
+### Migração do frontend
+
+- Nenhuma alteração de chamada, payload ou chave é necessária pelo frontend. Todas as respostas e filtros permanecem 100% retrocompatíveis.
+
 ## 2026-07-23 - Feed v2 do Radar com datas e identidades estáveis
 
 ### Superfícies afetadas

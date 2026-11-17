@@ -65,7 +65,7 @@ class Settings(BaseSettings):
         alias="INGESTION_COMPANY_MISSING_MAX_RATIO",
     )
     celery_worker_max_tasks_per_child: int = Field(
-        default=1,
+        default=100,
         ge=1,
         alias="CELERY_WORKER_MAX_TASKS_PER_CHILD",
     )
@@ -85,7 +85,7 @@ class Settings(BaseSettings):
         alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CAMPAIGNS",
     )
     analise_materializacao_max_active_chunks_per_campaign: int = Field(
-        default=1,
+        default=4,
         ge=1,
         alias="ANALISE_MATERIALIZACAO_MAX_ACTIVE_CHUNKS_PER_CAMPAIGN",
     )
@@ -187,6 +187,10 @@ class Settings(BaseSettings):
         ge=0,
         alias="ANALISE_FUNDAMENTALISTA_HTTP_CACHE_MAX_AGE_SECONDS",
     )
+    setores_cache_enabled: bool = Field(default=True, alias="SETORES_CACHE_ENABLED")
+    setores_cache_ttl_seconds: int = Field(default=120, ge=1, alias="SETORES_CACHE_TTL_SECONDS")
+    setores_cache_lock_seconds: int = Field(default=90, ge=1, alias="SETORES_CACHE_LOCK_SECONDS")
+    setores_cache_wait_seconds: float = Field(default=3.0, ge=0, alias="SETORES_CACHE_WAIT_SECONDS")
     ingestion_stage_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_STAGE_BATCH_SIZE")
     ingestion_promote_batch_size: int = Field(default=5000, ge=1, alias="INGESTION_PROMOTE_BATCH_SIZE")
     ingestion_phase_stale_after_seconds: int = Field(
@@ -218,8 +222,38 @@ class Settings(BaseSettings):
         ge=1,
         alias="INGESTION_MAX_ACTIVE_MEMBERS_PER_PARENT",
     )
+    ingestion_max_active_members_global: int = Field(
+        default=1,
+        ge=1,
+        alias="INGESTION_MAX_ACTIVE_MEMBERS_GLOBAL",
+    )
+    ingestion_queue_dispatch_poll_seconds: int = Field(
+        default=15,
+        ge=1,
+        alias="INGESTION_QUEUE_DISPATCH_POLL_SECONDS",
+    )
+    ingestion_execution_slots: int = Field(
+        default=1,
+        ge=1,
+        alias="INGESTION_EXECUTION_SLOTS",
+    )
+    ingestion_duckdb_memory_limit_mb: int = Field(
+        default=768,
+        ge=128,
+        alias="INGESTION_DUCKDB_MEMORY_LIMIT_MB",
+    )
+    ingestion_postgres_promote_work_mem_mb: int = Field(
+        default=64,
+        ge=4,
+        alias="INGESTION_POSTGRES_PROMOTE_WORK_MEM_MB",
+    )
     ingestion_queue_name: str = Field(default="ingestion", alias="INGESTION_QUEUE_NAME")
     ingestion_control_queue_name: str = Field(default="ingestion_control", alias="INGESTION_CONTROL_QUEUE_NAME")
+    ingestion_monitor_snapshot_cache_ttl_seconds: int = Field(
+        default=0,
+        ge=0,
+        alias="INGESTION_MONITOR_SNAPSHOT_CACHE_TTL_SECONDS",
+    )
     radar_cvm_enabled: bool = Field(default=False, alias="RADAR_CVM_ENABLED")
     radar_cvm_queue_name: str = Field(default="celery", alias="RADAR_CVM_QUEUE_NAME")
     radar_cvm_storage_backend: Literal["r2", "local"] = Field(default="r2", alias="RADAR_CVM_STORAGE_BACKEND")
