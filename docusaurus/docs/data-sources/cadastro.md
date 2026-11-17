@@ -92,6 +92,14 @@ Também são independentes a mudança do artefato e o efeito no domínio. Um CSV
 
 Registros duplicados dentro do mesmo arquivo, linhas sem identificadores essenciais ou dados que não passam pela normalização não são promovidos silenciosamente. Eles ficam vinculados à execução para inspeção operacional.
 
+## Validação e divergências de CNPJ
+
+O CNPJ usado como identidade canônica passa pela validação dos dígitos verificadores. O valor original informado pela fonte continua associado ao registro CVM e à sua proveniência (arquivo, linha e hash). Uma divergência não altera o UUID interno da companhia quando ela pode ser reconciliada pelo código CVM.
+
+Há uma correção explícita e restrita para o código CVM `80012` (`BRAZIL FAST FOOD CORP.`). O arquivo oficial [cad_cia_estrang.csv](https://dados.cvm.gov.br/dados/CIA_ESTRANG/CAD/DADOS/cad_cia_estrang.csv) publica `05.714.446/0004-00`, cujo dígito verificador é inválido. A regra só se aplica quando arquivo, código CVM, CNPJ de origem e denominação coincidem. O CNPJ canônico usado em `companhias` e nos identificadores ativos é `05.714.446/0001-00`, identificado para a mesma companhia no [Acórdão CARF nº 1402-002.180](https://acordaos.economia.gov.br/solr/acordaos2_shard7_replica_n101/browse?debugQuery=true&fq=ano_sessao_s%3A%222016%22&fq=decisao_txt%3A%22a%22&fq=decisao_txt%3A%22do%22&fq=decisao_txt%3A%22em%22&fq=decisao_txt%3A%22membros%22&fq=nome_relator_s%3A%22FERNANDO+BRASIL+DE+OLIVEIRA+PINTO%22&fq=secao_s%3A%22Primeira+Se%C3%A7%C3%A3o+de+Julgamento%22&q=). A [listagem pública da CVM](https://cvmweb.cvm.gov.br/swb/sistemas/scw/cpublica/ciaab/FormBuscaCiaAbOrdAlf.aspx?LetraInicial=B) confirma o nome, o código e o cancelamento em 23/12/2002, mas mostra `-` no campo CNPJ.
+
+O valor de origem `05.714.446/0004-00` permanece no registro CVM, com arquivo e linha de origem; a correção não reescreve o dado publicado pela CVM. Cada divergência de dígitos verificadores gera o diagnóstico estruturado `cvm_registry_cnpj_source_mismatch`, com código CVM, arquivo, linha e apenas os quatro últimos dígitos dos valores. Para divergências sem regra respaldada por evidência, o processo não promove o valor inválido como CNPJ canônico. A correção duradoura é solicitar à CVM a retificação do arquivo cadastral, anexando a linha de origem e a evidência oficial; a regra local deve permanecer restrita até a fonte oficial ser corrigida.
+
 ## Endpoints principais
 
 ```bash

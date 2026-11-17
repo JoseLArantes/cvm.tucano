@@ -9,6 +9,19 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-17 - CNPJ canônico corrigido para o registro CVM 80012
+
+### Superfície afetada
+
+- `GET /companhias/codigo-cvm/80012`
+- `GET /companhias` quando o registro CVM `80012` estiver na página retornada
+
+### Comportamento entregue
+
+- A resposta da companhia preserva o UUID de provedor existente e retorna o CNPJ válido `05714446000100`.
+- O CSV oficial da CVM continua sendo preservado como origem: o registro CVM mantém o valor publicado `05714446000400`, com arquivo, linha e hash de origem. O CNPJ canônico é reconciliado por uma regra restrita respaldada por registro oficial do CARF/RFB.
+- Novas divergências de dígitos verificadores no cadastro produzem diagnóstico operacional sanitizado e não promovem o valor de origem como CNPJ canônico.
+
 ## 2026-11-16 - Filtro Exato e Resolução Atual de Ticker FCA
 
 ### Superfície afetada

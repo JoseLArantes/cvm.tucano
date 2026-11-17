@@ -1,3 +1,6 @@
+import uuid
+from typing import Any
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -8,6 +11,7 @@ from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.models.ingestion import SourceArtifactSnapshot, SourceMemberSnapshot
 from app.models.setores import SetorClassificacaoCompanhia
+from app.schemas.companhia import CompanhiaResposta
 from app.services.ingestion.cadastro import (
     ARQUIVO_CADASTRO_ABERTA,
     ARQUIVO_CADASTRO_ESTRANGEIRA,
@@ -17,6 +21,7 @@ from app.services.ingestion.cadastro import (
     selecionar_registro_canonico,
     sincronizar_cadastro_companhias,
 )
+from app.services.ingestion.cnpj_registry import cnpj_tem_digitos_validos
 from app.services.ingestion.normalizers import normalizar_cnpj_opcional, normalizar_codigo_cvm
 
 
@@ -112,6 +117,20 @@ def _row_estrangeira(
     }
 
 
+_ROW_CVM_80012_SOURCE_CNPJ_MISMATCH = {
+    **_row_estrangeira(
+        cnpj="05.714.446/0004-00",
+        codigo_cvm="80012",
+        denominacao="BRAZIL FAST FOOD CORP.",
+    ),
+    "DENOM_COMERC": "BOB'S",
+    "PAIS_ORIGEM": "BRASIL",
+    "DT_REG": "2000-07-10",
+    "DT_CANCEL": "2002-12-23",
+    "SIT": "CANCELADA",
+}
+
+
 def _csv_open(rows: list[dict[str, str]]) -> bytes:
     header = list(rows[0].keys())
     lines = [";".join(header)]
@@ -160,6 +179,39 @@ def test_normalizar_linha_cadastro_estrangeira_valid() -> None:
     assert result.data["cnpj_companhia"] == "07857093000114"
     assert result.data["codigo_cvm"] == 80187
     assert result.data["pais_origem"] == "EXTERIOR"
+
+
+def test_registry_cnpj_check_digits_and_evidence_scoped_correction() -> None:
+    assert cnpj_tem_digitos_validos("05714446000100")
+    assert not cnpj_tem_digitos_validos("05714446000400")
+    assert not cnpj_tem_digitos_validos("11111111111111")
+
+    resultado = normalizar_linha_cadastro_estrangeira(
+        _ROW_CVM_80012_SOURCE_CNPJ_MISMATCH,
+        linha_origem=11,
+    )
+
+    assert resultado.status == "valid"
+    assert resultado.data is not None
+    assert resultado.data["cnpj_companhia"] == "05714446000100"
+    assert resultado.data["cnpj_companhia_origem"] == "05714446000400"
+    diagnostico = (resultado.details or {})["diagnostico_cnpj"]
+    assert diagnostico["correcao_aplicada"] is True
+    assert diagnostico["regra"] == "cvm-80012-brazil-fast-food-cnpj-carf"
+
+    sem_evidencia = normalizar_linha_cadastro_estrangeira(
+        _row_estrangeira(
+            cnpj="05.714.446/0004-00",
+            codigo_cvm="80013",
+            denominacao="OTHER COMPANY",
+        ),
+        linha_origem=12,
+    )
+    assert sem_evidencia.status == "valid"
+    assert sem_evidencia.data is not None
+    assert sem_evidencia.data["cnpj_companhia"] is None
+    assert sem_evidencia.data["cnpj_companhia_origem"] == "05714446000400"
+    assert (sem_evidencia.details or {})["diagnostico_cnpj"]["correcao_aplicada"] is False
 
 
 def test_selecionar_registro_canonico_prefere_ativo() -> None:
@@ -324,5 +376,111 @@ def test_sincronizar_cadastro_companhias_downloads_open_and_foreign_sources() ->
         assert repeticao["total_inalterados"] == 2
         session.refresh(estrangeira)
         assert estrangeira.alterado_em == alterado_em_original
+    finally:
+        session.close()
+
+
+def test_registry_sync_corrects_cnpj_without_changing_provider_identity(caplog: Any) -> None:
+    session = _session()
+    try:
+        provider_id = uuid.UUID("3588500f-eb75-4db4-a4f9-5b7cb94eac5a")
+        companhia_existente = Companhia(
+            id=provider_id,
+            cnpj_companhia="05714446000400",
+            codigo_cvm=80012,
+            denominacao_social="BRAZIL FAST FOOD CORP.",
+            tipo_emissor="estrangeira",
+            qualidade_identidade="alta",
+            endereco={},
+            responsavel={},
+            arquivo_origem=ARQUIVO_CADASTRO_ESTRANGEIRA,
+            linha_origem=11,
+            hash_origem="old-source-hash",
+        )
+        identificador_antigo = CompanhiaIdentificador(
+            id=uuid.uuid4(),
+            companhia_id=provider_id,
+            tipo="cnpj",
+            valor="05714446000400",
+            valor_normalizado="05714446000400",
+            fonte="cad_cia_estrang",
+            confianca="alta",
+            ativo=True,
+        )
+        session.add_all([companhia_existente, identificador_antigo])
+        session.commit()
+
+        aberta_payload = _csv_open([_row_aberta()])
+        estrangeira_payload = _csv_foreign(
+            [
+                dict(_ROW_CVM_80012_SOURCE_CNPJ_MISMATCH),
+                _row_estrangeira(
+                    cnpj="05.714.446/0004-00",
+                    codigo_cvm="80013",
+                    denominacao="OTHER COMPANY",
+                ),
+            ]
+        )
+        payloads = {
+            "https://dados.cvm.gov.br/dados/CIA_ABERTA/CAD/DADOS/cad_cia_aberta.csv": aberta_payload,
+            "https://dados.cvm.gov.br/dados/CIA_ESTRANG/CAD/DADOS/cad_cia_estrang.csv": estrangeira_payload,
+        }
+
+        resultado = sincronizar_cadastro_companhias(
+            session,
+            downloader=lambda url: payloads[url],
+        )
+
+        assert resultado["status"] == "sucesso"
+        session.refresh(companhia_existente)
+        resposta = CompanhiaResposta.model_validate(companhia_existente)
+        assert resposta.id == provider_id
+        assert resposta.cnpj_companhia == "05714446000100"
+        assert cnpj_tem_digitos_validos(resposta.cnpj_companhia)
+
+        registro_origem = (
+            session.query(CompanhiaRegistroCvm)
+            .filter(CompanhiaRegistroCvm.codigo_cvm == 80012)
+            .one()
+        )
+        assert registro_origem.cnpj_companhia == "05714446000400"
+        assert registro_origem.arquivo_origem == ARQUIVO_CADASTRO_ESTRANGEIRA
+        assert registro_origem.linha_origem == 2
+
+        session.refresh(identificador_antigo)
+        assert identificador_antigo.ativo is False
+        assert identificador_antigo.valid_to is not None
+        identificador_correto = (
+            session.query(CompanhiaIdentificador)
+            .filter(
+                CompanhiaIdentificador.companhia_id == provider_id,
+                CompanhiaIdentificador.tipo == "cnpj",
+                CompanhiaIdentificador.ativo.is_(True),
+            )
+            .one()
+        )
+        assert identificador_correto.valor_normalizado == "05714446000100"
+
+        diagnosticos = [
+            record
+            for record in caplog.records
+            if getattr(record, "event_code", None) == "cvm_registry_cnpj_source_mismatch"
+        ]
+        assert len(diagnosticos) == 2
+        assert all(not hasattr(record, "cnpj_origem") for record in diagnosticos)
+        assert all(record.cnpj_origem_sufixo == "0400" for record in diagnosticos)
+
+        repeticao = sincronizar_cadastro_companhias(
+            session,
+            force_reimport=True,
+            downloader=lambda url: payloads[url],
+        )
+        assert repeticao["status"] == "sucesso"
+        assert session.query(Companhia).filter(Companhia.codigo_cvm == 80012).count() == 1
+        session.refresh(companhia_existente)
+        resposta_repetida = CompanhiaResposta.model_validate(companhia_existente)
+        assert resposta_repetida.id == provider_id
+        assert resposta_repetida.cnpj_companhia == "05714446000100"
+        assert session.query(CompanhiaRegistroCvm).filter(CompanhiaRegistroCvm.codigo_cvm == 80012).count() == 1
     finally:
         session.close()

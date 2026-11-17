@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -16,6 +17,7 @@ from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.models.identidade import CompanhiaIdentificador, CompanhiaMercado, CompanhiaRegistroCvm
 from app.models.sincronizacao import ExecucaoSincronizacao
+from app.services.ingestion.cnpj_registry import cnpj_tem_digitos_validos, resolver_cnpj_cadastro
 from app.services.ingestion.dedup import buscar_execucao_hash_existente
 from app.services.ingestion.lifecycle import (
     extract_delivery_rows,
@@ -40,6 +42,7 @@ ARQUIVO_CADASTRO_ABERTA = "cad_cia_aberta.csv"
 ARQUIVO_CADASTRO_ESTRANGEIRA = "cad_cia_estrang.csv"
 FONTE_CADASTRO_ABERTA = "cad_cia_aberta"
 FONTE_CADASTRO_ESTRANGEIRA = "cad_cia_estrang"
+_logger = logging.getLogger(__name__)
 
 _CAMPOS_NEGOCIO_REGISTRO_CVM = (
     "denominacao_social",
@@ -64,6 +67,7 @@ _CAMPOS_NEGOCIO_REGISTRO_CVM = (
 )
 
 _CAMPOS_NEGOCIO_COMPANHIA = (
+    "cnpj_companhia",
     "codigo_cvm",
     "denominacao_social",
     "denominacao_comercial",
@@ -157,22 +161,31 @@ def normalizar_linha_cadastro_aberta(
     linha_origem: int,
     arquivo_origem: str = ARQUIVO_CADASTRO_ABERTA,
 ) -> CadastroNormalizationResult:
-    cnpj_companhia = normalizar_cnpj_opcional(row.get("CNPJ_CIA"))
     codigo_cvm = normalizar_codigo_cvm(row.get("CD_CVM"))
     denominacao_social = normalizar_texto(row.get("DENOM_SOCIAL"))
+    resolucao_cnpj = resolver_cnpj_cadastro(
+        row.get("CNPJ_CIA"),
+        arquivo_origem=arquivo_origem,
+        linha_origem=linha_origem,
+        codigo_cvm=codigo_cvm,
+        denominacao_social=denominacao_social,
+    )
+    cnpj_companhia = resolucao_cnpj.cnpj_canonico
+    diagnostico_cnpj = resolucao_cnpj.diagnostico
+    detalhes = {"diagnostico_cnpj": diagnostico_cnpj} if diagnostico_cnpj is not None else None
     if cnpj_companhia is None and codigo_cvm is None:
         return CadastroNormalizationResult(
             status="invalid",
             data=None,
             reason_code="identidade_ausente",
-            details={"linha_origem": linha_origem},
+            details={"linha_origem": linha_origem, **(detalhes or {})},
         )
     if denominacao_social is None:
         return CadastroNormalizationResult(
             status="invalid",
             data=None,
             reason_code="denominacao_social_ausente",
-            details={"linha_origem": linha_origem},
+            details={"linha_origem": linha_origem, **(detalhes or {})},
         )
 
     endereco = _normalizar_endereco(row)
@@ -207,11 +220,13 @@ def normalizar_linha_cadastro_aberta(
         "auditor": normalizar_texto(row.get("AUDITOR")),
         "cnpj_auditor": normalizar_cnpj_opcional(row.get("CNPJ_AUDITOR")),
     }
+    if resolucao_cnpj.cnpj_origem != cnpj_companhia:
+        data["cnpj_companhia_origem"] = resolucao_cnpj.cnpj_origem
     data["hash_sem_mercado"] = gerar_hash_canonico(
         {k: v for k, v in data.items() if k not in {"tipo_mercado", "hash_origem", "hash_sem_mercado"}}
     )
     data["hash_origem"] = gerar_hash_canonico({k: v for k, v in data.items() if k != "hash_origem"})
-    return CadastroNormalizationResult(status="valid", data=data)
+    return CadastroNormalizationResult(status="valid", data=data, details=detalhes)
 
 
 def normalizar_linha_cadastro_estrangeira(
@@ -220,22 +235,31 @@ def normalizar_linha_cadastro_estrangeira(
     linha_origem: int,
     arquivo_origem: str = ARQUIVO_CADASTRO_ESTRANGEIRA,
 ) -> CadastroNormalizationResult:
-    cnpj_companhia = normalizar_cnpj_opcional(row.get("CNPJ"))
     codigo_cvm = normalizar_codigo_cvm(row.get("CD_CVM"))
     denominacao_social = normalizar_texto(row.get("DENOM_SOCIAL"))
+    resolucao_cnpj = resolver_cnpj_cadastro(
+        row.get("CNPJ"),
+        arquivo_origem=arquivo_origem,
+        linha_origem=linha_origem,
+        codigo_cvm=codigo_cvm,
+        denominacao_social=denominacao_social,
+    )
+    cnpj_companhia = resolucao_cnpj.cnpj_canonico
+    diagnostico_cnpj = resolucao_cnpj.diagnostico
+    detalhes = {"diagnostico_cnpj": diagnostico_cnpj} if diagnostico_cnpj is not None else None
     if cnpj_companhia is None and codigo_cvm is None:
         return CadastroNormalizationResult(
             status="invalid",
             data=None,
             reason_code="identidade_ausente",
-            details={"linha_origem": linha_origem},
+            details={"linha_origem": linha_origem, **(detalhes or {})},
         )
     if denominacao_social is None:
         return CadastroNormalizationResult(
             status="invalid",
             data=None,
             reason_code="denominacao_social_ausente",
-            details={"linha_origem": linha_origem},
+            details={"linha_origem": linha_origem, **(detalhes or {})},
         )
 
     data: dict[str, Any] = {
@@ -268,11 +292,13 @@ def normalizar_linha_cadastro_estrangeira(
         "auditor": normalizar_texto(row.get("AUDITOR")),
         "cnpj_auditor": normalizar_cnpj_opcional(row.get("CNPJ_AUDITOR")),
     }
+    if resolucao_cnpj.cnpj_origem != cnpj_companhia:
+        data["cnpj_companhia_origem"] = resolucao_cnpj.cnpj_origem
     data["hash_sem_mercado"] = gerar_hash_canonico(
         {k: v for k, v in data.items() if k not in {"tipo_mercado", "hash_origem", "hash_sem_mercado"}}
     )
     data["hash_origem"] = gerar_hash_canonico({k: v for k, v in data.items() if k != "hash_origem"})
-    return CadastroNormalizationResult(status="valid", data=data)
+    return CadastroNormalizationResult(status="valid", data=data, details=detalhes)
 
 
 def selecionar_registro_canonico(registros: Iterable[dict[str, Any]]) -> dict[str, Any]:
@@ -336,19 +362,28 @@ def _buscar_companhia_existente(
     cnpj = registro.get("cnpj_companhia")
     codigo_cvm = registro.get("codigo_cvm")
     if ctx is not None:
-        if cnpj and cnpj in ctx.comp_by_cnpj:
-            return ctx.comp_by_cnpj[cnpj]
-        if codigo_cvm is not None and codigo_cvm in ctx.comp_by_cvm:
-            return ctx.comp_by_cvm[codigo_cvm]
-        return None
-    filtros = []
-    if cnpj is not None:
-        filtros.append(Companhia.cnpj_companhia == cnpj)
-    if codigo_cvm is not None:
-        filtros.append(Companhia.codigo_cvm == codigo_cvm)
-    if not filtros:
-        return None
-    return db.scalar(select(Companhia).where(or_(*filtros)))
+        por_cnpj = ctx.comp_by_cnpj.get(cnpj) if cnpj else None
+        por_codigo = ctx.comp_by_cvm.get(codigo_cvm) if codigo_cvm is not None else None
+    else:
+        filtros = []
+        if cnpj is not None:
+            filtros.append(Companhia.cnpj_companhia == cnpj)
+        if codigo_cvm is not None:
+            filtros.append(Companhia.codigo_cvm == codigo_cvm)
+        if not filtros:
+            return None
+        encontrados = list(db.execute(select(Companhia).where(or_(*filtros))).scalars())
+        por_cnpj = next((item for item in encontrados if cnpj is not None and item.cnpj_companhia == cnpj), None)
+        por_codigo = next(
+            (item for item in encontrados if codigo_cvm is not None and item.codigo_cvm == codigo_cvm),
+            None,
+        )
+
+    if por_cnpj is not None and por_codigo is not None and por_cnpj.id != por_codigo.id:
+        raise ValueError("Conflito entre CNPJ e codigo CVM durante reconciliacao do cadastro.")
+    if por_cnpj is not None and codigo_cvm is not None and por_cnpj.codigo_cvm not in (None, codigo_cvm):
+        raise ValueError("CNPJ do cadastro ja esta associado a outro codigo CVM.")
+    return por_cnpj or por_codigo
 
 
 def _upsert_companhia(
@@ -358,10 +393,13 @@ def _upsert_companhia(
 ) -> Companhia:
     companhia = _buscar_companhia_existente(db, registro_canonico, ctx=ctx)
     agora = _agora()
+    cnpj_solicitado = registro_canonico.get("cnpj_companhia")
+    if cnpj_solicitado is not None and not cnpj_tem_digitos_validos(cnpj_solicitado):
+        raise ValueError("CNPJ canonico do cadastro nao passou na validacao dos digitos verificadores.")
     if companhia is None:
         companhia = Companhia(
             id=uuid.uuid4(),
-            cnpj_companhia=registro_canonico.get("cnpj_companhia") or f"sem-cnpj-{registro_canonico['codigo_cvm']}",
+            cnpj_companhia=cnpj_solicitado or f"sem-cnpj-{registro_canonico['codigo_cvm']}",
             codigo_cvm=registro_canonico.get("codigo_cvm"),
             denominacao_social=registro_canonico.get("denominacao_social"),
             denominacao_comercial=registro_canonico.get("denominacao_comercial"),
@@ -415,7 +453,26 @@ def _upsert_companhia(
                 raise
             companhia = companhia_existente
 
+    cnpj_persistido = cnpj_solicitado
+    if cnpj_persistido is None:
+        cnpj_atual_valido = cnpj_tem_digitos_validos(companhia.cnpj_companhia)
+        cnpj_persistido = (
+            companhia.cnpj_companhia
+            if cnpj_atual_valido or companhia.cnpj_companhia.startswith("sem-cnpj-")
+            else f"sem-cnpj-{registro_canonico['codigo_cvm']}"
+        )
+    if cnpj_persistido != companhia.cnpj_companhia:
+        conflito_cnpj = ctx.comp_by_cnpj.get(cnpj_persistido) if ctx is not None else db.scalar(
+            select(Companhia).where(
+                Companhia.cnpj_companhia == cnpj_persistido,
+                Companhia.id != companhia.id,
+            )
+        )
+        if conflito_cnpj is not None and conflito_cnpj.id != companhia.id:
+            raise ValueError("CNPJ canonico do cadastro ja esta associado a outra companhia.")
+
     valores_negocio = {
+        "cnpj_companhia": cnpj_persistido,
         "codigo_cvm": companhia.codigo_cvm or registro_canonico.get("codigo_cvm"),
         "denominacao_social": registro_canonico.get("denominacao_social"),
         "denominacao_comercial": registro_canonico.get("denominacao_comercial"),
@@ -449,6 +506,13 @@ def _upsert_companhia(
     )
     for campo, valor in valores_negocio.items():
         setattr(companhia, campo, valor)
+    if ctx is not None:
+        for chave, companhia_cache in list(ctx.comp_by_cnpj.items()):
+            if companhia_cache.id == companhia.id and chave != cnpj_persistido:
+                del ctx.comp_by_cnpj[chave]
+        ctx.comp_by_cnpj[cnpj_persistido] = companhia
+        if companhia.codigo_cvm is not None:
+            ctx.comp_by_cvm[companhia.codigo_cvm] = companhia
     companhia.arquivo_origem = registro_canonico["arquivo_origem"]
     companhia.ano_origem = registro_canonico.get("ano_origem")
     companhia.linha_origem = registro_canonico.get("linha_origem")
@@ -465,7 +529,9 @@ def _upsert_registro_cvm(
     registro: dict[str, Any],
     ctx: CadastroBatchContext | None = None,
 ) -> tuple[CompanhiaRegistroCvm, str]:
-    cnpj_companhia = registro.get("cnpj_companhia")
+    # The canonical company CNPJ may be corrected from an independently
+    # evidenced source. This CVM registration row retains the source value.
+    cnpj_companhia = registro.get("cnpj_companhia_origem", registro.get("cnpj_companhia"))
     codigo_cvm = registro.get("codigo_cvm")
     fonte = registro["fonte_cadastro"]
 
@@ -611,6 +677,8 @@ def _upsert_identificador(
     confianca: str = "alta",
     ctx: CadastroBatchContext | None = None,
 ) -> None:
+    if tipo == "cnpj" and not cnpj_tem_digitos_validos(valor_normalizado):
+        raise ValueError("Identificador CNPJ do cadastro nao passou na validacao dos digitos verificadores.")
     existente: CompanhiaIdentificador | None = None
     if ctx is not None:
         existente = ctx.ident_cache.get((companhia.id, tipo, valor_normalizado, fonte))
@@ -642,6 +710,7 @@ def _upsert_identificador(
         return
     existente.ativo = True
     existente.confianca = confianca
+    existente.valid_to = None
 
 
 def gerar_identificadores_companhia(
@@ -651,7 +720,44 @@ def gerar_identificadores_companhia(
     registros: Iterable[dict[str, Any]],
     ctx: CadastroBatchContext | None = None,
 ) -> None:
-    for registro in registros:
+    registros_lista = list(registros)
+    cnpjs_por_fonte: dict[str, set[str]] = {}
+    for registro in registros_lista:
+        cnpj = registro.get("cnpj_companhia")
+        if cnpj:
+            cnpjs_por_fonte.setdefault(registro["fonte_cadastro"], set()).add(cnpj)
+
+    if ctx is not None:
+        identificadores_existentes = list(ctx.ident_cache.values())
+    else:
+        identificadores_existentes = list(
+            db.execute(
+                select(CompanhiaIdentificador).where(
+                    CompanhiaIdentificador.companhia_id == companhia.id,
+                    CompanhiaIdentificador.tipo == "cnpj",
+                )
+            ).scalars()
+        )
+    hoje = datetime.now(UTC).date()
+    fontes_cadastro = {registro["fonte_cadastro"] for registro in registros_lista}
+    for identificador in identificadores_existentes:
+        if (
+            identificador.companhia_id == companhia.id
+            and identificador.tipo == "cnpj"
+            and identificador.ativo
+            and (
+                not cnpj_tem_digitos_validos(identificador.valor_normalizado)
+                or (
+                    identificador.fonte in fontes_cadastro
+                    and identificador.valor_normalizado
+                    not in cnpjs_por_fonte.get(identificador.fonte, set())
+                )
+            )
+        ):
+            identificador.ativo = False
+            identificador.valid_to = hoje
+
+    for registro in registros_lista:
         cnpj = registro.get("cnpj_companhia")
         codigo_cvm = registro.get("codigo_cvm")
         if cnpj:
@@ -767,6 +873,25 @@ def _ler_csv(payload: bytes) -> list[dict[str, str]]:
     import io
 
     return list(csv.DictReader(io.StringIO(_decode_csv(payload)), delimiter=";"))
+
+
+def _registrar_diagnostico_cnpj(diagnostico: dict[str, Any]) -> None:
+    cnpj_origem = str(diagnostico.get("cnpj_origem") or "")
+    cnpj_canonico = str(diagnostico.get("cnpj_canonico") or "")
+    _logger.warning(
+        "cvm_registry_cnpj_source_mismatch",
+        extra={
+            "event_code": "cvm_registry_cnpj_source_mismatch",
+            "codigo_cvm": diagnostico.get("codigo_cvm"),
+            "arquivo_origem": diagnostico.get("arquivo_origem"),
+            "linha_origem": diagnostico.get("linha_origem"),
+            "motivo": diagnostico.get("motivo"),
+            "cnpj_origem_sufixo": cnpj_origem[-4:] or None,
+            "cnpj_canonico_sufixo": cnpj_canonico[-4:] or None,
+            "correcao_aplicada": bool(diagnostico.get("correcao_aplicada")),
+            "regra_correcao": diagnostico.get("regra"),
+        },
+    )
 
 
 def _download(url: str, *, timeout: float) -> bytes:
@@ -1101,6 +1226,9 @@ def ingerir_cadastro(
 
         for linha_origem, row in enumerate(abertas, start=2):
             resultado = normalizar_linha_cadastro_aberta(row, linha_origem=linha_origem)
+            diagnostico_cnpj = (resultado.details or {}).get("diagnostico_cnpj")
+            if diagnostico_cnpj is not None:
+                _registrar_diagnostico_cnpj(diagnostico_cnpj)
             if resultado.status != "valid" or resultado.data is None:
                 rejeitados += 1
                 continue
@@ -1108,6 +1236,9 @@ def ingerir_cadastro(
 
         for linha_origem, row in enumerate(estrangeiras, start=2):
             resultado = normalizar_linha_cadastro_estrangeira(row, linha_origem=linha_origem)
+            diagnostico_cnpj = (resultado.details or {}).get("diagnostico_cnpj")
+            if diagnostico_cnpj is not None:
+                _registrar_diagnostico_cnpj(diagnostico_cnpj)
             if resultado.status != "valid" or resultado.data is None:
                 rejeitados += 1
                 continue
