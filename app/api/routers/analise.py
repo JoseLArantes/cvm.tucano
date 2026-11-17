@@ -36,6 +36,7 @@ from app.schemas.analise import (
     AnaliseEvidenceTrailResponse,
     AnaliseFundamentalistaEventosResposta,
     AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaPeriodoResposta,
     AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
@@ -98,6 +99,7 @@ from app.services.analise import (
     obter_fundamentalista_com_metadata,
     obter_fundamentalista_eventos,
     obter_fundamentalista_generation,
+    obter_fundamentalista_periodo,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
@@ -176,6 +178,10 @@ _RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
                 "description": "Política privada de cache HTTP do relatório autenticado.",
                 "schema": {"type": "string"},
             },
+            "Vary": {
+                "description": "Indica que a resposta varia conforme o cabeçalho de autorização.",
+                "schema": {"type": "string"},
+            },
             "X-Analise-Source": {
                 "description": (
                     "Origem da entrega: `redis_cache`, `redis_cache_wait`, `db_snapshot`, "
@@ -196,7 +202,42 @@ _RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
             "Cache-Control": {"schema": {"type": "string"}},
             "X-Analise-Source": {"schema": {"type": "string"}},
             "X-Analise-Generation": {"schema": {"type": "string"}},
+            "Vary": {"schema": {"type": "string"}},
         },
+    },
+}
+
+_RESPOSTAS_FUNDAMENTALISTA_PERIODO: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    200: {
+        "description": "Resumo anual com fatos disponíveis, indisponibilidades explícitas e comparações YoY.",
+        "headers": {
+            "ETag": {"description": "Hash do payload para revalidação com `If-None-Match`.", "schema": {"type": "string"}},
+            "Cache-Control": {"description": "Política privada de cache HTTP.", "schema": {"type": "string"}},
+            "Vary": {"description": "A representação varia conforme autorização.", "schema": {"type": "string"}},
+            "X-Analise-Source": {
+                "description": "Origem da resposta anual.",
+                "schema": {"type": "string", "enum": ["canonical_facts", "compiled_runtime"]},
+            },
+            "X-Analise-Generation": {
+                "description": "ID da execução canônica usada ou `runtime`.",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    304: {
+        "description": "O ETag enviado em `If-None-Match` continua representando o payload vigente.",
+        "headers": {
+            "ETag": {"schema": {"type": "string"}},
+            "Cache-Control": {"schema": {"type": "string"}},
+            "Vary": {"schema": {"type": "string"}},
+            "X-Analise-Source": {"schema": {"type": "string", "enum": ["canonical_facts", "compiled_runtime"]}},
+            "X-Analise-Generation": {"schema": {"type": "string"}},
+        },
+    },
+    404: {
+        "description": "Companhia ou exercício fiscal anual não encontrado no escopo e corte informacional pedidos.",
+        "content": {"application/json": {"example": {"detail": "Exercício fiscal `FY2020` não encontrado."}}},
     },
 }
 
@@ -2329,6 +2370,58 @@ def obter_analise_fundamentalista(
     finally:
         if lock_token:
             cache.release_lock(lock_key, lock_token)
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}",
+    response_model=AnaliseFundamentalistaPeriodoResposta,
+    summary="Resumo Fundamentalista por Exercício",
+    description=(
+        "Retorna um resumo financeiro tipado para um exercício fiscal anual `FYAAAA`, com observações, "
+        "indisponibilidades explícitas, comparações YoY e referências de evidência. O caminho canônico "
+        "consulta somente fatos do exercício solicitado e do exercício anterior. Sem projeção canônica "
+        "completa, o mesmo resumo é compilado sob demanda e `resolution.mode=runtime_fallback` identifica "
+        "essa origem. `as_of` é um corte de conhecimento documental e não altera o exercício fiscal selecionado. "
+        "`escopo` mantém o recorte societário consolidado ou individual; o padrão é consolidado. A resposta usa "
+        "os mesmos cálculos e versões do relatório fundamentalista e do catálogo `/analise/metricas`, incluindo "
+        "lucro atribuível à controladora, margens, giro do ativo médio, CAPEX sobre receita, caixa livre e ROE/ROA "
+        "por saldos médios. Valores ausentes permanecem explícitos em `indisponibilidades`; o ano anterior serve "
+        "somente para comparar os valores atuais e não é repetido em `observacoes`. A resposta suporta ETag e "
+        "`If-None-Match`; retorna `404` se o FY não existir e `422` se `period_id` não tiver o formato `FYAAAA`."
+    ),
+    responses=_RESPOSTAS_FUNDAMENTALISTA_PERIODO,
+    operation_id="obterAnaliseFundamentalistaPeriodo",
+)
+def obter_analise_fundamentalista_periodo(
+    codigo_cvm: Annotated[int, Path(description="Código CVM da companhia.", examples=[9512])],
+    period_id: Annotated[str, Path(pattern=r"^FY[0-9]{4}$", description="Exercício fiscal anual no formato `FYAAAA`.", examples=["FY2020"])],
+    db: DbSession,
+    request: Request,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`. Anual padrão: `consolidated`. ")] = "consolidated",
+    as_of: Annotated[date | None, Query(description="Corte de conhecimento dos documentos em `AAAA-MM-DD`; não seleciona o exercício fiscal.")] = None,
+) -> Response:
+    started_at = perf_counter()
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    fiscal_year = int(period_id[2:])
+    if fiscal_year < 1900 or fiscal_year > 9999:
+        raise HTTPException(status_code=422, detail="period_id deve identificar um exercício entre FY1900 e FY9999.")
+    result = obter_fundamentalista_periodo(
+        db,
+        companhia,
+        fiscal_year=fiscal_year,
+        scope=escopo,
+        as_of=as_of,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Exercício fiscal `{period_id}` não encontrado para a companhia e o corte informacional solicitados.")
+    response, source, generation = result
+    return _fundamentalista_http_response(
+        request,
+        response.model_dump_json(),
+        source=source,
+        generation=generation,
+        started_at=started_at,
+    )
 
 
 @router.get(

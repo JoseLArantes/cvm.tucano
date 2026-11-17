@@ -288,7 +288,7 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
 
     # 3. Assert response structure
     assert "report_id" in data
-    assert data["report_version"] == "1.1.0"
+    assert data["report_version"] == "1.2.0"
     assert data["companhia"]["codigo_cvm"] == cia.codigo_cvm
     assert data["resolution"]["mode"] == "runtime_fallback"
 
@@ -353,6 +353,74 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
     assert {"available", "attention"}.issubset(dossier_groups)
 
 
+def test_fundamentalista_periodo_runtime_fallback_com_yoy(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    agora = datetime.now(UTC)
+    db_session.add_all(
+        [
+            _row(
+                cia,
+                agora,
+                form="DFP",
+                ref=date(2024, 12, 31),
+                version=1,
+                account="3.11.01",
+                value="34000000",
+                start=date(2024, 1, 1),
+                end=date(2024, 12, 31),
+            ),
+            _row(
+                cia,
+                agora,
+                form="DFP",
+                ref=date(2025, 12, 31),
+                version=2,
+                account="3.11.01",
+                value="36000000",
+                start=date(2025, 1, 1),
+                end=date(2025, 12, 31),
+            ),
+        ]
+    )
+    db_session.commit()
+    headers = _ops_headers(client)
+
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/periodos/FY2025",
+        params={"escopo": "consolidated"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["periodo"]["period_id"] == "FY2025"
+    assert payload["calculation_version"] == "2026.3"
+    assert payload["resolution"]["mode"] == "runtime_fallback"
+    assert response.headers["X-Analise-Source"] == "compiled_runtime"
+    assert response.headers["X-Analise-Generation"] == "runtime"
+    observations = {item["metric_id"]: item for item in payload["observacoes"]}
+    assert observations["lucro_liquido_controladora"]["value"] == "36000000000"
+    assert observations["margem_liquida_controladora"]["unit"] == "ratio"
+    expected_parent_margin = 36_000_000_000 / 497_549_000_000
+    assert abs(float(observations["margem_liquida_controladora"]["value"]) - expected_parent_margin) < 1e-8
+    comparisons = {item["metric_id"]: item for item in payload["comparacoes"]}
+    assert comparisons["lucro_liquido_controladora"]["comparable_period_id"] == "FY2024"
+    assert comparisons["lucro_liquido_controladora"]["absolute_change"] == "2000000000"
+    assert "ETag" in response.headers
+    assert response.headers["Vary"] == "Authorization"
+
+    invalid_period = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/periodos/2025",
+        headers=headers,
+    )
+    assert invalid_period.status_code == 422
+    missing_period = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/periodos/FY1900",
+        headers=headers,
+    )
+    assert missing_period.status_code == 404
+
+
 def test_fundamentalista_canonical_mode(client: TestClient, db_session: Session) -> None:
     # 1. Seed data
     cia = _seed_analise_v2(db_session)
@@ -373,6 +441,15 @@ def test_fundamentalista_canonical_mode(client: TestClient, db_session: Session)
 
     assert data["resolution"]["mode"] == "canonical"
     assert data["resolution"]["materialization_execution_id"] == str(execucao.id)
+
+    annual_summary = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista/periodos/FY2025",
+        params={"escopo": "consolidated"},
+        headers=headers,
+    )
+    assert annual_summary.status_code == 200
+    assert annual_summary.json()["resolution"]["mode"] == "canonical"
+    assert annual_summary.headers["X-Analise-Source"] == "canonical_facts"
 
 
 def test_fundamentalista_invalid_filters(client: TestClient, db_session: Session) -> None:
@@ -621,6 +698,7 @@ def test_fundamentalista_openapi_exposes_additive_contract_without_causal_langua
     assert "causal" not in serialized
 
     paths = openapi["paths"]
+    assert "/analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}" in paths
     assert "/analise/companhias/{codigo_cvm}/fundamentalista/eventos" in paths
     assert "/analise/companhias/{codigo_cvm}/fundamentalista/evidencias/{evidence_id}/trilha" in paths
     schemas = openapi["components"]["schemas"]
@@ -628,6 +706,7 @@ def test_fundamentalista_openapi_exposes_additive_contract_without_causal_langua
     assert "AnalisePainelPosicaoFinanceira" in schemas
     assert "AnaliseEvidenceDossierItem" in schemas
     assert "AnaliseEvidenceTrailResponse" in schemas
+    assert "AnaliseFundamentalistaPeriodoResposta" in schemas
 
 
 def test_fundamentalista_additive_blocks_and_ttm_verification(db_session: Session, client: TestClient) -> None:

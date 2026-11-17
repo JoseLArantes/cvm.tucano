@@ -34,6 +34,8 @@ Ao contrario de materializacao e monitoramento operacional, os endpoints abaixo 
 | `GET` | `/analise/companhias/{codigo_cvm}/governanca` | Observacoes temporais anuais de governanca |
 | `GET` | `/analise/companhias/{codigo_cvm}/pessoas` | Observacoes temporais anuais de pessoas e remuneracao |
 | `GET` | `/analise/companhias/{codigo_cvm}/brief` | Brief analitico consolidado da companhia |
+| `GET` | `/analise/companhias/{codigo_cvm}/fundamentalista` | Relatório fundamentalista completo |
+| `GET` | `/analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}` | Resumo fundamentalista de um exercício fiscal e comparação YoY |
 
 ## `GET /analise/metricas`
 
@@ -381,6 +383,22 @@ O payload de resposta contém:
 - `event_buckets`: agrupamentos de eventos por ano ou mês, com contadores por família e severidade
 - `evidence_dossier`: dossiê factual priorizado pelo backend para orientar a UI sem inferência no frontend
 
+Métricas aditivas no contrato fundamentalista (motor `2026.3`):
+
+| `metric_id` | Unidade | Resolução / fórmula |
+| --- | --- | --- |
+| `lucro_liquido_controladora` | `BRL` | Conta CVM `3.11.01`; não é substituída pelo lucro líquido consolidado quando ausente |
+| `lucro_liquido_nao_controladores` | `BRL` | Conta CVM `3.11.02`; disponibilidade depende da abertura divulgada |
+| `margem_bruta` | `ratio` | `lucro_bruto / receita_liquida` |
+| `margem_ebit` | `ratio` | `ebit / receita_liquida` |
+| `margem_ebitda` | `ratio` | `ebitda / receita_liquida` |
+| `margem_liquida_controladora` | `ratio` | `lucro_liquido_controladora / receita_liquida` |
+| `giro_ativo` | `ratio` | `receita_liquida / média do ativo total de abertura e encerramento` |
+| `capex_receita` | `ratio` | `CAPEX normalizado como desembolso positivo / receita_liquida` |
+| `margem_caixa_livre` | `ratio` | `(caixa_operacional - CAPEX) / receita_liquida` |
+
+Valores `unit=ratio` são decimais canônicos (por exemplo, `0.125` equivale a `12,5%`). `roe` e `roa` também passam a exigir saldo de abertura para usar, respectivamente, patrimônio líquido médio e ativo total médio. Quando esse saldo não estiver disponível, a métrica vem em `indisponibilidades`; o saldo final não é usado como aproximação silenciosa. As métricas e fórmulas também são publicadas em `GET /analise/metricas`.
+
 Campos adicionais em `etapas.caixa_solidez`:
 
 - `ponte_caixa`: lista por período com itens de ponte de caixa. Cada item traz `metric_id`, `label`, `value`, `unit`, `role` (`opening`, `operating_cash`, `capex`, `adjustment` ou `free_cash`) e `evidence_ids`. Quando a ponte não é compatível com os componentes disponíveis, o período retorna `unavailable_reason`.
@@ -413,6 +431,94 @@ curl -H "Authorization: Bearer $TOKEN" \
 curl -i -H "Authorization: Bearer $TOKEN" \
   -H 'If-None-Match: "ETAG_RECEBIDO"' \
   "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=5"
+```
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`
+
+Retorna os dados fundamentalistas de um único exercício fiscal, já resolvidos e comparados ao exercício imediatamente anterior. Por exemplo, `FY2020` solicita o exercício encerrado em 2020. O recurso é adequado para telas que navegam ano a ano e evitam carregar todo o histórico do relatório principal.
+
+Parâmetros:
+
+| Nome | Local | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- | --- |
+| `codigo_cvm` | path | integer | — | Código CVM da companhia |
+| `period_id` | path | string | — | Período anual no formato `FYAAAA`, como `FY2020` |
+| `escopo` | query | string | `consolidated` | `consolidated` ou `individual` |
+| `as_of` | query | string | ausente | Corte de conhecimento documental em `AAAA-MM-DD`; não muda o ano selecionado |
+
+Exemplo:
+
+```bash
+curl -i -H "Authorization: Bearer $TOKEN" \
+  "https://api.exemplo/analise/companhias/9512/fundamentalista/periodos/FY2020?escopo=consolidated"
+```
+
+### Contrato da resposta
+
+O corpo usa `AnaliseFundamentalistaPeriodoResposta` e contém:
+
+- `companhia`, `calculation_version`, `periodo`, `escopo` e `as_of` para identificar companhia, versão do cálculo, datas de referência e recorte informacional;
+- `resolution.mode`: `canonical` quando há projeção canônica completa e `runtime_fallback` quando o serviço precisa resolver os dados a partir das demonstrações no request;
+- `metricas`: IDs estáveis do conjunto de métricas avaliado;
+- `observacoes`: métricas disponíveis no ano, com valor decimal, unidade, formulário, indicação de reapresentação e proveniência;
+- `indisponibilidades`: métricas sem fato ou sem componentes suficientes, com `reason_code` e lista `missing`;
+- `comparacoes`: comparação `YoY` com o ano anterior para cada observação disponível; razões informam variação em pontos percentuais quando aplicável;
+- `issues`: alertas de contexto;
+- `evidence_index`: referências compactas com IDs opacos para abrir evidências nos endpoints de detalhe existentes.
+
+O serviço verifica a existência do exercício anual no contexto CVM antes de responder. A falta do ano solicitado retorna `404`; `period_id` fora do padrão `FYAAAA` ou anterior a `FY1900` retorna `422`. Exercícios com dados incompletos continuam retornando `200`, expondo os campos indisponíveis em vez de ocultar a lacuna.
+
+### Caminho canônico e custo
+
+O endpoint reutiliza `AnaliseContextoRevision` e `AnaliseFatoRevision`; não cria uma tabela ou um fluxo de materialização separado. Com a projeção canônica completa, a leitura dos fatos é limitada ao FY pedido e ao FY anterior necessário à comparação YoY. O estado de contexto é lido para confirmar que o exercício existe no corte `as_of` solicitado. Se faltar qualquer status canônico esperado para o período atual ou, quando existente no contexto, para o comparador, a resposta inteira é resolvida em `runtime_fallback` para evitar misturar origens. Esse fallback é mais caro porque carrega as demonstrações para recomputar o recorte.
+
+Após a publicação do motor `2026.3`, fatos de materializações anteriores não são considerados canônicos para esse contrato. Até uma materialização bem-sucedida na nova versão, a rota permanece disponível usando `runtime_fallback`; a regeneração deve seguir a fila e o processo de campanhas já existentes, sujeitos à prioridade de ingestão.
+
+### Cache HTTP e respostas
+
+A resposta `200` inclui `ETag`, `Cache-Control`, `Vary: Authorization`, `X-Analise-Source` e `X-Analise-Generation`. O consumidor pode reenviar `ETag` em `If-None-Match`; se o payload continuar idêntico, recebe `304 Not Modified` sem corpo. Para esta rota, `X-Analise-Source` é `canonical_facts` ou `compiled_runtime`, e a geração é o ID da execução canônica ou `runtime`.
+
+| Status | Significado |
+| --- | --- |
+| `200` | Resumo anual retornado, mesmo quando há métricas listadas em `indisponibilidades` |
+| `304` | O ETag enviado continua vigente |
+| `404` | Companhia ou exercício anual não encontrado para escopo e corte informacional |
+| `422` | Identificador anual ou parâmetro inválido |
+
+Exemplo reduzido do corpo:
+
+```json
+{
+  "companhia": {
+    "codigo_cvm": 9512,
+    "cnpj_companhia": "33000167000101",
+    "denominacao_social": "Companhia Exemplo S.A.",
+    "situacao_registro": "ATIVO"
+  },
+  "calculation_version": "2026.3",
+  "periodo": {
+    "period_id": "FY2020",
+    "fiscal_year": 2020,
+    "quarter": null,
+    "periodicidade": "annual",
+    "base_periodo": "fy",
+    "period_nature": "duration",
+    "start_date": "2020-01-01",
+    "end_date": "2020-12-31",
+    "form": "DFP",
+    "scope": "consolidated",
+    "restated": false
+  },
+  "escopo": "consolidated",
+  "as_of": null,
+  "resolution": { "mode": "canonical", "materialization_execution_id": "123", "as_of": null },
+  "metricas": ["receita_liquida", "lucro_liquido_controladora", "margem_liquida_controladora"],
+  "observacoes": [],
+  "indisponibilidades": [],
+  "comparacoes": [],
+  "issues": [],
+  "evidence_index": {}
+}
 ```
 
 ## `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`

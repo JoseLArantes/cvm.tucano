@@ -9,6 +9,28 @@ Convencoes deste changelog:
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
 
+## 2026-11-17 - Resumo fundamentalista anual por exercício
+
+### Superfícies afetadas
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+- `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/metricas`
+
+### Comportamento entregue
+
+- Novo endpoint anual aceita `period_id=FYAAAA` e retorna observações do exercício, indisponibilidades tipadas, comparações YoY com o FY anterior, issues, proveniência e `evidence_index`.
+- A camada canônica reutiliza fatos materializados limitados ao FY pedido e ao FY anterior. Quando falta projeção canônica completa, o contrato usa `resolution.mode=runtime_fallback` para todo o payload. `as_of` limita o conhecimento documental e `escopo` seleciona a visão societária.
+- A resposta envia ETag e cabeçalhos de cache/revalidação; `304` é retornado quando `If-None-Match` corresponde ao payload atual.
+- O motor passa a `2026.3` e o relatório fundamentalista a `1.2.0`.
+- O catálogo passa a incluir `lucro_liquido_controladora` (CVM `3.11.01`), `lucro_liquido_nao_controladores` (`3.11.02`), `margem_bruta`, `margem_ebit`, `margem_ebitda`, `margem_liquida_controladora`, `giro_ativo`, `capex_receita` e `margem_caixa_livre`.
+- ROE e ROA anuais e trimestrais usam saldos médios de abertura e encerramento. Sem o saldo de abertura, a razão é declarada indisponível.
+
+### Migração operacional
+
+Materializações feitas por versões anteriores do motor não são lidas como fatos canônicos `2026.3`. Até a regeneração pela campanha/materialização existente, consumidores podem receber o mesmo contrato via `runtime_fallback`.
+
 ## 2026-11-17 - CNPJ canônico corrigido para o registro CVM 80012
 
 ### Superfície afetada

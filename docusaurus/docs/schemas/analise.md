@@ -560,6 +560,10 @@ Campos principais por métrica:
 | `disponibilidades` | array | Bases temporais suportadas |
 | `limitations` | array | Limitações metodológicas |
 
+O catálogo usa a versão de cálculo `2026.3`. As métricas aditivas incluem lucro líquido atribuível à controladora (`lucro_liquido_controladora`, conta CVM `3.11.01`), lucro atribuível a não controladores (`lucro_liquido_nao_controladores`, conta `3.11.02`), margens bruta/EBIT/EBITDA e margem líquida da controladora, giro do ativo médio, CAPEX sobre receita e margem de caixa livre. Métricas de razão usam `unit=ratio` e valor decimal, sem multiplicação por 100.
+
+`roe` e `roa` usam lucro líquido dividido pelo saldo médio de abertura e encerramento do patrimônio líquido e do ativo total, respectivamente. A resolução requer os dois saldos; se faltar o saldo de abertura, o contrato expõe indisponibilidade em vez de aproximar pelo saldo final. A comparação YoY de uma razão retorna a diferença em pontos percentuais.
+
 ## Série
 
 `AnaliseSeriesResposta` traz `resolution`, observações disponíveis e indisponibilidades explícitas.
@@ -792,6 +796,27 @@ Campos principais:
 | `evidence_graph` | object | Grafo opcional com nós (`nodes`) e arestas (`edges`) expressando relacionamentos |
 | `event_buckets` | array | Buckets agregados de eventos por ano ou mês |
 | `evidence_dossier` | array | Dossiê factual priorizado para a UI |
+
+### `AnaliseFundamentalistaPeriodoResposta`
+
+Resposta enxuta para um exercício fiscal anual, servida por `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`. `period_id` usa `FYAAAA`. O payload contém somente observações e indisponibilidades do ano pedido; `comparacoes` contém variação `YoY` em relação ao FY imediatamente anterior. O ano comparável é lido para calcular as comparações, mas seus valores não são repetidos em `observacoes`.
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `companhia` | object | Resumo da companhia |
+| `calculation_version` | string | Versão do motor, atualmente `2026.3` |
+| `periodo` | object | Metadados e datas de referência do FY selecionado |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string ou null | Corte de conhecimento aplicado aos documentos |
+| `resolution` | object | Modo canônico ou `runtime_fallback` e execução, quando aplicável |
+| `metricas` | array de strings | IDs de métricas avaliadas |
+| `observacoes` | array | Valores disponíveis no FY selecionado, com unidade e proveniência |
+| `indisponibilidades` | array | Métricas sem dado ou componentes suficientes e seus motivos |
+| `comparacoes` | array | Comparação YoY para observações disponíveis no FY selecionado |
+| `issues` | array | Alertas de contexto associados à resolução |
+| `evidence_index` | object | Mapa de IDs opacos para referências compactas das observações |
+
+Cada item de `comparacoes` segue `AnaliseComparacaoItem`: para valores monetários, `absolute_change` preserva `BRL`; para razões, `percentage_point_change` é expresso em pontos percentuais. `metric_unit` continua identificando a unidade dos valores comparados. Uma comparação sem FY anterior disponível tem `status=unavailable` e `reason_code=MISSING_COMPARABLE_PERIOD`.
 
 ### `AnaliseStageCaixaSolidez`
 

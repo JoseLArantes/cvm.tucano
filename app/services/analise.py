@@ -71,6 +71,7 @@ from app.schemas.analise import (
     AnaliseFundamentalistaEtapas,
     AnaliseFundamentalistaEventosResposta,
     AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaPeriodoResposta,
     AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseIssue,
@@ -141,8 +142,8 @@ from app.schemas.analise import (
 )
 from app.services.financeiro_valores import valor_conta_ajustado
 
-CALCULATION_VERSION: Literal["2026.2"] = "2026.2"
-FUNDAMENTALISTA_REPORT_VERSION = "1.1.0"
+CALCULATION_VERSION: Literal["2026.3"] = "2026.3"
+FUNDAMENTALISTA_REPORT_VERSION = "1.2.0"
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 DB_SCOPE_TO_API: dict[str, AnaliseEscopo] = {"consolidado": "consolidated", "individual": "individual"}
@@ -360,6 +361,30 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         strategy="Tenta 3.11 antes de 3.09 e usa somente o exercício corrente.",
         bases=("fy", "quarter", "ytd"),
     ),
+    "lucro_liquido_controladora": MetricSpec(
+        metric_id="lucro_liquido_controladora",
+        nome="Lucro líquido atribuível à controladora",
+        metric_type="flow",
+        unit="BRL",
+        period_nature="duration",
+        candidate_accounts=("3.11.01",),
+        direction="higher_is_better",
+        strategy="Seleciona a conta CVM 3.11.01 no exercício corrente, sem substituir pelo lucro consolidado.",
+        bases=("fy", "quarter", "ytd"),
+        limitations=("A métrica depende da divulgação separada da parcela atribuível à controladora.",),
+    ),
+    "lucro_liquido_nao_controladores": MetricSpec(
+        metric_id="lucro_liquido_nao_controladores",
+        nome="Lucro líquido atribuível a não controladores",
+        metric_type="flow",
+        unit="BRL",
+        period_nature="duration",
+        candidate_accounts=("3.11.02",),
+        direction="contextual",
+        strategy="Seleciona a conta CVM 3.11.02 no exercício corrente.",
+        bases=("fy", "quarter", "ytd"),
+        limitations=("A métrica depende da divulgação separada da parcela atribuível a não controladores.",),
+    ),
     "caixa_operacional": MetricSpec(
         metric_id="caixa_operacional",
         nome="Caixa gerado nas operações",
@@ -492,6 +517,84 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         vertical_denominator_metric_id=None,
         limitations=("Retornada como razão decimal canônica com `unit=ratio`.",),
     ),
+    "margem_bruta": MetricSpec(
+        metric_id="margem_bruta",
+        nome="Margem bruta",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="lucro_bruto / receita_liquida",
+        direction="contextual",
+        strategy="Calculada como lucro bruto dividido por receita líquida.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "margem_ebit": MetricSpec(
+        metric_id="margem_ebit",
+        nome="Margem EBIT",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="ebit / receita_liquida",
+        direction="contextual",
+        strategy="Calculada como EBIT dividido por receita líquida.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "margem_ebitda": MetricSpec(
+        metric_id="margem_ebitda",
+        nome="Margem EBITDA",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="ebitda / receita_liquida",
+        direction="contextual",
+        strategy="Calculada como EBITDA dividido por receita líquida.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "margem_liquida_controladora": MetricSpec(
+        metric_id="margem_liquida_controladora",
+        nome="Margem líquida atribuível à controladora",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="lucro_liquido_controladora / receita_liquida",
+        direction="contextual",
+        strategy="Calculada como lucro líquido atribuível à controladora dividido por receita líquida.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "giro_ativo": MetricSpec(
+        metric_id="giro_ativo",
+        nome="Giro do ativo",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="receita_liquida / ativo_total_medio",
+        direction="contextual",
+        strategy="Calculado como receita líquida dividida pelo ativo total médio da janela.",
+        bases=("fy", "quarter", "ytd"),
+        limitations=("Requer saldo de abertura para calcular o ativo médio.",),
+    ),
+    "capex_receita": MetricSpec(
+        metric_id="capex_receita",
+        nome="CAPEX sobre receita",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="capex / receita_liquida",
+        direction="contextual",
+        strategy="Calculado como CAPEX dividido por receita líquida; CAPEX é normalizado como desembolso positivo.",
+        bases=("fy", "quarter", "ytd"),
+    ),
+    "margem_caixa_livre": MetricSpec(
+        metric_id="margem_caixa_livre",
+        nome="Margem de caixa livre",
+        metric_type="ratio",
+        unit="ratio",
+        period_nature="duration",
+        formula="caixa_livre / receita_liquida",
+        direction="contextual",
+        strategy="Calculada como caixa livre dividido por receita líquida.",
+        bases=("fy", "quarter", "ytd"),
+    ),
     "ebitda": MetricSpec(
         metric_id="ebitda",
         nome="EBITDA",
@@ -568,9 +671,9 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         metric_type="ratio",
         unit="ratio",
         period_nature="duration",
-        formula="lucro_liquido / patrimonio_liquido",
+        formula="lucro_liquido / média(patrimonio_liquido_abertura, patrimonio_liquido_encerramento)",
         direction="higher_is_better",
-        strategy="Calculado como lucro líquido dividido por patrimônio líquido.",
+        strategy="Calculado como lucro líquido do período dividido pela média do patrimônio líquido na abertura e no encerramento do período.",
         bases=("fy", "quarter", "ytd"),
     ),
     "roa": MetricSpec(
@@ -579,15 +682,22 @@ METRIC_SPECS: dict[str, MetricSpec] = {
         metric_type="ratio",
         unit="ratio",
         period_nature="duration",
-        formula="lucro_liquido / ativo_total",
+        formula="lucro_liquido / média(ativo_total_abertura, ativo_total_encerramento)",
         direction="higher_is_better",
-        strategy="Calculado como lucro líquido dividido por ativo total.",
+        strategy="Calculado como lucro líquido do período dividido pela média do ativo total na abertura e no encerramento do período.",
         bases=("fy", "quarter", "ytd"),
     ),
 }
 
 METRIC_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "margem_liquida": ("lucro_liquido", "receita_liquida"),
+    "margem_bruta": ("lucro_bruto", "receita_liquida"),
+    "margem_ebit": ("ebit", "receita_liquida"),
+    "margem_ebitda": ("ebitda", "receita_liquida"),
+    "margem_liquida_controladora": ("lucro_liquido_controladora", "receita_liquida"),
+    "giro_ativo": ("receita_liquida", "ativo_total"),
+    "capex_receita": ("capex", "receita_liquida"),
+    "margem_caixa_livre": ("caixa_livre", "receita_liquida"),
     "ebitda": ("ebit", "depreciacao_amortizacao"),
     "caixa_livre": ("caixa_operacional", "capex"),
     "divida_liquida": ("divida_bruta", "caixa_equivalentes"),
@@ -597,6 +707,16 @@ METRIC_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "roe": ("lucro_liquido", "patrimonio_liquido"),
     "roa": ("lucro_liquido", "ativo_total"),
 }
+
+FUNDAMENTALISTA_SUMMARY_METRICS = [
+    "receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido",
+    "lucro_liquido_controladora", "lucro_liquido_nao_controladores",
+    "margem_bruta", "margem_ebit", "margem_ebitda", "margem_liquida",
+    "margem_liquida_controladora", "roe", "roa", "giro_ativo",
+    "caixa_operacional", "capex", "caixa_livre", "capex_receita", "margem_caixa_livre",
+    "caixa_equivalentes", "divida_bruta", "divida_liquida", "alavancagem", "conversao_lucro_caixa", "liquidez_corrente",
+    "ativo_total", "patrimonio_liquido",
+]
 
 
 _ACCOUNT_LABELS: dict[str, str] = {
@@ -733,6 +853,22 @@ def _period_id_for(periodicidade: AnalisePeriodicidade, base_periodo: AnaliseBas
         return f"{year}-YTDQ{quarter}"
     assert quarter is not None
     return f"{year}-Q{quarter}"
+
+
+def _opening_balance_period_id(period_id: str, base_periodo: AnaliseBasePeriodo) -> str | None:
+    if period_id.startswith("FY"):
+        return _get_opening_period_id(period_id, base_periodo)
+    if "-YTDQ" in period_id:
+        year_part = period_id.split("-YTDQ", 1)[0]
+        return f"FY{int(year_part) - 1}" if year_part.isdigit() else None
+    if "-Q" in period_id:
+        try:
+            year_part, quarter_part = period_id.split("-Q", 1)
+            year, quarter = int(year_part), int(quarter_part)
+        except ValueError:
+            return None
+        return f"{year}-Q{quarter - 1}" if quarter > 1 else f"{year - 1}-Q4"
+    return None
 
 
 def _document_known_on_or_before(as_of: date) -> ColumnElement[bool]:
@@ -1467,7 +1603,13 @@ def _resolve_series_facts(
     facts_by_metric_period: dict[tuple[str, str], ResolvedFact] = {}
     unavailable: list[AnaliseSeriesUnavailable] = []
 
-    for year, quarter in _candidate_periods(context, periodicidade, base_periodo, horizonte_anos):
+    calculation_horizon = horizonte_anos + 1 if horizonte_anos and periodicidade == "annual" and base_periodo == "fy" else horizonte_anos
+    calculation_periods = _candidate_periods(context, periodicidade, base_periodo, calculation_horizon)
+    visible_period_ids = {
+        _period_id_for(periodicidade, base_periodo, year, quarter)
+        for year, quarter in _candidate_periods(context, periodicidade, base_periodo, horizonte_anos)
+    }
+    for year, quarter in calculation_periods:
         for metric_id in metric_ids:
             spec = METRIC_SPECS[metric_id]
             if base_periodo not in spec.bases:
@@ -1555,17 +1697,64 @@ def _resolve_series_facts(
                 continue
             facts_by_metric_period[(metric_id, period_id)] = resolved
 
+    if periodicidade == "quarterly" and base_periodo == "ytd":
+        # YTD ROE/ROA and asset turnover use the previous FY closing balance as their opening balance.
+        # That stock belongs to a different series profile, so resolve only these two auxiliary facts
+        # internally and exclude them from the visible quarterly/YTD response below.
+        for year, _quarter in calculation_periods:
+            opening_period_id = f"FY{year - 1}"
+            for metric_id in ("ativo_total", "patrimonio_liquido"):
+                if metric_id not in metric_ids:
+                    continue
+                opening_fact = _resolve_base_metric_for_period(
+                    rows_by_account,
+                    METRIC_SPECS[metric_id],
+                    scope,
+                    "annual",
+                    "fy",
+                    year - 1,
+                    None,
+                )
+                if opening_fact is not None:
+                    facts_by_metric_period[(metric_id, opening_period_id)] = opening_fact
+
     derived_metric_ids = [metric_id for metric_id in metric_ids if METRIC_SPECS[metric_id].formula]
-    for year, quarter in _candidate_periods(context, periodicidade, base_periodo, horizonte_anos):
+    for year, quarter in calculation_periods:
         period_id = _period_id_for(periodicidade, base_periodo, year, quarter)
         for metric_id in derived_metric_ids:
             spec = METRIC_SPECS[metric_id]
-            if metric_id == "margem_liquida":
-                lucro = facts_by_metric_period.get(("lucro_liquido", period_id))
-                receita = facts_by_metric_period.get(("receita_liquida", period_id))
-                if lucro and receita:
-                    ratio = _safe_div(lucro.value, receita.value)
-                    if ratio is not None:
+            if metric_id in {
+                "margem_liquida", "margem_bruta", "margem_ebit", "margem_ebitda",
+                "margem_liquida_controladora", "capex_receita", "margem_caixa_livre", "giro_ativo",
+            }:
+                numerator_metric_id = {
+                    "margem_liquida": "lucro_liquido",
+                    "margem_bruta": "lucro_bruto",
+                    "margem_ebit": "ebit",
+                    "margem_ebitda": "ebitda",
+                    "margem_liquida_controladora": "lucro_liquido_controladora",
+                    "capex_receita": "capex",
+                    "margem_caixa_livre": "caixa_livre",
+                    "giro_ativo": "receita_liquida",
+                }[metric_id]
+                numerator = facts_by_metric_period.get((numerator_metric_id, period_id))
+                denominator_metric_id = "ativo_total" if metric_id == "giro_ativo" else "receita_liquida"
+                denominator = facts_by_metric_period.get((denominator_metric_id, period_id))
+                components = [numerator, denominator]
+                denominator_value = denominator.value if denominator is not None else None
+                if metric_id == "giro_ativo":
+                    ratio_opening_period_id = _opening_balance_period_id(period_id, base_periodo)
+                    opening_assets = facts_by_metric_period.get(("ativo_total", ratio_opening_period_id)) if ratio_opening_period_id else None
+                    components.append(opening_assets)
+                    denominator_value = (
+                        (denominator.value + opening_assets.value) / 2
+                        if denominator is not None and opening_assets is not None
+                        else None
+                    )
+                if all(component is not None for component in components) and numerator is not None and denominator_value is not None:
+                    value = _safe_div(abs(numerator.value) if metric_id == "capex_receita" else numerator.value, denominator_value)
+                    if value is not None:
+                        resolved_components = [component for component in components if component is not None]
                         facts_by_metric_period[(metric_id, period_id)] = ResolvedFact(
                             metric_id=metric_id,
                             period_id=period_id,
@@ -1573,32 +1762,27 @@ def _resolve_series_facts(
                             quarter=quarter,
                             period_nature=spec.period_nature,
                             period_basis=base_periodo,
-                            start_date=receita.start_date,
-                            end_date=receita.end_date,
-                            value=ratio,
+                            start_date=numerator.start_date,
+                            end_date=numerator.end_date,
+                            value=value,
                             unit=spec.unit,
                             scope=scope,
                             form="DERIVED",
-                            version=max(filter(None, [lucro.version, receita.version]), default=None),
-                            restated=lucro.restated or receita.restated,
+                            version=max((component.version for component in resolved_components if component.version is not None), default=None),
+                            restated=any(component.restated for component in resolved_components),
                             value_source="derived_from_formula",
-                            comparables=AnaliseComparables(
-                                yoy_period_id=receita.comparables.yoy_period_id,
-                                qoq_period_id=receita.comparables.qoq_period_id,
-                            ),
-                            provenance=[*lucro.provenance, *receita.provenance],
+                            comparables=numerator.comparables,
+                            provenance=[provenance for component in resolved_components for provenance in component.provenance],
                         )
                         continue
-                unavailable.append(
-                    AnaliseSeriesUnavailable(
-                        metric_id=metric_id,
-                        period_id=period_id,
-                        status="unavailable",
-                        reason_code="MISSING_FORMULA_COMPONENT",
-                        message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
-                        missing=["lucro_liquido", "receita_liquida"],
-                    )
-                )
+                unavailable.append(AnaliseSeriesUnavailable(
+                    metric_id=metric_id,
+                    period_id=period_id,
+                    status="unavailable",
+                    reason_code="MISSING_FORMULA_COMPONENT",
+                    message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula ou o denominador é zero.",
+                    missing=[denominator_metric_id, "ativo_total_anterior"] if metric_id == "giro_ativo" else [numerator_metric_id, "receita_liquida"],
+                ))
             elif metric_id == "ebitda":
                 ebit = facts_by_metric_period.get(("ebit", period_id))
                 dep = facts_by_metric_period.get(("depreciacao_amortizacao", period_id))
@@ -1780,8 +1964,11 @@ def _resolve_series_facts(
             elif metric_id == "roe":
                 lucro = facts_by_metric_period.get(("lucro_liquido", period_id))
                 patrimonio = facts_by_metric_period.get(("patrimonio_liquido", period_id))
-                if lucro and patrimonio:
-                    ratio = _safe_div(lucro.value, patrimonio.value)
+                opening_id = _opening_balance_period_id(period_id, base_periodo)
+                patrimonio_abertura = facts_by_metric_period.get(("patrimonio_liquido", opening_id)) if opening_id else None
+                patrimonio_medio = (patrimonio.value + patrimonio_abertura.value) / 2 if patrimonio and patrimonio_abertura else None
+                if lucro is not None and patrimonio is not None and patrimonio_abertura is not None and patrimonio_medio is not None:
+                    ratio = _safe_div(lucro.value, patrimonio_medio)
                     if ratio is not None:
                         facts_by_metric_period[(metric_id, period_id)] = ResolvedFact(
                             metric_id=metric_id,
@@ -1796,14 +1983,14 @@ def _resolve_series_facts(
                             unit=spec.unit,
                             scope=scope,
                             form="DERIVED",
-                            version=max(filter(None, [lucro.version, patrimonio.version]), default=None),
-                            restated=lucro.restated or patrimonio.restated,
+                            version=max(filter(None, [lucro.version, patrimonio.version, patrimonio_abertura.version]), default=None),
+                            restated=lucro.restated or patrimonio.restated or patrimonio_abertura.restated,
                             value_source="derived_from_formula",
                             comparables=AnaliseComparables(
                                 yoy_period_id=lucro.comparables.yoy_period_id,
                                 qoq_period_id=lucro.comparables.qoq_period_id,
                             ),
-                            provenance=[*lucro.provenance, *patrimonio.provenance],
+                            provenance=[*lucro.provenance, *patrimonio.provenance, *patrimonio_abertura.provenance],
                         )
                         continue
                 unavailable.append(
@@ -1813,14 +2000,17 @@ def _resolve_series_facts(
                         status="unavailable",
                         reason_code="MISSING_FORMULA_COMPONENT",
                         message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
-                        missing=["lucro_liquido", "patrimonio_liquido"],
+                        missing=["lucro_liquido", "patrimonio_liquido", "patrimonio_liquido_abertura"],
                     )
                 )
             elif metric_id == "roa":
                 lucro = facts_by_metric_period.get(("lucro_liquido", period_id))
                 ativo = facts_by_metric_period.get(("ativo_total", period_id))
-                if lucro and ativo:
-                    ratio = _safe_div(lucro.value, ativo.value)
+                opening_id = _opening_balance_period_id(period_id, base_periodo)
+                ativo_abertura = facts_by_metric_period.get(("ativo_total", opening_id)) if opening_id else None
+                ativo_medio = (ativo.value + ativo_abertura.value) / 2 if ativo and ativo_abertura else None
+                if lucro is not None and ativo is not None and ativo_abertura is not None and ativo_medio is not None:
+                    ratio = _safe_div(lucro.value, ativo_medio)
                     if ratio is not None:
                         facts_by_metric_period[(metric_id, period_id)] = ResolvedFact(
                             metric_id=metric_id,
@@ -1835,14 +2025,14 @@ def _resolve_series_facts(
                             unit=spec.unit,
                             scope=scope,
                             form="DERIVED",
-                            version=max(filter(None, [lucro.version, ativo.version]), default=None),
-                            restated=lucro.restated or ativo.restated,
+                            version=max(filter(None, [lucro.version, ativo.version, ativo_abertura.version]), default=None),
+                            restated=lucro.restated or ativo.restated or ativo_abertura.restated,
                             value_source="derived_from_formula",
                             comparables=AnaliseComparables(
                                 yoy_period_id=lucro.comparables.yoy_period_id,
                                 qoq_period_id=lucro.comparables.qoq_period_id,
                             ),
-                            provenance=[*lucro.provenance, *ativo.provenance],
+                            provenance=[*lucro.provenance, *ativo.provenance, *ativo_abertura.provenance],
                         )
                         continue
                 unavailable.append(
@@ -1852,15 +2042,15 @@ def _resolve_series_facts(
                         status="unavailable",
                         reason_code="MISSING_FORMULA_COMPONENT",
                         message=f"Não foi possível calcular `{metric_id}` porque faltam componentes da fórmula.",
-                        missing=["lucro_liquido", "ativo_total"],
+                        missing=["lucro_liquido", "ativo_total", "ativo_total_abertura"],
                     )
                 )
 
     facts = sorted(
-        [item for item in facts_by_metric_period.values() if item.metric_id in requested_metric_ids],
+        [item for item in facts_by_metric_period.values() if item.metric_id in requested_metric_ids and item.period_id in visible_period_ids],
         key=lambda item: (item.fiscal_year, item.quarter or 0, item.metric_id),
     )
-    filtered_unavailable = _dedupe_unavailable([item for item in unavailable if item.metric_id in requested_metric_ids])
+    filtered_unavailable = _dedupe_unavailable([item for item in unavailable if item.metric_id in requested_metric_ids and item.period_id in visible_period_ids])
     return facts, filtered_unavailable, _dedupe_issues(issues)
 
 
@@ -2214,6 +2404,151 @@ def obter_series(
         as_of=as_of,
         horizonte_anos=horizonte_anos,
     )
+
+
+def obter_fundamentalista_periodo(
+    db: Session,
+    companhia: Companhia,
+    *,
+    fiscal_year: int,
+    scope: AnaliseEscopo = "consolidated",
+    as_of: date | None = None,
+) -> tuple[AnaliseFundamentalistaPeriodoResposta, str, str] | None:
+    period_id = f"FY{fiscal_year}"
+    previous_period_id = f"FY{fiscal_year - 1}"
+    context_pair = _context_revision_for_as_of(db, companhia, scope, as_of)
+    execution = context_pair[0] if context_pair else None
+    context_revision = context_pair[1] if context_pair else None
+
+    context: ContextData | None = None
+    if context_revision is not None:
+        periods = [_periodo_disponivel_from_payload(item, scope) for item in context_revision.periodos_disponiveis]
+        available_annual_period_ids = {item.period_id for item in periods if item.periodicidade == "annual"}
+        periodo = next((item for item in periods if item.period_id == period_id and item.periodicidade == "annual"), None)
+    else:
+        context = _load_context(db, companhia, scope, as_of)
+        available_annual_period_ids = {item.period_id for item in context.periodos_disponiveis if item.periodicidade == "annual"}
+        periodo = next((item for item in context.periodos_disponiveis if item.period_id == period_id and item.periodicidade == "annual"), None)
+    if periodo is None:
+        return None
+
+    period_ids = {period_id, previous_period_id}
+    metric_ids = list(FUNDAMENTALISTA_SUMMARY_METRICS)
+    source = "compiled_runtime"
+    generation = str(execution.id) if execution is not None else "runtime"
+    observations: list[AnaliseSeriesObservation] = []
+    unavailable: list[AnaliseSeriesUnavailable] = []
+    issues: list[AnaliseIssue] = []
+
+    if context_revision is not None and execution is not None:
+        stmt = select(AnaliseFatoRevision).where(
+            AnaliseFatoRevision.codigo_cvm == companhia.codigo_cvm,
+            AnaliseFatoRevision.escopo == scope,
+            AnaliseFatoRevision.calculation_version == CALCULATION_VERSION,
+            AnaliseFatoRevision.periodicidade == "annual",
+            AnaliseFatoRevision.base_periodo == "fy",
+            AnaliseFatoRevision.metric_id.in_(metric_ids),
+            AnaliseFatoRevision.period_id.in_(period_ids),
+        )
+        if as_of is None:
+            stmt = stmt.where(AnaliseFatoRevision.known_to.is_(None))
+        else:
+            stmt = stmt.where(
+                AnaliseFatoRevision.known_from <= as_of,
+                or_(AnaliseFatoRevision.known_to.is_(None), AnaliseFatoRevision.known_to > as_of),
+            )
+        revisions = db.scalars(stmt.order_by(AnaliseFatoRevision.fiscal_year, AnaliseFatoRevision.metric_id)).all()
+        for revision in revisions:
+            if revision.status == "available" and revision.observation_payload is not None:
+                observations.append(AnaliseSeriesObservation.model_validate(revision.observation_payload))
+            elif revision.status == "unavailable" and revision.unavailable_payload is not None:
+                unavailable.append(AnaliseSeriesUnavailable.model_validate(revision.unavailable_payload))
+        # An incomplete canonical projection falls back as a whole, preserving a single resolution mode.
+        expected_period_ids = {period_id}
+        if previous_period_id in available_annual_period_ids:
+            expected_period_ids.add(previous_period_id)
+        canonical_statuses: set[tuple[str, str]] = {
+            (item.metric_id, item.period_id) for item in observations
+        }
+        canonical_statuses.update((item.metric_id, item.period_id) for item in unavailable)
+        projection_complete = all(
+            (metric_id, expected_period_id) in canonical_statuses
+            for expected_period_id in expected_period_ids
+            for metric_id in metric_ids
+        )
+        if projection_complete:
+            source = "canonical_facts"
+            issues = [AnaliseIssue.model_validate(item) for item in context_revision.issues]
+        else:
+            context_pair = None
+
+    if context_pair is None or source == "compiled_runtime":
+        context = context or _load_context(db, companhia, scope, as_of)
+        facts, runtime_unavailable, runtime_issues = _resolve_series_facts(
+            context,
+            metric_ids,
+            "annual",
+            "fy",
+            scope,
+        )
+        observations = [_observation_from_fact(fact) for fact in facts if fact.period_id in period_ids]
+        unavailable = [item for item in runtime_unavailable if item.period_id in period_ids]
+        issues = runtime_issues
+        source = "compiled_runtime"
+        generation = "runtime"
+
+    current_observations = [item for item in observations if item.period_id == period_id]
+    previous_observations = {item.metric_id: item for item in observations if item.period_id == previous_period_id}
+    comparisons: list[AnaliseComparacaoItem] = []
+    for current in current_observations:
+        spec = METRIC_SPECS[current.metric_id]
+        previous = previous_observations.get(current.metric_id)
+        comparisons.append(
+            _build_comparison_item(current, previous, "YoY", spec)
+            if previous is not None
+            else _comparison_unavailable(
+                current.metric_id,
+                period_id,
+                "YoY",
+                current.unit,
+                "percentage_point" if spec.metric_type == "ratio" else "ratio",
+                "MISSING_COMPARABLE_PERIOD",
+                "O exercício fiscal imediatamente anterior não possui observação comparável.",
+            )
+        )
+
+    evidence_index: dict[str, CompactEvidenceRef] = {}
+    for observation in current_observations:
+        evidence_id = _make_fundamentalista_evidence_id(
+            companhia,
+            "metric",
+            scope,
+            as_of,
+            "fy",
+            observation.metric_id,
+            observation.period_id,
+        )
+        evidence_index[evidence_id] = CompactEvidenceRef(
+            id=evidence_id,
+            type="observation",
+            label=f"{METRIC_SPECS[observation.metric_id].nome} ({observation.period_id})",
+            period_id=observation.period_id,
+        )
+    response = AnaliseFundamentalistaPeriodoResposta(
+        companhia=_companhia_resumo(companhia),
+        calculation_version=CALCULATION_VERSION,
+        periodo=periodo,
+        escopo=scope,
+        as_of=as_of,
+        resolution=_canonical_resolution(execution, as_of) if source == "canonical_facts" and execution else _runtime_resolution(as_of),
+        metricas=metric_ids,
+        observacoes=current_observations,
+        indisponibilidades=[item for item in unavailable if item.period_id == period_id],
+        comparacoes=comparisons,
+        issues=issues,
+        evidence_index=evidence_index,
+    )
+    return response, source, generation
 
 
 def _current_fact_revisions_stmt(
@@ -4049,8 +4384,8 @@ def _get_period_value_for_basis(
         patrimonio_atual = obs_lookup.get(("patrimonio_liquido", period_id))
         prev_p = _get_period_id_12_months_ago(period_id, periodicidade, base_periodo)
         patrimonio_anterior = obs_lookup.get(("patrimonio_liquido", prev_p)) if prev_p else None
-        if lucro_val is not None and patrimonio_atual is not None:
-            patrimonio_medio = (patrimonio_atual + patrimonio_anterior) / 2 if patrimonio_anterior is not None else patrimonio_atual
+        if lucro_val is not None and patrimonio_atual is not None and patrimonio_anterior is not None:
+            patrimonio_medio = (patrimonio_atual + patrimonio_anterior) / 2
             return _safe_div(lucro_val, patrimonio_medio)
         return None
 
@@ -4059,8 +4394,8 @@ def _get_period_value_for_basis(
         ativo_atual = obs_lookup.get(("ativo_total", period_id))
         prev_p = _get_period_id_12_months_ago(period_id, periodicidade, base_periodo)
         ativo_anterior = obs_lookup.get(("ativo_total", prev_p)) if prev_p else None
-        if lucro_val is not None and ativo_atual is not None:
-            ativo_medio = (ativo_atual + ativo_anterior) / 2 if ativo_anterior is not None else ativo_atual
+        if lucro_val is not None and ativo_atual is not None and ativo_anterior is not None:
+            ativo_medio = (ativo_atual + ativo_anterior) / 2
             return _safe_div(lucro_val, ativo_medio)
         return None
 
@@ -4072,16 +4407,33 @@ def _get_period_value_for_basis(
         return obs_lookup.get((metric_id, period_id))
     
     if spec.metric_type == "ratio":
-        if metric_id in ("margem_bruta", "margem_ebitda", "margem_ebit", "margem_liquida"):
+        if metric_id in (
+            "margem_bruta", "margem_ebitda", "margem_ebit", "margem_liquida",
+            "margem_liquida_controladora", "capex_receita", "margem_caixa_livre",
+        ):
             num_id = {
                 "margem_bruta": "lucro_bruto",
                 "margem_ebitda": "ebitda",
                 "margem_ebit": "ebit",
                 "margem_liquida": "lucro_liquido",
+                "margem_liquida_controladora": "lucro_liquido_controladora",
+                "capex_receita": "capex",
+                "margem_caixa_livre": "caixa_livre",
             }[metric_id]
             num_ttm = _get_ttm_value(num_id, period_id, base_periodo, obs_lookup)
             den_ttm = _get_ttm_value("receita_liquida", period_id, base_periodo, obs_lookup)
+            if metric_id == "capex_receita" and num_ttm is not None:
+                num_ttm = abs(num_ttm)
             return _safe_div(num_ttm, den_ttm) if (num_ttm is not None and den_ttm is not None) else None
+
+        if metric_id == "giro_ativo":
+            receita_ttm = _get_ttm_value("receita_liquida", period_id, base_periodo, obs_lookup)
+            ativo_atual = obs_lookup.get(("ativo_total", period_id))
+            prev_p = _get_period_id_12_months_ago(period_id, periodicidade, base_periodo)
+            ativo_anterior = obs_lookup.get(("ativo_total", prev_p)) if prev_p else None
+            if receita_ttm is not None and ativo_atual is not None and ativo_anterior is not None:
+                return _safe_div(receita_ttm, (ativo_atual + ativo_anterior) / 2)
+            return None
 
         if metric_id == "conversao_lucro_caixa":
             caixa_ttm = _get_ttm_value("caixa_operacional", period_id, base_periodo, obs_lookup)
@@ -7215,7 +7567,12 @@ def _compile_fundamentalista(
     def make_ev_id(ev_type: str, *parts: str) -> str:
         return _make_fundamentalista_evidence_id(companhia, ev_type, scope, as_of, base_periodo, *parts)
 
-    RESULT_METRICS = ["receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido", "margem_liquida", "roe", "roa"]
+    RESULT_METRICS = [
+        "receita_liquida", "lucro_bruto", "ebit", "ebitda", "lucro_liquido",
+        "lucro_liquido_controladora", "lucro_liquido_nao_controladores",
+        "margem_liquida", "margem_bruta", "margem_ebit", "margem_ebitda",
+        "margem_liquida_controladora", "roe", "roa", "giro_ativo",
+    ]
     CASH_METRICS = [
         "caixa_operacional",
         "capex",
@@ -7230,6 +7587,8 @@ def _compile_fundamentalista(
         "passivo_circulante",
         "ativo_total",
         "patrimonio_liquido",
+        "capex_receita",
+        "margem_caixa_livre",
     ]
     DERIVED_METRICS = ["roe", "roa"]
     ALL_METRICS = list(dict.fromkeys(RESULT_METRICS + CASH_METRICS + DERIVED_METRICS))

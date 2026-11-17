@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.schemas.comum import CanonicalDecimal, Paginacao
 
-CalculationVersion = Literal["2026.2"]
+CalculationVersion = Literal["2026.2", "2026.3"]
 AnalisePeriodicidade = Literal["annual", "quarterly"]
 AnaliseBasePeriodo = Literal["fy", "quarter", "ytd"]
 AnaliseEscopo = Literal["consolidated", "individual"]
@@ -961,6 +961,21 @@ class CompactEvidenceRef(BaseModel):
     )
 
 
+class AnaliseFundamentalistaPeriodoResposta(BaseModel):
+    companhia: AnaliseCompanhiaResumo = Field(description="Identificação da companhia analisada.")
+    calculation_version: CalculationVersion = Field(description="Versão do motor de cálculo aplicada.")
+    periodo: AnalisePeriodoDisponivel = Field(description="Exercício fiscal selecionado, com datas e escopo.")
+    escopo: AnaliseEscopo = Field(description="Escopo societário dos fatos: consolidado ou individual.")
+    as_of: date | None = Field(default=None, description="Corte de conhecimento aplicado aos documentos CVM.")
+    resolution: AnaliseResolutionMetadata = Field(description="Origem canônica ou runtime do resumo.")
+    metricas: list[str] = Field(description="Identificadores estáveis das métricas consideradas.")
+    observacoes: list[AnaliseSeriesObservation] = Field(description="Valores disponíveis no exercício, com unidades e proveniência.")
+    indisponibilidades: list[AnaliseSeriesUnavailable] = Field(description="Métricas que não puderam ser calculadas e seus motivos.")
+    comparacoes: list[AnaliseComparacaoItem] = Field(description="Comparações YoY com o exercício fiscal imediatamente anterior.")
+    issues: list[AnaliseIssue] = Field(default_factory=list, description="Inconsistências contextuais encontradas.")
+    evidence_index: dict[str, CompactEvidenceRef] = Field(default_factory=dict, description="Referências opacas para as evidências das observações.")
+
+
 class AnaliseEvidenceGraphNode(BaseModel):
     """
     Nó estruturado representando uma evidência factual ou documento na árvore de proveniência lógica.
@@ -1652,7 +1667,7 @@ class AnaliseFundamentalistaResposta(BaseModel):
     """
     report_id: str = Field(
         description="Identificador determinístico único do relatório gerado com base nos filtros aplicados.",
-        examples=["rep_9512_consolidated_annual_fy_5_latest_2026.2_runtime"]
+        examples=["rep_9512_consolidated_annual_fy_5_latest_2026.3_runtime"]
     )
     report_version: str = Field(
         description="Versão lógica do formato/layout do relatório para compatibilidade de renderização na UI.",
@@ -1665,7 +1680,7 @@ class AnaliseFundamentalistaResposta(BaseModel):
     metodologia: dict[str, object] = Field(
         description="Resumo metodológico declarativo das regras aplicadas para auditoria externa.",
         examples=[{
-            "motor_versao": "2026.2",
+            "motor_versao": "2026.3",
             "etapas_definicao": {
                 "ponto_partida": "Identidade e qualidade cadastral/cobertura"
             }

@@ -524,7 +524,7 @@ def _materializacao_execucao(
         companhia_id=cia.id,
         codigo_cvm=cia.codigo_cvm,
         escopo=escopo,
-        calculation_version="2026.2",
+        calculation_version="2026.3",
         status=status,
         coverage_complete=coverage_complete,
         source=source,
@@ -638,11 +638,13 @@ def test_metricas_catalogo(client: TestClient) -> None:
     resp = client.get("/analise/metricas")
     assert resp.status_code == 200
     payload = resp.json()
-    assert payload["calculation_version"] == "2026.2"
+    assert payload["calculation_version"] == "2026.3"
     margem = next(item for item in payload["metricas"] if item["id"] == "margem_liquida")
     assert margem["type"] == "ratio"
     assert margem["unit"] == "ratio"
     assert margem["formula"] == "lucro_liquido / receita_liquida"
+    metric_ids = {item["id"] for item in payload["metricas"]}
+    assert {"lucro_liquido_controladora", "margem_liquida_controladora", "capex_receita", "giro_ativo"}.issubset(metric_ids)
 
 
 def test_analise_manifesto(client: TestClient, db_session: Session) -> None:
@@ -1269,7 +1271,7 @@ def test_analise_materializacao_companhia_status_retorna_anos_canonicos(
             companhia_id=cia.id,
             codigo_cvm=cia.codigo_cvm,
             escopo="consolidated",
-            calculation_version="2026.2",
+            calculation_version="2026.3",
             known_from=date(2025, 2, 26),
             known_to=None,
             default_period_id="FY2025",
