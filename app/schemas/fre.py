@@ -27,6 +27,74 @@ class FreDocumentoResposta(PeriodicModel):
     alterado_em: BrazilianDateTime
 
 
+class FreEndividamentoResposta(PeriodicModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID = Field(description="Identificador persistido da linha histórica.")
+    companhia_id: uuid.UUID | None = Field(description="Vínculo com a identidade canônica da companhia, quando resolvido.")
+    cnpj_companhia: str = Field(description="CNPJ publicado no quadro, normalizado para 14 dígitos.")
+    data_referencia: BrazilianDate = Field(description="Data de referência do cabeçalho FRE.")
+    versao: int = Field(description="Versão do formulário FRE.")
+    id_documento: int = Field(description="ID do formulário FRE associado à linha.")
+    data_inicio_exercicio_social: BrazilianDate | None = Field(description="Início do exercício social informado na linha.")
+    data_fim_exercicio_social: BrazilianDate | None = Field(description="Fim do exercício social informado na linha.")
+    passivo: CanonicalDecimal | None = Field(description="Passivo reportado sem conversão; escala e moeda não são comprovadas pela origem.")
+    indice_endividamento: CanonicalDecimal | None = Field(description="Índice declarado pela companhia sem interpretação ou cálculo pelo serviço.")
+    tipo_indice: str | None = Field(description="Rótulo do índice de endividamento publicado.")
+    descricao_outro_indice: str | None = Field(description="Descrição publicada quando o tipo usa índice alternativo.")
+    unidade_passivo: str | None = Field(default=None, description="Unidade monetária não comprovada pelo arquivo de origem; permanece nula.")
+    unidade_indice: str | None = Field(default=None, description="Unidade ou escala do índice não comprovada pelo arquivo de origem; permanece nula.")
+    limitacoes_interpretacao: list[str] = Field(
+        default_factory=lambda: ["A origem não comprova a moeda ou escala do passivo nem a unidade ou escala do índice; os números são preservados sem conversão."],
+        description="Limitações de interpretação conhecidas para os campos originais.",
+    )
+    row_fingerprint: str = Field(description="Hash do conteúdo normalizado, usado para deduplicar cópias exatas sem colapsar linhas distintas.")
+    arquivo_origem: str = Field(description="Nome do CSV membro promovido.")
+    ano_origem: int | None = Field(description="Ano do ZIP anual da CVM que continha a linha.")
+    linha_origem: int | None = Field(description="Número sequencial original no CSV, com cabeçalho como linha 1 e primeiro registro de dados como linha 2.")
+    hash_origem: str = Field(description="Hash do arquivo/membro de origem associado à linha.")
+    link_documento: str | None = Field(default=None, description="Link do formulário FRE associado ao cabeçalho de mesmo CNPJ, documento, referência e versão.")
+    criado_em: BrazilianDateTime = Field(description="Data e hora em que a linha foi criada no Tucano CVM.")
+    sincronizado_em: BrazilianDateTime = Field(description="Data e hora da última promoção pela ingestão.")
+    alterado_em: BrazilianDateTime = Field(description="Data e hora da última alteração persistida da linha.")
+
+
+class FreObrigacaoResposta(PeriodicModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: uuid.UUID = Field(description="Identificador persistido da linha histórica.")
+    companhia_id: uuid.UUID | None = Field(description="Vínculo com a identidade canônica da companhia, quando resolvido.")
+    cnpj_companhia: str = Field(description="CNPJ publicado no quadro, normalizado para 14 dígitos.")
+    data_referencia: BrazilianDate = Field(description="Data de referência do cabeçalho FRE.")
+    versao: int = Field(description="Versão do formulário FRE.")
+    id_documento: int = Field(description="ID do formulário FRE associado à linha.")
+    nome_companhia: str | None = Field(description="Denominação publicada no quadro.")
+    data_inicio_exercicio_social: BrazilianDate | None = Field(description="Início do exercício social informado na linha.")
+    data_fim_exercicio_social: BrazilianDate | None = Field(description="Fim do exercício social informado na linha.")
+    tipo_obrigacao: str | None = Field(description="Classificação de obrigação publicada pela companhia.")
+    tipo_garantia: str | None = Field(description="Classificação de garantia publicada pela companhia.")
+    descricao_outras_garantias: str | None = Field(description="Detalhe textual de garantia adicional.")
+    divida_inferior_1_ano: CanonicalDecimal | None = Field(description="Faixa agregada abaixo de um ano, sem data individual de pagamento.")
+    divida_1a3_anos: CanonicalDecimal | None = Field(description="Faixa agregada de um a três anos.")
+    divida_3a5_anos: CanonicalDecimal | None = Field(description="Faixa agregada de três a cinco anos.")
+    divida_superior_5_anos: CanonicalDecimal | None = Field(description="Faixa agregada acima de cinco anos.")
+    divida_total: CanonicalDecimal | None = Field(description="Total agregado publicado para a linha.")
+    observacao: str | None = Field(description="Observação literal vinculada à classificação da obrigação.")
+    moeda: str | None = Field(default=None, description="Moeda não comprovada no quadro; permanece nula.")
+    unidade_valores: str | None = Field(default=None, description="Unidade ou escala monetária não comprovada no quadro; permanece nula.")
+    limitacoes_interpretacao: list[str] = Field(
+        default_factory=lambda: ["O quadro não comprova moeda nem escala monetária; os valores permanecem como publicados, sem conversão."],
+        description="Limitações de interpretação conhecidas para os valores originais.",
+    )
+    row_fingerprint: str = Field(description="Hash do conteúdo normalizado, usado para deduplicar cópias exatas sem colapsar linhas distintas.")
+    arquivo_origem: str = Field(description="Nome do CSV membro promovido.")
+    ano_origem: int | None = Field(description="Ano do ZIP anual da CVM que continha a linha.")
+    linha_origem: int | None = Field(description="Número sequencial original no CSV, com cabeçalho como linha 1 e primeiro registro de dados como linha 2.")
+    hash_origem: str = Field(description="Hash do arquivo/membro de origem associado à linha.")
+    link_documento: str | None = Field(default=None, description="Link do formulário FRE associado ao cabeçalho de mesmo CNPJ, documento, referência e versão.")
+    criado_em: BrazilianDateTime = Field(description="Data e hora em que a linha foi criada no Tucano CVM.")
+    sincronizado_em: BrazilianDateTime = Field(description="Data e hora da última promoção pela ingestão.")
+    alterado_em: BrazilianDateTime = Field(description="Data e hora da última alteração persistida da linha.")
+
+
 class FreAuditorResposta(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -646,6 +714,16 @@ class FreAcaoEntregueResposta(BaseModel):
 
 class ListaFreDocumentosResposta(BaseModel):
     dados: list[FreDocumentoResposta] = Field(description="Lista paginada de documentos FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreEndividamentoResposta(BaseModel):
+    dados: list[FreEndividamentoResposta] = Field(description="Linhas paginadas de nível de endividamento declaradas no FRE.")
+    paginacao: Paginacao
+
+
+class ListaFreObrigacoesResposta(BaseModel):
+    dados: list[FreObrigacaoResposta] = Field(description="Linhas paginadas de dívidas e obrigações declaradas no FRE.")
     paginacao: Paginacao
 
 

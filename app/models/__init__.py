@@ -50,8 +50,10 @@ from app.models.fre import (
     FreEmpregadoPosicaoFaixaEtaria,
     FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreEndividamento,
     FreMembroComite,
     FreMercadoEstrangeiro,
+    FreObrigacao,
     FreOutroValorMobiliario,
     FreParticipacaoSociedade,
     FrePlanoRecompra,
@@ -91,6 +93,7 @@ from app.models.ingestion import (
 )
 from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueControl, IngestionQueueItem
 from app.models.ipe import IpeDocumento
+from app.models.obrigacoes_contratuais import ObrigacaoContratualRegistro
 from app.models.setores import (
     Setor,
     SetorAlias,
@@ -146,6 +149,7 @@ __all__ = [
     "FreAuditor",
     "FreCapitalSocial",
     "FreDocumento",
+    "FreEndividamento",
     "FreEmpregadoLocalDeclaracaoGenero",
     "FreEmpregadoLocalDeclaracaoRaca",
     "FreEmpregadoLocalFaixaEtaria",
@@ -181,6 +185,8 @@ __all__ = [
     "FreDireitoAcao",
     "FreVolumeValorMobiliario",
     "FreOutroValorMobiliario",
+    "FreObrigacao",
+    "ObrigacaoContratualRegistro",
     "FreTitularValorMobiliario",
     "FreMercadoEstrangeiro",
     "FreTituloExterior",

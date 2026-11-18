@@ -103,6 +103,17 @@ def _canonical_cnpj(value: str | None) -> str:
     return normalized
 
 
+def _canonical_admin_cnpj(value: Any) -> str | None:
+    """Return a canonical administrator CNPJ when the source field is valid.
+
+    CVM files occasionally contain a truncated administrator name in this
+    column. The original value remains in ``dados``; it must not be inserted
+    into the typed CNPJ column or cause the whole annual publication to fail.
+    """
+    normalized = re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+    return normalized if _CNPJ_PATTERN.fullmatch(normalized) else None
+
+
 def _normalizar_valor(campo: str, value: str | None, secao: str) -> Any:
     text = (value or "").strip()
     if not text:
@@ -299,7 +310,9 @@ def _prepare_row(secao: str, row: dict[str, Any], *, execution_id: Any, ano: int
     }
     if secao == "geral":
         base["tipo"] = row["tipo"]
-        return base | {dest: row["values"].get(source) for source, dest in _CORE_MAPPING[secao].items()}
+        mapped = {dest: row["values"].get(source) for source, dest in _CORE_MAPPING[secao].items()}
+        mapped["cnpj_administrador"] = _canonical_admin_cnpj(row["values"].get("CNPJ_Administrador"))
+        return base | mapped
     return base | {dest: row["values"].get(source) for source, dest in _CORE_MAPPING[secao].items()}
 
 

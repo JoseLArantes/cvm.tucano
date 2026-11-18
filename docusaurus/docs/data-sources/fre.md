@@ -43,7 +43,9 @@ O pacote anual contém um cabeçalho documental e diversos membros especializado
 | Empregados | membros por posição, local, gênero, raça, faixa etária e PCD | Promovido para tabelas específicas quando suportado. |
 | Participações e relações | participações em sociedades, relações familiares, subordinação e partes relacionadas | Promovido para tabelas específicas quando suportado. |
 | Valores mobiliários e tesouraria | volumes, titulares, mercados estrangeiros, títulos no exterior, recompra e tesouraria | Promovido para tabelas específicas quando suportado. |
-| Datasets sem mapeamento promovido | alguns quadros financeiros, dividendos, endividamento, obrigações e políticas | Catalogados na ingestão como pendentes de mapeamento promovido. |
+| Endividamento | `fre_cia_aberta_endividamento_{ano}.csv` | Membro opcional promovido para `fre_endividamentos` quando presente. O histórico contém linhas de 2010 a 2023. |
+| Obrigações | `fre_cia_aberta_obrigacao_{ano}.csv` | Membro opcional promovido para `fre_obrigacoes` quando presente. As faixas são agregadas e não identificam contratos ou parcelas. |
+| Outros datasets sem mapeamento promovido | alguns quadros financeiros, dividendos e políticas | Continuam catalogados na ingestão como pendentes de mapeamento promovido. |
 
 ## Estrutura no Tucano CVM
 
@@ -59,11 +61,14 @@ Os dados promovidos do FRE são organizados por tema, sempre mantendo o vínculo
 | Empregados | tabelas por posição, local, gênero, raça, faixa etária e PCD |
 | Administração e relações | administradores, comitês, relações familiares, subordinação e partes relacionadas |
 | Valores mobiliários | volumes, outros valores mobiliários, titulares, mercados estrangeiros, títulos no exterior, recompra e tesouraria |
+| Endividamento e obrigações | `fre_endividamentos`, `fre_obrigacoes` |
 
 ## Endpoints principais
 
 ```bash
 GET /fre/documentos?codigo_cvm=25224&ano_inicio=2020
+GET /fre/endividamento?codigo_cvm=25224&ano_inicio=2010&ano_fim=2023
+GET /fre/obrigacoes?codigo_cvm=25224&data_referencia_fim=31/12/2023
 GET /fre/auditores?codigo_cvm=25224
 GET /fre/capital-social?codigo_cvm=25224
 GET /fre/posicao-acionaria?codigo_cvm=25224
@@ -76,6 +81,14 @@ GET /fre/plano-recompra?codigo_cvm=25224
 ```
 
 A API também expõe endpoints mais específicos para classes de ações, distribuição de capital, remunerações detalhadas, empregados por local ou faixa, declarações de administradores e valores mobiliários em tesouraria.
+
+As consultas de endividamento e obrigações aceitam os mesmos filtros de emissor, data de referência,
+versão, documento e ano de origem, com paginação. As respostas preservam arquivo, ano, linha, hash e
+link do formulário. Cópias idênticas normalizadas são deduplicadas, enquanto conteúdos diferentes sob
+a mesma classificação permanecem em linhas separadas. A CVM não comprova moeda/escala dos valores nem
+unidade/escala do índice: os números são mantidos sem conversão, os campos de unidade retornam `null`
+e a resposta descreve essa limitação. Um resultado vazio significa somente que não há linhas naquele
+recorte.
 
 ## Quadros descontinuados pela CVM
 

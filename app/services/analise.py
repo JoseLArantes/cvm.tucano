@@ -143,7 +143,7 @@ from app.schemas.analise import (
 from app.services.financeiro_valores import valor_conta_ajustado
 
 CALCULATION_VERSION: Literal["2026.3"] = "2026.3"
-FUNDAMENTALISTA_REPORT_VERSION = "1.2.0"
+FUNDAMENTALISTA_REPORT_VERSION = "2.0.0"
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 DB_SCOPE_TO_API: dict[str, AnaliseEscopo] = {"consolidado": "consolidated", "individual": "individual"}
@@ -5033,6 +5033,7 @@ def _build_debt_profile(
         scope=scope,
         limitations=["Cronograma de vencimentos de longo prazo e passivos de arrendamentos mercantil (leasing) não individualizados contabilisticamente."],
         evidence_ids=sorted(list(set(ev_ids))),
+        inadimplencia_ou_descumprimento=None,
         caixa_e_equivalentes=curr_caixa,
         divida_bruta=curr_db,
         divida_liquida=curr_dl,

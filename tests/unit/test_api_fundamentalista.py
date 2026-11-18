@@ -8,12 +8,14 @@ from sqlalchemy import event, func, select
 from sqlalchemy.orm import Session
 
 from app.api.routers import analise as analise_router
+from app.core.cache import build_cache_key
 from app.core.cache import cache as delivery_cache
 from app.models.analise import AnaliseFundamentalistaSnapshot
 from app.models.companhia import Companhia
 from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro
 from app.models.ipe import IpeDocumento
 from app.services.analise import (
+    CALCULATION_VERSION,
     clear_analysis_session_cache,
     materializar_analise_companhia,
     obter_fundamentalista_com_metadata,
@@ -288,7 +290,7 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
 
     # 3. Assert response structure
     assert "report_id" in data
-    assert data["report_version"] == "1.2.0"
+    assert data["report_version"] == "2.0.0"
     assert data["companhia"]["codigo_cvm"] == cia.codigo_cvm
     assert data["resolution"]["mode"] == "runtime_fallback"
 
@@ -313,6 +315,11 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
 
     # Stage 3: Caixa e Solidez
     caixa = etapas["caixa_solidez"]
+    debt_profile = data["debt_profile"]
+    assert debt_profile["inadimplencia_ou_descumprimento"] is None
+    assert debt_profile["inadimplencia_ou_descumprimento_status"] == "nao_coletado"
+    assert debt_profile["cronograma_vencimentos_status"] == "nao_coletado"
+    assert debt_profile["covenants_status"] == "nao_coletado"
     assert len(caixa["series"]) > 0
     cash_metric_ids = {obs["metric_id"] for obs in caixa["series"]}
     assert "caixa_operacional" in cash_metric_ids
@@ -438,6 +445,10 @@ def test_fundamentalista_canonical_mode(client: TestClient, db_session: Session)
     )
     assert response.status_code == 200
     data = response.json()
+
+    assert data["report_version"] == "2.0.0"
+    assert data["debt_profile"]["inadimplencia_ou_descumprimento"] is None
+    assert data["debt_profile"]["inadimplencia_ou_descumprimento_status"] == "nao_coletado"
 
     assert data["resolution"]["mode"] == "canonical"
     assert data["resolution"]["materialization_execution_id"] == str(execucao.id)
@@ -969,6 +980,93 @@ def test_materializacao_prewarm_persiste_e_reutiliza_snapshot(
     assert response.headers["x-analise-generation"] == str(execution.id)
     assert response.headers["etag"].startswith('"')
     assert response.headers["cache-control"].startswith("private")
+
+
+def test_snapshot_com_report_version_antiga_nao_e_reutilizado(db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    execution = materializar_analise_companhia(db_session, cia, scope="consolidated")
+    snapshot = db_session.scalar(
+        select(AnaliseFundamentalistaSnapshot).where(
+            AnaliseFundamentalistaSnapshot.codigo_cvm == cia.codigo_cvm,
+            AnaliseFundamentalistaSnapshot.source_execution_id == execution.id,
+            AnaliseFundamentalistaSnapshot.periodicidade == "annual",
+            AnaliseFundamentalistaSnapshot.base_periodo == "fy",
+            AnaliseFundamentalistaSnapshot.horizonte_anos == 5,
+            AnaliseFundamentalistaSnapshot.as_of_key == "latest",
+            AnaliseFundamentalistaSnapshot.include_key == "none",
+        )
+    )
+    assert snapshot is not None
+    snapshot.report_version = "1.2.0"
+    snapshot.payload["report_version"] = "1.2.0"
+    snapshot.payload["debt_profile"]["inadimplencia_ou_descumprimento"] = False
+    db_session.commit()
+    clear_analysis_session_cache(db_session)
+
+    result = obter_fundamentalista_com_metadata(
+        db_session,
+        cia,
+        scope="consolidated",
+        periodicidade="annual",
+        base_periodo="fy",
+        horizonte_anos=5,
+    )
+
+    assert result.source == "compiled_canonical"
+    assert result.response.report_version == "2.0.0"
+    assert result.response.debt_profile is not None
+    assert result.response.debt_profile.inadimplencia_ou_descumprimento is None
+
+
+def test_cache_redis_ignora_chave_com_report_version_antiga(
+    db_session: Session,
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+    legacy_key = build_cache_key(
+        "fundamentalista",
+        cia.codigo_cvm or 0,
+        {
+            "escopo": "consolidated",
+            "periodicidade": "annual",
+            "base_periodo": "fy",
+            "horizonte_anos": 5,
+            "as_of": None,
+            "include": None,
+            "calculation_version": CALCULATION_VERSION,
+            "report_version": "1.2.0",
+            "generation": "runtime",
+        },
+        namespace="analise:delivery",
+    )
+    values = {
+        legacy_key: json.dumps(
+            {
+                "report_version": "1.2.0",
+                "debt_profile": {"inadimplencia_ou_descumprimento": False},
+            }
+        )
+    }
+
+    monkeypatch.setattr(analise_router._settings, "analise_fundamentalista_cache_enabled", True)
+    monkeypatch.setattr(delivery_cache, "get", lambda key: values.get(key))
+    monkeypatch.setattr(delivery_cache, "set", lambda key, value, _ttl: _cache_set(values, key, value, _ttl))
+    monkeypatch.setattr(delivery_cache, "acquire_lock", lambda _key, _ttl: "lock-token")
+    monkeypatch.setattr(delivery_cache, "release_lock", lambda _key, _token: None)
+
+    response = client.get(
+        f"/analise/companhias/{cia.codigo_cvm}/fundamentalista",
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-analise-source"] == "compiled_runtime"
+    assert response.json()["report_version"] == "2.0.0"
+    assert response.json()["debt_profile"]["inadimplencia_ou_descumprimento"] is None
+    assert legacy_key in values
+    assert len(values) == 2
 
 
 def test_snapshot_canonico_reduz_leitura_para_duas_consultas(

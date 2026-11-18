@@ -24,6 +24,44 @@ O **Formulário de Referência (FRE)** é o documento mais rico em informações
 | `GET` | `/fre/documentos` | Listar documentos FRE |
 | `GET` | `/fre/responsaveis` | Responsáveis pelo FRE |
 | `GET` | `/fre/auditores` | Auditores independentes |
+| `GET` | `/fre/endividamento` | Índices e passivos declarados no quadro histórico de endividamento |
+| `GET` | `/fre/obrigacoes` | Faixas agregadas de obrigações por tipo e garantia |
+
+### Endividamento e obrigações históricas
+
+As rotas promovem os membros opcionais `fre_cia_aberta_endividamento_{ano}.csv` e
+`fre_cia_aberta_obrigacao_{ano}.csv` do fluxo FRE já existente. Os arquivos históricos contêm linhas
+de 2010 a 2023. A ausência de um membro em um ZIP posterior não é erro de ingestão; consulte
+`/fre/datasets/disponibilidade` para distinguir pacote, membro e linhas promovidas.
+
+Ambas as rotas aceitam os filtros comuns: `cnpj_companhia`, `codigo_cvm`,
+`data_referencia_inicio`, `data_referencia_fim`, `ano_origem`, `ano_inicio`, `ano_fim`, `versao`,
+`id_documento`, `pagina` e `tamanho_pagina`. `codigo_cvm` é resolvido para o CNPJ canônico da
+companhia. A resposta contém `dados` e `paginacao` (`pagina`, `tamanho_pagina` e `total`). Um recorte
+sem linhas retorna lista vazia e total zero.
+
+Cada linha é vinculada ao cabeçalho FRE por CNPJ, `id_documento`, `data_referencia` e `versao`. A
+resposta preserva `arquivo_origem`, `ano_origem`, `linha_origem`, `hash_origem` e `link_documento`.
+`linha_origem` é o número sequencial original no CSV, contando o cabeçalho como linha 1 e o primeiro
+registro de dados como linha 2.
+`row_fingerprint` identifica o conteúdo normalizado da linha. Duas linhas com mesma classificação e
+valores diferentes continuam separadas; cópias com conteúdo normalizado idêntico são promovidas uma
+única vez. Os campos decimais permanecem no formato decimal canônico, sem agregação ou conversão.
+
+#### `GET /fre/endividamento`
+
+Retorna `passivo`, `indice_endividamento`, `tipo_indice` e `descricao_outro_indice`, além do período
+de exercício informado. A fonte não comprova a moeda/escala do passivo nem a unidade/escala do índice.
+Por isso `unidade_passivo` e `unidade_indice` são nulos, `limitacoes_interpretacao` explica a lacuna e
+os valores não são convertidos.
+
+#### `GET /fre/obrigacoes`
+
+Retorna `tipo_obrigacao`, `tipo_garantia`, descrição de outras garantias, observação e as faixas
+`divida_inferior_1_ano`, `divida_1a3_anos`, `divida_3a5_anos`, `divida_superior_5_anos` e
+`divida_total`. As faixas são totais agregados do quadro, não parcelas, credores ou datas de pagamento
+de contratos individuais. Como a fonte não comprova moeda ou escala, `moeda` e `unidade_valores` são
+nulos e `limitacoes_interpretacao` registra a limitação. Os números são preservados sem conversão.
 
 ### Capital Social e Estrutura Acionária
 

@@ -573,3 +573,82 @@ O endpoint valida se a evidência de fato pertence à companhia solicitada. Reto
 - Contas CVM e demonstração de origem
 - Metadados do documento/formulário entregue na CVM com link de download direto
 - Relação com outras comparações, sinais ou reapresentações do relatório
+
+## Obrigações contratuais e eventos de insolvência
+
+As rotas FRE acima expõem os quadros agregados de dívida declarados pela companhia. Elas não
+representam um contrato individual, uma parcela, um teste verificado ou a cobertura integral da
+dívida. Para fatos contratuais revisados e replay temporal, use as rotas abaixo.
+
+### `GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+
+Exige o mesmo bearer token dos demais endpoints protegidos. O corte padrão é a data corrente em
+`America/Sao_Paulo`.
+
+| Parâmetro | Tipo | Padrão | Semântica |
+| --- | --- | --- | --- |
+| `as_of` | `AAAA-MM-DD` | Hoje em São Paulo | Data de corte informacional. Registros com `disponivel_em` posterior são excluídos mesmo se tiverem efeito retroativo. |
+| `tipo_registro` | lista repetível | Todos | `acordo`, `covenant`, `covenant_test`, `breach`, `waiver`, `cash_leg`, `maturity_change`, `cross_default`, `proceeding` ou `coverage`. |
+| `acordo_id` | string | Todos | ID estável do acordo/instrumento relacionado. |
+| `historico` | boolean | `false` | `false` seleciona a maior revisão de cada registro estável conhecida no corte; `true` inclui as revisões anteriores que já estavam disponíveis. |
+| `pagina` | inteiro | `1` | Página, iniciando em 1. |
+| `tamanho_pagina` | inteiro | `100` | Registros por página, máximo 500. |
+
+A resposta contém `companhia_codigo_cvm`, `as_of`, `historico`, `dados` e `paginacao`. Cada registro
+inclui `registro_id`, `revisao`, `acordo_id`, datas `disponivel_em` e `efetivo_em`, `payload`,
+`evidencias`, `revisor_id`, `registrado_por`, `registrado_em` e `rationale`. A autoria da gravação é
+metadado de auditoria separado da identidade do revisor.
+
+O endpoint calcula `resultado_calculado` para um teste quando há `valor_aferido`, usando o comparador
+e o limite da própria revisão. `resultado_verificado` dentro do payload é uma classificação distinta:
+se não for `indisponivel`, a gravação exige revisor e evidência versionada. Para comparar máximo
+inclusivo, use `comparador="lte"`; por exemplo, 3,2 contra 3,0 resulta em `falhou`, enquanto 3,0
+resulta em `passou`.
+
+`waiver_aplicavel` indica que um waiver publicado até o corte foi implementado, estava vigente na data
+do teste e inclui aquele `registro_id` em `test_ids_cobertos`. Ele não remove nem reescreve o registro
+`breach`. `vencimento_efetivo` em parcelas aplica a última mudança elegível publicada e efetiva no
+corte. Uma mudança baseada em cross-default só é aplicada se o registro referenciado tiver gatilho e
+condições confirmados, além de revisor e evidência versionada. `projecao_aplicada` informa quando a
+mudança exibida foi aplicada à projeção da parcela.
+
+Processos (`proceeding`) usam `event_id` (igual a `registro_id`) para identificar cada ato e `case_id`
+para agrupar atos do mesmo processo. Assim, petições, decisões, intervenções e encerramentos no mesmo
+processo conservam IDs próprios; `eventos_relacionados` aponta para outros `event_id` já registrados.
+`etapa` separa `peticao`, `admissao_ou_decisao`, `intervencao_confirmada` e `encerramento`. A data de
+publicação fica em `disponivel_em`; a data de eficácia fica em `efetivo_em`. Um ato posterior ao corte
+não participa do replay, ainda que tenha sido publicado depois com efeito retroativo.
+
+Registros `coverage` apontam o DFP ou ITR que forma a população comparável, os acordos divulgados e
+revisados, exposições declaradas/reconciliadas, divergências de escopo e exposições omitidas. Quando
+`clausulas_desconhecidas` estiver preenchido, `responsavel_lacuna` identifica quem pode esclarecer os
+termos (companhia, agente fiduciário ou revisor autorizado). A lista vazia de acordos revisados não
+prova cobertura nem conformidade.
+
+### `POST /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+
+Exige token de sistema ou usuário administrador e aceita um lote atômico de até 500 registros. Cada
+item precisa de uma evidência com localizador documental (documento e seção/página/linha) ou URL e
+hash. A chave idempotente é companhia, `record_type`, `registro_id` e `revisao`: uma repetição de
+conteúdo igual é idempotente; conteúdo divergente na mesma revisão retorna `409`. Para corrigir um
+fato, acrescente uma nova revisão sem apagar a anterior. `revisor_id` deve identificar a revisão
+analítica e não é inferido do usuário que autenticou a gravação.
+
+Os payloads são discriminados por `record_type`:
+
+| Tipo | Conteúdo principal |
+| --- | --- |
+| `acordo` | Instrumento/série, emissor, devedor, garantidores, moeda, escopo, responsável pelos testes, vigência e cláusula. `acordo_id` deve ser igual ao `registro_id`. |
+| `covenant` | ID e definição financeira, escopo, contas e ajustes, unidade, janela, comparador, limite e datas de teste. |
+| `covenant_test` | Covenant, data, comparador/limite, valor medido, resultado calculado e resultado verificado separados. |
+| `breach` | Covenant e teste afetados, estado da violação, prazo de cura e retirada. A violação original permanece no histórico após waiver ou cura. |
+| `waiver` | Covenant, IDs exatos dos testes cobertos, período de eficácia, condições, implementação e retirada. |
+| `cash_leg` | ID estável da parcela, vencimento original, valor e moeda. |
+| `maturity_change` | IDs das parcelas, datas/condições e base da alteração; aceleração por cross-default exige referência ao respectivo evento. |
+| `cross_default` | Acordos de origem e afetado, cláusula e estado do gatilho/condições. Confirmar ambos requer revisor e evidência versionada. |
+| `proceeding` | `event_id` do ato, `case_id` do processo, órgão, entidade afetada, etapa publicada, exposições, valor divulgado e relações com outros atos. |
+| `coverage` | Documento DFP/ITR, contratos divulgados/revisados, valores reconciliados, diferenças e lacunas. |
+
+Para termos materiais não publicados, registre a cláusula em aberto e o responsável por esclarecê-la.
+Não use `false`, array vazia ou ausência de registro como prova de que não há descumprimento ou de que
+todo o livro de dívida foi revisado.

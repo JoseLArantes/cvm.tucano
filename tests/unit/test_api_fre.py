@@ -26,6 +26,8 @@ from app.models.fre import (
     FreEmpregadoPosicaoFaixaEtaria,
     FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreEndividamento,
+    FreObrigacao,
     FreParticipacaoSociedade,
     FrePosicaoAcionaria,
     FrePosicaoAcionariaClasseAcao,
@@ -1084,6 +1086,118 @@ def test_openapi_does_not_expose_removed_fre_phase_2_endpoints(client: TestClien
     assert "/fre/capital-social/reducoes" not in paths
     assert "/fre/capital-social/reducoes-classes-acoes" not in paths
     assert "/fre/direitos-acoes" not in paths
+
+
+def test_api_fre_endividamento_e_obrigacoes_preservam_origem_e_limitacoes(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    companhia = _companhia()
+    db_session.add(companhia)
+    db_session.flush()
+    agora = datetime.now(UTC)
+    db_session.add(
+        FreDocumento(
+            companhia_id=companhia.id,
+            cnpj_companhia=companhia.cnpj_companhia,
+            codigo_cvm=companhia.codigo_cvm,
+            data_referencia=date(2023, 12, 31),
+            versao=2,
+            denominacao_companhia="Empresa A",
+            categoria_documento="FRE",
+            id_documento=345,
+            data_recebimento=date(2024, 1, 20),
+            link_documento="https://dados.cvm.gov.br/fre/documento/345",
+            arquivo_origem="fre_cia_aberta_2023.csv",
+            ano_origem=2023,
+            linha_origem=2,
+            hash_origem="header-hash",
+            criado_em=agora,
+            sincronizado_em=agora,
+            alterado_em=agora,
+        )
+    )
+    db_session.add_all(
+        [
+            FreEndividamento(
+                companhia_id=companhia.id,
+                cnpj_companhia=companhia.cnpj_companhia,
+                data_referencia=date(2023, 12, 31),
+                versao=2,
+                id_documento=345,
+                data_inicio_exercicio_social=date(2023, 1, 1),
+                data_fim_exercicio_social=date(2023, 12, 31),
+                passivo=Decimal("123456789.12345678901234567891"),
+                indice_endividamento=Decimal("3.20000000000000000001"),
+                tipo_indice="Dívida líquida/EBITDA",
+                descricao_outro_indice=None,
+                row_fingerprint="debt-row-hash",
+                arquivo_origem="fre_cia_aberta_endividamento_2023.csv",
+                ano_origem=2023,
+                linha_origem=4,
+                hash_origem="member-hash",
+                criado_em=agora,
+                sincronizado_em=agora,
+                alterado_em=agora,
+            ),
+            FreObrigacao(
+                companhia_id=companhia.id,
+                cnpj_companhia=companhia.cnpj_companhia,
+                data_referencia=date(2023, 12, 31),
+                versao=2,
+                id_documento=345,
+                nome_companhia="Empresa A",
+                data_inicio_exercicio_social=date(2023, 1, 1),
+                data_fim_exercicio_social=date(2023, 12, 31),
+                tipo_obrigacao="Debêntures",
+                tipo_garantia="Real",
+                descricao_outras_garantias=None,
+                divida_inferior_1_ano=Decimal("10.12345678901234567891"),
+                divida_1a3_anos=Decimal("20.0"),
+                divida_3a5_anos=None,
+                divida_superior_5_anos=None,
+                divida_total=Decimal("30.12345678901234567891"),
+                observacao=None,
+                row_fingerprint="obligation-row-hash",
+                arquivo_origem="fre_cia_aberta_obrigacao_2023.csv",
+                ano_origem=2023,
+                linha_origem=8,
+                hash_origem="member-hash-2",
+                criado_em=agora,
+                sincronizado_em=agora,
+                alterado_em=agora,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    endividamento = client.get("/fre/endividamento", params={"codigo_cvm": companhia.codigo_cvm})
+    obrigacoes = client.get("/fre/obrigacoes", params={"cnpj_companhia": companhia.cnpj_companhia})
+
+    assert endividamento.status_code == 200
+    row_debt = endividamento.json()["dados"][0]
+    assert row_debt["passivo"] == "123456789.12345678901234567891"
+    assert row_debt["indice_endividamento"] == "3.20000000000000000001"
+    assert row_debt["unidade_passivo"] is None
+    assert row_debt["unidade_indice"] is None
+    assert row_debt["arquivo_origem"] == "fre_cia_aberta_endividamento_2023.csv"
+    assert row_debt["linha_origem"] == 4
+    assert row_debt["hash_origem"] == "member-hash"
+    assert row_debt["link_documento"] == "https://dados.cvm.gov.br/fre/documento/345"
+    assert obrigacoes.status_code == 200
+    row_obligation = obrigacoes.json()["dados"][0]
+    assert row_obligation["divida_inferior_1_ano"] == "10.12345678901234567891"
+    assert row_obligation["moeda"] is None
+    assert row_obligation["unidade_valores"] is None
+    assert row_obligation["link_documento"] == "https://dados.cvm.gov.br/fre/documento/345"
+
+
+def test_openapi_exposes_fre_debt_routes(client: TestClient) -> None:
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
+    paths = response.json()["paths"]
+    assert "/fre/endividamento" in paths
+    assert "/fre/obrigacoes" in paths
 
 
 def test_endpoints_fre_new_employee_and_sociedade_datasets(client: TestClient, db_session: Session) -> None:

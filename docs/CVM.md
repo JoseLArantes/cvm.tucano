@@ -714,15 +714,23 @@ Observação operacional importante:
 - **Importância**: Visão histórica compacta dentro do Formulário de Referência
 - **Uso Principal**: Análise de tendências financeiras multianuais
 
-#### `fre_cia_aberta_endividamento_2026.csv`
+#### `fre_cia_aberta_endividamento_{ano}.csv`
 - **Descrição**: Detalhamento do endividamento e fontes de financiamento
 - **Dados Contidos**:
-  - Divisão de dívidas por vencimento (curto e longo prazo)
-  - Segregação por indexador (juros fixos, flutuantes, câmbio, etc.)
-  - Garantias prestadas
+  - Passivo e índice de endividamento declarados, tipo de índice e descrição de índice alternativo
+  - Identificadores do documento FRE, versão, referência e período social
+- **Nota de cobertura**: Os CSVs históricos com linhas foram publicados de 2010 a 2023. O arquivo não comprova moeda/escala do passivo nem unidade/escala do índice; não converter esses valores.
   
 - **Importância**: Diagnóstico de risco de crédito e estrutura de capital
 - **Uso Principal**: Análise de liquidez e solvência
+
+O quadro é promovido para as rotas `/fre/endividamento` e `/fre/obrigacoes` quando o membro opcional
+está presente no ZIP. A unidade e a moeda que não constam no arquivo permanecem desconhecidas; os
+valores originais são preservados sem conversão.
+
+#### `fre_cia_aberta_obrigacao_{ano}.csv`
+- **Campos observados no quadro histórico**: tipo de obrigação, garantia e faixas agregadas de dívida inferior a 1 ano, de 1 a 3 anos, de 3 a 5 anos, superior a 5 anos e total.
+- **Nota de cobertura**: As faixas não individualizam instrumentos, parcelas ou datas de pagamento. O CSV não comprova moeda/escala monetária; não converter os valores.
 
 #### `fre_cia_aberta_fatores_risco_2026.csv`
 - **Descrição**: Fatores de risco reportados pela companhia

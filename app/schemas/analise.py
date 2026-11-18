@@ -1521,12 +1521,15 @@ class DebtProfile(BaseModel):
     arrendamentos: CanonicalDecimal | None = Field(default=None, description="Passivos de arrendamentos contábeis.")
     divida_ajustada_com_arrendamentos: CanonicalDecimal | None = Field(default=None, description="Dívida total incluindo arrendamentos.")
     
-    cronograma_vencimentos: list[DebtMaturityFaixa] = Field(default_factory=list, description="Cronograma de vencimentos por faixa.")
+    cronograma_vencimentos: list[DebtMaturityFaixa] = Field(default_factory=list, description="Faixas agregadas de vencimento divulgadas, sem datas de parcelas individuais.")
+    cronograma_vencimentos_status: Literal["nao_coletado", "nao_divulgado", "desconhecido", "ausencia_verificada", "disponivel"] = Field(default="nao_coletado", description="Estado da coleta e verificação das faixas agregadas.")
     moedas: list[str] = Field(default_factory=list, description="Moedas de indexação.")
     indexadores: list[str] = Field(default_factory=list, description="Indexadores da dívida.")
     garantias: list[str] = Field(default_factory=list, description="Tipos de garantias declaradas.")
-    covenants: list[str] = Field(default_factory=list, description="Informações sobre cláusulas restritivas.")
-    inadimplencia_ou_descumprimento: bool = Field(default=False, description="Flag indicando inadimplemento contratual.")
+    covenants: list[str] = Field(default_factory=list, description="Textos de covenants coletados, sem indicar por si só compliance.")
+    covenants_status: Literal["nao_coletado", "nao_divulgado", "desconhecido", "ausencia_verificada", "disponivel"] = Field(default="nao_coletado", description="Estado da coleta e verificação dos covenants.")
+    inadimplencia_ou_descumprimento: bool | None = Field(default=None, description="Resultado verificado de inadimplência contratual. Nulo enquanto não coletado ou verificado.")
+    inadimplencia_ou_descumprimento_status: Literal["nao_coletado", "nao_divulgado", "desconhecido", "ausencia_verificada", "disponivel"] = Field(default="nao_coletado", description="Estado da verificação da inadimplência contratual.")
     alavancagem: CanonicalDecimal | None = Field(default=None, description="Métrica de alavancagem calculada (ex.: Dívida Líquida / EBITDA).")
 
 
@@ -1671,7 +1674,7 @@ class AnaliseFundamentalistaResposta(BaseModel):
     )
     report_version: str = Field(
         description="Versão lógica do formato/layout do relatório para compatibilidade de renderização na UI.",
-        examples=["1.0.0"]
+        examples=["2.0.0"]
     )
     companhia: AnaliseCompanhiaResumo = Field(description="Cadastral básico da companhia analisada.")
     contexto: AnaliseContextoPadrao = Field(description="Contexto informacional padrão (período ativo sugerido, escopo).")

@@ -2,6 +2,23 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-18 - FRE histórico de dívida e consulta contratual por corte
+
+### Superfícies afetadas
+
+- `GET /fre/endividamento` e `GET /fre/obrigacoes`
+- `GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+- `POST /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- Os dois quadros opcionais históricos do FRE passam a ser promovidos e consultáveis com filtros por emissor, referência, ano de origem, versão e documento. As respostas preservam decimal, arquivo, ano, linha, hash, link do formulário e fingerprint da linha; cópias idênticas são deduplicadas e linhas distintas sob a mesma classificação permanecem separadas.
+- As consultas FRE declaram como nulas moeda, escala e unidades que os arquivos não comprovam. Valores não são convertidos e faixas de obrigações não são apresentadas como parcelas contratuais.
+- A consulta contratual entrega registros versionados com replay de corte informacional, evidências, identidade do revisor e autoria de gravação separados, comparação aritmética de covenant calculada pelo serviço, estado verificado independente, waiver limitado a testes, projeção de vencimento e eventos de processos.
+- O lote administrativo é atômico e idempotente por companhia, tipo, ID estável e revisão. Repetição de conteúdo igual é aceita; divergência para uma revisão existente retorna `409`.
+- `debt_profile.inadimplencia_ou_descumprimento` agora é anulável, e vencimentos, covenants e inadimplência recebem estados explícitos. Até coleta ou verificação, os estados são `nao_coletado` e a inadimplência é `null`. `report_version` passa a `2.0.0`; cache Redis e seleção de snapshot usam essa versão para evitar payload legado.
+
 ## 2026-11-18 - Catalogo, fundamentos e informes mensais de FII
 
 ### Superficies afetadas

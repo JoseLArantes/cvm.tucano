@@ -43,8 +43,10 @@ from app.models.fre import (
     FreEmpregadoPosicaoFaixaEtaria,
     FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreEndividamento,
     FreMembroComite,
     FreMercadoEstrangeiro,
+    FreObrigacao,
     FreOutroValorMobiliario,
     FreParticipacaoSociedade,
     FrePlanoRecompra,
@@ -193,6 +195,48 @@ def normalizar_fre_row(
                 "linha_origem": linha_origem,
             },
         )
+
+    if tipo in {"endividamento", "obrigacao"}:
+        base_chave = {
+            "cnpj_companhia": normalizar_cnpj_opcional(linha.get("CNPJ_Companhia")),
+            "data_referencia": normalizar_data(linha.get("Data_Referencia")),
+            "versao": normalizar_inteiro(linha.get("Versao")),
+            "id_documento": normalizar_inteiro(linha.get("ID_Documento")),
+        }
+        if any(base_chave[campo] is None for campo in ("cnpj_companhia", "data_referencia", "versao", "id_documento")):
+            raise ValueError("campo_obrigatorio_ausente")
+        dados: dict[str, Any] = base_chave | {
+            "data_inicio_exercicio_social": normalizar_data(linha.get("Data_Inicio_Exercicio_Social")),
+            "data_fim_exercicio_social": normalizar_data(linha.get("Data_Fim_Exercicio_Social")),
+            "arquivo_origem": arquivo_origem,
+            "ano_origem": ano_origem,
+            "linha_origem": linha_origem,
+        }
+        if tipo == "endividamento":
+            dados |= {
+                "passivo": normalizar_decimal_cvm(linha.get("Passivo")),
+                "indice_endividamento": normalizar_decimal_cvm(linha.get("Indice_Endividamento")),
+                "tipo_indice": normalizar_texto(linha.get("Tipo_Indice")),
+                "descricao_outro_indice": normalizar_texto(linha.get("Descricao_Outro_Indice")),
+            }
+            row_kind = "fre_endividamento"
+        else:
+            dados |= {
+                "nome_companhia": normalizar_texto(linha.get("Nome_Companhia")),
+                "tipo_obrigacao": normalizar_texto(linha.get("Tipo_Obrigacao")),
+                "tipo_garantia": normalizar_texto(linha.get("Tipo_Garantia")),
+                "descricao_outras_garantias": normalizar_texto(linha.get("Descricao_Outras_Garantias")),
+                "divida_inferior_1_ano": normalizar_decimal_cvm(linha.get("Divida_Inferior_1_Ano")),
+                "divida_1a3_anos": normalizar_decimal_cvm(linha.get("Divida_1a3Anos")),
+                "divida_3a5_anos": normalizar_decimal_cvm(linha.get("Divida_3a5Anos")),
+                "divida_superior_5_anos": normalizar_decimal_cvm(linha.get("Divida_Superior_5_Anos")),
+                "divida_total": normalizar_decimal_cvm(linha.get("Divida_Total")),
+                "observacao": normalizar_texto(linha.get("Observacao")),
+            }
+            row_kind = "fre_obrigacao"
+        fingerprint_fields = {key: value for key, value in dados.items() if key not in {"arquivo_origem", "ano_origem", "linha_origem"}}
+        dados["row_fingerprint"] = gerar_hash_canonico(fingerprint_fields)
+        return row_kind, dados
 
     cnpj_companhia = normalizar_cnpj_opcional(linha.get("CNPJ_Companhia"))
     data_referencia = normalizar_data(linha.get("Data_Referencia"))
@@ -1142,6 +1186,10 @@ def _fre_promotion_spec(row_kind: str) -> tuple[type[Any], str, tuple[str, ...]]
             "fre_documentos",
             ("id_documento", "versao", "data_referencia"),
         )
+    if row_kind == "fre_endividamento":
+        return FreEndividamento, "fre_endividamentos", ("cnpj_companhia", "id_documento", "versao", "data_referencia", "row_fingerprint")
+    if row_kind == "fre_obrigacao":
+        return FreObrigacao, "fre_obrigacoes", ("cnpj_companhia", "id_documento", "versao", "data_referencia", "row_fingerprint")
     if row_kind == "fre_auditor":
         return (
             FreAuditor,

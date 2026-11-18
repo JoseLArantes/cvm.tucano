@@ -797,6 +797,44 @@ Campos principais:
 | `event_buckets` | array | Buckets agregados de eventos por ano ou mês |
 | `evidence_dossier` | array | Dossiê factual priorizado para a UI |
 
+### `DebtProfile` e sinais contratuais
+
+`debt_profile` reúne saldos contábeis da dívida e sinais contratuais. Os quadros históricos do FRE
+podem ajudar a localizar endividamento e faixas agregadas, mas não identificam acordos ou parcelas e
+não verificam cumprimento de covenants. Portanto, as listas `cronograma_vencimentos`, `moedas`,
+`indexadores`, `garantias` e `covenants` não constituem por si só cobertura contratual. Enquanto o
+painel não coletar e validar cada fato, elas começam vazias e o estado correspondente começa em
+`nao_coletado`.
+
+| Campo | Tipo | Semântica atual |
+| --- | --- | --- |
+| `cronograma_vencimentos` | array | Faixas agregadas eventualmente coletadas; vazio não significa ausência verificada. |
+| `cronograma_vencimentos_status` | enum | Estado da coleta das faixas. |
+| `covenants` | array de strings | Textos eventualmente coletados, sem conclusão automática sobre compliance. |
+| `covenants_status` | enum | Estado da coleta e verificação de covenants. |
+| `inadimplencia_ou_descumprimento` | boolean ou null | Resultado binário verificado; permanece `null` enquanto não houver um resultado verificado. |
+| `inadimplencia_ou_descumprimento_status` | enum | Estado da informação de inadimplência ou descumprimento. |
+
+Os três campos de estado usam os mesmos valores:
+
+| Estado | Interpretação |
+| --- | --- |
+| `nao_coletado` | O painel ainda não coletou a informação. É o estado inicial atual. |
+| `nao_divulgado` | A revisão da fonte aplicável não localizou divulgação daquele campo. Não afirma ausência contratual. |
+| `desconhecido` | A informação existe ou pode existir, mas não pode ser resolvida com as evidências disponíveis. |
+| `ausencia_verificada` | A revisão documentou que a condição não existe no escopo e período examinados. |
+| `disponivel` | Há dado coletado e utilizável; isso não implica que uma obrigação foi cumprida. |
+
+`inadimplencia_ou_descumprimento=false` só pode ser interpretado junto de
+`inadimplencia_ou_descumprimento_status="ausencia_verificada"`. Uma lista vazia acompanhada de
+`nao_coletado`, `nao_divulgado` ou `desconhecido` não significa inexistência ou conformidade. A versão
+do relatório passou a `report_version="2.0.0"`; caches e snapshots anteriores não são selecionados
+como a versão corrente.
+
+Para acordos individuais, datas de teste, waivers, parcelas ou processos, use
+`GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais` descrito em
+[Análise por companhia](../api-endpoints/analise-companhias.md#obrigações-contratuais-e-eventos-de-insolvência).
+
 ### `AnaliseFundamentalistaPeriodoResposta`
 
 Resposta enxuta para um exercício fiscal anual, servida por `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`. `period_id` usa `FYAAAA`. O payload contém somente observações e indisponibilidades do ano pedido; `comparacoes` contém variação `YoY` em relação ao FY imediatamente anterior. O ano comparável é lido para calcular as comparações, mas seus valores não são repetidos em `observacoes`.

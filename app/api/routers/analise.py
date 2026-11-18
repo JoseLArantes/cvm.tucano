@@ -1,8 +1,9 @@
 import hashlib
 from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy import case, func, select
@@ -78,8 +79,18 @@ from app.schemas.analise import (
     AnaliseSinaisResposta,
 )
 from app.schemas.comum import Paginacao
+from app.schemas.obrigacoes_contratuais import (
+    AcordoPayload,
+    CovenantTestPayload,
+    EvidenciaContratual,
+    ListaRegistrosContratuaisResposta,
+    LoteRegistrosContratuaisInput,
+    LoteRegistrosContratuaisResposta,
+    RegistroContratualResposta,
+)
 from app.services.analise import (
     CALCULATION_VERSION,
+    FUNDAMENTALISTA_REPORT_VERSION,
     campanha_tem_requeue_em_transito,
     contar_chunks_ativos_campanha,
     contar_chunks_stale_campanha,
@@ -118,6 +129,13 @@ from app.services.analise_materializacao_operacional import (
     MaterializationReconcileConflict,
     build_materialization_operational_snapshot,
     reconcile_materialization_execution,
+)
+from app.services.normalizacao import normalizar_cnpj
+from app.services.obrigacoes_contratuais import (
+    ConflitoRevisaoContratualError,
+    gravar_lote_registros_contratuais,
+    listar_registros_contratuais,
+    validar_payload_contratual,
 )
 from app.worker.celery_app import celery_app
 
@@ -2305,6 +2323,7 @@ def obter_analise_fundamentalista(
             "as_of": as_of,
             "include": include,
             "calculation_version": CALCULATION_VERSION,
+            "report_version": FUNDAMENTALISTA_REPORT_VERSION,
             "generation": generation,
         },
         namespace="analise:delivery",
@@ -2552,3 +2571,167 @@ def obter_analise_fundamentalista_evidencia(
         raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+_TIPOS_REGISTRO_CONTRATUAL = Literal[
+    "acordo",
+    "covenant",
+    "covenant_test",
+    "breach",
+    "waiver",
+    "cash_leg",
+    "maturity_change",
+    "cross_default",
+    "proceeding",
+    "coverage",
+]
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/obrigacoes-contratuais",
+    response_model=ListaRegistrosContratuaisResposta,
+    summary="Consultar obrigações contratuais no corte",
+    description=(
+        "Consulta registros versionados de acordos, covenants e testes, violações, waivers, parcelas, "
+        "alterações de vencimento, cross-defaults, processos e cobertura. `as_of` limita os fatos à "
+        "data em que a evidência já estava publicamente disponível. O padrão é a data corrente em "
+        "America/Sao_Paulo. `historico=false` seleciona a maior revisão disponível de cada registro; "
+        "`historico=true` retorna todas as revisões disponíveis no corte. A comparação aritmética do "
+        "teste é calculada pelo serviço e permanece separada do resultado verificado, que exige revisor "
+        "e evidência versionada. Waivers preservam as violações originais e só cobrem os testes listados. "
+        "A aceleração por cross-default é projetada somente quando o gatilho e as condições constam "
+        "como confirmados por revisor e evidência. Cada linha expõe `disponivel_em` (data da evidência) "
+        "e `efetivo_em` (data de efeito conhecida). A paginação ocorre após filtros e seleção de revisão."
+    ),
+    responses={
+        **_RESPOSTAS_PADRAO,
+        200: {"description": "Registros elegíveis no corte, com proveniência e metadados de paginação."},
+    },
+    operation_id="listarObrigacoesContratuais",
+)
+def listar_obrigacoes_contratuais(
+    codigo_cvm: Annotated[int, Path(description="Código oficial da companhia na CVM.", examples=[9512])],
+    db: DbSession,
+    paginacao: Annotated[PaginacaoQuery, Depends()],
+    as_of: Annotated[
+        date | None,
+        Query(description="Corte informacional em `AAAA-MM-DD`; por padrão, data corrente em America/Sao_Paulo.", examples=["2025-12-31"]),
+    ] = None,
+    tipo_registro: Annotated[
+        list[_TIPOS_REGISTRO_CONTRATUAL] | None,
+        Query(description="Filtra tipos de registro; parâmetro repetível.", examples=["covenant_test", "waiver"]),
+    ] = None,
+    acordo_id: Annotated[str | None, Query(description="ID estável do acordo ou instrumento.", max_length=200)] = None,
+    historico: Annotated[
+        bool,
+        Query(description="Quando verdadeiro, inclui revisões anteriores já disponíveis no corte."),
+    ] = False,
+) -> ListaRegistrosContratuaisResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    corte = as_of or datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    total, dados = listar_registros_contratuais(
+        db,
+        codigo_cvm=codigo_cvm,
+        as_of=corte,
+        historico=historico,
+        tipos=cast(list[str] | None, tipo_registro),
+        acordo_id=acordo_id,
+        pagina=paginacao.pagina,
+        tamanho_pagina=paginacao.tamanho_pagina,
+    )
+    return ListaRegistrosContratuaisResposta(
+        companhia_codigo_cvm=companhia.codigo_cvm or codigo_cvm,
+        as_of=corte,
+        historico=historico,
+        dados=dados,
+        paginacao=Paginacao(
+            pagina=paginacao.pagina,
+            tamanho_pagina=paginacao.tamanho_pagina,
+            total=total,
+        ),
+    )
+
+
+@router.post(
+    "/companhias/{codigo_cvm}/obrigacoes-contratuais",
+    response_model=LoteRegistrosContratuaisResposta,
+    status_code=201,
+    summary="Registrar lote de obrigações contratuais revisadas",
+    description=(
+        "Grava registros revisados e suas evidências em uma única transação. Exige o token de sistema "
+        "ou usuário administrador. A chave idempotente é companhia, tipo, ID estável e revisão: repetir "
+        "a mesma revisão com o mesmo conteúdo é aceito sem duplicar; enviar conteúdo diferente para "
+        "uma revisão existente retorna `409 Conflict`. O usuário autenticado que grava e o `revisor_id` "
+        "informado em cada item são armazenados separadamente. Resultados aritméticos de covenant são "
+        "recalculados pelo serviço. O lote aceita até 500 registros e é atômico."
+    ),
+    responses={
+        201: {"description": "Lote persistido; `aceitos` conta novas revisões e `idempotentes` as já existentes."},
+        401: {"description": "Token ausente ou inválido."},
+        403: {"description": "A gravação requer autorização administrativa."},
+        404: {"description": "Companhia não encontrada."},
+        409: {"description": "Uma chave de revisão existente recebeu conteúdo divergente."},
+        422: {"description": "Payload ou relações inválidas."},
+    },
+    operation_id="registrarLoteObrigacoesContratuais",
+)
+def registrar_lote_obrigacoes_contratuais(
+    codigo_cvm: Annotated[int, Path(description="Código oficial da companhia na CVM.", examples=[9512])],
+    lote: LoteRegistrosContratuaisInput,
+    db: DbSession,
+    autenticacao: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    _: Annotated[None, Depends(exigir_admin_api)],
+) -> LoteRegistrosContratuaisResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    for registro in lote.registros:
+        if isinstance(registro.payload, AcordoPayload):
+            try:
+                emissor_cnpj = normalizar_cnpj(registro.payload.emissor_cnpj)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="cnpj_emissor_invalido") from exc
+            if emissor_cnpj != companhia.cnpj_companhia:
+                raise HTTPException(status_code=422, detail="acordo_emissor_diverge_da_companhia_da_rota")
+
+    if autenticacao.usuario is None:
+        registrado_por = "token_sistema"
+    else:
+        registrado_por = str(autenticacao.usuario.id)
+    try:
+        aceitos, idempotentes, registros = gravar_lote_registros_contratuais(
+            db,
+            codigo_cvm=codigo_cvm,
+            lote=lote,
+            registrado_por=registrado_por,
+        )
+    except ConflitoRevisaoContratualError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    respostas = []
+    for registro_persistido in registros:
+        resultado_calculado = None
+        calculado_em = None
+        payload_validado = validar_payload_contratual(registro_persistido.payload)
+        if isinstance(payload_validado, CovenantTestPayload):
+            teste = payload_validado
+            resultado_calculado = teste.resultado_calculado
+            calculado_em = teste.data_teste
+        respostas.append(
+            RegistroContratualResposta(
+                registro_id=registro_persistido.registro_id,
+                revisao=registro_persistido.revisao,
+                acordo_id=registro_persistido.acordo_id,
+                disponivel_em=registro_persistido.disponivel_em,
+                efetivo_em=registro_persistido.efetivo_em,
+                payload=payload_validado,
+                evidencias=[EvidenciaContratual.model_validate(item) for item in registro_persistido.evidencias],
+                revisor_id=registro_persistido.revisor_id,
+                registrado_por=registro_persistido.registrado_por,
+                rationale=registro_persistido.rationale,
+                registrado_em=registro_persistido.criado_em,
+                calculado_em=calculado_em,
+                resultado_calculado=resultado_calculado,
+            )
+        )
+    return LoteRegistrosContratuaisResposta(aceitos=aceitos, idempotentes=idempotentes, registros=respostas)

@@ -1,6 +1,7 @@
 import io
 import zipfile
 from datetime import UTC, date, datetime
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine
@@ -21,7 +22,9 @@ from app.models.fre import (
     FreDistribuicaoCapitalClasseAcao,
     FreDocumento,
     FreEmpregadoPosicaoGenero,
+    FreEndividamento,
     FreMembroComite,
+    FreObrigacao,
     FrePosicaoAcionaria,
     FrePosicaoAcionariaClasseAcao,
     FreRelacaoFamiliar,
@@ -40,6 +43,7 @@ from app.services.ingestion.cadastro import (
     promover_registros_cadastro,
 )
 from app.services.ingestion.fre import map_fre_members, normalizar_fre_row, sincronizar_fre
+from app.services.ingestion.validation import validate_member_header
 
 
 def _session() -> Session:
@@ -120,6 +124,7 @@ def _zip_fre(
     cnpj_documento: str = "08.773.135/0001-00",
     cnpj_filho: str = "08.773.135/0001-00",
     incluir_empregados_genero: bool = True,
+    incluir_quadros_divida: bool = False,
 ) -> bytes:
     b = io.BytesIO()
     with zipfile.ZipFile(b, mode="w", compression=zipfile.ZIP_DEFLATED) as z:
@@ -189,6 +194,28 @@ def _zip_fre(
                     f"{cnpj_filho};2025-12-31;1;123;EMPRESA A;Diretoria;10;20;1;0;0\n"
                 ).encode("latin1"),
             )
+        if incluir_quadros_divida:
+            z.writestr(
+                f"fre_cia_aberta_endividamento_{ano}.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Data_Inicio_Exercicio_Social;"
+                    "Data_Fim_Exercicio_Social;Passivo;Indice_Endividamento;Tipo_Indice;Descricao_Outro_Indice\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;2025-01-01;2025-12-31;1200,123456789012;3,25;Dívida líquida/EBITDA;\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;2025-01-01;2025-12-31;1200,123456789012;3,25;Dívida líquida/EBITDA;\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;2025-01-01;2025-12-31;1201,123456789012;3,25;Dívida líquida/EBITDA;\n"
+                ).encode("latin1"),
+            )
+            z.writestr(
+                f"fre_cia_aberta_obrigacao_{ano}.csv",
+                (
+                    "CNPJ_Companhia;Data_Referencia;Versao;ID_Documento;Nome_Companhia;Data_Inicio_Exercicio_Social;"
+                    "Data_Fim_Exercicio_Social;Tipo_Obrigacao;Tipo_Garantia;Descricao_Outras_Garantias;"
+                    "Divida_Inferior_1_Ano;Divida_1a3Anos;Divida_3a5Anos;Divida_Superior_5_Anos;Divida_Total;Observacao\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;2025-01-01;2025-12-31;Debêntures;Real;Imóveis;10,1;20,2;30,3;40,4;101,0;Nota A\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;2025-01-01;2025-12-31;Debêntures;Real;Imóveis;10,1;20,2;30,3;40,4;101,0;Nota A\n"
+                    "08.773.135/0001-00;2025-12-31;1;123;EMPRESA A;2025-01-01;2025-12-31;Debêntures;Real;Imóveis;10,1;20,2;30,3;40,4;102,0;Nota B\n"
+                ).encode("latin1"),
+            )
     return b.getvalue()
 
 
@@ -198,7 +225,66 @@ def test_map_fre_members_preserves_optional_file() -> None:
     assert "fre_cia_aberta_2025.csv" in member_map
     assert "fre_cia_aberta_empregado_posicao_declaracao_genero_2025.csv" in member_map
     assert "fre_cia_aberta_empregado_posicao_declaracao_genero_2025.csv" in optional
+    assert "fre_cia_aberta_endividamento_2025.csv" in optional
+    assert "fre_cia_aberta_obrigacao_2025.csv" in optional
     assert len(required) == 61
+
+
+def test_validate_member_header_rejects_incompatible_debt_file() -> None:
+    resultado = validate_member_header(
+        "fre_endividamento",
+        ["Data_Referencia", "Versao", "ID_Documento", "Passivo"],
+    )
+
+    assert resultado.status == "invalid"
+    assert resultado.reason_code == "schema_inesperado"
+    assert "CNPJ_Companhia" in resultado.details["missing_required_columns"]
+
+
+def test_sincronizar_fre_promove_quadros_de_divida_sem_descartar_linhas_distintas() -> None:
+    session = _session()
+    try:
+        companhia = _companhia()
+        session.add(companhia)
+        session.flush()
+        _add_identifiers(session, companhia)
+        session.commit()
+
+        def zip_historico() -> bytes:
+            return (
+                _zip_fre(2023, incluir_quadros_divida=True)
+                .replace(b"2025-12-31", b"2023-12-31")
+                .replace(b"2025-01-01", b"2023-01-01")
+            )
+
+        resultado = sincronizar_fre(
+            session,
+            2023,
+            downloader=lambda _: zip_historico(),
+        )
+
+        assert resultado["status"] == "sucesso"
+        linhas_endividamento = session.query(FreEndividamento).order_by(FreEndividamento.linha_origem).all()
+        linhas_obrigacao = session.query(FreObrigacao).order_by(FreObrigacao.linha_origem).all()
+        assert len(linhas_endividamento) == 2
+        assert len(linhas_obrigacao) == 2
+        assert linhas_endividamento[0].passivo == Decimal("1200.123456789012")
+        assert linhas_endividamento[0].row_fingerprint != linhas_endividamento[1].row_fingerprint
+        assert linhas_obrigacao[0].divida_total == Decimal("101.0")
+        assert linhas_obrigacao[1].divida_total == Decimal("102.0")
+        assert linhas_obrigacao[0].hash_origem
+        assert linhas_obrigacao[0].linha_origem != linhas_obrigacao[1].linha_origem
+
+        reingestao = sincronizar_fre(
+            session,
+            2023,
+            downloader=lambda _: zip_historico(),
+        )
+        assert reingestao["status"] in {"sucesso", "skipped", "sem_alteracao"}
+        assert session.query(FreEndividamento).count() == 2
+        assert session.query(FreObrigacao).count() == 2
+    finally:
+        session.close()
 
 
 def test_normalizar_fre_row_allows_child_without_cnpj_for_header_map() -> None:
