@@ -10,7 +10,7 @@ from app.core.config import get_settings
 from app.models.sincronizacao import ExecucaoSincronizacao, TipoExecucao
 from app.services.ingestion.source_registry import obter_fonte
 
-_ANNUAL_SOURCES = {"dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"}
+_ANNUAL_SOURCES = {"dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"}
 
 
 def sync_execution_metadata(*, tipo_fonte: str, ano: int | None) -> tuple[str, str, str]:

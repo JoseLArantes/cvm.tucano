@@ -170,6 +170,7 @@ def agendar_ingestao_automatica_task(
         "app.worker.tasks.sincronizar_ipe_task",
         "app.worker.tasks.sincronizar_vlmo_task",
         "app.worker.tasks.sincronizar_cgvn_task",
+        "app.worker.tasks.sincronizar_fii_task",
     }
     if task_name not in allowed_tasks:
         raise ValueError(f"Task de ingestao automatica nao permitida: {task_name}")
@@ -358,6 +359,7 @@ def _enfileirar_fontes_anuais_agendadas(
         "ipe": sincronizar_ipe_task,
         "vlmo": sincronizar_vlmo_task,
         "cgvn": sincronizar_cgvn_task,
+        "fii": sincronizar_fii_task,
     }
     rows = db.scalars(
         select(ExecucaoSincronizacao)
@@ -2907,6 +2909,46 @@ def sincronizar_cgvn_task(
             skip_probe=skip_probe, pending_update_id=pending_update_id,
         ), kind="zip_prepare",
     ))
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fii_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def sincronizar_fii_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
+) -> dict[str, Any]:
+    return _executar_com_reserva(
+        self,
+        queue_item_id=_queue_item_id,
+        reservation_token=_queue_reservation_token,
+        task_name=self.name,
+        task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport},
+        operation=lambda: _processar_fii_enfileirado(
+            ano=ano,
+            task_id=str(self.request.id),
+            force_reimport=force_reimport,
+        ),
+        kind="zip_prepare",
+    )
+
+
+def _processar_fii_enfileirado(*, ano: int, task_id: str, force_reimport: bool) -> dict[str, Any]:
+    from app.services.ingestion.fii import processar_informe_fii
+
+    return processar_informe_fii(ano=ano, task_id=task_id, force_reimport=force_reimport)
+
+
+@celery_app.task(name="app.worker.tasks.agendar_ingestao_fii_semanal_task")  # type: ignore[untyped-decorator]
+def agendar_ingestao_fii_semanal_task() -> dict[str, Any]:
+    from app.services.ingestion.fii import agendar_ingestao_semanal_fii
+
+    resultado = agendar_ingestao_semanal_fii()
+    if resultado.get("anos_enfileirados"):
+        despachar_fila_ingestao_task.delay()
+    return resultado
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.pre_processar_sincronizacao_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]

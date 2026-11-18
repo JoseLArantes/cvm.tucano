@@ -49,6 +49,8 @@ celery_app.conf.task_routes = {
     "app.worker.tasks.sincronizar_ipe_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_vlmo_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_cgvn_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.sincronizar_fii_task": {"queue": settings.ingestion_queue_name},
+    "app.worker.tasks.agendar_ingestao_fii_semanal_task": {"queue": settings.ingestion_control_queue_name},
     "app.worker.tasks.pre_processar_sincronizacao_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.ingerir_sincronizacao_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.reconciliar_ingestion_stale_task": {"queue": settings.ingestion_control_queue_name},
@@ -129,6 +131,10 @@ def construir_beat_schedule() -> dict[str, dict[str, Any]]:
                     "args": (tarefa, (ano,), {}),
                 }
                 deslocamento_minutos += 5
+        beat_schedule["sincronizar-fii-semanal"] = {
+            "task": "app.worker.tasks.agendar_ingestao_fii_semanal_task",
+            "schedule": crontab(day_of_week="monday", hour=8, minute=30),
+        }
     elif settings.updates_service_enabled:
         beat_schedule["cvm-updates-scanner"] = {
             "task": "app.updates.tasks.run_daily_scanner_task",

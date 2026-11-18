@@ -21,6 +21,7 @@ _ZIP_TASKS = {
     "ipe": "app.worker.tasks.sincronizar_ipe_task",
     "vlmo": "app.worker.tasks.sincronizar_vlmo_task",
     "cgvn": "app.worker.tasks.sincronizar_cgvn_task",
+    "fii": "app.worker.tasks.sincronizar_fii_task",
 }
 _ACTIVE = ("reserved", "running")
 _TRANSITIONS = ("transition_pending",)

@@ -78,6 +78,13 @@ OPENAPI_TAGS = [
         "description": "Consulta cadastral da entidade raiz `companhias`.",
     },
     {
+        "name": "fiis",
+        "description": (
+            "Catálogo e informes mensais de fundos imobiliários e classes, com histórico, indicadores, "
+            "composição financeira e proveniência dos dados publicados pela CVM."
+        ),
+    },
+    {
         "name": "analise",
         "description": (
             "API analítica orientada a períodos, métricas, comparabilidade, qualidade e evidências. "

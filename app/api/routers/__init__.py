@@ -7,6 +7,7 @@ from app.api.routers.cgvn import router as cgvn_router
 from app.api.routers.companhias import router as companhias_router
 from app.api.routers.exportacao import router as exportacao_router
 from app.api.routers.fca import router as fca_router
+from app.api.routers.fiis import router as fiis_router
 from app.api.routers.financeiro import router as financeiro_router
 from app.api.routers.fre import router as fre_router
 from app.api.routers.health import router as health_router
@@ -31,6 +32,7 @@ protected_router.include_router(setores_router, tags=["setores"])
 protected_router.include_router(exportacao_router)
 protected_router.include_router(financeiro_router, tags=["financeiro"])
 protected_router.include_router(fca_router, tags=["fca"])
+protected_router.include_router(fiis_router, tags=["fiis"])
 protected_router.include_router(ipe_router, tags=["ipe"])
 protected_router.include_router(vlmo_router, tags=["vlmo"])
 protected_router.include_router(cgvn_router, tags=["cgvn"])

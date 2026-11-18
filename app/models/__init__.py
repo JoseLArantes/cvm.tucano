@@ -20,6 +20,7 @@ from app.models.fca import (
     FcaGeral,
     FcaValorMobiliario,
 )
+from app.models.fii import FiiInformeAtivoPassivo, FiiInformeComplemento, FiiInformeGeral
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.fre import (
     FreAcaoEntregue,
@@ -131,6 +132,9 @@ __all__ = [
     "DemonstracaoFinanceira",
     "DocumentoFinanceiro",
     "ExecucaoSincronizacao",
+    "FiiInformeAtivoPassivo",
+    "FiiInformeComplemento",
+    "FiiInformeGeral",
     "FcaAuditor",
     "FcaDepartamentoAcionistas",
     "FcaDocumento",

@@ -249,6 +249,8 @@ def _successful_ingested_years(db: Session, tipo_fonte: str) -> list[int]:
 def _scanner_scopes_for_source(db: Session, settings: Any, tipo_fonte: str) -> list[tuple[int | None, str | None]]:
     if tipo_fonte == "cadastro":
         return [(None, None)]
+    if tipo_fonte == "fii":
+        return []
     return [
         (year, get_source_url(settings, tipo_fonte, year))
         for year in _successful_ingested_years(db, tipo_fonte)

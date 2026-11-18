@@ -2,6 +2,23 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-18 - Catalogo, fundamentos e informes mensais de FII
+
+### Superficies afetadas
+
+- `GET /fiis` com filtros por CNPJ, tipo, nome, ISIN, segmento e negociação em bolsa
+- `GET /fiis/{cnpj}/{tipo}` para perfil e fundamentos vigentes
+- `GET /fiis/{cnpj}/{tipo}/informes` com filtros por competência e versão
+- `GET /fiis/{cnpj}/{tipo}/informes/{competencia}` para os dados das três seções e proveniência
+
+### Comportamento entregue
+
+- Catálogo e histórico são alimentados pelos ZIPs anuais do Informe Mensal Estruturado da CVM desde 2016. A identidade diferencia fundo e classe, aceita CNPJ alfanumérico e mantém decimais da fonte como strings.
+- Os payloads expõem perfil, patrimônio, cotistas, indicadores de rentabilidade, dividend yield e composição de ativos e passivos. Decimais chegam como strings exatas; cada seção descreve unidades e proveniência. A seção financeira sem atribuição segura entre fundo e classe é sinalizada como `ambiguo`, com `dados=null` e variantes rastreáveis.
+- `todas_versoes=true` inclui versões observadas em publicações anteriores, e `consta_no_snapshot_atual` identifica se cada seção ainda está no ZIP anual publicado.
+- A ingestão valida e publica as três seções em conjunto, mantém a última publicação válida em caso de falha, compara alterações efetivas por campo e conserva informes retirados do snapshot.
+- Quando `AUTO_TRIGGER_UPDATES=true`, a descoberta dos arquivos da CVM é agendada semanalmente às segundas-feiras, às 08h30, em `America/Sao_Paulo`.
+
 Convencoes deste changelog:
 
 - cada entrada lista endpoints ou superficies afetadas;

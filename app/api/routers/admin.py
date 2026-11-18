@@ -161,6 +161,7 @@ from app.worker.tasks import (
     sincronizar_cgvn_task,
     sincronizar_dfp_task,
     sincronizar_fca_task,
+    sincronizar_fii_task,
     sincronizar_fre_task,
     sincronizar_ipe_task,
     sincronizar_itr_task,
@@ -1099,6 +1100,7 @@ def _count_ingestion_tasks(tasks_by_worker: dict[str, Any] | None) -> int:
         "app.worker.tasks.sincronizar_ipe_task",
         "app.worker.tasks.sincronizar_vlmo_task",
         "app.worker.tasks.sincronizar_cgvn_task",
+        "app.worker.tasks.sincronizar_fii_task",
         "app.worker.tasks.pre_processar_sincronizacao_task",
         "app.worker.tasks.ingerir_sincronizacao_task",
     }
@@ -1292,7 +1294,7 @@ def _agora() -> datetime:
     return datetime.now(UTC)
 
 
-_DISPATCHABLE_SOURCES = {"cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"}
+_DISPATCHABLE_SOURCES = {"cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"}
 _ANNUAL_DISPATCH_SOURCES = _DISPATCHABLE_SOURCES - {"cadastro"}
 _WORK_ITEM_PREVIEW_LIMIT = 50
 
@@ -1708,7 +1710,7 @@ def _agendar_por_arquivo(
 
     tipo_fonte = None
     arquivo_canonico = None
-    for src in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
+    for src in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"):
         arquivo_resolvido = _resolver_arquivo_suportado_por_fonte(src, arquivo_informado, ano_efetivo)
         if arquivo_resolvido is not None:
             tipo_fonte = src
@@ -1732,6 +1734,7 @@ def _agendar_por_arquivo(
             "ipe": sincronizar_ipe_task,
             "vlmo": sincronizar_vlmo_task,
             "cgvn": sincronizar_cgvn_task,
+            "fii": sincronizar_fii_task,
         }
         task_func = task_mapper[tipo_fonte]
         task_id = _agendar_task_sincronizacao(
@@ -2030,6 +2033,37 @@ def disparar_sincronizacao_vlmo(
 
 
 @router.post(
+    "/sincronizacoes/fii/{ano}",
+    response_model=RespostaAgendamentoSincronizacao,
+    summary="Disparar sincronizacao de Informes Mensais de FII",
+    description=(
+        "Agenda o ZIP anual da CVM de Informes Mensais Estruturados de FIIs na fila persistida de ingestao. "
+        "Os tres CSVs obrigatorios sao validados e publicados como uma unidade. A fonte nao depende do cadastro "
+        "de companhias abertas. `force_reimport=true` ignora a deduplicacao pelo SHA do ZIP."
+    ),
+    responses=_RESPOSTA_TOKEN_INVALIDO,
+    operation_id="dispararSincronizacaoFiiAdmin",
+)
+def disparar_sincronizacao_fii(
+    ano: Annotated[int, Path(ge=2016, description="Ano do pacote anual de Informes Mensais de FII.", examples=[2026])],
+    _: Annotated[None, Depends(validar_token_api)],
+    db: DbSession,
+    force_reimport: Annotated[
+        bool, Query(description="Reprocessa mesmo quando o SHA do ZIP ja foi publicado.", examples=[False])
+    ] = False,
+) -> dict[str, str]:
+    task_id = _agendar_task_sincronizacao(
+        db,
+        task=sincronizar_fii_task,
+        tipo_fonte="fii",
+        ano=ano,
+        args=(ano,),
+        kwargs={"force_reimport": force_reimport},
+    )
+    return {"id_tarefa": task_id, "status": "agendada", "lote_id": _lote_id_por_task(db, task_id)}
+
+
+@router.post(
     "/sincronizacoes/cgvn/{ano}",
     response_model=RespostaAgendamentoSincronizacao,
     summary="Disparar Sincronizacao CGVN",
@@ -2092,6 +2126,7 @@ def disparar_sincronizacao_tudo(
         "ipe": sincronizar_ipe_task,
         "vlmo": sincronizar_vlmo_task,
         "cgvn": sincronizar_cgvn_task,
+        "fii": sincronizar_fii_task,
     }
     batch = criar_lote(db, source="admin_annual", metadata={"ano": ano, "force_reimport": force_reimport})
 
@@ -2177,7 +2212,7 @@ def pre_processar_fonte_anual_route(
     ] = False,
 ) -> dict[str, str]:
     fonte_lower = tipo_fonte.lower().strip()
-    if fonte_lower not in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"):
+    if fonte_lower not in ("dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"):
         raise HTTPException(status_code=422, detail=f"Fonte '{tipo_fonte}' nao suportada ou nao necessita de ano.")
     
     task_id = novo_task_id()
@@ -3013,6 +3048,7 @@ def replay_sincronizacao(
             "ipe": sincronizar_ipe_task,
             "vlmo": sincronizar_vlmo_task,
             "cgvn": sincronizar_cgvn_task,
+            "fii": sincronizar_fii_task,
         }
         task_func = task_mapper.get(execucao.tipo_fonte)
         if task_func is None:
@@ -4493,7 +4529,7 @@ def despachar_ingestao(
     if conflicts:
         raise HTTPException(status_code=409, detail={"reason_code": "ACTIVE_EQUIVALENT_WORK", **conflicts[0]})
     work_items: list[dict[str, Any]] = []
-    tasks = {"cadastro": sincronizar_cadastro_companhias_task, "dfp": sincronizar_dfp_task, "itr": sincronizar_itr_task, "fre": sincronizar_fre_task, "fca": sincronizar_fca_task, "ipe": sincronizar_ipe_task, "vlmo": sincronizar_vlmo_task, "cgvn": sincronizar_cgvn_task}
+    tasks = {"cadastro": sincronizar_cadastro_companhias_task, "dfp": sincronizar_dfp_task, "itr": sincronizar_itr_task, "fre": sincronizar_fre_task, "fca": sincronizar_fca_task, "ipe": sincronizar_ipe_task, "vlmo": sincronizar_vlmo_task, "cgvn": sincronizar_cgvn_task, "fii": sincronizar_fii_task}
     staged: list[tuple[dict[str, Any], str, ExecucaoSincronizacao]] = []
     batch = criar_lote(
         db,
