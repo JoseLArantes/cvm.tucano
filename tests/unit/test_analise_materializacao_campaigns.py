@@ -48,7 +48,7 @@ def _admit_finalizer(db_session: Session, execution: ExecucaoSincronizacao) -> t
     return str(item.id), "test-reservation"
 
 
-def _companhia(db_session: Session, codigo_cvm: int = 9512, situacao_registro: str = "ATIVO") -> Companhia:
+def _companhia(db_session: Session, codigo_cvm: int = 9512, situacao_registro: str | None = "ATIVO") -> Companhia:
     agora = datetime.now(UTC)
     cia = Companhia(
         cnpj_companhia=f"{codigo_cvm:014d}",
@@ -147,13 +147,16 @@ def test_claim_materializacao_campanha_chunk_marca_itens_como_running(db_session
     assert items[0].chunk_execucao_id == chunk.id
 
 
-def test_criar_materializacao_campanha_exclui_companhias_canceladas_por_padrao(db_session: Session) -> None:
+def test_criar_materializacao_campanha_inclui_somente_companhias_ativas(db_session: Session) -> None:
     _companhia(db_session, codigo_cvm=9512, situacao_registro="ATIVO")
     _companhia(db_session, codigo_cvm=1716, situacao_registro="CANCELADA")
+    _companhia(db_session, codigo_cvm=4319, situacao_registro="SUSPENSA")
+    _companhia(db_session, codigo_cvm=6212, situacao_registro=None)
+    _companhia(db_session, codigo_cvm=7733, situacao_registro="ATIVA")
 
     campanha = criar_materializacao_campanha(
         db_session,
-        codigos_cvm=[9512, 1716],
+        codigos_cvm=[9512, 1716, 4319, 6212, 7733, 9999],
         source="post_ingestion",
     )
 
@@ -168,8 +171,18 @@ def test_criar_materializacao_campanha_exclui_companhias_canceladas_por_padrao(d
     assert campanha.total_items == 2
     assert {item.codigo_cvm for item in itens} == {9512}
     assert campanha.summary is not None
-    assert campanha.summary["selection"]["excluded_cancelled_codigo_cvm_count"] == 1
-    assert campanha.summary["selection"]["incluir_canceladas"] is False
+    selection = campanha.summary["selection"]
+    assert selection["eligible_codigo_cvm_count"] == 1
+    assert selection["excluded_non_active_codigo_cvm_count"] == 5
+    assert selection["excluded_non_active_by_situacao_registro"] == {
+        "ATIVA": 1,
+        "CANCELADA": 1,
+        "SEM_CADASTRO": 1,
+        "SEM_SITUACAO": 1,
+        "SUSPENSA": 1,
+    }
+    assert selection["selection_policy"] == "situacao_registro=ATIVO"
+    assert selection["legacy_incluir_canceladas_ignored"] is False
 
 
 def test_criar_materializacao_campanha_define_invalidated_from_por_execucao_origem(db_session: Session) -> None:
@@ -225,7 +238,7 @@ def test_criar_materializacao_campanha_define_invalidated_from_por_execucao_orig
     assert {item.invalidated_from for item in itens} == {datetime(2026, 3, 10, tzinfo=UTC).date()}
 
 
-def test_criar_materializacao_campanha_pode_incluir_companhias_canceladas_quando_explicito(db_session: Session) -> None:
+def test_criar_materializacao_campanha_ignora_flag_legada_de_inclusao_de_canceladas(db_session: Session) -> None:
     cia = _companhia(db_session, codigo_cvm=1716, situacao_registro="CANCELADA")
     assert cia.codigo_cvm is not None
 
@@ -241,11 +254,11 @@ def test_criar_materializacao_campanha_pode_incluir_companhias_canceladas_quando
         ).all()
     )
 
-    assert campanha.total_items == 2
-    assert {item.codigo_cvm for item in itens} == {cia.codigo_cvm}
+    assert campanha.total_items == 0
+    assert itens == []
     assert campanha.summary is not None
-    assert campanha.summary["selection"]["excluded_cancelled_codigo_cvm_count"] == 0
-    assert campanha.summary["selection"]["incluir_canceladas"] is True
+    assert campanha.summary["selection"]["excluded_non_active_codigo_cvm_count"] == 1
+    assert campanha.summary["selection"]["legacy_incluir_canceladas_ignored"] is True
 
 
 def test_finalizar_sincronizacao_zip_cria_campanha_e_dispara_dispatcher(
@@ -666,6 +679,49 @@ def test_materializar_analise_chunk_task_nao_processa_itens_quando_gate_ja_esta_
     assert item_atualizado.status == "pending"
     assert chunk_atualizado is not None
     assert chunk_atualizado.status == "cancelled"
+
+
+def test_materializar_chunk_pula_companhia_que_deixou_de_estar_ativa(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cia = _companhia(db_session)
+    assert cia.codigo_cvm is not None
+    campanha = criar_materializacao_campanha(
+        db_session,
+        codigos_cvm=[cia.codigo_cvm],
+        source="post_ingestion",
+        chunk_size=1,
+    )
+    claimed = claim_materializacao_campanha_chunk(db_session, campanha.id, chunk_size=1)
+    assert claimed is not None
+    chunk, items = claimed
+    item = items[0]
+
+    cia.situacao_registro = "SUSPENSA"
+    db_session.commit()
+    monkeypatch.setattr(worker_tasks, "SessionLocal", lambda: db_session)
+
+    resultado = worker_tasks.materializar_analise_chunk_task.run(str(campanha.id), str(chunk.id))
+
+    item_atualizado = db_session.get(AnaliseMaterializacaoCampanhaItem, item.id)
+    chunk_atualizado = db_session.get(AnaliseMaterializacaoChunkExecucao, chunk.id)
+    assert item_atualizado is not None
+    assert item_atualizado.materializacao_execucao_id is not None
+    execucao = db_session.get(AnaliseMaterializacaoExecucao, item_atualizado.materializacao_execucao_id)
+
+    assert resultado["status"] == "processed"
+    assert resultado["skipped_items"] == 1
+    assert resultado["success_items"] == 0
+    assert resultado["failed_items"] == 0
+    assert item_atualizado.status == "skipped"
+    assert item_atualizado.reason == "COMPANY_NOT_ACTIVE"
+    assert execucao is not None
+    assert execucao.summary is not None
+    assert execucao.summary["skipped_reason"] == "COMPANY_NOT_ACTIVE"
+    assert chunk_atualizado is not None
+    assert chunk_atualizado.summary is not None
+    assert chunk_atualizado.summary["skipped_items"] == 1
 
 
 def test_materializar_analise_campanha_enfileira_um_chunk_por_invocacao(

@@ -27,6 +27,7 @@ This context covers the public HTTP surface implemented by FastAPI routers and P
 - CVM data surfaces are split by domain routers such as `companhias`, `financeiro`, `fre`, `fca`, `ipe`, `vlmo`, and `cgvn`.
 - Analysis endpoints live under `/analise/companhias/...`.
 - Analysis materialization observability and controls live under `/analise/materializacoes/...`.
+- Materialization contracts admit only companies with `situacao_registro=ATIVO`; repair requests for other states are rejected and legacy pending items may complete as skipped.
 - The updates service has its own router under `app/updates/router.py`.
 
 ## Rules for API changes

@@ -2,6 +2,23 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-19 - Elegibilidade estrita de companhias na materializacao analitica
+
+### Superficies afetadas
+
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+- Campanhas criadas apos ingestao financeira
+
+### Comportamento entregue
+
+- Execucoes automaticas, pontuais, reparos e backfills materializam somente companhias cujo `situacao_registro`, normalizado, seja `ATIVO`.
+- Situacoes diferentes e cadastros ausentes sao excluidos ao criar campanhas; `summary.selection` expoe contagens solicitadas, elegiveis e excluidas, exclusoes por situacao, `selection_policy` e o registro do override legado ignorado.
+- Itens antigos que chegam a execucao depois de a companhia deixar de estar `ATIVO` sao concluidos como `skipped`, com motivo `COMPANY_NOT_ACTIVE`, sem gerar revisoes canonicas.
+- O repair de uma companhia fora de `ATIVO` e rejeitado e nao cria campanha. Flags legadas de inclusao de canceladas nao fazem bypass da regra.
+
 ## 2026-11-18 - FRE histórico de dívida e consulta contratual por corte
 
 ### Superfícies afetadas

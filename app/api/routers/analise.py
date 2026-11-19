@@ -888,9 +888,9 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
     description=(
         "Retorna snapshot operacional das execuções, campanhas, itens e filas Celery da materialização analítica, "
         "incluindo contagem de tasks orquestradoras, tasks de chunk, profundidade de fila dedicada e previews "
-        "dos itens pendentes/em andamento. Campanhas automáticas não incluem companhias com "
-        "`situacao_registro=CANCELADA`; canceladas só aparecem se uma execução pontual tiver sido disparada com "
-        "override explícito. O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
+        "dos itens pendentes/em andamento. Campanhas e execuções só processam companhias com "
+        "`situacao_registro=ATIVO`; itens antigos que deixaram de atender à regra são marcados como skipped. "
+        "O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
         "recuperáveis, campanhas presas sem despacho inicial, último sweep automático persistido e tasks ativas do "
         "fluxo de recuperação de pendências. A inspeção Celery é tolerante a timeout/falha e a detecção detalhada "
         "de campanhas pendentes recuperáveis é limitada por `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS`."
@@ -1369,9 +1369,8 @@ def trigger_recuperacao_materializacao_analitica(
     summary="Listar Materializacoes Analiticas",
     description=(
         "Lista execuções de materialização analítica com status, progresso, tempo decorrido, estimativa de conclusão "
-        "e vínculo opcional com campanhas e itens de campanha. Campanhas automáticas e fluxos padrão excluem "
-        "companhias com `situacao_registro=CANCELADA`; execuções pontuais só processam canceladas mediante "
-        "override explícito no disparo operacional."
+        "e vínculo opcional com campanhas e itens de campanha. A regra de elegibilidade é única para execuções "
+        "automáticas, pontuais, reparos e backfills: somente companhias com `situacao_registro=ATIVO` são processadas."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarMaterializacoesAnaliticas",
@@ -1754,7 +1753,8 @@ def consultar_status_materializacao_companhia(
         "Cria uma campanha pequena de materialização para recompor a camada canônica de uma companhia e escopo "
         "a partir dos períodos solicitados. O payload pode informar métricas para validação e diagnóstico, mas "
         "a recomposição operacional continua sendo por companhia, escopo e janela de conhecimento derivada do "
-        "primeiro período aceito. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
+        "primeiro período aceito. A companhia precisa estar com `situacao_registro=ATIVO`; outros estados são "
+        "rejeitados sem criar campanha. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
         "resposta retorna `gate_status=red` e `reason_code=WAIT_MATERIALIZATION`."
     ),
     responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
@@ -1900,8 +1900,8 @@ def reconciliar_materializacao_analitica(
     summary="Detalhar Materializacao Analitica",
     description=(
         "Retorna detalhe completo de uma execução de materialização analítica específica, incluindo resumo bruto "
-        "persistido e vínculos opcionais com campanha, item e posição em chunk. Execuções disparadas sem override "
-        "explícito podem concluir como skip operacional quando a companhia estiver com `situacao_registro=CANCELADA`."
+        "persistido e vínculos opcionais com campanha, item e posição em chunk. Se a companhia não estiver com "
+        "`situacao_registro=ATIVO`, o resumo registra `skipped_reason=COMPANY_NOT_ACTIVE` e nenhuma revisão é produzida."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="detalharMaterializacaoAnalitica",

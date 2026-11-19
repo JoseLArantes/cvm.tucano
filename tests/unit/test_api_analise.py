@@ -1056,11 +1056,11 @@ def test_materializar_analise_companhia_pula_cancelada_por_padrao(db_session: Se
     assert execucao.status == "success"
     assert execucao.coverage_complete is False
     assert execucao.summary is not None
-    assert execucao.summary["skipped_reason"] == "COMPANHIA_CANCELADA"
+    assert execucao.summary["skipped_reason"] == "COMPANY_NOT_ACTIVE"
     assert execucao.summary["company_status"] == "CANCELADA"
 
 
-def test_materializar_analise_companhia_permita_cancelada_quando_explicito(db_session: Session) -> None:
+def test_materializar_analise_companhia_nao_permite_bypass_para_cancelada(db_session: Session) -> None:
     cia = _seed_analise_v2(db_session)
     cia.situacao_registro = "CANCELADA"
     db_session.commit()
@@ -1074,9 +1074,11 @@ def test_materializar_analise_companhia_permita_cancelada_quando_explicito(db_se
     )
 
     assert execucao.status == "success"
+    assert execucao.coverage_complete is False
     assert execucao.summary is not None
-    assert execucao.summary.get("skipped_reason") is None
-    assert int(execucao.summary["knowledge_dates"]) > 0
+    assert execucao.summary["skipped_reason"] == "COMPANY_NOT_ACTIVE"
+    assert execucao.summary["company_status"] == "CANCELADA"
+    assert int(execucao.summary["knowledge_dates"]) == 0
 
 
 def test_analise_series_as_of_uses_canonical_timeline(client: TestClient, db_session: Session) -> None:
@@ -1796,6 +1798,34 @@ def test_analise_materializacoes_repair_companhia_cria_campanha_focada(
     item = db_session.query(AnaliseMaterializacaoCampanhaItem).filter_by(campanha_id=campanha.id).one()
     assert item.escopo == "consolidated"
     assert item.invalidated_from == date(2022, 3, 15)
+
+
+def test_analise_materializacoes_repair_rejeita_companhia_nao_ativa(
+    client: TestClient,
+    db_session: Session,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    cia.situacao_registro = "SUSPENSA"
+    db_session.commit()
+
+    resp = client.post(
+        "/analise/materializacoes/companhias/9512/repair",
+        headers=_ops_headers(client),
+        json={
+            "escopo": "consolidated",
+            "period_ids": ["FY2021"],
+            "metricas": ["receita_liquida"],
+            "mode": "missing_only",
+        },
+    )
+
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["status"] == "rejected"
+    assert payload["campanha_id"] is None
+    assert payload["reason_code"] == "COMPANY_NOT_ACTIVE"
+    assert payload["rejected_items"][0]["reason_code"] == "COMPANY_NOT_ACTIVE"
+    assert db_session.scalar(select(func.count()).select_from(AnaliseMaterializacaoCampanha)) == 0
 
 
 def test_analise_materializacoes_trigger_recuperacao_global_endpoint(client: TestClient, db_session: Session) -> None:

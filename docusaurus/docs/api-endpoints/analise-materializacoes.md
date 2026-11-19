@@ -49,10 +49,13 @@ A materializacao canonica usa:
 - retries operacionais
 - self-healing para campanhas presas ou chunks stale
 
-Por padrao:
+Elegibilidade:
 
-- campanhas automaticas e fluxos padrao nao incluem companhias com `situacao_registro=CANCELADA`
-- companhias canceladas so entram com override explicito em disparos pontuais
+- campanhas, execucoes pontuais, reparos e backfills processam somente companhias com `situacao_registro=ATIVO`
+- demais situacoes, inclusive cadastro ausente ou sem situacao, sao excluidas da selecao
+- flags legadas de inclusao de canceladas nao alteram essa regra
+
+O resumo da campanha registra a selecao em `summary.selection`: `requested_codigo_cvm_count`, `eligible_codigo_cvm_count`, `excluded_non_active_codigo_cvm_count`, `excluded_non_active_by_situacao_registro` e `selection_policy`. Chamadas antigas que solicitarem o override tambem ficam sinalizadas por `legacy_incluir_canceladas_ignored`, sem alterar a elegibilidade.
 
 Controles de concorrencia:
 
@@ -75,9 +78,10 @@ Cada execucao pode ser:
 
 Regra operacional atual:
 
-- campanhas automaticas e fluxos padrao excluem companhias com `situacao_registro=CANCELADA`
-- se uma execucao pontual for disparada sem override para uma companhia cancelada, a execucao e registrada e concluida sem produzir revisoes, com sinalizacao de skip operacional no `summary`
-- a materializacao pontual de canceladas so ocorre quando o operador informa explicitamente o override de inclusao
+- campanhas automaticas, execucoes pontuais, reparos e backfills processam somente companhias com `situacao_registro=ATIVO`
+- uma execucao legada ou item pendente cuja companhia deixou de estar `ATIVO` e concluido sem produzir revisoes, com `summary.skipped_reason=COMPANY_NOT_ACTIVE`
+- em campanhas, esses itens recebem status `skipped` e a razao `COMPANY_NOT_ACTIVE`
+- o campo de inclusao de canceladas mantido em chamadas internas antigas e ignorado
 
 Parametros:
 
@@ -199,6 +203,7 @@ Semantica:
 
 - `period_ids` define quais períodos serão avaliados para repair
 - `metricas` valida e explica a solicitação, mas a recomposição real continua sendo por companhia, escopo e janela de conhecimento
+- somente companhias com `situacao_registro=ATIVO` podem entrar no repair; outras situações são rejeitadas com `COMPANY_NOT_ACTIVE`
 - `mode=missing_only` aceita períodos com dado bruto e lacuna canônica/materializada
 - o backend deriva `invalidated_from` pelo documento CVM mais antigo que suporta os períodos aceitos
 - a campanha criada usa `source=manual_repair` e `chunk_size=1`
@@ -469,10 +474,10 @@ Em uma execução bem-sucedida, `summary` também informa o prewarm do relatóri
 | `fundamentalista_snapshot_source` | Origem usada para produzir o read model, normalmente `compiled_canonical`. |
 | `fundamentalista_snapshot_error` | Classe do erro quando o prewarm falha; presente somente nesse caso. |
 
-Quando uma companhia estiver com `situacao_registro=CANCELADA` e nao houver override explicito de inclusao, o `summary` pode trazer:
+Quando uma companhia nao estiver com `situacao_registro=ATIVO`, o `summary` pode trazer:
 
-- `skipped_reason=COMPANHIA_CANCELADA`
-- `company_status=CANCELADA`
+- `skipped_reason=COMPANY_NOT_ACTIVE`
+- `company_status` com o valor cadastral observado
 - contadores de revisoes em zero
 
 ## `POST /analise/materializacoes/{execucao_id}/reconcile`

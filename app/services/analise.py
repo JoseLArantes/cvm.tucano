@@ -2147,8 +2147,12 @@ def _payload_fingerprint(value: Any) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
-def _companhia_tem_registro_cancelado(companhia: Companhia) -> bool:
-    return (companhia.situacao_registro or "").strip().upper() == "CANCELADA"
+def _situacao_registro_ativa(situacao_registro: str | None) -> bool:
+    return (situacao_registro or "").strip().upper() == "ATIVO"
+
+
+def _companhia_tem_registro_ativo(companhia: Companhia) -> bool:
+    return _situacao_registro_ativa(companhia.situacao_registro)
 
 
 def _default_period_id(periodos: list[AnalisePeriodoDisponivel]) -> str:
@@ -5706,18 +5710,6 @@ def criar_repair_materializacao_companhia(
     triggered_at = datetime.now(UTC)
     metricas = sorted(set(request.metricas))
     unknown_metrics = sorted(metric_id for metric_id in metricas if metric_id not in METRIC_SPECS)
-    coverage = obter_coverage(
-        db,
-        companhia,
-        scope=request.escopo,
-        periodicidade=None,
-        base_periodo=None,
-    )
-    coverage_by_period = {item.period_id: item for item in coverage.periodos}
-    accepted_items: list[AnaliseMaterializacaoRepairItem] = []
-    rejected_items: list[AnaliseMaterializacaoRepairItem] = []
-    accepted_periods: list[AnaliseCoveragePeriodoItem] = []
-
     if not request.period_ids:
         return AnaliseMaterializacaoRepairResposta(
             status="rejected",
@@ -5729,6 +5721,46 @@ def criar_repair_materializacao_companhia(
             gate_status=obter_estado_gate_materializacao(db).status,
             triggered_at=triggered_at,
         )
+    situacao_registro = db.scalar(
+        select(Companhia.situacao_registro).where(Companhia.id == companhia.id)
+    )
+    if not _situacao_registro_ativa(situacao_registro):
+        inactive_rejected_items = [
+            AnaliseMaterializacaoRepairItem(
+                period_id=period_id,
+                accepted=False,
+                reason_code="COMPANY_NOT_ACTIVE",
+                reason_message=(
+                    "O repair so pode ser criado para companhias com "
+                    "situacao_registro=ATIVO."
+                ),
+                remediation_code=None,
+                remediation_message=None,
+            )
+            for period_id in request.period_ids
+        ]
+        return AnaliseMaterializacaoRepairResposta(
+            status="rejected",
+            campanha_id=None,
+            accepted_items=[],
+            rejected_items=inactive_rejected_items,
+            reason_code="COMPANY_NOT_ACTIVE",
+            dispatcher_enqueued=False,
+            gate_status=obter_estado_gate_materializacao(db).status,
+            triggered_at=triggered_at,
+        )
+
+    coverage = obter_coverage(
+        db,
+        companhia,
+        scope=request.escopo,
+        periodicidade=None,
+        base_periodo=None,
+    )
+    coverage_by_period = {item.period_id: item for item in coverage.periodos}
+    accepted_items: list[AnaliseMaterializacaoRepairItem] = []
+    rejected_items: list[AnaliseMaterializacaoRepairItem] = []
+    accepted_periods: list[AnaliseCoveragePeriodoItem] = []
 
     active_item = _active_materializacao_item(db, companhia, request.escopo)
     if active_item is not None:
@@ -6581,11 +6613,6 @@ def criar_materializacao_campanha(
     chunk_size: int | None = None,
     incluir_canceladas: bool = False,
 ) -> AnaliseMaterializacaoCampanha:
-    invalidated_from_por_codigo = _invalidated_from_por_codigo_cvm(
-        db,
-        codigos_cvm=codigos_cvm,
-        source_execucao_id=source_execucao_id,
-    )
     campanha = AnaliseMaterializacaoCampanha(
         source=source,
         source_execucao_id=uuid.UUID(source_execucao_id) if source_execucao_id else None,
@@ -6596,30 +6623,50 @@ def criar_materializacao_campanha(
     db.add(campanha)
     db.flush()
 
+    codigos_solicitados = sorted(set(codigos_cvm))
     companhias = {
         item.codigo_cvm: item
-        for item in db.scalars(select(Companhia).where(Companhia.codigo_cvm.in_(sorted(set(codigos_cvm))))).all()
+        for item in db.scalars(
+            select(Companhia)
+            .where(Companhia.codigo_cvm.in_(codigos_solicitados))
+            .execution_options(populate_existing=True)
+        ).all()
         if item.codigo_cvm is not None
     }
-    codigos_cancelados = {
+    codigos_elegiveis = {
         codigo_cvm
-        for codigo_cvm, companhia in companhias.items()
-        if codigo_cvm is not None and not incluir_canceladas and _companhia_tem_registro_cancelado(companhia)
+        for codigo_cvm in codigos_solicitados
+        if codigo_cvm in companhias and _companhia_tem_registro_ativo(companhias[codigo_cvm])
     }
+    codigos_excluidos = set(codigos_solicitados) - codigos_elegiveis
+    excluidas_por_situacao: dict[str, int] = defaultdict(int)
+    for codigo_cvm in codigos_excluidos:
+        companhia = companhias.get(codigo_cvm)
+        situacao = (
+            (companhia.situacao_registro or "").strip().upper() or "SEM_SITUACAO"
+            if companhia is not None
+            else "SEM_CADASTRO"
+        )
+        excluidas_por_situacao[situacao] += 1
+    invalidated_from_por_codigo = _invalidated_from_por_codigo_cvm(
+        db,
+        codigos_cvm=sorted(codigos_elegiveis),
+        source_execucao_id=source_execucao_id,
+    )
     campanha.summary = {
         **(campanha.summary or {}),
         "selection": {
-            "requested_codigo_cvm_count": len(set(codigos_cvm)),
-            "eligible_codigo_cvm_count": len(set(codigos_cvm)) - len(codigos_cancelados),
-            "excluded_cancelled_codigo_cvm_count": len(codigos_cancelados),
-            "incluir_canceladas": incluir_canceladas,
+            "requested_codigo_cvm_count": len(codigos_solicitados),
+            "eligible_codigo_cvm_count": len(codigos_elegiveis),
+            "excluded_non_active_codigo_cvm_count": len(codigos_excluidos),
+            "excluded_non_active_by_situacao_registro": dict(sorted(excluidas_por_situacao.items())),
+            "selection_policy": "situacao_registro=ATIVO",
+            "legacy_incluir_canceladas_ignored": incluir_canceladas,
         },
     }
     itens: list[AnaliseMaterializacaoCampanhaItem] = []
     ordem = 0
-    for codigo_cvm in sorted(set(codigos_cvm)):
-        if codigo_cvm in codigos_cancelados:
-            continue
+    for codigo_cvm in sorted(codigos_elegiveis):
         companhia = companhias.get(codigo_cvm)
         for escopo in ("consolidated", "individual"):
             ordem += 1
@@ -6811,6 +6858,7 @@ def registrar_progresso_chunk_execucao(
     processed_items: int,
     success_items: int,
     failed_items: int,
+    skipped_items: int = 0,
 ) -> AnaliseMaterializacaoChunkExecucao:
     chunk.processed_items = processed_items
     chunk.success_items = success_items
@@ -6820,6 +6868,7 @@ def registrar_progresso_chunk_execucao(
         "processed_items": processed_items,
         "success_items": success_items,
         "failed_items": failed_items,
+        "skipped_items": skipped_items,
     }
     renovar_chunk_execucao_lease(db, chunk, lease_owner=lease_owner)
     db.commit()
@@ -6835,6 +6884,7 @@ def finalizar_chunk_execucao(
     processed_items: int,
     success_items: int,
     failed_items: int,
+    skipped_items: int = 0,
     summary: dict[str, Any] | None = None,
 ) -> AnaliseMaterializacaoChunkExecucao:
     finished_at = datetime.now(UTC)
@@ -6852,6 +6902,7 @@ def finalizar_chunk_execucao(
         "processed_items": processed_items,
         "success_items": success_items,
         "failed_items": failed_items,
+        "skipped_items": skipped_items,
     }
     db.commit()
     db.refresh(chunk)
@@ -7046,13 +7097,15 @@ def registrar_resultado_materializacao_campanha_item(
     db: Session,
     item: AnaliseMaterializacaoCampanhaItem,
     *,
-    status: Literal["success", "failed"],
+    status: Literal["success", "failed", "skipped"],
     materializacao_execucao_id: uuid.UUID | None = None,
     last_error: str | None = None,
+    reason: str | None = None,
 ) -> AnaliseMaterializacaoCampanhaItem:
     item.status = status
     item.materializacao_execucao_id = materializacao_execucao_id
     item.last_error = last_error
+    item.reason = reason
     item.finished_at = datetime.now(UTC)
     item.updated_at = item.finished_at
     campanha = db.get(AnaliseMaterializacaoCampanha, item.campanha_id)
@@ -7117,7 +7170,11 @@ def materializar_analise_companhia(
         db.commit()
         last_commit_time = now_ts
 
-    if _companhia_tem_registro_cancelado(companhia) and not incluir_canceladas:
+    situacao_registro = db.scalar(
+        select(Companhia.situacao_registro).where(Companhia.id == companhia.id)
+    )
+    # `incluir_canceladas` remains accepted for compatibility, but it cannot bypass eligibility.
+    if not _situacao_registro_ativa(situacao_registro):
         started_at = datetime.now(UTC)
         execucao = AnaliseMaterializacaoExecucao(
             companhia_id=companhia.id,
@@ -7149,9 +7206,9 @@ def materializar_analise_companhia(
                 "closed_fact_revisions": 0,
                 "deleted_future_context_revisions": 0,
                 "deleted_future_fact_revisions": 0,
-                "skipped_reason": "COMPANHIA_CANCELADA",
-                "company_status": companhia.situacao_registro,
-                "incluir_canceladas": False,
+                "skipped_reason": "COMPANY_NOT_ACTIVE",
+                "company_status": situacao_registro,
+                "selection_policy": "situacao_registro=ATIVO",
                 "progress": {
                     "total_knowledge_dates": 0,
                     "processed_knowledge_dates": 0,

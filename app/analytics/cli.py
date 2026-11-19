@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--incluir-canceladas",
         action="store_true",
-        help="Permite materializar companhias com situacao_registro=CANCELADA em execucoes pontuais.",
+        help="Opcao legada sem efeito: a materializacao agora aceita apenas situacao_registro=ATIVO.",
     )
     return parser.parse_args()
 
@@ -45,11 +45,11 @@ def main() -> int:
 
     db = SessionLocal()
     try:
-        stmt = select(Companhia).order_by(Companhia.codigo_cvm)
+        if args.incluir_canceladas:
+            print("Aviso: --incluir-canceladas foi ignorado; somente situacao_registro=ATIVO sera processada.", file=sys.stderr)
+        stmt = select(Companhia).where(Companhia.situacao_registro == "ATIVO").order_by(Companhia.codigo_cvm)
         if args.codigos_cvm:
             stmt = stmt.where(Companhia.codigo_cvm.in_(args.codigos_cvm))
-        elif not args.incluir_canceladas:
-            stmt = stmt.where((Companhia.situacao_registro.is_(None)) | (Companhia.situacao_registro != "CANCELADA"))
         if args.limit is not None:
             stmt = stmt.limit(args.limit)
         companhias = db.scalars(stmt).all()
@@ -71,7 +71,6 @@ def main() -> int:
                         companhia,
                         scope=scope,
                         source="backfill",
-                        incluir_canceladas=args.incluir_canceladas,
                     )
                     processadas += 1
                     revisoes += int((execucao.summary or {}).get("fact_revisions", 0))

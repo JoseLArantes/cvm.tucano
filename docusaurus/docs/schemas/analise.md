@@ -183,7 +183,7 @@ O fluxo atual é:
 
 1. A ingestão financeira identifica quais companhias foram afetadas.
 2. O backend cria uma campanha de materialização.
-3. A campanha elimina por padrão companhias com `situacao_registro=CANCELADA`.
+3. A campanha inclui somente companhias com `situacao_registro=ATIVO`; demais situações e cadastros ausentes são excluídos.
 4. A campanha é dividida em itens por `codigo_cvm` e `escopo`.
 5. Antes de cada novo chunk, o backend consulta um gate de admissão.
 6. Se houver ingestão ativa ou pausa manual, a campanha permanece pendente.
@@ -203,11 +203,11 @@ Com isso, a API pode:
 - evitar recalcular a mesma história analítica inteira a cada request;
 - dar prioridade operacional total para ingestão e atualizações.
 
-Execução pontual de companhia cancelada:
+Elegibilidade da materialização:
 
-- o comportamento padrão continua sendo não processar `CANCELADA`
-- uma execução individual só pode incluir canceladas quando o operador informa override explícito
-- sem override, a execução pode ser registrada apenas como skip observável, sem gerar revisões
+- campanhas, execuções individuais, reparos e backfills só processam `situacao_registro=ATIVO`
+- itens pendentes cuja situação mudou para outro valor são registrados como `skipped`, com `COMPANY_NOT_ACTIVE`, sem gerar revisões
+- flags legadas de inclusão de canceladas são ignoradas
 
 ## Self-healing de campanhas pendentes
 
