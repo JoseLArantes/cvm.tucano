@@ -5,6 +5,14 @@ sidebar_position: 5
 
 # Companhias
 
+As respostas de cadastro incluem `codigos_isin`, uma lista ordenada dos ISINs de ações ativas. A lista é atualizada após a sincronização do CADASTRO e fica vazia quando não há vínculos materializados.
+
+## Referência de ISIN
+
+`GET /isin` exige token bearer e lista os vínculos entre CNPJ e ISIN. Os filtros exatos `cnpj_companhia` e `codigo_isin` são opcionais. Use `pagina` e `tamanho_pagina` para percorrer os resultados.
+
+`POST /ingestion/sincronizacoes/isin` exige token de administrador ou de sistema e agenda a importação dos arquivos `emissores/EMISSOR.txt` e `emissores/NUMERACA.TXT` do R2. A resposta `202` informa `execucao_id`, `id_tarefa` e `lote_id`. Uma importação em andamento resulta em `409`. Acompanhe a execução em `GET /ingestion/sincronizacoes/{id_execucao}`. O CADASTRO posterior atualiza as listas das companhias.
+
 ## Visão Geral
 
 A entidade `companhia` é a **raiz do domínio** do Tucano CVM. Todos os dados financeiros (DFP, ITR), societários (FRE, FCA), eventos (IPE), negociações (VLMO) e governança (CGVN) se vinculam a uma companhia sempre que possível.

@@ -12,6 +12,7 @@ from app.api.routers.financeiro import router as financeiro_router
 from app.api.routers.fre import router as fre_router
 from app.api.routers.health import router as health_router
 from app.api.routers.ipe import router as ipe_router
+from app.api.routers.isin import router as isin_router
 from app.api.routers.mestre import router as mestre_router
 from app.api.routers.public_analise import router as public_analise_router
 from app.api.routers.setores import router as setores_router
@@ -34,6 +35,7 @@ protected_router.include_router(financeiro_router, tags=["financeiro"])
 protected_router.include_router(fca_router, tags=["fca"])
 protected_router.include_router(fiis_router, tags=["fiis"])
 protected_router.include_router(ipe_router, tags=["ipe"])
+protected_router.include_router(isin_router, tags=["isin"])
 protected_router.include_router(vlmo_router, tags=["vlmo"])
 protected_router.include_router(cgvn_router, tags=["cgvn"])
 protected_router.include_router(fre_router, tags=["fre"])

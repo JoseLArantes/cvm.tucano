@@ -1034,6 +1034,10 @@ def pre_processar_cadastro(
             execucao_atual_id=execucao.id,
         )
         if anterior is not None and not force_reimport:
+            from app.services.ingestion.isin import materializar_isin
+
+            total_isin = materializar_isin(db)
+            run.quality_summary = {**(run.quality_summary or {}), "companhias_isin_alteradas": total_isin}
             execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
@@ -1255,6 +1259,12 @@ def ingerir_cadastro(
             referencia_fonte=f"{ARQUIVO_CADASTRO_ABERTA}+{ARQUIVO_CADASTRO_ESTRANGEIRA}",
             checksum_fonte=checksum_cadastro,
         )
+
+        from app.services.ingestion.isin import materializar_isin
+
+        total_isin = materializar_isin(db)
+        if run is not None:
+            run.quality_summary = {**(run.quality_summary or {}), "companhias_isin_alteradas": total_isin}
 
         execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
         execucao.total_inseridos = contadores["inseridos"]

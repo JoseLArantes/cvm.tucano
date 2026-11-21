@@ -93,6 +93,7 @@ from app.models.ingestion import (
 )
 from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueControl, IngestionQueueItem
 from app.models.ipe import IpeDocumento
+from app.models.isin import ReferenciaIsin
 from app.models.obrigacoes_contratuais import ObrigacaoContratualRegistro
 from app.models.setores import (
     Setor,
@@ -116,6 +117,7 @@ from app.updates.models import (
 )
 
 __all__ = [
+    "ReferenciaIsin",
     "AnaliseContextoRevision",
     "AnaliseFatoRevision",
     "AnaliseFundamentalistaSnapshot",

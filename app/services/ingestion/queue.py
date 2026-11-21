@@ -508,6 +508,9 @@ def reservar_vagas(db: Session) -> list[uuid.UUID]:
             if candidate is not None and candidate.kind == "zip_prepare":
                 zip_active += 1
         if candidate is None:
+            simple = _eligible_items(db, kind="simple", now=now)
+            candidate = simple[0] if simple else None
+        if candidate is None:
             break
         _reserve(db, candidate, now)
         selected.append(candidate.id)

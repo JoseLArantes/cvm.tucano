@@ -2176,3 +2176,9 @@ type AnaliseSeriesObservation = {
 - Consumir `/analise/metricas` para ids, nomes e unidades oficiais
 - Expor `resolution` para inspeção operacional e troubleshooting de dados `as_of`
 - Se houver tela operacional ou admin, consumir `/analise/materializacoes` e `/analise/materializacoes/monitoramento`
+# 21/11/2026 — ISIN no cadastro
+
+- As respostas de companhias e o cadastro na consulta mestre incluem `codigos_isin`, lista de ISINs de ações ativas, atualizada após o CADASTRO.
+- `GET /isin` consulta a referência com filtros `cnpj_companhia` e `codigo_isin` e paginação.
+- `POST /ingestion/sincronizacoes/isin` agenda a importação dos arquivos de emissores e numeração e exige permissão administrativa.
+

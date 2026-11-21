@@ -1068,6 +1068,26 @@ def reconciliar_materializacoes_terminais_task(self: Any) -> dict[str, Any]:
         db.close()
 
 
+@celery_app.task(bind=True, name="app.worker.tasks.sincronizar_isin_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def sincronizar_isin_task(self: Any, execucao_id: str, _queue_item_id: str | None = None, _queue_reservation_token: str | None = None) -> dict[str, Any]:
+    def operacao() -> dict[str, Any]:
+        from app.models.sincronizacao import ExecucaoSincronizacao
+        from app.services.ingestion.isin import importar_isin
+
+        db = SessionLocal()
+        try:
+            execucao = db.get(ExecucaoSincronizacao, uuid.UUID(execucao_id))
+            if execucao is None:
+                raise ValueError("Execucao ISIN nao encontrada")
+            return importar_isin(db, execucao)
+        finally:
+            db.close()
+
+    return _executar_com_reserva(self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+                                 task_name=self.name, task_args=[], task_kwargs={"execucao_id": execucao_id},
+                                 execution_id=execucao_id, operation=operacao, kind="simple")
+
+
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cadastro_companhias_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
 def sincronizar_cadastro_companhias_task(
     self: Any,

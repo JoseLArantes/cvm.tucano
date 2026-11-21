@@ -17,6 +17,9 @@ def sync_execution_metadata(*, tipo_fonte: str, ano: int | None) -> tuple[str, s
     settings = get_settings()
     fonte = tipo_fonte.lower().strip()
 
+    if fonte == "isin":
+        return "EMISSOR.txt+NUMERACA.TXT", "s3://" + settings.radar_cvm_r2_bucket + "/emissores/", TipoExecucao.arquivo_simples.value
+
     if fonte == "cadastro":
         arquivo = "cad_cia_aberta.csv+cad_cia_estrang.csv"
         url = (

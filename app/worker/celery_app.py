@@ -38,6 +38,7 @@ celery_app.conf.task_queues = tuple(
     for queue_name in dict.fromkeys(queue_names)
 )
 celery_app.conf.task_routes = {
+    "app.worker.tasks.sincronizar_isin_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_cadastro_companhias_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.sincronizar_member_task": {"queue": settings.ingestion_queue_name},
     "app.worker.tasks.disparar_dependentes_task": {"queue": settings.ingestion_control_queue_name},
