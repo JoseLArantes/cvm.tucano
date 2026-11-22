@@ -2,6 +2,11 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-22 - Documentação OpenAPI dos ISINs
+
+- `POST /ingestion/sincronizacoes/isin` aparece nos grupos `ingestion` e `isin` do Swagger, com exemplos, permissões e estados operacionais.
+- `GET /isin` documenta filtros, paginação, autenticação e exemplos da referência importada. A atualização das listas nas companhias ocorre na sincronização posterior do CADASTRO.
+
 ## 2026-11-19 - Elegibilidade estrita de companhias na materializacao analitica
 
 ### Superficies afetadas

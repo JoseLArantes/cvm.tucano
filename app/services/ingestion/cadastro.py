@@ -962,6 +962,7 @@ def pre_processar_cadastro(
     force_reimport: bool = False,
     downloader: Any | None = None,
     pending_update_id: str | None = None,
+    materializar_isin_se_inalterado: bool = False,
 ) -> dict[str, Any]:
     from app.models.ingestion import IngestionRun
     from app.models.sincronizacao import ExecucaoSincronizacao
@@ -1034,10 +1035,10 @@ def pre_processar_cadastro(
             execucao_atual_id=execucao.id,
         )
         if anterior is not None and not force_reimport:
-            from app.services.ingestion.isin import materializar_isin
+            if materializar_isin_se_inalterado:
+                from app.services.ingestion.isin import registrar_materializacao_isin
 
-            total_isin = materializar_isin(db)
-            run.quality_summary = {**(run.quality_summary or {}), "companhias_isin_alteradas": total_isin}
+                registrar_materializacao_isin(db, run)
             execucao.status = "skipped"
             execucao.finalizada_em = _agora()
             update_run_state(run, status="skipped", phase="complete", finished_at=_agora())
@@ -1260,11 +1261,9 @@ def ingerir_cadastro(
             checksum_fonte=checksum_cadastro,
         )
 
-        from app.services.ingestion.isin import materializar_isin
+        from app.services.ingestion.isin import registrar_materializacao_isin
 
-        total_isin = materializar_isin(db)
-        if run is not None:
-            run.quality_summary = {**(run.quality_summary or {}), "companhias_isin_alteradas": total_isin}
+        registrar_materializacao_isin(db, run)
 
         execucao.total_linhas_lidas = len(abertas) + len(estrangeiras)
         execucao.total_inseridos = contadores["inseridos"]
@@ -1361,6 +1360,7 @@ def sincronizar_cadastro_companhias(
         force_reimport=force_reimport,
         downloader=downloader,
         pending_update_id=pending_update_id,
+        materializar_isin_se_inalterado=True,
     )
     if phase1_res["status"] == "skipped":
         return phase1_res

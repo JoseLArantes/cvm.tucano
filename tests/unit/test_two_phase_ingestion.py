@@ -108,6 +108,35 @@ def _csv_content(rows: list[dict[str, str]]) -> bytes:
         lines.append(";".join(row.get(column, "") for column in header))
     return ("\n".join(lines) + "\n").encode("latin1")
 
+
+def test_pre_processamento_inalterado_nao_materializa_isin(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, db_session: Session
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "storage_dir", str(tmp_path))
+    aberta = _csv_content([_row_aberta("08.773.135/0001-00", "25224")])
+    estrangeira = _csv_content([_row_estrangeira("07.857.093/0001-14", "80187")])
+    checksum = hashlib.sha256(
+        f"{hashlib.sha256(aberta).hexdigest()}:{hashlib.sha256(estrangeira).hexdigest()}".encode()
+    ).hexdigest()
+    anterior = ExecucaoSincronizacao(tipo_fonte="cadastro", arquivo="cadastro", url="mock", status="sucesso", hash_arquivo=checksum)
+    nova = ExecucaoSincronizacao(tipo_fonte="cadastro", arquivo="cadastro", url="mock", status="agendada")
+    db_session.add_all([anterior, nova])
+    db_session.commit()
+    chamadas: list[bool] = []
+
+    def materializar(db: Session) -> int:
+        chamadas.append(True)
+        return 0
+
+    monkeypatch.setattr("app.services.ingestion.isin.materializar_isin", materializar)
+    resultado = pre_processar_cadastro(
+        db_session, execucao_id=nova.id,
+        downloader=lambda url: estrangeira if "CIA_ESTRANG" in url else aberta,
+    )
+    assert resultado["status"] == "skipped"
+    assert chamadas == []
+
 def test_two_phase_flow_and_self_healing(monkeypatch: pytest.MonkeyPatch) -> None:
     session = _session()
     settings = get_settings()

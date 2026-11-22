@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 import httpx
 import sqlalchemy.exc
+from botocore.exceptions import ConnectionClosedError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -24,6 +25,10 @@ _AUTORETRY_FOR: tuple[type[Exception], ...] = (
     DependencyNotReady,
     sqlalchemy.exc.OperationalError,
     sqlalchemy.exc.InterfaceError,
+    ConnectTimeoutError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    ReadTimeoutError,
 )
 
 _RETRY_KWARGS = {

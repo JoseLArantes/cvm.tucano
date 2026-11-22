@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.models.companhia import Companhia
+from app.models.ingestion import IngestionRun
 from app.models.isin import ReferenciaIsin
 from app.models.sincronizacao import ExecucaoSincronizacao
 from app.services.ingestion.cnpj_registry import cnpj_tem_digitos_validos
@@ -39,18 +40,50 @@ def materializar_isin(db: Session) -> int:
     for cnpj, codigo in referencias:
         por_cnpj[cnpj].append(codigo)
     alteradas = 0
+    agora = datetime.now(UTC)
     for companhia in db.scalars(select(Companhia)).all():
         codigos = sorted(por_cnpj.get(companhia.cnpj_companhia, []))
         if companhia.codigos_isin != codigos:
             companhia.codigos_isin = codigos
+            companhia.alterado_em = agora
             alteradas += 1
     return alteradas
 
 
+def registrar_materializacao_isin(db: Session, run: IngestionRun | None) -> int:
+    total = materializar_isin(db)
+    if run is not None:
+        referencia = db.scalar(
+            select(IngestionRun)
+            .where(IngestionRun.tipo_fonte == "isin", IngestionRun.status.in_(("sucesso", "sem_alteracao")))
+            .order_by(IngestionRun.finished_at.desc(), IngestionRun.created_at.desc())
+            .limit(1)
+        )
+        run.quality_summary = {
+            **(run.quality_summary or {}),
+            "companhias_isin_alteradas": total,
+            "isin_ingestion_run_id": str(referencia.id) if referencia is not None else None,
+        }
+    return total
+
+
 def importar_isin(db: Session, execucao: ExecucaoSincronizacao) -> dict[str, Any]:
     settings = get_settings()
-    run = create_run(db, tipo_fonte="isin", ano=None, execucao_sincronizacao_id=execucao.id, requested_by_task_id=execucao.id_tarefa)
+    run = db.scalar(
+        select(IngestionRun)
+        .where(IngestionRun.execucao_sincronizacao_id == execucao.id)
+        .order_by(IngestionRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        run = create_run(db, tipo_fonte="isin", ano=None, execucao_sincronizacao_id=execucao.id, requested_by_task_id=execucao.id_tarefa)
+    else:
+        update_run_state(run, status="em_execucao", phase="acquire")
+        run.finished_at = None
+        run.message = None
     execucao.status = "em_execucao"
+    execucao.mensagem_erro = None
+    execucao.finalizada_em = None
     db.commit()
     try:
         client = boto3.client("s3", endpoint_url=settings.radar_cvm_r2_endpoint_url, region_name=settings.radar_cvm_r2_region,

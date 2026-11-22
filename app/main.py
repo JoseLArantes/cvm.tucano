@@ -78,6 +78,10 @@ OPENAPI_TAGS = [
         "description": "Consulta cadastral da entidade raiz `companhias`.",
     },
     {
+        "name": "isin",
+        "description": "Consulta da referência importada de ISINs de ações e disparo da importação dos arquivos de emissores e numeração.",
+    },
+    {
         "name": "fiis",
         "description": (
             "Catálogo e informes mensais de fundos imobiliários e classes, com histórico, indicadores, "
