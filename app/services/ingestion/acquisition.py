@@ -29,6 +29,7 @@ _DATASET_SLUG_BY_FONTE: dict[str, str] = {
     "ipe": "cia_aberta-doc-ipe",
     "vlmo": "cia_aberta-doc-vlmo",
     "cgvn": "cia_aberta-doc-cgvn",
+    "fii": "fii-doc-inf_mensal",
 }
 
 

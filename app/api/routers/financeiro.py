@@ -694,7 +694,9 @@ def _criar_endpoint_demonstracao(tipo_formulario: str, rota: str, tipo_demonstra
             "Nos retornos financeiros, `valor_conta` já representa o montante monetário absoluto após aplicação "
             "de `escala_moeda`; `valor_conta_reportado` preserva o número bruto informado pela CVM. "
             "Ambos são serializados como strings decimais canônicas, sem separadores de milhares e sem localização pt-BR. "
-            "No CSV estruturado da CVM, o separador decimal aceito é `.` e a escala monetária vem exclusivamente da coluna `ESCALA_MOEDA`."
+            "No CSV estruturado da CVM, o separador decimal aceito é `.` e a escala monetária vem exclusivamente da coluna `ESCALA_MOEDA`. "
+            "Nas contas filhas de 3.99.01 e 3.99.02 da DRE, use `valor_conta_reportado` para LPA. "
+            "A linha já é expressa em reais por ação, mesmo quando o formulário usa escala MIL."
         ),
         responses=_RESPOSTAS_PADRAO,
         operation_id=(f"listar{tipo_formulario.title()}{tipo_demonstracao.title().replace('_', '')}{escopo.title()}"),

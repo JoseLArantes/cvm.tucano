@@ -5,7 +5,7 @@ from typing import Literal
 
 from app.services.financeiro_mapas import arquivos_demonstracao
 
-FonteChave = Literal["cadastro", "dfp", "itr", "fre", "fca", "ipe", "cgvn", "vlmo"]
+FonteChave = Literal["cadastro", "dfp", "itr", "fre", "fca", "ipe", "cgvn", "vlmo", "fii"]
 TipoDistribuicao = Literal["csv_unico", "zip_anual"]
 StatusSuporte = Literal["suportado", "pendente_mapeamento"]
 
@@ -373,22 +373,22 @@ def _datasets_fre() -> tuple[DatasetFonte, ...]:
             dataset="endividamento",
             descricao="Endividamento do emissor no FRE",
             member_name_template="fre_cia_aberta_endividamento_{ano}.csv",
-            row_kind=None,
-            destino_promovido=None,
+            row_kind="fre_endividamento",
+            destino_promovido="fre_endividamentos",
             obrigatorio=False,
-            status_suporte="pendente_mapeamento",
-            normalizador=None,
+            status_suporte="suportado",
+            normalizador="normalizar_fre_row",
             chaves_relacao=("cnpj_companhia", "id_documento"),
         ),
         DatasetFonte(
             dataset="obrigacao",
             descricao="Obrigacoes do emissor no FRE",
             member_name_template="fre_cia_aberta_obrigacao_{ano}.csv",
-            row_kind=None,
-            destino_promovido=None,
+            row_kind="fre_obrigacao",
+            destino_promovido="fre_obrigacoes",
             obrigatorio=False,
-            status_suporte="pendente_mapeamento",
-            normalizador=None,
+            status_suporte="suportado",
+            normalizador="normalizar_fre_row",
             chaves_relacao=("cnpj_companhia", "id_documento"),
         ),
         DatasetFonte(
@@ -994,6 +994,28 @@ def _datasets_vlmo() -> tuple[DatasetFonte, ...]:
     )
 
 
+def _datasets_fii() -> tuple[DatasetFonte, ...]:
+    return tuple(
+        DatasetFonte(
+            dataset=secao,
+            descricao=descricao,
+            member_name_template=f"inf_mensal_fii_{secao}_{{ano}}.csv",
+            row_kind=f"fii_{secao}",
+            destino_promovido=f"fii_informes_{tabela}",
+            obrigatorio=True,
+            status_suporte="suportado",
+            normalizador="normalizar_fii_row",
+            chaves_relacao=("CNPJ_Fundo_Classe", "Data_Referencia", "Versao"),
+            observacoes="Os tres membros anuais sao preparados e publicados como uma unidade.",
+        )
+        for secao, descricao, tabela in (
+            ("geral", "Perfil cadastral e operacional do informe mensal", "gerais"),
+            ("complemento", "Patrimonio, cotistas e indicadores mensais", "complementos"),
+            ("ativo_passivo", "Composicao dos ativos, direitos e passivos", "ativos_passivos"),
+        )
+    )
+
+
 def _datasets_cgvn() -> tuple[DatasetFonte, ...]:
     return (
         DatasetFonte(
@@ -1178,6 +1200,22 @@ _FONTES: tuple[FonteRegistry, ...] = (
         datasets=_datasets_cgvn(),
         artifact_type="annual_zip_replacement",
         update_cadence="weekday_or_weekly",
+    ),
+    FonteRegistry(
+        fonte="fii",
+        familia="fundos_de_investimento_imobiliario",
+        descricao="Informe Mensal Estruturado de Fundos de Investimento Imobiliario.",
+        tipo_distribuicao="zip_anual",
+        dataset_path_template="FII/DOC/INF_MENSAL/DADOS/inf_mensal_fii_{ano}.zip",
+        arquivo_principal_template="inf_mensal_fii_{ano}.zip",
+        primeiro_ano=2016,
+        ultimo_ano=None,
+        obrigatorio=True,
+        status_suporte="suportado",
+        dependencias=(),
+        datasets=_datasets_fii(),
+        artifact_type="annual_zip_replacement",
+        update_cadence="weekly",
     ),
 )
 

@@ -1,12 +1,14 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
     Date,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -16,8 +18,25 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import Text as TextType
+from sqlalchemy.types import TypeDecorator
 
 from app.db.base import Base
+
+
+class _FreSourceDecimal(TypeDecorator[Decimal]):
+    """Armazena decimais do CSV como texto para preservar todos os dígitos em SQLite e PostgreSQL."""
+
+    impl = TextType
+    cache_ok = True
+
+    def process_bind_param(self, value: Decimal | None, dialect: Any) -> str | None:
+        _ = dialect
+        return None if value is None else str(value)
+
+    def process_result_value(self, value: str | None, dialect: Any) -> Decimal | None:
+        _ = dialect
+        return None if value is None else Decimal(value)
 
 
 class FreDocumento(Base):
@@ -62,6 +81,70 @@ class FreDocumento(Base):
         server_default=func.now(),
         nullable=False,
     )
+
+
+class FreEndividamento(Base):
+    __tablename__ = "fre_endividamentos"
+    __table_args__ = (
+        UniqueConstraint("cnpj_companhia", "id_documento", "versao", "data_referencia", "row_fingerprint", name="uq_fre_endividamentos_fingerprint"),
+        Index("ix_fre_endividamentos_empresa_periodo", "cnpj_companhia", "data_referencia", "versao"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
+    cnpj_companhia: Mapped[str] = mapped_column(String(14), index=True)
+    data_referencia: Mapped[date] = mapped_column(Date, index=True)
+    versao: Mapped[int] = mapped_column(Integer, index=True)
+    id_documento: Mapped[int] = mapped_column(Integer, index=True)
+    data_inicio_exercicio_social: Mapped[date | None] = mapped_column(Date)
+    data_fim_exercicio_social: Mapped[date | None] = mapped_column(Date)
+    passivo: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    indice_endividamento: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    tipo_indice: Mapped[str | None] = mapped_column(Text)
+    descricao_outro_indice: Mapped[str | None] = mapped_column(Text)
+    row_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    arquivo_origem: Mapped[str] = mapped_column(Text)
+    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
+    linha_origem: Mapped[int | None] = mapped_column(Integer)
+    hash_origem: Mapped[str] = mapped_column(String(64))
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    sincronizado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    alterado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class FreObrigacao(Base):
+    __tablename__ = "fre_obrigacoes"
+    __table_args__ = (
+        UniqueConstraint("cnpj_companhia", "id_documento", "versao", "data_referencia", "row_fingerprint", name="uq_fre_obrigacoes_fingerprint"),
+        Index("ix_fre_obrigacoes_empresa_periodo", "cnpj_companhia", "data_referencia", "versao"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    companhia_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("companhias.id"), index=True)
+    cnpj_companhia: Mapped[str] = mapped_column(String(14), index=True)
+    data_referencia: Mapped[date] = mapped_column(Date, index=True)
+    versao: Mapped[int] = mapped_column(Integer, index=True)
+    id_documento: Mapped[int] = mapped_column(Integer, index=True)
+    nome_companhia: Mapped[str | None] = mapped_column(Text)
+    data_inicio_exercicio_social: Mapped[date | None] = mapped_column(Date)
+    data_fim_exercicio_social: Mapped[date | None] = mapped_column(Date)
+    tipo_obrigacao: Mapped[str | None] = mapped_column(Text)
+    tipo_garantia: Mapped[str | None] = mapped_column(Text)
+    descricao_outras_garantias: Mapped[str | None] = mapped_column(Text)
+    divida_inferior_1_ano: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    divida_1a3_anos: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    divida_3a5_anos: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    divida_superior_5_anos: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    divida_total: Mapped[Decimal | None] = mapped_column(_FreSourceDecimal())
+    observacao: Mapped[str | None] = mapped_column(Text)
+    row_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    arquivo_origem: Mapped[str] = mapped_column(Text)
+    ano_origem: Mapped[int | None] = mapped_column(Integer, index=True)
+    linha_origem: Mapped[int | None] = mapped_column(Integer)
+    hash_origem: Mapped[str] = mapped_column(String(64))
+    criado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    sincronizado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    alterado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class FreAuditor(Base):

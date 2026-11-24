@@ -12,10 +12,10 @@ from app.services.ingestion.source_registry import (
 def test_registry_contains_expected_sources_and_order() -> None:
     fontes = listar_fontes()
     assert [item.fonte for item in fontes] == [
-        "cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"
+        "cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"
     ]
     assert [item.fonte for item in fontes_implementadas()] == [
-        "cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"
+        "cadastro", "dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"
     ]
 
 
@@ -26,6 +26,14 @@ def test_registry_covers_datasets_for_supported_sources() -> None:
     assert obter_fonte("fre") is not None
     assert obter_fonte("fca") is not None
     assert obter_fonte("ipe") is not None
+
+    fii = obter_fonte("fii")
+    assert fii is not None
+    assert fii.primeiro_ano == 2016
+    assert fii.dependencias == ()
+    assert fii.update_cadence == "weekly"
+    assert fii.datasets_obrigatorios == 3
+    assert {item.dataset for item in fii.datasets} == {"geral", "complemento", "ativo_passivo"}
 
     fre = obter_fonte("fre")
     assert fre is not None
@@ -109,6 +117,10 @@ def test_registry_dataset_lookup_by_member_name_and_row_kind() -> None:
     assert dataset is not None
     assert dataset.row_kind == "vlmo_consolidado"
 
+    dataset = dataset_por_member_name("fii", "inf_mensal_fii_geral_2026.csv", 2026)
+    assert dataset is not None
+    assert dataset.row_kind == "fii_geral"
+
 
 def test_registry_dependency_graph() -> None:
     cadastro = obter_fonte("cadastro")
@@ -119,6 +131,7 @@ def test_registry_dependency_graph() -> None:
     ipe = obter_fonte("ipe")
     vlmo = obter_fonte("vlmo")
     cgvn = obter_fonte("cgvn")
+    fii = obter_fonte("fii")
 
     assert cadastro is not None and cadastro.dependencias == ()
     assert dfp is not None and dfp.dependencias == ("cadastro",)
@@ -128,6 +141,7 @@ def test_registry_dependency_graph() -> None:
     assert ipe is not None and ipe.dependencias == ("cadastro",)
     assert vlmo is not None and vlmo.dependencias == ("cadastro",)
     assert cgvn is not None and cgvn.dependencias == ("cadastro",)
+    assert fii is not None and fii.dependencias == ()
 
 
 def test_registry_coverage_guards_for_current_sources() -> None:
@@ -204,6 +218,9 @@ def test_registry_coverage_guards_for_current_sources() -> None:
         "vlmo_consolidado",
         "cgvn_documento",
         "cgvn_pratica",
+        "fii_geral",
+        "fii_complemento",
+        "fii_ativo_passivo",
     }
     for row_kind in row_kinds:
         assert dataset_por_row_kind(row_kind) is not None

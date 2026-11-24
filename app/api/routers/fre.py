@@ -3,7 +3,7 @@ from datetime import date
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Select, func, select
+from sqlalchemy import Select, func, select, tuple_
 from sqlalchemy.orm import Session
 
 from app.api.deps import DbSession, PaginacaoQuery
@@ -28,7 +28,9 @@ from app.models.fre import (
     FreEmpregadoPosicaoFaixaEtaria,
     FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreEndividamento,
     FreMercadoEstrangeiro,
+    FreObrigacao,
     FreOutroValorMobiliario,
     FreParticipacaoSociedade,
     FrePlanoRecompra,
@@ -68,7 +70,9 @@ from app.schemas.fre import (
     FreEmpregadoPosicaoFaixaEtariaResposta,
     FreEmpregadoPosicaoGeneroResposta,
     FreEmpregadoPosicaoLocalResposta,
+    FreEndividamentoResposta,
     FreMercadoEstrangeiroResposta,
+    FreObrigacaoResposta,
     FreOutroValorMobiliarioResposta,
     FreParticipacaoSociedadeResposta,
     FrePlanoRecompraClasseAcaoResposta,
@@ -106,7 +110,9 @@ from app.schemas.fre import (
     ListaFreEmpregadoPosicaoFaixaEtariaResposta,
     ListaFreEmpregadoPosicaoGeneroResposta,
     ListaFreEmpregadoPosicaoLocalResposta,
+    ListaFreEndividamentoResposta,
     ListaFreMercadosEstrangeirosResposta,
+    ListaFreObrigacoesResposta,
     ListaFreOutrosValoresMobiliariosResposta,
     ListaFreParticipacoesSociedadesResposta,
     ListaFrePlanoRecompraClassesAcoesResposta,
@@ -336,6 +342,80 @@ def listar_documentos_fre(
     )
 
 
+@router.get(
+    "/fre/endividamento",
+    response_model=ListaFreEndividamentoResposta,
+    summary="Listar nível de endividamento FRE",
+    description=(
+        "Retorna as linhas históricas declaradas no quadro FRE de nível de endividamento. "
+        "Os valores e índices permanecem como informados pela CVM, sem inferir unidade ou compliance contratual. "
+        "A resposta preserva documento, versão, exercício, arquivo, linha e hash de origem."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="listarEndividamentoFre",
+)
+def listar_endividamento_fre(
+    db: DbSession,
+    paginacao: Annotated[PaginacaoQuery, Depends()],
+    cnpj_companhia: ParametroCnpj = None,
+    codigo_cvm: ParametroCodigoCvm = None,
+    data_referencia_inicio: ParametroDataInicio = None,
+    data_referencia_fim: ParametroDataFim = None,
+    ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
+    versao: ParametroVersao = None,
+    id_documento: ParametroIdDocumento = None,
+    ordenar_por: Annotated[str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_documento.")] = "-data_referencia",
+) -> ListaFreEndividamentoResposta:
+    dados, total = _lista_fre_generica(
+        db, modelo=FreEndividamento, schema=FreEndividamentoResposta, paginacao=paginacao,
+        cnpj_companhia=cnpj_companhia, codigo_cvm=codigo_cvm,
+        data_referencia_inicio=data_referencia_inicio, data_referencia_fim=data_referencia_fim,
+        ano_origem=ano_origem, ano_inicio=ano_inicio, ano_fim=ano_fim, versao=versao,
+        id_documento=id_documento, ordenar_por=ordenar_por,
+        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_documento"},
+    )
+    return ListaFreEndividamentoResposta(dados=dados, paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total))
+
+
+@router.get(
+    "/fre/obrigacoes",
+    response_model=ListaFreObrigacoesResposta,
+    summary="Listar dívidas e obrigações FRE",
+    description=(
+        "Retorna as faixas agregadas de dívidas e obrigações do FRE por tipo de obrigação e garantia. "
+        "As faixas não representam parcelas contratuais individuais nem datas exatas de pagamento. "
+        "A resposta preserva documento, versão, exercício, arquivo, linha e hash de origem."
+    ),
+    responses=_RESPOSTAS_PADRAO,
+    operation_id="listarObrigacoesFre",
+)
+def listar_obrigacoes_fre(
+    db: DbSession,
+    paginacao: Annotated[PaginacaoQuery, Depends()],
+    cnpj_companhia: ParametroCnpj = None,
+    codigo_cvm: ParametroCodigoCvm = None,
+    data_referencia_inicio: ParametroDataInicio = None,
+    data_referencia_fim: ParametroDataFim = None,
+    ano_origem: ParametroAnoOrigem = None,
+    ano_inicio: ParametroAnoInicio = None,
+    ano_fim: ParametroAnoFim = None,
+    versao: ParametroVersao = None,
+    id_documento: ParametroIdDocumento = None,
+    ordenar_por: Annotated[str | None, Query(description="Campos: data_referencia, versao, cnpj_companhia, id_documento.")] = "-data_referencia",
+) -> ListaFreObrigacoesResposta:
+    dados, total = _lista_fre_generica(
+        db, modelo=FreObrigacao, schema=FreObrigacaoResposta, paginacao=paginacao,
+        cnpj_companhia=cnpj_companhia, codigo_cvm=codigo_cvm,
+        data_referencia_inicio=data_referencia_inicio, data_referencia_fim=data_referencia_fim,
+        ano_origem=ano_origem, ano_inicio=ano_inicio, ano_fim=ano_fim, versao=versao,
+        id_documento=id_documento, ordenar_por=ordenar_por,
+        campos_permitidos={"data_referencia", "versao", "cnpj_companhia", "id_documento"},
+    )
+    return ListaFreObrigacoesResposta(dados=dados, paginacao=Paginacao(pagina=paginacao.pagina, tamanho_pagina=paginacao.tamanho_pagina, total=total))
+
+
 def _lista_fre_generica(
     db: Session,
     *,
@@ -386,7 +466,43 @@ def _lista_fre_generica(
     query = _aplicar_ordenacao(query, modelo=modelo, ordenar_por=ordenar_por, campos_permitidos=campos_permitidos)
     total = db.scalar(query_total) or 0
     itens: Sequence[Any] = db.execute(query.offset(paginacao.offset).limit(paginacao.tamanho_pagina)).scalars().all()
-    return [schema.model_validate(item) for item in itens], total
+    respostas = [schema.model_validate(item) for item in itens]
+    if respostas and "link_documento" in schema.model_fields:
+        chaves_documento = {
+            (item.cnpj_companhia, item.id_documento, item.versao, item.data_referencia)
+            for item in itens
+        }
+        documentos = db.execute(
+            select(
+                FreDocumento.cnpj_companhia,
+                FreDocumento.id_documento,
+                FreDocumento.versao,
+                FreDocumento.data_referencia,
+                FreDocumento.link_documento,
+            ).where(
+                tuple_(
+                    FreDocumento.cnpj_companhia,
+                    FreDocumento.id_documento,
+                    FreDocumento.versao,
+                    FreDocumento.data_referencia,
+                ).in_(chaves_documento)
+            )
+        ).all()
+        links = {
+            (cnpj, id_documento, versao, data_referencia): link
+            for cnpj, id_documento, versao, data_referencia, link in documentos
+        }
+        respostas = [
+            resposta.model_copy(
+                update={
+                    "link_documento": links.get(
+                        (item.cnpj_companhia, item.id_documento, item.versao, item.data_referencia)
+                    )
+                }
+            )
+            for item, resposta in zip(itens, respostas, strict=True)
+        ]
+    return respostas, total
 
 
 @router.get(

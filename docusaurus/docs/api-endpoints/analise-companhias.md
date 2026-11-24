@@ -34,6 +34,8 @@ Ao contrario de materializacao e monitoramento operacional, os endpoints abaixo 
 | `GET` | `/analise/companhias/{codigo_cvm}/governanca` | Observacoes temporais anuais de governanca |
 | `GET` | `/analise/companhias/{codigo_cvm}/pessoas` | Observacoes temporais anuais de pessoas e remuneracao |
 | `GET` | `/analise/companhias/{codigo_cvm}/brief` | Brief analitico consolidado da companhia |
+| `GET` | `/analise/companhias/{codigo_cvm}/fundamentalista` | Relatório fundamentalista completo |
+| `GET` | `/analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}` | Resumo fundamentalista de um exercício fiscal e comparação YoY |
 
 ## `GET /analise/metricas`
 
@@ -139,6 +141,52 @@ Cada resposta de serie inclui:
 - `resolution.materialized_at`: instante de conclusao da materializacao
 - `resolution.as_of`: data de corte informacional efetivamente aplicada
 - `horizonte_anos`: horizonte anual efetivamente aplicado em consultas historicas FY
+
+### LPA declarado e VPA agregado
+
+As séries, comparações, o fundamentalista e o resumo anual usam as mesmas métricas por ação em `BRL/ação`. O catálogo lista cada combinação de classe e modalidade de LPA.
+
+| Métrica | Origem | Interpretação |
+| --- | --- | --- |
+| `lpa_basico_<classe>` | Contas filhas de `3.99.01` na DRE do DFP ou ITR | Lucro ou prejuízo básico por ação declarado pela companhia. |
+| `lpa_diluido_<classe>` | Contas filhas de `3.99.02` na DRE do DFP ou ITR | Resultado diluído declarado separadamente. |
+| `vpa` | Balanço passivo e composição de capital do mesmo DFP ou ITR | Valor patrimonial agregado por ação em circulação no fechamento. |
+
+As classes suportadas são `on`, `pn`, `pna`, `pnb`, `pnc`, `pnd` e `pne`. A identificação vem do rótulo da linha, pois o sufixo do código varia por emissor. O LPA usa o decimal original da linha, sem aplicar a escala da DRE. O DFP fornece o exercício anual. O ITR separa o trimestre e o acumulado pelas datas de início e fim do resultado. O LPA do quarto trimestre depende de uma linha explicitamente declarada.
+
+No escopo consolidado, o VPA divide a diferença entre PL consolidado (`2.03`) e participação dos não controladores (`2.03.09`) pelas ações integralizadas menos as ações em tesouraria. No individual, o numerador é o PL individual (`2.03`). Ações e balanço precisam ter o mesmo CNPJ, formulário, data e versão. O fechamento intermediário usa ITR e o fechamento anual, inclusive a posição de Q4, usa DFP. O VPA é agregado sobre todas as ações e é igual entre recortes trimestral e acumulado que tenham o mesmo fechamento.
+
+```http
+GET /analise/companhias/9512/series?metricas=lpa_basico_on,vpa&periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=2
+GET /analise/companhias/9512/series?metricas=lpa_basico_on&periodicidade=quarterly&base_periodo=quarter&escopo=consolidated&as_of=2026-09-01
+GET /analise/companhias/9512/series?metricas=lpa_basico_on&periodicidade=quarterly&base_periodo=ytd&escopo=consolidated&as_of=2026-09-01
+GET /analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=2
+GET /analise/companhias/9512/fundamentalista/periodos/FY2025?escopo=consolidated
+```
+
+Envie o Bearer token como nas demais consultas protegidas. A tabela mostra um recorte das observações da Petrobras. Os decimais chegam como strings e o VPA abaixo está arredondado apenas para apresentação.
+
+| `period_id` | `metric_id` | Valor exibido | `value_source` |
+| --- | --- | --- | --- |
+| `FY2025` | `lpa_basico_on` | 8,54 | `reported` |
+| `2026-Q2` | `lpa_basico_on` | 4,07 | `reported` |
+| `2026-YTDQ2` | `lpa_basico_on` | 6,60 | `reported` |
+| `FY2025` | `vpa` | 32,26 | `derived_from_formula` |
+
+Quando faltar a composição de capital da versão elegível, a lista de indisponibilidades inclui, por exemplo:
+
+```json
+{
+  "metric_id": "vpa",
+  "period_id": "FY2025",
+  "status": "unavailable",
+  "reason_code": "MISSING_FORMULA_COMPONENT",
+  "message": "Falta composição de capital na mesma versão do balanço.",
+  "missing": ["composicao_capital"]
+}
+```
+
+Outros motivos incluem LPA ausente ou conflitante na mesma classe e modalidade, moeda incompatível, balanço ambíguo ou quantidade de ações em circulação inválida. Um valor zero divulgado continua disponível. Para investigar um valor, use `provenance` e o detalhe do `evidence_id`. A evidência mantém conta, formulário, versão, data e, quando disponíveis, o rótulo original e o local no CSV.
 
 ## `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
 
@@ -381,6 +429,24 @@ O payload de resposta contém:
 - `event_buckets`: agrupamentos de eventos por ano ou mês, com contadores por família e severidade
 - `evidence_dossier`: dossiê factual priorizado pelo backend para orientar a UI sem inferência no frontend
 
+O LPA aparece em `etapas.resultado_eficiencia.series` e o VPA em `etapas.caixa_solidez.series`. Cada etapa expõe as lacunas das novas métricas em `indisponibilidades`, limitadas aos períodos exibidos.
+
+Métricas aditivas no contrato fundamentalista:
+
+| `metric_id` | Unidade | Resolução / fórmula |
+| --- | --- | --- |
+| `lucro_liquido_controladora` | `BRL` | Conta CVM `3.11.01`; não é substituída pelo lucro líquido consolidado quando ausente |
+| `lucro_liquido_nao_controladores` | `BRL` | Conta CVM `3.11.02`; disponibilidade depende da abertura divulgada |
+| `margem_bruta` | `ratio` | `lucro_bruto / receita_liquida` |
+| `margem_ebit` | `ratio` | `ebit / receita_liquida` |
+| `margem_ebitda` | `ratio` | `ebitda / receita_liquida` |
+| `margem_liquida_controladora` | `ratio` | `lucro_liquido_controladora / receita_liquida` |
+| `giro_ativo` | `ratio` | `receita_liquida / média do ativo total de abertura e encerramento` |
+| `capex_receita` | `ratio` | `CAPEX normalizado como desembolso positivo / receita_liquida` |
+| `margem_caixa_livre` | `ratio` | `(caixa_operacional - CAPEX) / receita_liquida` |
+
+Valores `unit=ratio` são decimais canônicos (por exemplo, `0.125` equivale a `12,5%`). `roe` e `roa` também passam a exigir saldo de abertura para usar, respectivamente, patrimônio líquido médio e ativo total médio. Quando esse saldo não estiver disponível, a métrica vem em `indisponibilidades`; o saldo final não é usado como aproximação silenciosa. As métricas e fórmulas também são publicadas em `GET /analise/metricas`.
+
 Campos adicionais em `etapas.caixa_solidez`:
 
 - `ponte_caixa`: lista por período com itens de ponte de caixa. Cada item traz `metric_id`, `label`, `value`, `unit`, `role` (`opening`, `operating_cash`, `capex`, `adjustment` ou `free_cash`) e `evidence_ids`. Quando a ponte não é compatível com os componentes disponíveis, o período retorna `unavailable_reason`.
@@ -413,6 +479,94 @@ curl -H "Authorization: Bearer $TOKEN" \
 curl -i -H "Authorization: Bearer $TOKEN" \
   -H 'If-None-Match: "ETAG_RECEBIDO"' \
   "https://api.exemplo/analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=5"
+```
+
+## `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`
+
+Retorna os dados fundamentalistas de um único exercício fiscal, já resolvidos e comparados ao exercício imediatamente anterior. Por exemplo, `FY2020` solicita o exercício encerrado em 2020. O recurso é adequado para telas que navegam ano a ano e evitam carregar todo o histórico do relatório principal.
+
+Parâmetros:
+
+| Nome | Local | Tipo | Padrão | Descrição |
+| --- | --- | --- | --- | --- |
+| `codigo_cvm` | path | integer | — | Código CVM da companhia |
+| `period_id` | path | string | — | Período anual no formato `FYAAAA`, como `FY2020` |
+| `escopo` | query | string | `consolidated` | `consolidated` ou `individual` |
+| `as_of` | query | string | ausente | Corte de conhecimento documental em `AAAA-MM-DD`; não muda o ano selecionado |
+
+Exemplo:
+
+```bash
+curl -i -H "Authorization: Bearer $TOKEN" \
+  "https://api.exemplo/analise/companhias/9512/fundamentalista/periodos/FY2020?escopo=consolidated"
+```
+
+### Contrato da resposta
+
+O corpo usa `AnaliseFundamentalistaPeriodoResposta` e contém:
+
+- `companhia`, `calculation_version`, `periodo`, `escopo` e `as_of` para identificar companhia, versão do cálculo, datas de referência e recorte informacional;
+- `resolution.mode`: `canonical` quando há projeção canônica completa e `runtime_fallback` quando o serviço precisa resolver os dados a partir das demonstrações no request;
+- `metricas`: IDs estáveis do conjunto de métricas avaliado;
+- `observacoes`: métricas disponíveis no ano, com valor decimal, unidade, formulário, indicação de reapresentação e proveniência;
+- `indisponibilidades`: métricas sem fato ou sem componentes suficientes, com `reason_code` e lista `missing`;
+- `comparacoes`: comparação `YoY` com o ano anterior para cada observação disponível; razões informam variação em pontos percentuais quando aplicável;
+- `issues`: alertas de contexto;
+- `evidence_index`: referências compactas com IDs opacos para abrir evidências nos endpoints de detalhe existentes.
+
+O serviço verifica a existência do exercício anual no contexto CVM antes de responder. A falta do ano solicitado retorna `404`; `period_id` fora do padrão `FYAAAA` ou anterior a `FY1900` retorna `422`. Exercícios com dados incompletos continuam retornando `200`, expondo os campos indisponíveis em vez de ocultar a lacuna.
+
+### Caminho canônico e custo
+
+O endpoint reutiliza `AnaliseContextoRevision` e `AnaliseFatoRevision`; não cria uma tabela ou um fluxo de materialização separado. Com a projeção canônica completa, a leitura dos fatos é limitada ao FY pedido e ao FY anterior necessário à comparação YoY. O estado de contexto é lido para confirmar que o exercício existe no corte `as_of` solicitado. Se faltar qualquer status canônico esperado para o período atual ou, quando existente no contexto, para o comparador, a resposta inteira é resolvida em `runtime_fallback` para evitar misturar origens. Esse fallback é mais caro porque carrega as demonstrações para recomputar o recorte.
+
+O motor `2026.4` seleciona fatos materializados na mesma versão. Até uma materialização bem-sucedida nessa versão, a rota usa `runtime_fallback`. A regeneração segue as campanhas existentes, sujeitas à prioridade de ingestão. O relatório agregado usa `report_version=2.1.0`.
+
+### Cache HTTP e respostas
+
+A resposta `200` inclui `ETag`, `Cache-Control`, `Vary: Authorization`, `X-Analise-Source` e `X-Analise-Generation`. O consumidor pode reenviar `ETag` em `If-None-Match`; se o payload continuar idêntico, recebe `304 Not Modified` sem corpo. Para esta rota, `X-Analise-Source` é `canonical_facts` ou `compiled_runtime`, e a geração é o ID da execução canônica ou `runtime`.
+
+| Status | Significado |
+| --- | --- |
+| `200` | Resumo anual retornado, mesmo quando há métricas listadas em `indisponibilidades` |
+| `304` | O ETag enviado continua vigente |
+| `404` | Companhia ou exercício anual não encontrado para escopo e corte informacional |
+| `422` | Identificador anual ou parâmetro inválido |
+
+Exemplo reduzido do corpo:
+
+```json
+{
+  "companhia": {
+    "codigo_cvm": 9512,
+    "cnpj_companhia": "33000167000101",
+    "denominacao_social": "Companhia Exemplo S.A.",
+    "situacao_registro": "ATIVO"
+  },
+  "calculation_version": "2026.4",
+  "periodo": {
+    "period_id": "FY2020",
+    "fiscal_year": 2020,
+    "quarter": null,
+    "periodicidade": "annual",
+    "base_periodo": "fy",
+    "period_nature": "duration",
+    "start_date": "2020-01-01",
+    "end_date": "2020-12-31",
+    "form": "DFP",
+    "scope": "consolidated",
+    "restated": false
+  },
+  "escopo": "consolidated",
+  "as_of": null,
+  "resolution": { "mode": "canonical", "materialization_execution_id": "123", "as_of": null },
+  "metricas": ["receita_liquida", "lucro_liquido_controladora", "margem_liquida_controladora"],
+  "observacoes": [],
+  "indisponibilidades": [],
+  "comparacoes": [],
+  "issues": [],
+  "evidence_index": {}
+}
 ```
 
 ## `GET /analise/companhias/{codigo_cvm}/fundamentalista/eventos`
@@ -467,3 +621,82 @@ O endpoint valida se a evidência de fato pertence à companhia solicitada. Reto
 - Contas CVM e demonstração de origem
 - Metadados do documento/formulário entregue na CVM com link de download direto
 - Relação com outras comparações, sinais ou reapresentações do relatório
+
+## Obrigações contratuais e eventos de insolvência
+
+As rotas FRE acima expõem os quadros agregados de dívida declarados pela companhia. Elas não
+representam um contrato individual, uma parcela, um teste verificado ou a cobertura integral da
+dívida. Para fatos contratuais revisados e replay temporal, use as rotas abaixo.
+
+### `GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+
+Exige o mesmo bearer token dos demais endpoints protegidos. O corte padrão é a data corrente em
+`America/Sao_Paulo`.
+
+| Parâmetro | Tipo | Padrão | Semântica |
+| --- | --- | --- | --- |
+| `as_of` | `AAAA-MM-DD` | Hoje em São Paulo | Data de corte informacional. Registros com `disponivel_em` posterior são excluídos mesmo se tiverem efeito retroativo. |
+| `tipo_registro` | lista repetível | Todos | `acordo`, `covenant`, `covenant_test`, `breach`, `waiver`, `cash_leg`, `maturity_change`, `cross_default`, `proceeding` ou `coverage`. |
+| `acordo_id` | string | Todos | ID estável do acordo/instrumento relacionado. |
+| `historico` | boolean | `false` | `false` seleciona a maior revisão de cada registro estável conhecida no corte; `true` inclui as revisões anteriores que já estavam disponíveis. |
+| `pagina` | inteiro | `1` | Página, iniciando em 1. |
+| `tamanho_pagina` | inteiro | `100` | Registros por página, máximo 500. |
+
+A resposta contém `companhia_codigo_cvm`, `as_of`, `historico`, `dados` e `paginacao`. Cada registro
+inclui `registro_id`, `revisao`, `acordo_id`, datas `disponivel_em` e `efetivo_em`, `payload`,
+`evidencias`, `revisor_id`, `registrado_por`, `registrado_em` e `rationale`. A autoria da gravação é
+metadado de auditoria separado da identidade do revisor.
+
+O endpoint calcula `resultado_calculado` para um teste quando há `valor_aferido`, usando o comparador
+e o limite da própria revisão. `resultado_verificado` dentro do payload é uma classificação distinta:
+se não for `indisponivel`, a gravação exige revisor e evidência versionada. Para comparar máximo
+inclusivo, use `comparador="lte"`; por exemplo, 3,2 contra 3,0 resulta em `falhou`, enquanto 3,0
+resulta em `passou`.
+
+`waiver_aplicavel` indica que um waiver publicado até o corte foi implementado, estava vigente na data
+do teste e inclui aquele `registro_id` em `test_ids_cobertos`. Ele não remove nem reescreve o registro
+`breach`. `vencimento_efetivo` em parcelas aplica a última mudança elegível publicada e efetiva no
+corte. Uma mudança baseada em cross-default só é aplicada se o registro referenciado tiver gatilho e
+condições confirmados, além de revisor e evidência versionada. `projecao_aplicada` informa quando a
+mudança exibida foi aplicada à projeção da parcela.
+
+Processos (`proceeding`) usam `event_id` (igual a `registro_id`) para identificar cada ato e `case_id`
+para agrupar atos do mesmo processo. Assim, petições, decisões, intervenções e encerramentos no mesmo
+processo conservam IDs próprios; `eventos_relacionados` aponta para outros `event_id` já registrados.
+`etapa` separa `peticao`, `admissao_ou_decisao`, `intervencao_confirmada` e `encerramento`. A data de
+publicação fica em `disponivel_em`; a data de eficácia fica em `efetivo_em`. Um ato posterior ao corte
+não participa do replay, ainda que tenha sido publicado depois com efeito retroativo.
+
+Registros `coverage` apontam o DFP ou ITR que forma a população comparável, os acordos divulgados e
+revisados, exposições declaradas/reconciliadas, divergências de escopo e exposições omitidas. Quando
+`clausulas_desconhecidas` estiver preenchido, `responsavel_lacuna` identifica quem pode esclarecer os
+termos (companhia, agente fiduciário ou revisor autorizado). A lista vazia de acordos revisados não
+prova cobertura nem conformidade.
+
+### `POST /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+
+Exige token de sistema ou usuário administrador e aceita um lote atômico de até 500 registros. Cada
+item precisa de uma evidência com localizador documental (documento e seção/página/linha) ou URL e
+hash. A chave idempotente é companhia, `record_type`, `registro_id` e `revisao`: uma repetição de
+conteúdo igual é idempotente; conteúdo divergente na mesma revisão retorna `409`. Para corrigir um
+fato, acrescente uma nova revisão sem apagar a anterior. `revisor_id` deve identificar a revisão
+analítica e não é inferido do usuário que autenticou a gravação.
+
+Os payloads são discriminados por `record_type`:
+
+| Tipo | Conteúdo principal |
+| --- | --- |
+| `acordo` | Instrumento/série, emissor, devedor, garantidores, moeda, escopo, responsável pelos testes, vigência e cláusula. `acordo_id` deve ser igual ao `registro_id`. |
+| `covenant` | ID e definição financeira, escopo, contas e ajustes, unidade, janela, comparador, limite e datas de teste. |
+| `covenant_test` | Covenant, data, comparador/limite, valor medido, resultado calculado e resultado verificado separados. |
+| `breach` | Covenant e teste afetados, estado da violação, prazo de cura e retirada. A violação original permanece no histórico após waiver ou cura. |
+| `waiver` | Covenant, IDs exatos dos testes cobertos, período de eficácia, condições, implementação e retirada. |
+| `cash_leg` | ID estável da parcela, vencimento original, valor e moeda. |
+| `maturity_change` | IDs das parcelas, datas/condições e base da alteração; aceleração por cross-default exige referência ao respectivo evento. |
+| `cross_default` | Acordos de origem e afetado, cláusula e estado do gatilho/condições. Confirmar ambos requer revisor e evidência versionada. |
+| `proceeding` | `event_id` do ato, `case_id` do processo, órgão, entidade afetada, etapa publicada, exposições, valor divulgado e relações com outros atos. |
+| `coverage` | Documento DFP/ITR, contratos divulgados/revisados, valores reconciliados, diferenças e lacunas. |
+
+Para termos materiais não publicados, registre a cláusula em aberto e o responsável por esclarecê-la.
+Não use `false`, array vazia ou ausência de registro como prova de que não há descumprimento ou de que
+todo o livro de dívida foi revisado.

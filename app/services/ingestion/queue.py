@@ -21,6 +21,7 @@ _ZIP_TASKS = {
     "ipe": "app.worker.tasks.sincronizar_ipe_task",
     "vlmo": "app.worker.tasks.sincronizar_vlmo_task",
     "cgvn": "app.worker.tasks.sincronizar_cgvn_task",
+    "fii": "app.worker.tasks.sincronizar_fii_task",
 }
 _ACTIVE = ("reserved", "running")
 _TRANSITIONS = ("transition_pending",)
@@ -506,6 +507,9 @@ def reservar_vagas(db: Session) -> list[uuid.UUID]:
             )
             if candidate is not None and candidate.kind == "zip_prepare":
                 zip_active += 1
+        if candidate is None:
+            simple = _eligible_items(db, kind="simple", now=now)
+            candidate = simple[0] if simple else None
         if candidate is None:
             break
         _reserve(db, candidate, now)

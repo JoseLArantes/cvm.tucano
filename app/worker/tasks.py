@@ -6,6 +6,7 @@ from typing import Any, Literal, cast
 
 import httpx
 import sqlalchemy.exc
+from botocore.exceptions import ConnectionClosedError, ConnectTimeoutError, EndpointConnectionError, ReadTimeoutError
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -24,6 +25,10 @@ _AUTORETRY_FOR: tuple[type[Exception], ...] = (
     DependencyNotReady,
     sqlalchemy.exc.OperationalError,
     sqlalchemy.exc.InterfaceError,
+    ConnectTimeoutError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    ReadTimeoutError,
 )
 
 _RETRY_KWARGS = {
@@ -170,6 +175,7 @@ def agendar_ingestao_automatica_task(
         "app.worker.tasks.sincronizar_ipe_task",
         "app.worker.tasks.sincronizar_vlmo_task",
         "app.worker.tasks.sincronizar_cgvn_task",
+        "app.worker.tasks.sincronizar_fii_task",
     }
     if task_name not in allowed_tasks:
         raise ValueError(f"Task de ingestao automatica nao permitida: {task_name}")
@@ -358,6 +364,7 @@ def _enfileirar_fontes_anuais_agendadas(
         "ipe": sincronizar_ipe_task,
         "vlmo": sincronizar_vlmo_task,
         "cgvn": sincronizar_cgvn_task,
+        "fii": sincronizar_fii_task,
     }
     rows = db.scalars(
         select(ExecucaoSincronizacao)
@@ -515,7 +522,6 @@ def materializar_analise_companhia_task(
             scope=cast(Literal["consolidated", "individual"], escopo),
             source=source,
             invalidated_from=datetime.fromisoformat(invalidated_from).date() if invalidated_from else None,
-            incluir_canceladas=incluir_canceladas,
             campanha_id=uuid.UUID(campanha_id) if campanha_id else None,
             campanha_item_id=uuid.UUID(campanha_item_id) if campanha_item_id else None,
             chunk_execucao_id=uuid.UUID(chunk_execucao_id) if chunk_execucao_id else None,
@@ -529,6 +535,8 @@ def materializar_analise_companhia_task(
             "escopo": escopo,
             "materializacao_execucao_id": str(execucao.id),
             "coverage_complete": execucao.coverage_complete,
+            "skipped_reason": (execucao.summary or {}).get("skipped_reason"),
+            "legacy_incluir_canceladas_ignored": incluir_canceladas,
         }
     finally:
         db.close()
@@ -827,6 +835,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
         processed = 0
         success_items = 0
         failed_items = 0
+        skipped_items = 0
         for position, item_id in enumerate(item_ids, start=1):
             chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
             if chunk is None or chunk.status in {"stale", "cancelled"}:
@@ -851,6 +860,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                         processed_items=processed,
                         success_items=success_items,
                         failed_items=failed_items,
+                        skipped_items=skipped_items,
                         summary={"reason": gate.reason_code, "requeued_items": len(remaining_ids)},
                     )
                 _reagendar_campanha_materializacao(campanha_id)
@@ -901,14 +911,22 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                     task_id=str(self.request.id),
                     position_in_chunk=position,
                 )
+                skipped_reason = (execucao.summary or {}).get("skipped_reason")
                 registrar_resultado_materializacao_campanha_item(
                     db,
                     item,
-                    status="success" if execucao.status == "success" else "failed",
+                    status=(
+                        "skipped"
+                        if skipped_reason is not None
+                        else "success" if execucao.status == "success" else "failed"
+                    ),
                     materializacao_execucao_id=execucao.id,
                     last_error=None if execucao.status == "success" else "materialization_failed",
+                    reason=skipped_reason,
                 )
-                if execucao.status == "success":
+                if skipped_reason is not None:
+                    skipped_items += 1
+                elif execucao.status == "success":
                     success_items += 1
                 else:
                     failed_items += 1
@@ -930,6 +948,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                     processed_items=processed,
                     success_items=success_items,
                     failed_items=failed_items,
+                    skipped_items=skipped_items,
                 )
 
         chunk = db.get(AnaliseMaterializacaoChunkExecucao, chunk_uuid)
@@ -941,6 +960,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
                 processed_items=processed,
                 success_items=success_items,
                 failed_items=failed_items,
+                skipped_items=skipped_items,
             )
         _reagendar_campanha_materializacao(campanha_id, countdown=0)
         return {
@@ -950,6 +970,7 @@ def materializar_analise_chunk_task(self: Any, campanha_id: str, chunk_execucao_
             "processed_items": processed,
             "success_items": success_items,
             "failed_items": failed_items,
+            "skipped_items": skipped_items,
         }
     finally:
         db.close()
@@ -1050,6 +1071,26 @@ def reconciliar_materializacoes_terminais_task(self: Any) -> dict[str, Any]:
         )
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.sincronizar_isin_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def sincronizar_isin_task(self: Any, execucao_id: str, _queue_item_id: str | None = None, _queue_reservation_token: str | None = None) -> dict[str, Any]:
+    def operacao() -> dict[str, Any]:
+        from app.models.sincronizacao import ExecucaoSincronizacao
+        from app.services.ingestion.isin import importar_isin
+
+        db = SessionLocal()
+        try:
+            execucao = db.get(ExecucaoSincronizacao, uuid.UUID(execucao_id))
+            if execucao is None:
+                raise ValueError("Execucao ISIN nao encontrada")
+            return importar_isin(db, execucao)
+        finally:
+            db.close()
+
+    return _executar_com_reserva(self, queue_item_id=_queue_item_id, reservation_token=_queue_reservation_token,
+                                 task_name=self.name, task_args=[], task_kwargs={"execucao_id": execucao_id},
+                                 execution_id=execucao_id, operation=operacao, kind="simple")
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.sincronizar_cadastro_companhias_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
@@ -2907,6 +2948,46 @@ def sincronizar_cgvn_task(
             skip_probe=skip_probe, pending_update_id=pending_update_id,
         ), kind="zip_prepare",
     ))
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.sincronizar_fii_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]
+def sincronizar_fii_task(
+    self: Any,
+    ano: int,
+    force_reimport: bool = False,
+    _queue_item_id: str | None = None,
+    _queue_reservation_token: str | None = None,
+) -> dict[str, Any]:
+    return _executar_com_reserva(
+        self,
+        queue_item_id=_queue_item_id,
+        reservation_token=_queue_reservation_token,
+        task_name=self.name,
+        task_args=[ano],
+        task_kwargs={"force_reimport": force_reimport},
+        operation=lambda: _processar_fii_enfileirado(
+            ano=ano,
+            task_id=str(self.request.id),
+            force_reimport=force_reimport,
+        ),
+        kind="zip_prepare",
+    )
+
+
+def _processar_fii_enfileirado(*, ano: int, task_id: str, force_reimport: bool) -> dict[str, Any]:
+    from app.services.ingestion.fii import processar_informe_fii
+
+    return processar_informe_fii(ano=ano, task_id=task_id, force_reimport=force_reimport)
+
+
+@celery_app.task(name="app.worker.tasks.agendar_ingestao_fii_semanal_task")  # type: ignore[untyped-decorator]
+def agendar_ingestao_fii_semanal_task() -> dict[str, Any]:
+    from app.services.ingestion.fii import agendar_ingestao_semanal_fii
+
+    resultado = agendar_ingestao_semanal_fii()
+    if resultado.get("anos_enfileirados"):
+        despachar_fila_ingestao_task.delay()
+    return resultado
 
 
 @celery_app.task(bind=True, name="app.worker.tasks.pre_processar_sincronizacao_task", **_RETRY_KWARGS)  # type: ignore[untyped-decorator]

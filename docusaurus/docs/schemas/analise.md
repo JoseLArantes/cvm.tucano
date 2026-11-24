@@ -183,7 +183,7 @@ O fluxo atual é:
 
 1. A ingestão financeira identifica quais companhias foram afetadas.
 2. O backend cria uma campanha de materialização.
-3. A campanha elimina por padrão companhias com `situacao_registro=CANCELADA`.
+3. A campanha inclui somente companhias com `situacao_registro=ATIVO`; demais situações e cadastros ausentes são excluídos.
 4. A campanha é dividida em itens por `codigo_cvm` e `escopo`.
 5. Antes de cada novo chunk, o backend consulta um gate de admissão.
 6. Se houver ingestão ativa ou pausa manual, a campanha permanece pendente.
@@ -203,11 +203,11 @@ Com isso, a API pode:
 - evitar recalcular a mesma história analítica inteira a cada request;
 - dar prioridade operacional total para ingestão e atualizações.
 
-Execução pontual de companhia cancelada:
+Elegibilidade da materialização:
 
-- o comportamento padrão continua sendo não processar `CANCELADA`
-- uma execução individual só pode incluir canceladas quando o operador informa override explícito
-- sem override, a execução pode ser registrada apenas como skip observável, sem gerar revisões
+- campanhas, execuções individuais, reparos e backfills só processam `situacao_registro=ATIVO`
+- itens pendentes cuja situação mudou para outro valor são registrados como `skipped`, com `COMPANY_NOT_ACTIVE`, sem gerar revisões
+- flags legadas de inclusão de canceladas são ignoradas
 
 ## Self-healing de campanhas pendentes
 
@@ -560,6 +560,12 @@ Campos principais por métrica:
 | `disponibilidades` | array | Bases temporais suportadas |
 | `limitations` | array | Limitações metodológicas |
 
+O catálogo usa a versão de cálculo `2026.4`. Inclui lucro líquido atribuível à controladora (`lucro_liquido_controladora`, conta CVM `3.11.01`), lucro atribuível a não controladores (`lucro_liquido_nao_controladores`, conta `3.11.02`), margens, giro do ativo médio, CAPEX sobre receita e margem de caixa livre. Métricas de razão usam `unit=ratio` e valor decimal, sem multiplicação por 100.
+
+LPA declarado por classe e VPA agregado usam `unit="BRL/ação"`. As observações de LPA têm `period_nature=duration` e `value_source=reported`. O VPA tem `period_nature=instant` e `value_source=derived_from_formula`. A proveniência permite localizar cada insumo com `document_id`, `version`, `source_file` e `source_line`, quando disponíveis. No LPA, `account_label` preserva o rótulo original da classe.
+
+`roe` e `roa` usam lucro líquido dividido pelo saldo médio de abertura e encerramento do patrimônio líquido e do ativo total, respectivamente. A resolução requer os dois saldos; se faltar o saldo de abertura, o contrato expõe indisponibilidade em vez de aproximar pelo saldo final. A comparação YoY de uma razão retorna a diferença em pontos percentuais.
+
 ## Série
 
 `AnaliseSeriesResposta` traz `resolution`, observações disponíveis e indisponibilidades explícitas.
@@ -792,6 +798,65 @@ Campos principais:
 | `evidence_graph` | object | Grafo opcional com nós (`nodes`) e arestas (`edges`) expressando relacionamentos |
 | `event_buckets` | array | Buckets agregados de eventos por ano ou mês |
 | `evidence_dossier` | array | Dossiê factual priorizado para a UI |
+
+### `DebtProfile` e sinais contratuais
+
+`debt_profile` reúne saldos contábeis da dívida e sinais contratuais. Os quadros históricos do FRE
+podem ajudar a localizar endividamento e faixas agregadas, mas não identificam acordos ou parcelas e
+não verificam cumprimento de covenants. Portanto, as listas `cronograma_vencimentos`, `moedas`,
+`indexadores`, `garantias` e `covenants` não constituem por si só cobertura contratual. Enquanto o
+painel não coletar e validar cada fato, elas começam vazias e o estado correspondente começa em
+`nao_coletado`.
+
+| Campo | Tipo | Semântica atual |
+| --- | --- | --- |
+| `cronograma_vencimentos` | array | Faixas agregadas eventualmente coletadas; vazio não significa ausência verificada. |
+| `cronograma_vencimentos_status` | enum | Estado da coleta das faixas. |
+| `covenants` | array de strings | Textos eventualmente coletados, sem conclusão automática sobre compliance. |
+| `covenants_status` | enum | Estado da coleta e verificação de covenants. |
+| `inadimplencia_ou_descumprimento` | boolean ou null | Resultado binário verificado; permanece `null` enquanto não houver um resultado verificado. |
+| `inadimplencia_ou_descumprimento_status` | enum | Estado da informação de inadimplência ou descumprimento. |
+
+Os três campos de estado usam os mesmos valores:
+
+| Estado | Interpretação |
+| --- | --- |
+| `nao_coletado` | O painel ainda não coletou a informação. É o estado inicial atual. |
+| `nao_divulgado` | A revisão da fonte aplicável não localizou divulgação daquele campo. Não afirma ausência contratual. |
+| `desconhecido` | A informação existe ou pode existir, mas não pode ser resolvida com as evidências disponíveis. |
+| `ausencia_verificada` | A revisão documentou que a condição não existe no escopo e período examinados. |
+| `disponivel` | Há dado coletado e utilizável; isso não implica que uma obrigação foi cumprida. |
+
+`inadimplencia_ou_descumprimento=false` só pode ser interpretado junto de
+`inadimplencia_ou_descumprimento_status="ausencia_verificada"`. Uma lista vazia acompanhada de
+`nao_coletado`, `nao_divulgado` ou `desconhecido` não significa inexistência ou conformidade. A versão
+do relatório é `report_version="2.1.0"`; caches e snapshots anteriores não são selecionados
+como a versão corrente.
+
+Para acordos individuais, datas de teste, waivers, parcelas ou processos, use
+`GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais` descrito em
+[Análise por companhia](../api-endpoints/analise-companhias.md#obrigações-contratuais-e-eventos-de-insolvência).
+
+### `AnaliseFundamentalistaPeriodoResposta`
+
+Resposta enxuta para um exercício fiscal anual, servida por `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`. `period_id` usa `FYAAAA`. O payload contém somente observações e indisponibilidades do ano pedido; `comparacoes` contém variação `YoY` em relação ao FY imediatamente anterior. O ano comparável é lido para calcular as comparações, mas seus valores não são repetidos em `observacoes`.
+
+| Campo | Tipo | Descrição |
+| --- | --- | --- |
+| `companhia` | object | Resumo da companhia |
+| `calculation_version` | string | Versão do motor, atualmente `2026.4` |
+| `periodo` | object | Metadados e datas de referência do FY selecionado |
+| `escopo` | string | `consolidated` ou `individual` |
+| `as_of` | string ou null | Corte de conhecimento aplicado aos documentos |
+| `resolution` | object | Modo canônico ou `runtime_fallback` e execução, quando aplicável |
+| `metricas` | array de strings | IDs de métricas avaliadas |
+| `observacoes` | array | Valores disponíveis no FY selecionado, com unidade e proveniência |
+| `indisponibilidades` | array | Métricas sem dado ou componentes suficientes e seus motivos |
+| `comparacoes` | array | Comparação YoY para observações disponíveis no FY selecionado |
+| `issues` | array | Alertas de contexto associados à resolução |
+| `evidence_index` | object | Mapa de IDs opacos para referências compactas das observações |
+
+Cada item de `comparacoes` segue `AnaliseComparacaoItem`: para valores monetários, `absolute_change` preserva `BRL`; para razões, `percentage_point_change` é expresso em pontos percentuais. `metric_unit` continua identificando a unidade dos valores comparados. Uma comparação sem FY anterior disponível tem `status=unavailable` e `reason_code=MISSING_COMPARABLE_PERIOD`.
 
 ### `AnaliseStageCaixaSolidez`
 

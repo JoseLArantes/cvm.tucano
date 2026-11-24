@@ -14,6 +14,7 @@ class Companhia(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     cnpj_companhia: Mapped[str] = mapped_column(String(14), unique=True, index=True)
     codigo_cvm: Mapped[int | None] = mapped_column(Integer, unique=True, index=True)
+    codigos_isin: Mapped[list[str]] = mapped_column(JSON, default=list, server_default="[]", nullable=False)
     denominacao_social: Mapped[str | None] = mapped_column(String(255))
     denominacao_comercial: Mapped[str | None] = mapped_column(String(255))
     situacao_registro: Mapped[str | None] = mapped_column(String(255))

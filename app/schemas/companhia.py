@@ -74,6 +74,7 @@ class CompanhiaResposta(BaseModel):
     id: uuid.UUID = Field(description="Identificador interno da companhia no sistema.")
     cnpj_companhia: str = Field(description="CNPJ normalizado da companhia com 14 digitos numericos.")
     codigo_cvm: int | None = Field(description="Codigo CVM da companhia, quando disponibilizado pela fonte.")
+    codigos_isin: list[str] = Field(default_factory=list, description="ISINs materializados de ações ativas, em ordem alfabética.")
     denominacao_social: str | None = Field(description="Razao social cadastrada na CVM.")
     denominacao_comercial: str | None = Field(description="Nome comercial cadastrado na CVM.")
     situacao_registro: str | None = Field(description="Situacao do registro da companhia na CVM.")

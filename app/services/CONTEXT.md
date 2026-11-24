@@ -50,6 +50,7 @@ For ingestion internals, also read `app/services/ingestion/CONTEXT.md`.
 - Do not reintroduce massive post-ingestion per-company fan-out.
 - Preserve observability by campaign, item, chunk, and execution under `/analise/materializacoes/...`.
 - Campaign recovery must distinguish stale chunks, pending undispatched campaigns, waiting-for-gate states, waiting-for-slot states, and active chunks.
+- Only companies whose current `situacao_registro` is `ATIVO` are eligible for campaigns, direct materialization, repair, and backfills. Recheck eligibility before computing; legacy cancellation overrides do not bypass this rule.
 
 ## Rules for analysis changes
 

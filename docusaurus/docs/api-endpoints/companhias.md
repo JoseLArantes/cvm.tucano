@@ -5,6 +5,51 @@ sidebar_position: 5
 
 # Companhias
 
+As respostas de cadastro incluem `codigos_isin`, uma lista ordenada dos ISINs de ações ativas. A lista é atualizada após a sincronização do CADASTRO e fica vazia quando não há vínculos materializados.
+
+## Referência de ISIN
+
+`GET /isin` exige token bearer e lista os vínculos entre CNPJ e ISIN. Os filtros exatos `cnpj_companhia` e `codigo_isin` são opcionais. Use `pagina` e `tamanho_pagina` para percorrer os resultados.
+
+Os filtros são combinados e comparados sem normalização. Informe o CNPJ com 14 dígitos e o ISIN com 12 caracteres. Os resultados são ordenados por ISIN. `pagina` começa em 1, `tamanho_pagina` tem padrão 100 e limite 500, e `paginacao.total` conta todos os vínculos correspondentes. Uma consulta sem resultados retorna `200` com `dados` vazio.
+
+```bash
+curl 'https://cvm.tucano.beakcloud.com/isin?cnpj_companhia=33000167000101' \
+  -H 'Authorization: Bearer {TOKEN}'
+```
+
+```json
+{
+  "dados": [
+    {"codigo_isin": "BRPETRACNOR9", "cnpj_companhia": "33000167000101"},
+    {"codigo_isin": "BRPETRACNPR6", "cnpj_companhia": "33000167000101"}
+  ],
+  "paginacao": {"pagina": 1, "tamanho_pagina": 100, "total": 2}
+}
+```
+
+`POST /ingestion/sincronizacoes/isin` exige token de administrador ou de sistema e agenda a importação dos arquivos `emissores/EMISSOR.txt` e `emissores/NUMERACA.TXT` do R2. A resposta `202` informa `execucao_id`, `id_tarefa` e `lote_id`. Uma importação em andamento resulta em `409`. Acompanhe a execução em `GET /ingestion/sincronizacoes/{id_execucao}`. O CADASTRO posterior atualiza as listas das companhias.
+
+O disparo não recebe corpo. Uma resposta `202` indica que o trabalho foi agendado na fila persistida. Ela não indica que a leitura dos arquivos terminou. Na execução, `sucesso` indica uma referência atualizada, `sem_alteracao` indica conteúdo equivalente e `falha` registra erro no processamento. `401` indica token inválido ou ausente, e `403` indica usuário sem permissão administrativa. O corpo de `409` inclui `detail.execucao_id` da importação existente.
+
+```bash
+curl -X POST 'https://cvm.tucano.beakcloud.com/ingestion/sincronizacoes/isin' \
+  -H 'Authorization: Bearer {TOKEN}'
+```
+
+```json
+{
+  "execucao_id": "f4f6a9d8-7e26-45f2-b3fb-ec43a0f8a89a",
+  "id_tarefa": "a37f0f88-44b9-4cff-9b0d-b826e4e8f367",
+  "lote_id": "5de6e344-42af-42c7-a2a2-6224f01a1ca8",
+  "status": "agendada"
+}
+```
+
+A referência associa os arquivos pelo código de emissor, preserva ações elegíveis ativas e valida CNPJ e ISIN. A publicação é transacional. Vínculos ausentes na cópia completa são removidos após importação válida, e uma falha preserva a referência anterior. As respostas de `/isin` refletem a referência importada. As respostas de companhias refletem o resultado da sincronização posterior do CADASTRO.
+
+Em `GET /ingestion/runs/{run_id}`, o `quality_summary` da execução do CADASTRO informa `companhias_isin_alteradas` e `isin_ingestion_run_id`, identificador da importação de referência usada quando disponível.
+
 ## Visão Geral
 
 A entidade `companhia` é a **raiz do domínio** do Tucano CVM. Todos os dados financeiros (DFP, ITR), societários (FRE, FCA), eventos (IPE), negociações (VLMO) e governança (CGVN) se vinculam a uma companhia sempre que possível.

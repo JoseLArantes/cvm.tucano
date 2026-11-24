@@ -137,6 +137,8 @@ Prefixe com `-` para ordem decrescente (ex: `-data_referencia`).
 
 > **`{escopo}`:** `consolidado` ou `individual`
 
+Nas contas filhas de `3.99.01` e `3.99.02` da DRE, o LPA da CVM já está em reais por ação. Use `valor_conta_reportado`, pois o campo genérico `valor_conta` aplica a escala monetária do formulário. Se a DRE usar `MIL`, uma linha de LPA de `8.54` mantém esse valor em `valor_conta_reportado`. O [endpoint de séries analíticas](./analise-companhias.md) entrega LPA com a unidade explícita `BRL/ação`.
+
 ### Exemplo: Balanço Patrimonial Ativo Consolidado
 
 ```bash

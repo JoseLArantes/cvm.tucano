@@ -17,6 +17,8 @@ This context covers persisted state, SQLAlchemy models, Alembic migrations, and 
 - **Natural key** means the business key used to identify a source row across repeated ingestion.
 - **Surrogate key** means internal identifiers such as UUID primary keys.
 - **Lineage fields** mean source artifact, source year, source member, source line, hashes, and timestamps used for auditability.
+- **Informe Mensal de FII** means the CVM monthly report with sections for general profile, holder and return data, and assets and liabilities, identified by fund or class CNPJ, reference month, and CVM version.
+- **Ambiguous report section** means a financial section whose source rows share a fund/class CNPJ, reference month, and version but cannot be assigned to one declared fund or class from the report data.
 - **Persisted structural change** means adding, removing, renaming, or changing columns, indexes, constraints, tables, enum-like values stored in rows, or relationships.
 
 ## Persistence rules

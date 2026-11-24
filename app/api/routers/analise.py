@@ -1,8 +1,9 @@
 import hashlib
 from datetime import UTC, date, datetime, timedelta
 from time import perf_counter
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from sqlalchemy import case, func, select
@@ -27,6 +28,7 @@ from app.models.analise import (
 )
 from app.models.companhia import Companhia
 from app.schemas.analise import (
+    METRICAS_POR_ACAO_DESCRICAO,
     AnaliseBasePeriodo,
     AnaliseBriefResposta,
     AnaliseComparacoesResposta,
@@ -36,6 +38,7 @@ from app.schemas.analise import (
     AnaliseEvidenceTrailResponse,
     AnaliseFundamentalistaEventosResposta,
     AnaliseFundamentalistaEvidenciaDetalhe,
+    AnaliseFundamentalistaPeriodoResposta,
     AnaliseFundamentalistaResposta,
     AnaliseGovernancaResposta,
     AnaliseManifestoResposta,
@@ -77,8 +80,18 @@ from app.schemas.analise import (
     AnaliseSinaisResposta,
 )
 from app.schemas.comum import Paginacao
+from app.schemas.obrigacoes_contratuais import (
+    AcordoPayload,
+    CovenantTestPayload,
+    EvidenciaContratual,
+    ListaRegistrosContratuaisResposta,
+    LoteRegistrosContratuaisInput,
+    LoteRegistrosContratuaisResposta,
+    RegistroContratualResposta,
+)
 from app.services.analise import (
     CALCULATION_VERSION,
+    FUNDAMENTALISTA_REPORT_VERSION,
     campanha_tem_requeue_em_transito,
     contar_chunks_ativos_campanha,
     contar_chunks_stale_campanha,
@@ -98,6 +111,7 @@ from app.services.analise import (
     obter_fundamentalista_com_metadata,
     obter_fundamentalista_eventos,
     obter_fundamentalista_generation,
+    obter_fundamentalista_periodo,
     obter_governanca,
     obter_manifesto,
     obter_pessoas,
@@ -116,6 +130,13 @@ from app.services.analise_materializacao_operacional import (
     MaterializationReconcileConflict,
     build_materialization_operational_snapshot,
     reconcile_materialization_execution,
+)
+from app.services.normalizacao import normalizar_cnpj
+from app.services.obrigacoes_contratuais import (
+    ConflitoRevisaoContratualError,
+    gravar_lote_registros_contratuais,
+    listar_registros_contratuais,
+    validar_payload_contratual,
 )
 from app.worker.celery_app import celery_app
 
@@ -176,6 +197,10 @@ _RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
                 "description": "Política privada de cache HTTP do relatório autenticado.",
                 "schema": {"type": "string"},
             },
+            "Vary": {
+                "description": "Indica que a resposta varia conforme o cabeçalho de autorização.",
+                "schema": {"type": "string"},
+            },
             "X-Analise-Source": {
                 "description": (
                     "Origem da entrega: `redis_cache`, `redis_cache_wait`, `db_snapshot`, "
@@ -196,7 +221,42 @@ _RESPOSTAS_FUNDAMENTALISTA: dict[int | str, dict[str, Any]] = {
             "Cache-Control": {"schema": {"type": "string"}},
             "X-Analise-Source": {"schema": {"type": "string"}},
             "X-Analise-Generation": {"schema": {"type": "string"}},
+            "Vary": {"schema": {"type": "string"}},
         },
+    },
+}
+
+_RESPOSTAS_FUNDAMENTALISTA_PERIODO: dict[int | str, dict[str, Any]] = {
+    **_RESPOSTAS_PADRAO,
+    200: {
+        "description": "Resumo anual com fatos disponíveis, indisponibilidades explícitas e comparações YoY.",
+        "headers": {
+            "ETag": {"description": "Hash do payload para revalidação com `If-None-Match`.", "schema": {"type": "string"}},
+            "Cache-Control": {"description": "Política privada de cache HTTP.", "schema": {"type": "string"}},
+            "Vary": {"description": "A representação varia conforme autorização.", "schema": {"type": "string"}},
+            "X-Analise-Source": {
+                "description": "Origem da resposta anual.",
+                "schema": {"type": "string", "enum": ["canonical_facts", "compiled_runtime"]},
+            },
+            "X-Analise-Generation": {
+                "description": "ID da execução canônica usada ou `runtime`.",
+                "schema": {"type": "string"},
+            },
+        },
+    },
+    304: {
+        "description": "O ETag enviado em `If-None-Match` continua representando o payload vigente.",
+        "headers": {
+            "ETag": {"schema": {"type": "string"}},
+            "Cache-Control": {"schema": {"type": "string"}},
+            "Vary": {"schema": {"type": "string"}},
+            "X-Analise-Source": {"schema": {"type": "string", "enum": ["canonical_facts", "compiled_runtime"]}},
+            "X-Analise-Generation": {"schema": {"type": "string"}},
+        },
+    },
+    404: {
+        "description": "Companhia ou exercício fiscal anual não encontrado no escopo e corte informacional pedidos.",
+        "content": {"application/json": {"example": {"detail": "Exercício fiscal `FY2020` não encontrado."}}},
     },
 }
 
@@ -814,7 +874,8 @@ def _serializar_gate(db: DbSession, controle: AnaliseMaterializacaoControle | No
     summary="Catalogo de Metricas Analiticas",
     description=(
         "Retorna o catálogo versionado de métricas analíticas, com identificadores estáveis, unidade, fórmula, "
-        "contas CVM candidatas, estratégia de resolução e limitações metodológicas."
+        "contas CVM candidatas, estratégia de resolução e limitações metodológicas.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
     ),
     operation_id="listarMetricasAnaliticas",
 )
@@ -829,9 +890,9 @@ def listar_metricas_analiticas() -> AnaliseMetricasCatalogoResposta:
     description=(
         "Retorna snapshot operacional das execuções, campanhas, itens e filas Celery da materialização analítica, "
         "incluindo contagem de tasks orquestradoras, tasks de chunk, profundidade de fila dedicada e previews "
-        "dos itens pendentes/em andamento. Campanhas automáticas não incluem companhias com "
-        "`situacao_registro=CANCELADA`; canceladas só aparecem se uma execução pontual tiver sido disparada com "
-        "override explícito. O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
+        "dos itens pendentes/em andamento. Campanhas e execuções só processam companhias com "
+        "`situacao_registro=ATIVO`; itens antigos que deixaram de atender à regra são marcados como skipped. "
+        "O snapshot também expõe sinais específicos de self-healing, como campanhas pendentes "
         "recuperáveis, campanhas presas sem despacho inicial, último sweep automático persistido e tasks ativas do "
         "fluxo de recuperação de pendências. A inspeção Celery é tolerante a timeout/falha e a detecção detalhada "
         "de campanhas pendentes recuperáveis é limitada por `ANALISE_MATERIALIZACAO_PENDING_RECOVERY_MAX_CAMPAIGNS`."
@@ -1310,9 +1371,8 @@ def trigger_recuperacao_materializacao_analitica(
     summary="Listar Materializacoes Analiticas",
     description=(
         "Lista execuções de materialização analítica com status, progresso, tempo decorrido, estimativa de conclusão "
-        "e vínculo opcional com campanhas e itens de campanha. Campanhas automáticas e fluxos padrão excluem "
-        "companhias com `situacao_registro=CANCELADA`; execuções pontuais só processam canceladas mediante "
-        "override explícito no disparo operacional."
+        "e vínculo opcional com campanhas e itens de campanha. A regra de elegibilidade é única para execuções "
+        "automáticas, pontuais, reparos e backfills: somente companhias com `situacao_registro=ATIVO` são processadas."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="listarMaterializacoesAnaliticas",
@@ -1695,7 +1755,8 @@ def consultar_status_materializacao_companhia(
         "Cria uma campanha pequena de materialização para recompor a camada canônica de uma companhia e escopo "
         "a partir dos períodos solicitados. O payload pode informar métricas para validação e diagnóstico, mas "
         "a recomposição operacional continua sendo por companhia, escopo e janela de conhecimento derivada do "
-        "primeiro período aceito. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
+        "primeiro período aceito. A companhia precisa estar com `situacao_registro=ATIVO`; outros estados são "
+        "rejeitados sem criar campanha. Se o gate de materialização estiver vermelho, a campanha fica pendente e a "
         "resposta retorna `gate_status=red` e `reason_code=WAIT_MATERIALIZATION`."
     ),
     responses=_RESPOSTAS_OPERACAO_MATERIALIZACAO,
@@ -1841,8 +1902,8 @@ def reconciliar_materializacao_analitica(
     summary="Detalhar Materializacao Analitica",
     description=(
         "Retorna detalhe completo de uma execução de materialização analítica específica, incluindo resumo bruto "
-        "persistido e vínculos opcionais com campanha, item e posição em chunk. Execuções disparadas sem override "
-        "explícito podem concluir como skip operacional quando a companhia estiver com `situacao_registro=CANCELADA`."
+        "persistido e vínculos opcionais com campanha, item e posição em chunk. Se a companhia não estiver com "
+        "`situacao_registro=ATIVO`, o resumo registra `skipped_reason=COMPANY_NOT_ACTIVE` e nenhuma revisão é produzida."
     ),
     responses=_RESPOSTAS_PADRAO,
     operation_id="detalharMaterializacaoAnalitica",
@@ -1923,7 +1984,7 @@ def obter_analise_coverage(
     "/companhias/{codigo_cvm}/series",
     response_model=AnaliseSeriesResposta,
     summary="Series Analiticas Normalizadas",
-    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.",
+    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseSeries",
 )
@@ -1989,7 +2050,7 @@ def obter_analise_series_diagnostico(
     "/companhias/{codigo_cvm}/comparacoes",
     response_model=AnaliseComparacoesResposta,
     summary="Comparacoes Analiticas Prontas",
-    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100, com motivo explícito quando o cálculo não estiver disponível.",
+    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100, com motivo explícito quando o cálculo não estiver disponível.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseComparacoes",
 )
@@ -2175,7 +2236,10 @@ def obter_analise_restatements(
         "Envie `If-None-Match` para receber `304 Not Modified` quando o payload não mudou.\n"
         "- Falhas ou indisponibilidade do Redis não alteram a resposta funcional; o backend consulta o read model ou compila o relatório.\n\n"
         "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis e opacas no formato `ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`.\n"
-        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos."
+        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos.\n\n"
+        "LPA fica em `etapas.resultado_eficiencia` e VPA em `etapas.caixa_solidez`. "
+        "Cada etapa traz a série e os motivos de indisponibilidade para os períodos exibidos.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
     ),
     responses=_RESPOSTAS_FUNDAMENTALISTA,
     operation_id="obterAnaliseFundamentalista",
@@ -2264,6 +2328,7 @@ def obter_analise_fundamentalista(
             "as_of": as_of,
             "include": include,
             "calculation_version": CALCULATION_VERSION,
+            "report_version": FUNDAMENTALISTA_REPORT_VERSION,
             "generation": generation,
         },
         namespace="analise:delivery",
@@ -2329,6 +2394,59 @@ def obter_analise_fundamentalista(
     finally:
         if lock_token:
             cache.release_lock(lock_key, lock_token)
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}",
+    response_model=AnaliseFundamentalistaPeriodoResposta,
+    summary="Resumo Fundamentalista por Exercício",
+    description=(
+        "Retorna um resumo financeiro tipado para um exercício fiscal anual `FYAAAA`, com observações, "
+        "indisponibilidades explícitas, comparações YoY e referências de evidência. O caminho canônico "
+        "consulta somente fatos do exercício solicitado e do exercício anterior. Sem projeção canônica "
+        "completa, o mesmo resumo é compilado sob demanda e `resolution.mode=runtime_fallback` identifica "
+        "essa origem. `as_of` é um corte de conhecimento documental e não altera o exercício fiscal selecionado. "
+        "`escopo` mantém o recorte societário consolidado ou individual; o padrão é consolidado. A resposta usa "
+        "os mesmos cálculos e versões do relatório fundamentalista e do catálogo `/analise/metricas`, incluindo "
+        "lucro atribuível à controladora, margens, giro do ativo médio, CAPEX sobre receita, caixa livre e ROE/ROA "
+        "por saldos médios. Valores ausentes permanecem explícitos em `indisponibilidades`; o ano anterior serve "
+        "somente para comparar os valores atuais e não é repetido em `observacoes`. A resposta suporta ETag e "
+        "`If-None-Match`; retorna `404` se o FY não existir e `422` se `period_id` não tiver o formato `FYAAAA`.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
+    ),
+    responses=_RESPOSTAS_FUNDAMENTALISTA_PERIODO,
+    operation_id="obterAnaliseFundamentalistaPeriodo",
+)
+def obter_analise_fundamentalista_periodo(
+    codigo_cvm: Annotated[int, Path(description="Código CVM da companhia.", examples=[9512])],
+    period_id: Annotated[str, Path(pattern=r"^FY[0-9]{4}$", description="Exercício fiscal anual no formato `FYAAAA`.", examples=["FY2020"])],
+    db: DbSession,
+    request: Request,
+    escopo: Annotated[AnaliseEscopo, Query(description="Escopo societário: `consolidated` ou `individual`. Anual padrão: `consolidated`. ")] = "consolidated",
+    as_of: Annotated[date | None, Query(description="Corte de conhecimento dos documentos em `AAAA-MM-DD`; não seleciona o exercício fiscal.")] = None,
+) -> Response:
+    started_at = perf_counter()
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    fiscal_year = int(period_id[2:])
+    if fiscal_year < 1900 or fiscal_year > 9999:
+        raise HTTPException(status_code=422, detail="period_id deve identificar um exercício entre FY1900 e FY9999.")
+    result = obter_fundamentalista_periodo(
+        db,
+        companhia,
+        fiscal_year=fiscal_year,
+        scope=escopo,
+        as_of=as_of,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Exercício fiscal `{period_id}` não encontrado para a companhia e o corte informacional solicitados.")
+    response, source, generation = result
+    return _fundamentalista_http_response(
+        request,
+        response.model_dump_json(),
+        source=source,
+        generation=generation,
+        started_at=started_at,
+    )
 
 
 @router.get(
@@ -2459,3 +2577,167 @@ def obter_analise_fundamentalista_evidencia(
         raise HTTPException(status_code=403, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+_TIPOS_REGISTRO_CONTRATUAL = Literal[
+    "acordo",
+    "covenant",
+    "covenant_test",
+    "breach",
+    "waiver",
+    "cash_leg",
+    "maturity_change",
+    "cross_default",
+    "proceeding",
+    "coverage",
+]
+
+
+@router.get(
+    "/companhias/{codigo_cvm}/obrigacoes-contratuais",
+    response_model=ListaRegistrosContratuaisResposta,
+    summary="Consultar obrigações contratuais no corte",
+    description=(
+        "Consulta registros versionados de acordos, covenants e testes, violações, waivers, parcelas, "
+        "alterações de vencimento, cross-defaults, processos e cobertura. `as_of` limita os fatos à "
+        "data em que a evidência já estava publicamente disponível. O padrão é a data corrente em "
+        "America/Sao_Paulo. `historico=false` seleciona a maior revisão disponível de cada registro; "
+        "`historico=true` retorna todas as revisões disponíveis no corte. A comparação aritmética do "
+        "teste é calculada pelo serviço e permanece separada do resultado verificado, que exige revisor "
+        "e evidência versionada. Waivers preservam as violações originais e só cobrem os testes listados. "
+        "A aceleração por cross-default é projetada somente quando o gatilho e as condições constam "
+        "como confirmados por revisor e evidência. Cada linha expõe `disponivel_em` (data da evidência) "
+        "e `efetivo_em` (data de efeito conhecida). A paginação ocorre após filtros e seleção de revisão."
+    ),
+    responses={
+        **_RESPOSTAS_PADRAO,
+        200: {"description": "Registros elegíveis no corte, com proveniência e metadados de paginação."},
+    },
+    operation_id="listarObrigacoesContratuais",
+)
+def listar_obrigacoes_contratuais(
+    codigo_cvm: Annotated[int, Path(description="Código oficial da companhia na CVM.", examples=[9512])],
+    db: DbSession,
+    paginacao: Annotated[PaginacaoQuery, Depends()],
+    as_of: Annotated[
+        date | None,
+        Query(description="Corte informacional em `AAAA-MM-DD`; por padrão, data corrente em America/Sao_Paulo.", examples=["2025-12-31"]),
+    ] = None,
+    tipo_registro: Annotated[
+        list[_TIPOS_REGISTRO_CONTRATUAL] | None,
+        Query(description="Filtra tipos de registro; parâmetro repetível.", examples=["covenant_test", "waiver"]),
+    ] = None,
+    acordo_id: Annotated[str | None, Query(description="ID estável do acordo ou instrumento.", max_length=200)] = None,
+    historico: Annotated[
+        bool,
+        Query(description="Quando verdadeiro, inclui revisões anteriores já disponíveis no corte."),
+    ] = False,
+) -> ListaRegistrosContratuaisResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    corte = as_of or datetime.now(ZoneInfo("America/Sao_Paulo")).date()
+    total, dados = listar_registros_contratuais(
+        db,
+        codigo_cvm=codigo_cvm,
+        as_of=corte,
+        historico=historico,
+        tipos=cast(list[str] | None, tipo_registro),
+        acordo_id=acordo_id,
+        pagina=paginacao.pagina,
+        tamanho_pagina=paginacao.tamanho_pagina,
+    )
+    return ListaRegistrosContratuaisResposta(
+        companhia_codigo_cvm=companhia.codigo_cvm or codigo_cvm,
+        as_of=corte,
+        historico=historico,
+        dados=dados,
+        paginacao=Paginacao(
+            pagina=paginacao.pagina,
+            tamanho_pagina=paginacao.tamanho_pagina,
+            total=total,
+        ),
+    )
+
+
+@router.post(
+    "/companhias/{codigo_cvm}/obrigacoes-contratuais",
+    response_model=LoteRegistrosContratuaisResposta,
+    status_code=201,
+    summary="Registrar lote de obrigações contratuais revisadas",
+    description=(
+        "Grava registros revisados e suas evidências em uma única transação. Exige o token de sistema "
+        "ou usuário administrador. A chave idempotente é companhia, tipo, ID estável e revisão: repetir "
+        "a mesma revisão com o mesmo conteúdo é aceito sem duplicar; enviar conteúdo diferente para "
+        "uma revisão existente retorna `409 Conflict`. O usuário autenticado que grava e o `revisor_id` "
+        "informado em cada item são armazenados separadamente. Resultados aritméticos de covenant são "
+        "recalculados pelo serviço. O lote aceita até 500 registros e é atômico."
+    ),
+    responses={
+        201: {"description": "Lote persistido; `aceitos` conta novas revisões e `idempotentes` as já existentes."},
+        401: {"description": "Token ausente ou inválido."},
+        403: {"description": "A gravação requer autorização administrativa."},
+        404: {"description": "Companhia não encontrada."},
+        409: {"description": "Uma chave de revisão existente recebeu conteúdo divergente."},
+        422: {"description": "Payload ou relações inválidas."},
+    },
+    operation_id="registrarLoteObrigacoesContratuais",
+)
+def registrar_lote_obrigacoes_contratuais(
+    codigo_cvm: Annotated[int, Path(description="Código oficial da companhia na CVM.", examples=[9512])],
+    lote: LoteRegistrosContratuaisInput,
+    db: DbSession,
+    autenticacao: Annotated[AutenticacaoApi, Depends(autenticar_requisicao)],
+    _: Annotated[None, Depends(exigir_admin_api)],
+) -> LoteRegistrosContratuaisResposta:
+    companhia = _obter_companhia_por_codigo_cvm_or_404(db, codigo_cvm)
+    for registro in lote.registros:
+        if isinstance(registro.payload, AcordoPayload):
+            try:
+                emissor_cnpj = normalizar_cnpj(registro.payload.emissor_cnpj)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="cnpj_emissor_invalido") from exc
+            if emissor_cnpj != companhia.cnpj_companhia:
+                raise HTTPException(status_code=422, detail="acordo_emissor_diverge_da_companhia_da_rota")
+
+    if autenticacao.usuario is None:
+        registrado_por = "token_sistema"
+    else:
+        registrado_por = str(autenticacao.usuario.id)
+    try:
+        aceitos, idempotentes, registros = gravar_lote_registros_contratuais(
+            db,
+            codigo_cvm=codigo_cvm,
+            lote=lote,
+            registrado_por=registrado_por,
+        )
+    except ConflitoRevisaoContratualError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    respostas = []
+    for registro_persistido in registros:
+        resultado_calculado = None
+        calculado_em = None
+        payload_validado = validar_payload_contratual(registro_persistido.payload)
+        if isinstance(payload_validado, CovenantTestPayload):
+            teste = payload_validado
+            resultado_calculado = teste.resultado_calculado
+            calculado_em = teste.data_teste
+        respostas.append(
+            RegistroContratualResposta(
+                registro_id=registro_persistido.registro_id,
+                revisao=registro_persistido.revisao,
+                acordo_id=registro_persistido.acordo_id,
+                disponivel_em=registro_persistido.disponivel_em,
+                efetivo_em=registro_persistido.efetivo_em,
+                payload=payload_validado,
+                evidencias=[EvidenciaContratual.model_validate(item) for item in registro_persistido.evidencias],
+                revisor_id=registro_persistido.revisor_id,
+                registrado_por=registro_persistido.registrado_por,
+                rationale=registro_persistido.rationale,
+                registrado_em=registro_persistido.criado_em,
+                calculado_em=calculado_em,
+                resultado_calculado=resultado_calculado,
+            )
+        )
+    return LoteRegistrosContratuaisResposta(aceitos=aceitos, idempotentes=idempotentes, registros=respostas)

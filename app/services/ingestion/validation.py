@@ -39,6 +39,8 @@ _REQUIRED_COLUMNS_BY_ROW_KIND: dict[str, set[str]] = {
     "dfp_parecer": {"CNPJ_CIA", "DT_REFER", "VERSAO"},
     "itr_parecer": {"CNPJ_CIA", "DT_REFER", "VERSAO"},
     "fre_documento": {"CNPJ_CIA", "DT_REFER", "VERSAO", "ID_DOC"},
+    "fre_endividamento": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento"},
+    "fre_obrigacao": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento"},
     "fca_documento": {"CNPJ_CIA", "DT_REFER", "VERSAO", "ID_DOC"},
     "fre_auditor": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "ID_Auditor"},
     "fre_capital_social": {"CNPJ_Companhia", "Data_Referencia", "Versao", "ID_Documento", "ID_Capital_Social"},
@@ -397,6 +399,16 @@ def _natural_key_documento(dados: dict[str, Any]) -> dict[str, Any]:
         "id_documento": dados.get("id_documento"),
         "versao": dados.get("versao"),
         "data_referencia": dados.get("data_referencia"),
+    }
+
+
+def _natural_key_fre_quadro_distinto(dados: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "cnpj_companhia": dados.get("cnpj_companhia"),
+        "id_documento": dados.get("id_documento"),
+        "versao": dados.get("versao"),
+        "data_referencia": dados.get("data_referencia"),
+        "row_fingerprint": dados.get("row_fingerprint"),
     }
 
 
@@ -1148,6 +1160,8 @@ _NATURAL_KEY_BUILDERS: dict[str, Any] = {
     "dfp_parecer": _natural_key_parecer,
     "itr_parecer": _natural_key_parecer,
     "fre_documento": _natural_key_documento,
+    "fre_endividamento": _natural_key_fre_quadro_distinto,
+    "fre_obrigacao": _natural_key_fre_quadro_distinto,
     "fca_documento": _natural_key_documento,
     "fre_auditor": _natural_key_fre_auditor,
     "fre_capital_social": _natural_key_fre_capital_social,

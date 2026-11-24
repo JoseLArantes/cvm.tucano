@@ -10,12 +10,15 @@ from app.core.config import get_settings
 from app.models.sincronizacao import ExecucaoSincronizacao, TipoExecucao
 from app.services.ingestion.source_registry import obter_fonte
 
-_ANNUAL_SOURCES = {"dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn"}
+_ANNUAL_SOURCES = {"dfp", "itr", "fre", "fca", "ipe", "vlmo", "cgvn", "fii"}
 
 
 def sync_execution_metadata(*, tipo_fonte: str, ano: int | None) -> tuple[str, str, str]:
     settings = get_settings()
     fonte = tipo_fonte.lower().strip()
+
+    if fonte == "isin":
+        return "EMISSOR.txt+NUMERACA.TXT", "s3://" + settings.radar_cvm_r2_bucket + "/emissores/", TipoExecucao.arquivo_simples.value
 
     if fonte == "cadastro":
         arquivo = "cad_cia_aberta.csv+cad_cia_estrang.csv"

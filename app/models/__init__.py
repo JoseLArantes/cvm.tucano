@@ -20,6 +20,7 @@ from app.models.fca import (
     FcaGeral,
     FcaValorMobiliario,
 )
+from app.models.fii import FiiInformeAtivoPassivo, FiiInformeComplemento, FiiInformeGeral
 from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.fre import (
     FreAcaoEntregue,
@@ -49,8 +50,10 @@ from app.models.fre import (
     FreEmpregadoPosicaoFaixaEtaria,
     FreEmpregadoPosicaoGenero,
     FreEmpregadoPosicaoLocal,
+    FreEndividamento,
     FreMembroComite,
     FreMercadoEstrangeiro,
+    FreObrigacao,
     FreOutroValorMobiliario,
     FreParticipacaoSociedade,
     FrePlanoRecompra,
@@ -90,6 +93,8 @@ from app.models.ingestion import (
 )
 from app.models.ingestion_queue import IngestionQueueBatch, IngestionQueueControl, IngestionQueueItem
 from app.models.ipe import IpeDocumento
+from app.models.isin import ReferenciaIsin
+from app.models.obrigacoes_contratuais import ObrigacaoContratualRegistro
 from app.models.setores import (
     Setor,
     SetorAlias,
@@ -112,6 +117,7 @@ from app.updates.models import (
 )
 
 __all__ = [
+    "ReferenciaIsin",
     "AnaliseContextoRevision",
     "AnaliseFatoRevision",
     "AnaliseFundamentalistaSnapshot",
@@ -131,6 +137,9 @@ __all__ = [
     "DemonstracaoFinanceira",
     "DocumentoFinanceiro",
     "ExecucaoSincronizacao",
+    "FiiInformeAtivoPassivo",
+    "FiiInformeComplemento",
+    "FiiInformeGeral",
     "FcaAuditor",
     "FcaDepartamentoAcionistas",
     "FcaDocumento",
@@ -142,6 +151,7 @@ __all__ = [
     "FreAuditor",
     "FreCapitalSocial",
     "FreDocumento",
+    "FreEndividamento",
     "FreEmpregadoLocalDeclaracaoGenero",
     "FreEmpregadoLocalDeclaracaoRaca",
     "FreEmpregadoLocalFaixaEtaria",
@@ -177,6 +187,8 @@ __all__ = [
     "FreDireitoAcao",
     "FreVolumeValorMobiliario",
     "FreOutroValorMobiliario",
+    "FreObrigacao",
+    "ObrigacaoContratualRegistro",
     "FreTitularValorMobiliario",
     "FreMercadoEstrangeiro",
     "FreTituloExterior",

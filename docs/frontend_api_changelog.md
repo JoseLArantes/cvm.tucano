@@ -2,12 +2,110 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-24 - LPA declarado e VPA agregado
+
+- O catálogo, as séries, as comparações e o fundamentalista, incluindo o resumo anual, incluem `lpa_basico_<classe>`, `lpa_diluido_<classe>` e `vpa`, com unidade `BRL/ação`.
+- O LPA usa o valor declarado pela classe e pelo recorte, sem aplicar o multiplicador do formulário. O VPA usa balanço e composição de capital da mesma versão do DFP ou ITR. As respostas indicam quando faltam dados e mantêm a proveniência de cada insumo.
+- O motor passa a `2026.4` e o relatório a `2.1.0`. Até a materialização da nova versão por companhia, os valores são resolvidos em `runtime_fallback`.
+- Os agregados setoriais usam exclusivamente fatos canônicos da versão vigente. A cobertura setorial volta a incorporar cada companhia conforme a materialização em `2026.4` é concluída.
+
+## 2026-11-22 - Documentação OpenAPI dos ISINs
+
+- `POST /ingestion/sincronizacoes/isin` aparece nos grupos `ingestion` e `isin` do Swagger, com exemplos, permissões e estados operacionais.
+- `GET /isin` documenta filtros, paginação, autenticação e exemplos da referência importada. A atualização das listas nas companhias ocorre na sincronização posterior do CADASTRO.
+
+## 2026-11-19 - Elegibilidade estrita de companhias na materializacao analitica
+
+### Superficies afetadas
+
+- `GET /analise/materializacoes`
+- `GET /analise/materializacoes/{execucao_id}`
+- `GET /analise/materializacoes/monitoramento`
+- `POST /analise/materializacoes/companhias/{codigo_cvm}/repair`
+- Campanhas criadas apos ingestao financeira
+
+### Comportamento entregue
+
+- Execucoes automaticas, pontuais, reparos e backfills materializam somente companhias cujo `situacao_registro`, normalizado, seja `ATIVO`.
+- Situacoes diferentes e cadastros ausentes sao excluidos ao criar campanhas; `summary.selection` expoe contagens solicitadas, elegiveis e excluidas, exclusoes por situacao, `selection_policy` e o registro do override legado ignorado.
+- Itens antigos que chegam a execucao depois de a companhia deixar de estar `ATIVO` sao concluidos como `skipped`, com motivo `COMPANY_NOT_ACTIVE`, sem gerar revisoes canonicas.
+- O repair de uma companhia fora de `ATIVO` e rejeitado e nao cria campanha. Flags legadas de inclusao de canceladas nao fazem bypass da regra.
+
+## 2026-11-18 - FRE histórico de dívida e consulta contratual por corte
+
+### Superfícies afetadas
+
+- `GET /fre/endividamento` e `GET /fre/obrigacoes`
+- `GET /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+- `POST /analise/companhias/{codigo_cvm}/obrigacoes-contratuais`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+
+### Comportamento entregue
+
+- Os dois quadros opcionais históricos do FRE passam a ser promovidos e consultáveis com filtros por emissor, referência, ano de origem, versão e documento. As respostas preservam decimal, arquivo, ano, linha, hash, link do formulário e fingerprint da linha; cópias idênticas são deduplicadas e linhas distintas sob a mesma classificação permanecem separadas.
+- As consultas FRE declaram como nulas moeda, escala e unidades que os arquivos não comprovam. Valores não são convertidos e faixas de obrigações não são apresentadas como parcelas contratuais.
+- A consulta contratual entrega registros versionados com replay de corte informacional, evidências, identidade do revisor e autoria de gravação separados, comparação aritmética de covenant calculada pelo serviço, estado verificado independente, waiver limitado a testes, projeção de vencimento e eventos de processos.
+- O lote administrativo é atômico e idempotente por companhia, tipo, ID estável e revisão. Repetição de conteúdo igual é aceita; divergência para uma revisão existente retorna `409`.
+- `debt_profile.inadimplencia_ou_descumprimento` agora é anulável, e vencimentos, covenants e inadimplência recebem estados explícitos. Até coleta ou verificação, os estados são `nao_coletado` e a inadimplência é `null`. `report_version` passa a `2.0.0`; cache Redis e seleção de snapshot usam essa versão para evitar payload legado.
+
+## 2026-11-18 - Catalogo, fundamentos e informes mensais de FII
+
+### Superficies afetadas
+
+- `GET /fiis` com filtros por CNPJ, tipo, nome, ISIN, segmento e negociação em bolsa
+- `GET /fiis/{cnpj}/{tipo}` para perfil e fundamentos vigentes
+- `GET /fiis/{cnpj}/{tipo}/informes` com filtros por competência e versão
+- `GET /fiis/{cnpj}/{tipo}/informes/{competencia}` para os dados das três seções e proveniência
+
+### Comportamento entregue
+
+- Catálogo e histórico são alimentados pelos ZIPs anuais do Informe Mensal Estruturado da CVM desde 2016. A identidade diferencia fundo e classe, aceita CNPJ alfanumérico e mantém decimais da fonte como strings.
+- Os payloads expõem perfil, patrimônio, cotistas, indicadores de rentabilidade, dividend yield e composição de ativos e passivos. Decimais chegam como strings exatas; cada seção descreve unidades e proveniência. A seção financeira sem atribuição segura entre fundo e classe é sinalizada como `ambiguo`, com `dados=null` e variantes rastreáveis.
+- `todas_versoes=true` inclui versões observadas em publicações anteriores, e `consta_no_snapshot_atual` identifica se cada seção ainda está no ZIP anual publicado.
+- A ingestão valida e publica as três seções em conjunto, mantém a última publicação válida em caso de falha, compara alterações efetivas por campo e conserva informes retirados do snapshot.
+- Quando `AUTO_TRIGGER_UPDATES=true`, a descoberta dos arquivos da CVM é agendada semanalmente às segundas-feiras, às 08h30, em `America/Sao_Paulo`.
+
 Convencoes deste changelog:
 
 - cada entrada lista endpoints ou superficies afetadas;
 - descreve o comportamento atual entregue ao cliente;
 - documentacao editorial sem mudanca de contrato nao entra aqui;
 - a fonte de verdade de campos e exemplos continua sendo o OpenAPI gerado pela aplicacao.
+
+## 2026-11-17 - Resumo fundamentalista anual por exercício
+
+### Superfícies afetadas
+
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista/periodos/{period_id}`
+- `GET /analise/companhias/{codigo_cvm}/fundamentalista`
+- `GET /analise/companhias/{codigo_cvm}/series`
+- `GET /analise/metricas`
+
+### Comportamento entregue
+
+- Novo endpoint anual aceita `period_id=FYAAAA` e retorna observações do exercício, indisponibilidades tipadas, comparações YoY com o FY anterior, issues, proveniência e `evidence_index`.
+- A camada canônica reutiliza fatos materializados limitados ao FY pedido e ao FY anterior. Quando falta projeção canônica completa, o contrato usa `resolution.mode=runtime_fallback` para todo o payload. `as_of` limita o conhecimento documental e `escopo` seleciona a visão societária.
+- A resposta envia ETag e cabeçalhos de cache/revalidação; `304` é retornado quando `If-None-Match` corresponde ao payload atual.
+- O motor passa a `2026.3` e o relatório fundamentalista a `1.2.0`.
+- O catálogo passa a incluir `lucro_liquido_controladora` (CVM `3.11.01`), `lucro_liquido_nao_controladores` (`3.11.02`), `margem_bruta`, `margem_ebit`, `margem_ebitda`, `margem_liquida_controladora`, `giro_ativo`, `capex_receita` e `margem_caixa_livre`.
+- ROE e ROA anuais e trimestrais usam saldos médios de abertura e encerramento. Sem o saldo de abertura, a razão é declarada indisponível.
+
+### Migração operacional
+
+Materializações feitas por versões anteriores do motor não são lidas como fatos canônicos `2026.3`. Até a regeneração pela campanha/materialização existente, consumidores podem receber o mesmo contrato via `runtime_fallback`.
+
+## 2026-11-17 - CNPJ canônico corrigido para o registro CVM 80012
+
+### Superfície afetada
+
+- `GET /companhias/codigo-cvm/80012`
+- `GET /companhias` quando o registro CVM `80012` estiver na página retornada
+
+### Comportamento entregue
+
+- A resposta da companhia preserva o UUID de provedor existente e retorna o CNPJ válido `05714446000100`.
+- O CSV oficial da CVM continua sendo preservado como origem: o registro CVM mantém o valor publicado `05714446000400`, com arquivo, linha e hash de origem. O CNPJ canônico é reconciliado por uma regra restrita respaldada por registro oficial do CARF/RFB.
+- Novas divergências de dígitos verificadores no cadastro produzem diagnóstico operacional sanitizado e não promovem o valor de origem como CNPJ canônico.
 
 ## 2026-11-16 - Filtro Exato e Resolução Atual de Ticker FCA
 
@@ -2090,3 +2188,9 @@ type AnaliseSeriesObservation = {
 - Consumir `/analise/metricas` para ids, nomes e unidades oficiais
 - Expor `resolution` para inspeção operacional e troubleshooting de dados `as_of`
 - Se houver tela operacional ou admin, consumir `/analise/materializacoes` e `/analise/materializacoes/monitoramento`
+# 21/11/2026 — ISIN no cadastro
+
+- As respostas de companhias e o cadastro na consulta mestre incluem `codigos_isin`, lista de ISINs de ações ativas, atualizada após o CADASTRO.
+- `GET /isin` consulta a referência com filtros `cnpj_companhia` e `codigo_isin` e paginação.
+- `POST /ingestion/sincronizacoes/isin` agenda a importação dos arquivos de emissores e numeração e exige permissão administrativa.
+
