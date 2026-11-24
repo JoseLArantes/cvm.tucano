@@ -9,6 +9,7 @@ from app.core.cache import build_cache_key, cache
 from app.core.config import get_settings
 from app.models.companhia import Companhia
 from app.schemas.analise import (
+    METRICAS_POR_ACAO_DESCRICAO,
     AnaliseBasePeriodo,
     AnaliseBriefResposta,
     AnaliseComparacoesResposta,
@@ -26,6 +27,7 @@ from app.schemas.analise import (
     AnaliseSinaisResposta,
 )
 from app.services.analise import (
+    CALCULATION_VERSION,
     obter_brief,
     obter_comparacoes,
     obter_coverage,
@@ -100,7 +102,7 @@ def obter_analise_manifesto_publico(
 ) -> Any:
     verificar_companhia_publica(codigo_cvm)
     params = {"escopo": escopo, "as_of": as_of}
-    key = build_cache_key("manifesto", codigo_cvm, params)
+    key = build_cache_key("manifesto", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:
@@ -139,7 +141,7 @@ def obter_analise_coverage_publico(
         "as_of": as_of,
         "horizonte_anos": horizonte_anos,
     }
-    key = build_cache_key("coverage", codigo_cvm, params)
+    key = build_cache_key("coverage", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:
@@ -165,7 +167,7 @@ def obter_analise_coverage_publico(
     "/companhias/{codigo_cvm}/series",
     response_model=AnaliseSeriesResposta,
     summary="Series Analiticas Normalizadas (Publico)",
-    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.",
+    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PUBLICAS,
     operation_id="obterAnaliseSeriesPublico",
 )
@@ -188,7 +190,7 @@ def obter_analise_series_publico(
         "as_of": as_of,
         "horizonte_anos": horizonte_anos,
     }
-    key = build_cache_key("series", codigo_cvm, params)
+    key = build_cache_key("series", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:
@@ -238,7 +240,7 @@ def obter_analise_series_diagnostico_publico(
         "as_of": as_of,
         "horizonte_anos": horizonte_anos,
     }
-    key = build_cache_key("diagnostico", codigo_cvm, params)
+    key = build_cache_key("diagnostico", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:
@@ -265,7 +267,7 @@ def obter_analise_series_diagnostico_publico(
     "/companhias/{codigo_cvm}/comparacoes",
     response_model=AnaliseComparacoesResposta,
     summary="Comparacoes Analiticas Prontas (Publico)",
-    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100.",
+    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PUBLICAS,
     operation_id="obterAnaliseComparacoesPublico",
 )
@@ -288,7 +290,7 @@ def obter_analise_comparacoes_publico(
         "as_of": as_of,
         "horizonte_anos": horizonte_anos,
     }
-    key = build_cache_key("comparacoes", codigo_cvm, params)
+    key = build_cache_key("comparacoes", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:
@@ -505,7 +507,7 @@ def obter_analise_brief_publico(
         "as_of": as_of,
         "incluir_eventos": incluir_eventos,
     }
-    key = build_cache_key("brief", codigo_cvm, params)
+    key = build_cache_key("brief", codigo_cvm, {**params, "calculation_version": CALCULATION_VERSION})
 
     cached = cache.get(key)
     if cached is not None:

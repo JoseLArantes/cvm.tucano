@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +13,7 @@ from app.core.cache import build_cache_key
 from app.core.cache import cache as delivery_cache
 from app.models.analise import AnaliseFundamentalistaSnapshot
 from app.models.companhia import Companhia
-from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro
+from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro
 from app.models.ipe import IpeDocumento
 from app.services.analise import (
     CALCULATION_VERSION,
@@ -274,6 +275,155 @@ def _seed_analise_v2(db: Session) -> Companhia:
     return cia
 
 
+def test_metricas_por_acao_do_fundamentalista(client: TestClient, db_session: Session) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+    agora = datetime.now(UTC)
+    annual = date(2025, 12, 31)
+    interim = date(2026, 6, 30)
+    db_session.add(_doc(cia, agora, form="ITR", ref=interim, version=1, document_id=9602, filed_at=date(2026, 8, 8)))
+
+    def lpa(form: str, end: date, version: int, start: date, code: str, label: str, value: str) -> None:
+        row = _row(cia, agora, form=form, ref=end, version=version, account=code, value=value, start=start, end=end)
+        row.descricao_conta = label
+        row.moeda = "REAL"
+        row.linha_origem = 42
+        db_session.add(row)
+
+    lpa("DFP", annual, 1, date(2025, 1, 1), "3.99.01", "Lucro Básico por Ação", "0")
+    lpa("DFP", date(2024, 12, 31), 1, date(2024, 1, 1), "3.99.01.01", "ON", "2.84")
+    lpa("DFP", annual, 1, date(2025, 1, 1), "3.99.01.04", " on ", "8.54")
+    lpa("DFP", annual, 1, date(2025, 1, 1), "3.99.02.02", "PN", "0")
+    lpa("DFP", annual, 1, date(2025, 1, 1), "3.99.01.02", "PNA", "2")
+    lpa("DFP", annual, 1, date(2025, 1, 1), "3.99.01.03", "PNA", "3")
+    lpa("DFP", annual, 2, date(2025, 1, 1), "3.99.01.01", "ON", "-1.25")
+    lpa("ITR", interim, 1, date(2026, 1, 1), "3.99.01.01", "ON", "6.6")
+    lpa("ITR", interim, 1, date(2026, 4, 1), "3.99.01.01", "ON", "4.07")
+
+    for version in (1, 2):
+        equity = db_session.scalar(select(DemonstracaoFinanceira).where(
+            DemonstracaoFinanceira.codigo_conta == "2.03",
+            DemonstracaoFinanceira.data_referencia == annual,
+            DemonstracaoFinanceira.versao == version,
+        ))
+        assert equity is not None
+        equity.moeda = "REAL"
+        equity.valor_conta = Decimal("417587000")
+        minority = _row(
+            cia, agora, form="DFP", ref=annual, version=version, account="2.03.09",
+            value="1801000", statement_type="balanco_patrimonial_passivo", end=annual,
+        )
+        minority.moeda = "REAL"
+        db_session.add(minority)
+    db_session.add(ComposicaoCapital(
+        companhia_id=cia.id, tipo_formulario="DFP", cnpj_companhia=cia.cnpj_companhia,
+        data_referencia=annual, versao=1, quantidade_total_acoes_capital_integralizado=Decimal(12888732771),
+        quantidade_total_acoes_tesouraria=Decimal(10), arquivo_origem="dfp_cia_aberta_composicao_capital_2025.csv",
+        linha_origem=8, hash_origem="composicao",
+    ))
+    db_session.commit()
+    clear_analysis_session_cache(db_session)
+
+    root = f"/analise/companhias/{cia.codigo_cvm}"
+    cutoff = {"as_of": "2026-03-05"}
+    annual_path = root + "/fundamentalista/periodos/FY2025"
+
+    def get(path: str, **params: str) -> dict[str, Any]:
+        response = client.get(path, params=params, headers=headers)
+        assert response.status_code == 200, response.text
+        return dict(response.json())
+
+    runtime = get(annual_path, **cutoff)
+    values = {row["metric_id"]: row for row in runtime["observacoes"]}
+    reasons = {row["metric_id"]: row for row in runtime["indisponibilidades"]}
+    assert values["lpa_basico_on"]["value"] == "8.54"
+    assert values["lpa_basico_on"]["unit"] == "BRL/ação"
+    assert values["lpa_basico_on"]["provenance"][0]["account_label"] == " on "
+    assert values["lpa_diluido_pn"]["value"] == "0"
+    yoy = next(item for item in runtime["comparacoes"] if item["metric_id"] == "lpa_basico_on")
+    assert (yoy["absolute_change"], yoy["metric_unit"], yoy["comparison_unit"]) == ("5.7", "BRL/ação", "ratio")
+    assert reasons["lpa_basico_pna"]["reason_code"] == "CONFLICTING_REPORTED_LPA"
+    assert Decimal(values["vpa"]["value"]).quantize(Decimal("0.01")) == Decimal("32.26")
+    assert values["vpa"]["value_source"] == "derived_from_formula"
+    assert [item["account_code"] for item in values["vpa"]["provenance"]] == ["2.03", "2.03.09", None]
+    assert values["vpa"]["provenance"][-1]["source_line"] == 8
+    after = get(annual_path, as_of="2026-03-11")
+    assert any(row["metric_id"] == "lpa_basico_on" and row["value"] == "-1.25" for row in after["observacoes"])
+    assert any(row["metric_id"] == "vpa" and row["missing"] == ["composicao_capital"] for row in after["indisponibilidades"])
+
+    for basis, expected_period, expected_value in (("quarter", "2026-Q2", "4.07"), ("ytd", "2026-YTDQ2", "6.6")):
+        series = get(root + "/series", periodicidade="quarterly", base_periodo=basis, metricas="lpa_basico_on")
+        assert any(row["period_id"] == expected_period and row["value"] == expected_value for row in series["observacoes"])
+        if basis == "quarter":
+            assert any(row["period_id"] == "2025-Q4" and row["reason_code"] == "MISSING_REPORTED_LPA" for row in series["indisponibilidades"])
+
+    materializar_analise_companhia(db_session, cia, scope="consolidated")
+    clear_analysis_session_cache(db_session)
+    canonical = get(annual_path, **cutoff)
+    assert canonical["resolution"]["mode"] == "canonical"
+    for field in ("observacoes", "indisponibilidades", "comparacoes", "evidence_index"):
+        assert canonical[field] == runtime[field]
+    report = get(root + "/fundamentalista", **cutoff)
+    stages = report["etapas"]
+    assert values["lpa_basico_on"] in stages["resultado_eficiencia"]["series"]
+    assert values["vpa"] in stages["caixa_solidez"]["series"]
+    evidence_id = next(key for key in canonical["evidence_index"] if key.endswith("::vpa::FY2025"))
+    evidence = get(root + f"/fundamentalista/evidencias/{evidence_id}")
+    assert evidence["observation"] == values["vpa"]
+    catalog = client.get("/analise/metricas", headers=headers).json()
+    assert sum(row["unit"] == "BRL/ação" for row in catalog["metricas"]) == 15
+    openapi = client.get("/openapi.json").json()
+    assert "MISSING_FORMULA_COMPONENT" in openapi["paths"]["/analise/companhias/{codigo_cvm}/series"]["get"]["description"]
+
+
+@pytest.mark.parametrize(
+    ("scope", "treasury", "expected"),
+    [
+        ("consolidated", Decimal(2), "-12.5"),
+        ("individual", Decimal(2), "-10"),
+        ("consolidated", Decimal(10), "INVALID_SHARES_OUTSTANDING"),
+        ("consolidated", None, "MISSING_FORMULA_COMPONENT"),
+    ],
+)
+def test_vpa_trimestral_com_pl_negativo_e_dados_de_tesouraria(
+    client: TestClient, db_session: Session, scope: str, treasury: Decimal | None, expected: str,
+) -> None:
+    cia = _seed_analise_v2(db_session)
+    headers = _ops_headers(client)
+    agora = datetime.now(UTC)
+    ref = date(2026, 6, 30)
+    db_session.add(_doc(cia, agora, form="ITR", ref=ref, version=1, document_id=9602, filed_at=date(2026, 8, 8)))
+    for account, value in [("2.03", "-80"), ("2.03.09", "20")]:
+        row = _row(
+            cia, agora, form="ITR", ref=ref, version=1, account=account, value=value,
+            statement_type="balanco_patrimonial_passivo", scale="UNIDADE", end=ref,
+            scope="consolidado" if scope == "consolidated" else "individual",
+        )
+        row.moeda = "REAL"
+        db_session.add(row)
+    db_session.add(ComposicaoCapital(
+        companhia_id=cia.id, tipo_formulario="ITR", cnpj_companhia=cia.cnpj_companhia,
+        data_referencia=ref, versao=1, quantidade_total_acoes_capital_integralizado=Decimal(10),
+        quantidade_total_acoes_tesouraria=treasury, arquivo_origem="itr_cia_aberta_composicao_capital_2026.csv",
+        hash_origem="composicao",
+    ))
+    db_session.commit()
+    clear_analysis_session_cache(db_session)
+    for basis, period in (("quarter", "2026-Q2"), ("ytd", "2026-YTDQ2")):
+        result = client.get(
+            f"/analise/companhias/{cia.codigo_cvm}/series", headers=headers,
+            params={"metricas": "vpa", "periodicidade": "quarterly", "base_periodo": basis, "escopo": scope},
+        )
+        assert result.status_code == 200, result.text
+        payload = result.json()
+        if expected.startswith("-"):
+            row = next(item for item in payload["observacoes"] if item["period_id"] == period)
+            assert row["value"] == expected
+            assert row["period_nature"] == "instant"
+        else:
+            assert next(item for item in payload["indisponibilidades"] if item["period_id"] == period)["reason_code"] == expected
+
+
 def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Session) -> None:
     # 1. Seed data
     cia = _seed_analise_v2(db_session)
@@ -290,7 +440,7 @@ def test_fundamentalista_runtime_fallback(client: TestClient, db_session: Sessio
 
     # 3. Assert response structure
     assert "report_id" in data
-    assert data["report_version"] == "2.0.0"
+    assert data["report_version"] == "2.1.0"
     assert data["companhia"]["codigo_cvm"] == cia.codigo_cvm
     assert data["resolution"]["mode"] == "runtime_fallback"
 
@@ -401,7 +551,7 @@ def test_fundamentalista_periodo_runtime_fallback_com_yoy(client: TestClient, db
     assert response.status_code == 200
     payload = response.json()
     assert payload["periodo"]["period_id"] == "FY2025"
-    assert payload["calculation_version"] == "2026.3"
+    assert payload["calculation_version"] == "2026.4"
     assert payload["resolution"]["mode"] == "runtime_fallback"
     assert response.headers["X-Analise-Source"] == "compiled_runtime"
     assert response.headers["X-Analise-Generation"] == "runtime"
@@ -446,7 +596,7 @@ def test_fundamentalista_canonical_mode(client: TestClient, db_session: Session)
     assert response.status_code == 200
     data = response.json()
 
-    assert data["report_version"] == "2.0.0"
+    assert data["report_version"] == "2.1.0"
     assert data["debt_profile"]["inadimplencia_ou_descumprimento"] is None
     assert data["debt_profile"]["inadimplencia_ou_descumprimento_status"] == "nao_coletado"
 
@@ -1013,7 +1163,7 @@ def test_snapshot_com_report_version_antiga_nao_e_reutilizado(db_session: Sessio
     )
 
     assert result.source == "compiled_canonical"
-    assert result.response.report_version == "2.0.0"
+    assert result.response.report_version == "2.1.0"
     assert result.response.debt_profile is not None
     assert result.response.debt_profile.inadimplencia_ou_descumprimento is None
 
@@ -1063,7 +1213,7 @@ def test_cache_redis_ignora_chave_com_report_version_antiga(
 
     assert response.status_code == 200
     assert response.headers["x-analise-source"] == "compiled_runtime"
-    assert response.json()["report_version"] == "2.0.0"
+    assert response.json()["report_version"] == "2.1.0"
     assert response.json()["debt_profile"]["inadimplencia_ou_descumprimento"] is None
     assert legacy_key in values
     assert len(values) == 2

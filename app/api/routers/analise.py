@@ -28,6 +28,7 @@ from app.models.analise import (
 )
 from app.models.companhia import Companhia
 from app.schemas.analise import (
+    METRICAS_POR_ACAO_DESCRICAO,
     AnaliseBasePeriodo,
     AnaliseBriefResposta,
     AnaliseComparacoesResposta,
@@ -873,7 +874,8 @@ def _serializar_gate(db: DbSession, controle: AnaliseMaterializacaoControle | No
     summary="Catalogo de Metricas Analiticas",
     description=(
         "Retorna o catálogo versionado de métricas analíticas, com identificadores estáveis, unidade, fórmula, "
-        "contas CVM candidatas, estratégia de resolução e limitações metodológicas."
+        "contas CVM candidatas, estratégia de resolução e limitações metodológicas.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
     ),
     operation_id="listarMetricasAnaliticas",
 )
@@ -1982,7 +1984,7 @@ def obter_analise_coverage(
     "/companhias/{codigo_cvm}/series",
     response_model=AnaliseSeriesResposta,
     summary="Series Analiticas Normalizadas",
-    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.",
+    description="Retorna observações analíticas normalizadas por métrica, período, unidade, formulário, versão e evidência.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseSeries",
 )
@@ -2048,7 +2050,7 @@ def obter_analise_series_diagnostico(
     "/companhias/{codigo_cvm}/comparacoes",
     response_model=AnaliseComparacoesResposta,
     summary="Comparacoes Analiticas Prontas",
-    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100, com motivo explícito quando o cálculo não estiver disponível.",
+    description="Retorna YoY, QoQ, CAGR, análise vertical e base 100, com motivo explícito quando o cálculo não estiver disponível.\n\n" + METRICAS_POR_ACAO_DESCRICAO,
     responses=_RESPOSTAS_PADRAO,
     operation_id="obterAnaliseComparacoes",
 )
@@ -2234,7 +2236,10 @@ def obter_analise_restatements(
         "Envie `If-None-Match` para receber `304 Not Modified` quando o payload não mudou.\n"
         "- Falhas ou indisponibilidade do Redis não alteram a resposta funcional; o backend consulta o read model ou compila o relatório.\n\n"
         "O relatório indexa todas as evidências em `evidence_index` com chaves estáveis e opacas no formato `ev::{codigo_cvm}::{type}::{escopo}::{as_of}::{base_periodo}::{identifier}`.\n"
-        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos."
+        "Use o parâmetro opcional `include=evidence_graph` para incluir o grafo lógico direcionado mapeando a linhagem factual entre os fatos.\n\n"
+        "LPA fica em `etapas.resultado_eficiencia` e VPA em `etapas.caixa_solidez`. "
+        "Cada etapa traz a série e os motivos de indisponibilidade para os períodos exibidos.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
     ),
     responses=_RESPOSTAS_FUNDAMENTALISTA,
     operation_id="obterAnaliseFundamentalista",
@@ -2406,7 +2411,8 @@ def obter_analise_fundamentalista(
         "lucro atribuível à controladora, margens, giro do ativo médio, CAPEX sobre receita, caixa livre e ROE/ROA "
         "por saldos médios. Valores ausentes permanecem explícitos em `indisponibilidades`; o ano anterior serve "
         "somente para comparar os valores atuais e não é repetido em `observacoes`. A resposta suporta ETag e "
-        "`If-None-Match`; retorna `404` se o FY não existir e `422` se `period_id` não tiver o formato `FYAAAA`."
+        "`If-None-Match`; retorna `404` se o FY não existir e `422` se `period_id` não tiver o formato `FYAAAA`.\n\n"
+        + METRICAS_POR_ACAO_DESCRICAO
     ),
     responses=_RESPOSTAS_FUNDAMENTALISTA_PERIODO,
     operation_id="obterAnaliseFundamentalistaPeriodo",

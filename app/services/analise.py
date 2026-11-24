@@ -32,7 +32,7 @@ from app.models.analise import (
 )
 from app.models.cgvn import CgvnDocumento, CgvnPratica
 from app.models.companhia import Companhia
-from app.models.financeiro import DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
+from app.models.financeiro import ComposicaoCapital, DemonstracaoFinanceira, DocumentoFinanceiro, ParecerFinanceiro
 from app.models.fre import FreCapitalSocialAumento, FreEmpregadoPosicaoGenero, FreRemuneracaoTotalOrgao
 from app.models.ingestion import IngestionRun
 from app.models.ipe import IpeDocumento
@@ -142,8 +142,8 @@ from app.schemas.analise import (
 )
 from app.services.financeiro_valores import valor_conta_ajustado
 
-CALCULATION_VERSION: Literal["2026.3"] = "2026.3"
-FUNDAMENTALISTA_REPORT_VERSION = "2.0.0"
+CALCULATION_VERSION: Literal["2026.4"] = "2026.4"
+FUNDAMENTALISTA_REPORT_VERSION = "2.1.0"
 _settings = get_settings()
 logger = logging.getLogger(__name__)
 DB_SCOPE_TO_API: dict[str, AnaliseEscopo] = {"consolidado": "consolidated", "individual": "individual"}
@@ -313,6 +313,7 @@ class ContextData:
     qualidade: AnaliseQualidadeResumo
     periodos_disponiveis: list[AnalisePeriodoDisponivel]
     issues: list[AnaliseIssue]
+    capital_by_filing: dict[tuple[str, date, int], ComposicaoCapital]
 
 
 METRIC_SPECS: dict[str, MetricSpec] = {
@@ -689,6 +690,41 @@ METRIC_SPECS: dict[str, MetricSpec] = {
     ),
 }
 
+_LPA_PREFIXES = {"basico": "3.99.01", "diluido": "3.99.02"}
+_LPA_METRICS = {
+    f"lpa_{kind}_{share_class.lower()}": (kind, share_class, prefix)
+    for kind, prefix in _LPA_PREFIXES.items()
+    for share_class in ("ON", "PN", "PNA", "PNB", "PNC", "PND", "PNE")
+}
+METRIC_SPECS.update({
+    metric_id: MetricSpec(
+        metric_id=metric_id,
+        nome=f"LPA {'básico' if kind == 'basico' else 'diluído'} ({share_class})",
+        metric_type="flow",
+        unit="BRL/ação",
+        period_nature="duration",
+        candidate_accounts=(prefix,),
+        direction="contextual",
+        strategy=f"Seleciona uma conta filha de {prefix} que declare a classe {share_class} na DRE do período e usa o decimal original da CVM.",
+        bases=("fy", "quarter", "ytd"),
+        limitations=("Requer divulgação da modalidade e do recorte exatos. A escala da DRE e as diferenças entre acumulados não se aplicam.",),
+    )
+    for metric_id, (kind, share_class, prefix) in _LPA_METRICS.items()
+})
+METRIC_SPECS["vpa"] = MetricSpec(
+    metric_id="vpa",
+    nome="Valor patrimonial por ação (agregado)",
+    metric_type="stock",
+    unit="BRL/ação",
+    period_nature="instant",
+    candidate_accounts=("2.03", "2.03.09"),
+    formula="patrimonio_liquido_atribuivel / (acoes_integralizadas - acoes_tesouraria)",
+    direction="contextual",
+    strategy="Usa PL da controladora e ações em circulação do mesmo formulário, data e versão. No consolidado, deduz a participação não controladora.",
+    bases=("fy", "quarter", "ytd"),
+    limitations=("Resultado agregado. Requer todos os insumos e uma quantidade positiva de ações em circulação.",),
+)
+
 METRIC_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "margem_liquida": ("lucro_liquido", "receita_liquida"),
     "margem_bruta": ("lucro_bruto", "receita_liquida"),
@@ -715,7 +751,7 @@ FUNDAMENTALISTA_SUMMARY_METRICS = [
     "margem_liquida_controladora", "roe", "roa", "giro_ativo",
     "caixa_operacional", "capex", "caixa_livre", "capex_receita", "margem_caixa_livre",
     "caixa_equivalentes", "divida_bruta", "divida_liquida", "alavancagem", "conversao_lucro_caixa", "liquidez_corrente",
-    "ativo_total", "patrimonio_liquido",
+    "ativo_total", "patrimonio_liquido", "vpa", *_LPA_METRICS,
 ]
 
 
@@ -886,13 +922,22 @@ def _row_matches_scope(row: DemonstracaoFinanceira, scope: AnaliseEscopo) -> boo
     return DB_SCOPE_TO_API.get(row.escopo_demonstracao) == scope
 
 
-def _row_value(row: DemonstracaoFinanceira) -> Decimal | None:
-    if row.valor_conta is None:
+def _lpa_kind(row: DemonstracaoFinanceira) -> str | None:
+    if row.tipo_demonstracao != "demonstracao_resultado" or not row.codigo_conta:
         return None
+    prefix, _, _ = row.codigo_conta.rpartition(".")
+    return next((kind for kind, root in _LPA_PREFIXES.items() if root == prefix), None)
+
+
+def _row_value(row: DemonstracaoFinanceira) -> Decimal | None:
+    if row.valor_conta is None or _lpa_kind(row) is not None:
+        return row.valor_conta
     return valor_conta_ajustado(row.valor_conta, row.escala_moeda)
 
 
-def _provenance_for(row: DemonstracaoFinanceira, doc: DocumentoFinanceiro, form: AnaliseForm | None = None) -> AnaliseProvenienciaItem:
+def _provenance_for(
+    row: DemonstracaoFinanceira, doc: DocumentoFinanceiro, form: AnaliseForm | None = None, *, per_share: bool = False,
+) -> AnaliseProvenienciaItem:
     return AnaliseProvenienciaItem(
         source="CVM",
         dataset="demonstracoes_financeiras",
@@ -907,6 +952,9 @@ def _provenance_for(row: DemonstracaoFinanceira, doc: DocumentoFinanceiro, form:
         end_date=row.data_fim_exercicio or row.data_referencia,
         filed_at=doc.data_recebimento,
         link_download=doc.link_documento,
+        account_label=row.descricao_conta if per_share else None,
+        source_file=row.arquivo_origem if per_share else None,
+        source_line=row.linha_origem if per_share else None,
     )
 
 
@@ -1033,6 +1081,20 @@ def _load_context(db: Session, companhia: Companhia, scope: AnaliseEscopo, as_of
             )
         ).all()
     )
+    capital_by_filing = {
+        (item.tipo_formulario, item.data_referencia, item.versao): item
+        for item in db.scalars(
+            select(ComposicaoCapital).join(
+                doc_sq,
+                and_(
+                    ComposicaoCapital.cnpj_companhia == doc_sq.c.cnpj_companhia,
+                    ComposicaoCapital.tipo_formulario == doc_sq.c.tipo_formulario,
+                    ComposicaoCapital.data_referencia == doc_sq.c.data_referencia,
+                    ComposicaoCapital.versao == doc_sq.c.max_versao,
+                ),
+            ).where(ComposicaoCapital.cnpj_companhia == companhia.cnpj_companhia)
+        )
+    }
 
     periodos_disponiveis = _available_periods(rows, scope)
     qualidade = _build_quality(db, companhia, rows, documents, scope, periodos_disponiveis)
@@ -1049,6 +1111,7 @@ def _load_context(db: Session, companhia: Companhia, scope: AnaliseEscopo, as_of
                 qualidade=qualidade,
                 periodos_disponiveis=periodos_disponiveis,
                 issues=list(qualidade.issues),
+                capital_by_filing=capital_by_filing,
             ),
         ),
     )
@@ -1588,6 +1651,127 @@ def _candidate_periods(
     return deduped
 
 
+type PerShareRows = dict[tuple[str, date, str], list[tuple[DemonstracaoFinanceira, DocumentoFinanceiro]]]
+
+
+def _index_per_share_rows(context: ContextData) -> PerShareRows:
+    indexed: PerShareRows = defaultdict(list)
+    for row, doc in context.rows:
+        if not _row_current_exercise(row) or row.codigo_conta is None:
+            continue
+        account = row.codigo_conta
+        if row.tipo_demonstracao == "demonstracao_resultado":
+            kind = _lpa_kind(row)
+            if kind is None:
+                continue
+            share_class = "".join((row.descricao_conta or "").lower().split())
+            account = f"lpa_{kind}_{share_class}"
+            if account not in _LPA_METRICS:
+                continue
+        elif row.tipo_demonstracao != "balanco_patrimonial_passivo" or account not in {"2.03", "2.03.09"}:
+            continue
+        indexed[(row.tipo_formulario, row.data_referencia, account)].append((row, doc))
+    return indexed
+
+
+def _resolve_per_share(
+    context: ContextData,
+    indexed: PerShareRows,
+    annual_references: dict[int, date],
+    metric_id: str,
+    periodicidade: AnalisePeriodicidade,
+    base_periodo: AnaliseBasePeriodo,
+    scope: AnaliseEscopo,
+    year: int,
+    quarter: int | None,
+) -> ResolvedFact | AnaliseSeriesUnavailable:
+    period_id = _period_id_for(periodicidade, base_periodo, year, quarter)
+
+    def unavailable(code: str, message: str, missing: list[str]) -> AnaliseSeriesUnavailable:
+        return AnaliseSeriesUnavailable(
+            metric_id=metric_id, period_id=period_id, status="unavailable",
+            reason_code=code, message=message, missing=missing,
+        )
+
+    is_lpa = metric_id in _LPA_METRICS
+    annual_filing = quarter is None or (quarter == 4 and (not is_lpa or base_periodo == "ytd"))
+    form: AnaliseForm = "DFP" if annual_filing else "ITR"
+    reference = annual_references.get(year) if annual_filing else _quarter_end(year, cast(int, quarter))
+    if reference is None:
+        return unavailable("MISSING_SOURCE_FACT", "Formulário do período indisponível.", [form])
+
+    def candidates(account: str) -> list[tuple[DemonstracaoFinanceira, DocumentoFinanceiro]]:
+        return [
+            (row, doc) for row, doc in indexed.get((form, reference, account), [])
+            if (row.data_fim_exercicio or row.data_referencia) == reference
+        ]
+
+    if is_lpa:
+        rows = candidates(metric_id)
+        if quarter is not None:
+            start = _quarter_start(year, quarter) if base_periodo == "quarter" else date(year, 1, 1)
+            rows = [(row, doc) for row, doc in rows if row.data_inicio_exercicio == start]
+        if not rows:
+            return unavailable("MISSING_REPORTED_LPA", "A classe e modalidade não foram localizadas no recorte exato.", [metric_id])
+        if any(not _is_brl(row) for row, _ in rows):
+            return unavailable("INCOMPATIBLE_CURRENCY", "O LPA divulgado precisa estar em reais por ação.", ["moeda"])
+        if len({row.valor_conta for row, _ in rows}) != 1:
+            return unavailable("CONFLICTING_REPORTED_LPA", "Há valores distintos de LPA da mesma classe no formulário e recorte.", [])
+        rows.sort(key=lambda pair: (pair[0].codigo_conta or "", pair[0].linha_origem or 0, str(pair[0].id)))
+        row, doc = rows[0]
+        return cast(ResolvedFact, _resolved_from_row(
+            metric_id=metric_id, spec=METRIC_SPECS[metric_id], periodicidade=periodicidade, base_periodo=base_periodo,
+            row=row, doc=doc, scope=scope,
+            provenance=[_provenance_for(item, filing, per_share=True) for item, filing in rows],
+        ))
+
+    accounts = ("2.03", "2.03.09") if scope == "consolidated" else ("2.03",)
+    balance_rows = [candidates(account) for account in accounts]
+    missing = [account for account, rows in zip(accounts, balance_rows, strict=True) if not rows]
+    if missing:
+        return unavailable("MISSING_FORMULA_COMPONENT", "Faltam contas patrimoniais no balanço do período.", missing)
+    if any(len(rows) != 1 for rows in balance_rows):
+        return unavailable("AMBIGUOUS_BALANCE", "Há mais de uma linha patrimonial elegível no balanço.", [])
+    balance = [rows[0] for rows in balance_rows]
+    row, doc = balance[0]
+    if any(not _is_brl(item) for item, _ in balance):
+        return unavailable("INCOMPATIBLE_CURRENCY", "As contas patrimoniais precisam estar em reais.", ["moeda"])
+    capital = context.capital_by_filing.get((form, reference, row.versao))
+    if capital is None:
+        return unavailable("MISSING_FORMULA_COMPONENT", "Falta composição de capital na mesma versão do balanço.", ["composicao_capital"])
+    issued = capital.quantidade_total_acoes_capital_integralizado
+    treasury = capital.quantidade_total_acoes_tesouraria
+    if issued is None or treasury is None:
+        missing = [
+            field for field, value in (
+                ("quantidade_total_acoes_capital_integralizado", issued),
+                ("quantidade_total_acoes_tesouraria", treasury),
+            ) if value is None
+        ]
+        return unavailable("MISSING_FORMULA_COMPONENT", "O formulário não informa todas as quantidades de ações.", missing)
+    shares = issued - treasury
+    if shares <= 0 or treasury < 0:
+        return unavailable("INVALID_SHARES_OUTSTANDING", "As quantidades reportadas não formam um saldo válido de ações em circulação.", [])
+    equity = cast(Decimal, _row_value(row))
+    if scope == "consolidated":
+        equity -= cast(Decimal, _row_value(balance[1][0]))
+    provenance = [_provenance_for(item, filing, per_share=True) for item, filing in balance]
+    provenance.append(AnaliseProvenienciaItem(
+        dataset="composicoes_capital", form=form, document_id=doc.id_documento,
+        row_id=str(capital.id), version=capital.versao, statement_type="composicao_capital",
+        end_date=capital.data_referencia, filed_at=doc.data_recebimento, link_download=doc.link_documento,
+        source_file=capital.arquivo_origem, source_line=capital.linha_origem,
+    ))
+    return cast(ResolvedFact, _resolved_from_row(
+        metric_id=metric_id, spec=METRIC_SPECS[metric_id], periodicidade=periodicidade, base_periodo=base_periodo,
+        row=row, doc=doc, scope=scope, value=equity / shares, provenance=provenance, value_source="derived_from_formula",
+    ))
+
+
+def _is_brl(row: DemonstracaoFinanceira) -> bool:
+    return (row.moeda or "").strip().upper() in {"REAL", "BRL"}
+
+
 def _resolve_series_facts(
     context: ContextData,
     metric_ids: list[str],
@@ -1599,6 +1783,11 @@ def _resolve_series_facts(
     requested_metric_ids = list(metric_ids)
     metric_ids = _expand_metric_dependencies(metric_ids)
     rows_by_account = _index_rows_by_account(context.rows)
+    needs_per_share = any(metric_id == "vpa" or metric_id in _LPA_METRICS for metric_id in metric_ids)
+    per_share_rows = _index_per_share_rows(context) if needs_per_share else {}
+    annual_references = {
+        doc.data_referencia.year: doc.data_referencia for doc in context.documents if doc.tipo_formulario == "DFP"
+    } if needs_per_share else {}
     issues = list(context.issues)
     facts_by_metric_period: dict[tuple[str, str], ResolvedFact] = {}
     unavailable: list[AnaliseSeriesUnavailable] = []
@@ -1623,6 +1812,16 @@ def _resolve_series_facts(
                         missing=[base_periodo],
                     )
                 )
+                continue
+
+            if metric_id == "vpa" or metric_id in _LPA_METRICS:
+                per_share = _resolve_per_share(
+                    context, per_share_rows, annual_references, metric_id, periodicidade, base_periodo, scope, year, quarter,
+                )
+                if isinstance(per_share, AnaliseSeriesUnavailable):
+                    unavailable.append(per_share)
+                else:
+                    facts_by_metric_period[(metric_id, per_share.period_id)] = per_share
                 continue
 
             if spec.formula:
@@ -2050,7 +2249,10 @@ def _resolve_series_facts(
         [item for item in facts_by_metric_period.values() if item.metric_id in requested_metric_ids and item.period_id in visible_period_ids],
         key=lambda item: (item.fiscal_year, item.quarter or 0, item.metric_id),
     )
-    filtered_unavailable = _dedupe_unavailable([item for item in unavailable if item.metric_id in requested_metric_ids and item.period_id in visible_period_ids])
+    filtered_unavailable = sorted(
+        _dedupe_unavailable([item for item in unavailable if item.metric_id in requested_metric_ids and item.period_id in visible_period_ids]),
+        key=lambda item: (_period_id_sort_key(item.period_id), item.metric_id),
+    )
     return facts, filtered_unavailable, _dedupe_issues(issues)
 
 
@@ -4073,13 +4275,14 @@ def obter_restatements(
                 reference_row = after or before
                 if reference_row is None:
                     continue
+                is_lpa = _lpa_kind(reference_row) is not None
                 changed_accounts.append(
                     AnaliseRestatementContaAlterada(
                         account_code=reference_row.codigo_conta or "",
-                        account_label=_account_label(reference_row.codigo_conta),
+                        account_label=reference_row.descricao_conta if is_lpa else _account_label(reference_row.codigo_conta),
                         statement_type=reference_row.tipo_demonstracao,
                         statement_label=_statement_label(reference_row.tipo_demonstracao),
-                        unit=_statement_unit(reference_row.tipo_demonstracao),
+                        unit="BRL/ação" if is_lpa and _is_brl(reference_row) else _statement_unit(reference_row.tipo_demonstracao),
                         is_focus=(reference_row.codigo_conta or "") in _RESTATEMENT_FOCUS_ACCOUNTS,
                         reason_if_available="Valor da conta difere entre versões consecutivas do mesmo documento.",
                         evidence_id=_make_fundamentalista_evidence_id(
@@ -7630,6 +7833,7 @@ def _compile_fundamentalista(
         "lucro_liquido_controladora", "lucro_liquido_nao_controladores",
         "margem_liquida", "margem_bruta", "margem_ebit", "margem_ebitda",
         "margem_liquida_controladora", "roe", "roa", "giro_ativo",
+        *_LPA_METRICS,
     ]
     CASH_METRICS = [
         "caixa_operacional",
@@ -7645,6 +7849,7 @@ def _compile_fundamentalista(
         "passivo_circulante",
         "ativo_total",
         "patrimonio_liquido",
+        "vpa",
         "capex_receita",
         "margem_caixa_livre",
     ]
@@ -7800,6 +8005,10 @@ def _compile_fundamentalista(
 
     resultado_eficiencia = AnaliseStageResultadoEficiencia(
         series=res_obs,
+        indisponibilidades=[
+            item for item in series_res.indisponibilidades
+            if item.metric_id in _LPA_METRICS and item.period_id in active_periods
+        ],
         comparacoes=res_comps,
         evidence_ids=res_evidence_ids,
     )
@@ -7835,6 +8044,10 @@ def _compile_fundamentalista(
 
     caixa_solidez = AnaliseStageCaixaSolidez(
         series=cash_obs,
+        indisponibilidades=[
+            item for item in series_res.indisponibilidades
+            if item.metric_id == "vpa" and item.period_id in active_periods
+        ],
         comparacoes=cash_comps,
         sinais=cash_sinais,
         reapresentacoes=cash_restatements,

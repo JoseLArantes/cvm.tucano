@@ -142,6 +142,52 @@ Cada resposta de serie inclui:
 - `resolution.as_of`: data de corte informacional efetivamente aplicada
 - `horizonte_anos`: horizonte anual efetivamente aplicado em consultas historicas FY
 
+### LPA declarado e VPA agregado
+
+As séries, comparações, o fundamentalista e o resumo anual usam as mesmas métricas por ação em `BRL/ação`. O catálogo lista cada combinação de classe e modalidade de LPA.
+
+| Métrica | Origem | Interpretação |
+| --- | --- | --- |
+| `lpa_basico_<classe>` | Contas filhas de `3.99.01` na DRE do DFP ou ITR | Lucro ou prejuízo básico por ação declarado pela companhia. |
+| `lpa_diluido_<classe>` | Contas filhas de `3.99.02` na DRE do DFP ou ITR | Resultado diluído declarado separadamente. |
+| `vpa` | Balanço passivo e composição de capital do mesmo DFP ou ITR | Valor patrimonial agregado por ação em circulação no fechamento. |
+
+As classes suportadas são `on`, `pn`, `pna`, `pnb`, `pnc`, `pnd` e `pne`. A identificação vem do rótulo da linha, pois o sufixo do código varia por emissor. O LPA usa o decimal original da linha, sem aplicar a escala da DRE. O DFP fornece o exercício anual. O ITR separa o trimestre e o acumulado pelas datas de início e fim do resultado. O LPA do quarto trimestre depende de uma linha explicitamente declarada.
+
+No escopo consolidado, o VPA divide a diferença entre PL consolidado (`2.03`) e participação dos não controladores (`2.03.09`) pelas ações integralizadas menos as ações em tesouraria. No individual, o numerador é o PL individual (`2.03`). Ações e balanço precisam ter o mesmo CNPJ, formulário, data e versão. O fechamento intermediário usa ITR e o fechamento anual, inclusive a posição de Q4, usa DFP. O VPA é agregado sobre todas as ações e é igual entre recortes trimestral e acumulado que tenham o mesmo fechamento.
+
+```http
+GET /analise/companhias/9512/series?metricas=lpa_basico_on,vpa&periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=2
+GET /analise/companhias/9512/series?metricas=lpa_basico_on&periodicidade=quarterly&base_periodo=quarter&escopo=consolidated&as_of=2026-09-01
+GET /analise/companhias/9512/series?metricas=lpa_basico_on&periodicidade=quarterly&base_periodo=ytd&escopo=consolidated&as_of=2026-09-01
+GET /analise/companhias/9512/fundamentalista?periodicidade=annual&base_periodo=fy&escopo=consolidated&horizonte_anos=2
+GET /analise/companhias/9512/fundamentalista/periodos/FY2025?escopo=consolidated
+```
+
+Envie o Bearer token como nas demais consultas protegidas. A tabela mostra um recorte das observações da Petrobras. Os decimais chegam como strings e o VPA abaixo está arredondado apenas para apresentação.
+
+| `period_id` | `metric_id` | Valor exibido | `value_source` |
+| --- | --- | --- | --- |
+| `FY2025` | `lpa_basico_on` | 8,54 | `reported` |
+| `2026-Q2` | `lpa_basico_on` | 4,07 | `reported` |
+| `2026-YTDQ2` | `lpa_basico_on` | 6,60 | `reported` |
+| `FY2025` | `vpa` | 32,26 | `derived_from_formula` |
+
+Quando faltar a composição de capital da versão elegível, a lista de indisponibilidades inclui, por exemplo:
+
+```json
+{
+  "metric_id": "vpa",
+  "period_id": "FY2025",
+  "status": "unavailable",
+  "reason_code": "MISSING_FORMULA_COMPONENT",
+  "message": "Falta composição de capital na mesma versão do balanço.",
+  "missing": ["composicao_capital"]
+}
+```
+
+Outros motivos incluem LPA ausente ou conflitante na mesma classe e modalidade, moeda incompatível, balanço ambíguo ou quantidade de ações em circulação inválida. Um valor zero divulgado continua disponível. Para investigar um valor, use `provenance` e o detalhe do `evidence_id`. A evidência mantém conta, formulário, versão, data e, quando disponíveis, o rótulo original e o local no CSV.
+
 ## `GET /analise/companhias/{codigo_cvm}/series/diagnostico`
 
 Usa os mesmos filtros de `/series`, mas retorna uma explicação operacional de lacunas.
@@ -383,7 +429,9 @@ O payload de resposta contém:
 - `event_buckets`: agrupamentos de eventos por ano ou mês, com contadores por família e severidade
 - `evidence_dossier`: dossiê factual priorizado pelo backend para orientar a UI sem inferência no frontend
 
-Métricas aditivas no contrato fundamentalista (motor `2026.3`):
+O LPA aparece em `etapas.resultado_eficiencia.series` e o VPA em `etapas.caixa_solidez.series`. Cada etapa expõe as lacunas das novas métricas em `indisponibilidades`, limitadas aos períodos exibidos.
+
+Métricas aditivas no contrato fundamentalista:
 
 | `metric_id` | Unidade | Resolução / fórmula |
 | --- | --- | --- |
@@ -472,7 +520,7 @@ O serviço verifica a existência do exercício anual no contexto CVM antes de r
 
 O endpoint reutiliza `AnaliseContextoRevision` e `AnaliseFatoRevision`; não cria uma tabela ou um fluxo de materialização separado. Com a projeção canônica completa, a leitura dos fatos é limitada ao FY pedido e ao FY anterior necessário à comparação YoY. O estado de contexto é lido para confirmar que o exercício existe no corte `as_of` solicitado. Se faltar qualquer status canônico esperado para o período atual ou, quando existente no contexto, para o comparador, a resposta inteira é resolvida em `runtime_fallback` para evitar misturar origens. Esse fallback é mais caro porque carrega as demonstrações para recomputar o recorte.
 
-Após a publicação do motor `2026.3`, fatos de materializações anteriores não são considerados canônicos para esse contrato. Até uma materialização bem-sucedida na nova versão, a rota permanece disponível usando `runtime_fallback`; a regeneração deve seguir a fila e o processo de campanhas já existentes, sujeitos à prioridade de ingestão.
+O motor `2026.4` seleciona fatos materializados na mesma versão. Até uma materialização bem-sucedida nessa versão, a rota usa `runtime_fallback`. A regeneração segue as campanhas existentes, sujeitas à prioridade de ingestão. O relatório agregado usa `report_version=2.1.0`.
 
 ### Cache HTTP e respostas
 
@@ -495,7 +543,7 @@ Exemplo reduzido do corpo:
     "denominacao_social": "Companhia Exemplo S.A.",
     "situacao_registro": "ATIVO"
   },
-  "calculation_version": "2026.3",
+  "calculation_version": "2026.4",
   "periodo": {
     "period_id": "FY2020",
     "fiscal_year": 2020,

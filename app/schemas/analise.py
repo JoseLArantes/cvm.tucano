@@ -3,17 +3,39 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.comum import CanonicalDecimal, Paginacao
 
-CalculationVersion = Literal["2026.2", "2026.3"]
+METRICAS_POR_ACAO_DESCRICAO = (
+    "**Métricas por ação (BRL/ação).** Use `lpa_basico_<classe>`, `lpa_diluido_<classe>` ou `vpa`. "
+    "As classes são `on`, `pn`, `pna`, `pnb`, `pnc`, `pnd` e `pne`, identificadas pelo rótulo da conta filha "
+    "de 3.99.01 ou 3.99.02 na DRE. O LPA usa o valor publicado sem o multiplicador de escala da DRE "
+    "(`value_source=reported`). A base `fy` lê o DFP corrente. As bases `quarter` e `ytd` selecionam datas distintas "
+    "no ITR. O LPA do trimestre depende de declaração explícita, inclusive em Q4. "
+    "O VPA é uma posição de fechamento (`value_source=derived_from_formula`). Divide o PL atribuível à controladora "
+    "pelas ações integralizadas menos as de tesouraria. No consolidado, usa 2.03 menos 2.03.09. No individual, usa 2.03. "
+    "O balanço e a composição de capital pertencem ao mesmo emissor, formulário, data e versão. "
+    "Nas comparações, a variação absoluta mantém BRL/ação e a relativa usa `ratio`.\n\n"
+    "O corte `as_of` seleciona a versão elegível pela data de recebimento, usando a data de referência "
+    "quando esse metadado está ausente. A proveniência expõe a conta ou a composição de capital, documento, "
+    "versão e, quando disponíveis, rótulo, arquivo e linha. "
+    "Faltas são descritas em `indisponibilidades`: `MISSING_REPORTED_LPA`, `CONFLICTING_REPORTED_LPA`, "
+    "`MISSING_SOURCE_FACT`, `MISSING_FORMULA_COMPONENT`, `AMBIGUOUS_BALANCE`, "
+    "`INCOMPATIBLE_CURRENCY` ou `INVALID_SHARES_OUTSTANDING`.\n\n"
+    "Exemplos de observações da Petrobras: `lpa_basico_on` em FY2025 tem `value: \"8.54\"`; "
+    "em 2026-Q2 tem `value: \"4.07\"`; em 2026-YTDQ2 tem `value: \"6.6\"`. "
+    "O `vpa` de FY2025 é aproximadamente `32.26`. Se faltar composição de capital da versão selecionada, "
+    "a indisponibilidade de `vpa` usa `reason_code: MISSING_FORMULA_COMPONENT` e `missing: [composicao_capital]`."
+)
+
+CalculationVersion = Literal["2026.2", "2026.3", "2026.4"]
 AnalisePeriodicidade = Literal["annual", "quarterly"]
 AnaliseBasePeriodo = Literal["fy", "quarter", "ytd"]
 AnaliseEscopo = Literal["consolidated", "individual"]
 AnaliseNaturezaPeriodo = Literal["instant", "duration"]
 AnaliseMetricType = Literal["stock", "flow", "ratio", "count"]
-AnaliseUnit = Literal["BRL", "ratio", "percentage_point", "count", "shares", "index"]
+AnaliseUnit = Literal["BRL", "BRL/ação", "ratio", "percentage_point", "count", "shares", "index"]
 AnaliseForm = Literal["DFP", "ITR", "DERIVED"]
 AnaliseValueSource = Literal["reported", "derived_from_ytd_delta", "derived_from_dfp_minus_ytd", "derived_from_formula"]
 AnaliseStatus = Literal["available", "unavailable"]
@@ -702,6 +724,9 @@ class AnaliseProvenienciaItem(BaseModel):
     end_date: date | None = Field(default=None, description="Data final da observação de origem, em ISO 8601.")
     filed_at: date | None = Field(default=None, description="Data de entrega/recebimento do documento, em ISO 8601.")
     link_download: str | None = Field(default=None, description="Link oficial para download do documento na CVM.")
+    account_label: str | None = Field(default=None, description="Rótulo original da conta. Para LPA, identifica a classe da ação, como ON ou PNA.")
+    source_file: str | None = Field(default=None, description="Nome do membro CSV que contém a linha da métrica por ação.")
+    source_line: int | None = Field(default=None, description="Número da linha de origem no CSV, quando disponível.")
 
 
 class AnaliseEvidenceItem(BaseModel):
@@ -722,7 +747,7 @@ class AnaliseSeriesObservation(BaseModel):
     start_date: date | None = Field(default=None, description="Data inicial do período em ISO 8601.")
     end_date: date = Field(description="Data final do período em ISO 8601.")
     value: CanonicalDecimal = Field(description="Valor da observação serializado como decimal canônico.")
-    unit: AnaliseUnit = Field(description="Unidade do valor.")
+    unit: AnaliseUnit = Field(description="Unidade do valor. LPA e VPA usam BRL/ação.", examples=["BRL", "BRL/ação"])
     scope: AnaliseEscopo = Field(description="Escopo societário considerado.")
     form: AnaliseForm = Field(description="Formulário principal usado para a observação.")
     version: int | None = Field(default=None, description="Versão documental principal usada.")
@@ -733,6 +758,17 @@ class AnaliseSeriesObservation(BaseModel):
 
 
 class AnaliseSeriesUnavailable(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [{
+            "metric_id": "vpa",
+            "period_id": "FY2025",
+            "status": "unavailable",
+            "reason_code": "MISSING_FORMULA_COMPONENT",
+            "message": "Falta composição de capital na mesma versão do balanço.",
+            "missing": ["composicao_capital"],
+        }],
+    })
+
     metric_id: str = Field(description="Métrica indisponível.")
     period_id: str = Field(description="Período solicitado/avaliado.")
     status: Literal["unavailable"] = Field(description="Marca a indisponibilidade.")
@@ -1130,6 +1166,10 @@ class AnaliseStageResultadoEficiencia(BaseModel):
         default_factory=list,
         description="Séries históricas de métricas de fluxo de resultado (ex: receita_liquida, ebit, lucro_liquido)."
     )
+    indisponibilidades: list[AnaliseSeriesUnavailable] = Field(
+        default_factory=list,
+        description="Motivos de indisponibilidade de LPA declarado por classe e recorte exibido.",
+    )
     comparacoes: list[AnaliseComparacaoItem] = Field(
         default_factory=list,
         description="Comparações prontas YoY/QoQ e taxas de crescimento CAGR calculadas para as métricas de resultado."
@@ -1193,6 +1233,10 @@ class AnaliseStageCaixaSolidez(BaseModel):
     series: list[AnaliseSeriesObservation] = Field(
         default_factory=list,
         description="Séries históricas de métricas de caixa, investimentos e passivos financeiros."
+    )
+    indisponibilidades: list[AnaliseSeriesUnavailable] = Field(
+        default_factory=list,
+        description="Motivos de indisponibilidade do VPA agregado nos fechamentos exibidos.",
     )
     comparacoes: list[AnaliseComparacaoItem] = Field(
         default_factory=list,
@@ -1670,11 +1714,11 @@ class AnaliseFundamentalistaResposta(BaseModel):
     """
     report_id: str = Field(
         description="Identificador determinístico único do relatório gerado com base nos filtros aplicados.",
-        examples=["rep_9512_consolidated_annual_fy_5_latest_2026.3_runtime"]
+        examples=["rep_9512_consolidated_annual_fy_5_latest_2026.4_runtime"]
     )
     report_version: str = Field(
         description="Versão lógica do formato/layout do relatório para compatibilidade de renderização na UI.",
-        examples=["2.0.0"]
+        examples=["2.1.0"]
     )
     companhia: AnaliseCompanhiaResumo = Field(description="Cadastral básico da companhia analisada.")
     contexto: AnaliseContextoPadrao = Field(description="Contexto informacional padrão (período ativo sugerido, escopo).")
@@ -1683,7 +1727,7 @@ class AnaliseFundamentalistaResposta(BaseModel):
     metodologia: dict[str, object] = Field(
         description="Resumo metodológico declarativo das regras aplicadas para auditoria externa.",
         examples=[{
-            "motor_versao": "2026.3",
+            "motor_versao": "2026.4",
             "etapas_definicao": {
                 "ponto_partida": "Identidade e qualidade cadastral/cobertura"
             }

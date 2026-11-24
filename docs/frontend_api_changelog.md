@@ -2,6 +2,13 @@
 
 Este arquivo registra apenas mudancas com impacto consumivel por clientes da API.
 
+## 2026-11-24 - LPA declarado e VPA agregado
+
+- O catálogo, as séries, as comparações e o fundamentalista, incluindo o resumo anual, incluem `lpa_basico_<classe>`, `lpa_diluido_<classe>` e `vpa`, com unidade `BRL/ação`.
+- O LPA usa o valor declarado pela classe e pelo recorte, sem aplicar o multiplicador do formulário. O VPA usa balanço e composição de capital da mesma versão do DFP ou ITR. As respostas indicam quando faltam dados e mantêm a proveniência de cada insumo.
+- O motor passa a `2026.4` e o relatório a `2.1.0`. Até a materialização da nova versão por companhia, os valores são resolvidos em `runtime_fallback`.
+- Os agregados setoriais usam exclusivamente fatos canônicos da versão vigente. A cobertura setorial volta a incorporar cada companhia conforme a materialização em `2026.4` é concluída.
+
 ## 2026-11-22 - Documentação OpenAPI dos ISINs
 
 - `POST /ingestion/sincronizacoes/isin` aparece nos grupos `ingestion` e `isin` do Swagger, com exemplos, permissões e estados operacionais.

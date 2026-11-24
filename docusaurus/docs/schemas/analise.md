@@ -560,7 +560,9 @@ Campos principais por métrica:
 | `disponibilidades` | array | Bases temporais suportadas |
 | `limitations` | array | Limitações metodológicas |
 
-O catálogo usa a versão de cálculo `2026.3`. As métricas aditivas incluem lucro líquido atribuível à controladora (`lucro_liquido_controladora`, conta CVM `3.11.01`), lucro atribuível a não controladores (`lucro_liquido_nao_controladores`, conta `3.11.02`), margens bruta/EBIT/EBITDA e margem líquida da controladora, giro do ativo médio, CAPEX sobre receita e margem de caixa livre. Métricas de razão usam `unit=ratio` e valor decimal, sem multiplicação por 100.
+O catálogo usa a versão de cálculo `2026.4`. Inclui lucro líquido atribuível à controladora (`lucro_liquido_controladora`, conta CVM `3.11.01`), lucro atribuível a não controladores (`lucro_liquido_nao_controladores`, conta `3.11.02`), margens, giro do ativo médio, CAPEX sobre receita e margem de caixa livre. Métricas de razão usam `unit=ratio` e valor decimal, sem multiplicação por 100.
+
+LPA declarado por classe e VPA agregado usam `unit="BRL/ação"`. As observações de LPA têm `period_nature=duration` e `value_source=reported`. O VPA tem `period_nature=instant` e `value_source=derived_from_formula`. A proveniência permite localizar cada insumo com `document_id`, `version`, `source_file` e `source_line`, quando disponíveis. No LPA, `account_label` preserva o rótulo original da classe.
 
 `roe` e `roa` usam lucro líquido dividido pelo saldo médio de abertura e encerramento do patrimônio líquido e do ativo total, respectivamente. A resolução requer os dois saldos; se faltar o saldo de abertura, o contrato expõe indisponibilidade em vez de aproximar pelo saldo final. A comparação YoY de uma razão retorna a diferença em pontos percentuais.
 
@@ -828,7 +830,7 @@ Os três campos de estado usam os mesmos valores:
 `inadimplencia_ou_descumprimento=false` só pode ser interpretado junto de
 `inadimplencia_ou_descumprimento_status="ausencia_verificada"`. Uma lista vazia acompanhada de
 `nao_coletado`, `nao_divulgado` ou `desconhecido` não significa inexistência ou conformidade. A versão
-do relatório passou a `report_version="2.0.0"`; caches e snapshots anteriores não são selecionados
+do relatório é `report_version="2.1.0"`; caches e snapshots anteriores não são selecionados
 como a versão corrente.
 
 Para acordos individuais, datas de teste, waivers, parcelas ou processos, use
@@ -842,7 +844,7 @@ Resposta enxuta para um exercício fiscal anual, servida por `GET /analise/compa
 | Campo | Tipo | Descrição |
 | --- | --- | --- |
 | `companhia` | object | Resumo da companhia |
-| `calculation_version` | string | Versão do motor, atualmente `2026.3` |
+| `calculation_version` | string | Versão do motor, atualmente `2026.4` |
 | `periodo` | object | Metadados e datas de referência do FY selecionado |
 | `escopo` | string | `consolidated` ou `individual` |
 | `as_of` | string ou null | Corte de conhecimento aplicado aos documentos |
